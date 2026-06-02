@@ -95,6 +95,14 @@ def test_escape_origin_text_escapes_double_quotes() -> None:
     assert escape_origin_text('A "quoted" title') == 'A ""quoted"" title'
 
 
+def test_escape_origin_text_converts_unicode_subscripts() -> None:
+    assert escape_origin_text("Strain [%] (l₀ = 52.8 mm)") == "Strain [%] (l\\-(0) = 52.8 mm)"
+
+
+def test_escape_origin_text_converts_unicode_superscripts() -> None:
+    assert escape_origin_text("Current density [A/mm²]") == "Current density [A/mm\\+(2)]"
+
+
 def test_set_origin_axis_title_sets_axis_label_text() -> None:
     layer = _Layer()
     set_origin_axis_title(layer, "x", "Temperature [°C]")

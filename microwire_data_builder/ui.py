@@ -84,7 +84,12 @@ from .core import (
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
     MINI_DMA_COLUMN,
+    MINI_DMA_ORIGIN_COLUMN,
+    MINI_DMA_STRAIN_COLUMN,
+    MINI_DMA_TRANSITION_COLUMN,
+    MINI_DMA_BREAK_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     SHAPE_MEMORY_DISPLACEMENT_COLUMN,
     SHAPE_MEMORY_LOAD_COLUMN,
     SHAPE_MEMORY_STRAIN_COLUMN,
@@ -297,6 +302,8 @@ TRANSITION_TEMP_COLUMNS = [
 ]
 
 _SHAPE_MEMORY_COLUMN_ALIASES = {
+    "Shape memory stress/strain graphs": SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    "Shape memory stress/strain graphs (Origin)": SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     "Shape memory displacement (mm)": SHAPE_MEMORY_DISPLACEMENT_COLUMN,
     "Shape memory load (g)": SHAPE_MEMORY_LOAD_COLUMN,
     "Shape memory strain (%)": SHAPE_MEMORY_STRAIN_COLUMN,
@@ -489,6 +496,22 @@ def _open_microwire_eda_window(config: object, parent: QtWidgets.QWidget | None 
     launch_eda_window(config=config if isinstance(config, object) else None, parent=parent)
 
 
+def _settings_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 def _looks_like_test_path(value: object) -> bool:
     if not isinstance(value, (str, Path)):
         return False
@@ -520,6 +543,86 @@ def _sanitise_existing_file(value: object) -> Optional[str]:
     except Exception:
         return None
     return None
+
+
+def _database_name_from_project_stem(stem: str) -> str | None:
+    if stem.endswith("_latest"):
+        return stem[: -len("_latest")] or None
+    match = re.match(r"^(?P<name>.+)_\d{4}-\d{2}-\d{2}_\d{4}(?:_\d+)?$", stem)
+    if match:
+        return match.group("name") or None
+    return None
+
+
+def _resolve_latest_database_project(path: Path) -> Path:
+    """Return the rolling database latest project for a remembered DB copy."""
+
+    candidate = Path(path).expanduser()
+    try:
+        if not candidate.exists() or not candidate.is_file():
+            return candidate
+    except Exception:
+        return candidate
+    if candidate.name.endswith("_latest.pydpj"):
+        return candidate
+
+    database_name = _database_name_from_project_stem(candidate.stem)
+    parent = candidate.parent
+    roots: list[Path] = []
+    if parent.name.lower() in {"archive", "_working"}:
+        roots.append(parent.parent)
+    roots.append(parent)
+
+    for root in dict.fromkeys(roots):
+        try:
+            if not root.exists() or not root.is_dir():
+                continue
+        except Exception:
+            continue
+        if database_name:
+            named_latest = root / f"{database_name}_latest.pydpj"
+            try:
+                if named_latest.exists() and named_latest.is_file():
+                    return named_latest
+            except Exception:
+                pass
+        try:
+            latest_candidates = sorted(root.glob("*_latest.pydpj"))
+        except Exception:
+            latest_candidates = []
+        if len(latest_candidates) == 1:
+            return latest_candidates[0]
+    return candidate
+
+
+def _latest_database_project_in_dir(database_dir: Path) -> Path | None:
+    root = Path(database_dir).expanduser()
+    try:
+        if not root.exists() or not root.is_dir():
+            return None
+    except Exception:
+        return None
+    preferred = root / "microwire_database_latest.pydpj"
+    try:
+        if preferred.exists() and preferred.is_file():
+            return preferred
+    except Exception:
+        pass
+    try:
+        latest_candidates = [
+            candidate
+            for candidate in root.glob("*_latest.pydpj")
+            if candidate.exists() and candidate.is_file()
+        ]
+    except Exception:
+        return None
+    if not latest_candidates:
+        return None
+    try:
+        latest_candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    except Exception:
+        latest_candidates.sort(key=lambda path: path.name)
+    return latest_candidates[0]
 
 
 def _dialog_start_directory(preferred: Path | str | None = None) -> Path:
@@ -597,6 +700,32 @@ def _json_safe(value: Any) -> Any:
         except Exception:
             pass
     return str(value)
+
+
+def _encode_project_payload(value: Any) -> Optional[Dict[str, str]]:
+    try:
+        raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        return None
+    return {
+        "encoding": "pickle-base64",
+        "value": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def _decode_project_payload(payload: Any) -> Any:
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("encoding") != "pickle-base64":
+        return None
+    value = payload.get("value")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        raw = base64.b64decode(value.encode("ascii"), validate=True)
+        return pickle.loads(raw)
+    except Exception:
+        return None
 
 
 def _normalise_import_header(text: str) -> str:
@@ -2829,6 +2958,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._recent_old_values: Dict[Tuple[int, int], Any] = {}
         self._row_series_cache: Dict[int, pd.Series] = {}
         self._column_label_cache: Tuple[str, ...] = tuple(str(column) for column in self._frame.columns)
+        self._decoration_suppressed = 0
 
     @staticmethod
     def _coerce_frame(frame: pd.DataFrame | None) -> pd.DataFrame:
@@ -2894,6 +3024,12 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         provider: Optional[Callable[[pd.Series, str], Optional[QtGui.QBrush]]],
     ) -> None:
         self._background_provider = provider
+
+    def suppress_decorations(self, suppressed: bool) -> None:
+        if suppressed:
+            self._decoration_suppressed += 1
+            return
+        self._decoration_suppressed = max(0, self._decoration_suppressed - 1)
 
     def set_foreground_provider(
         self,
@@ -2991,6 +3127,8 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         except Exception:
             return None
         if role == QtCore.Qt.ItemDataRole.DecorationRole:
+            if self._decoration_suppressed:
+                return None
             provider = getattr(self, "_decoration_provider", None)
             if provider is not None:
                 column_label = self._column_label(index.column())
@@ -3613,49 +3751,28 @@ def _render_measurement_pixmap(
             title = format_annealing_title(metadata)
         except Exception:
             title = ""
+    if not title:
+        path = getattr(record, "path", None)
+        if path:
+            try:
+                title = format_annealing_title(Path(path).stem)
+            except Exception:
+                title = ""
+    if not title:
+        title = "Current annealing"
     target_width = max(int(width_px * 2), width_px)
     target_height = max(int(height_px * 2), height_px)
     figsize = (max(target_width / 96.0, 1.0), max(target_height / 96.0, 1.0))
     canvas_agg: FigureCanvasAgg | None = None
     figure = None
-    rc_overrides = {
-        "axes.titlesize": ANNEALING_TITLE_FONT_SIZE,
-        "axes.labelsize": ANNEALING_AXIS_FONT_SIZE,
-        "xtick.labelsize": ANNEALING_TICK_FONT_SIZE,
-        "ytick.labelsize": ANNEALING_TICK_FONT_SIZE,
-        "lines.linewidth": 1.0,
-        "lines.markersize": 3.0,
-    }
     try:
-        with plt.rc_context(rc_overrides):
-            figure, _ = plot_annealing_curve(
-                plot_df,
-                title,
-                target_px=(target_width, target_height),
-            )
+        figure, _ = plot_annealing_curve(
+            plot_df,
+            title,
+            target_px=(target_width, target_height),
+        )
         if figure is not None:
             figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
-            for ax in figure.axes:
-                try:
-                    ax.tick_params(labelsize=ANNEALING_TICK_FONT_SIZE)
-                except Exception:
-                    pass
-                try:
-                    ax.xaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
-                    ax.yaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
-                except Exception:
-                    pass
-                if ax.get_title():
-                    try:
-                        ax.set_title(ax.get_title(), fontsize=ANNEALING_TITLE_FONT_SIZE)
-                    except Exception:
-                        pass
-                legend = ax.get_legend()
-                if legend is not None:
-                    try:
-                        legend.remove()
-                    except Exception:
-                        legend.set_visible(False)
         canvas_agg = FigureCanvasAgg(figure)
         canvas_agg.draw()
         width, height = canvas_agg.get_width_height()
@@ -4908,26 +5025,11 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             axes = None
         if axes is not None:
             try:
-                axes.set_title("")
-                axes.set_xlabel("")
-                axes.set_ylabel("")
-            except Exception:
-                pass
-            try:
-                legend = axes.get_legend()
-            except Exception:
-                legend = None
-            if legend is not None:
-                try:
-                    legend.remove()
-                except Exception:
-                    pass
-            try:
                 axes.tick_params(labelsize=8)
             except Exception:
                 pass
         try:
-            figure.subplots_adjust(left=0.08, right=0.98, top=0.98, bottom=0.12)
+            figure.subplots_adjust(left=0.08, right=0.98, top=0.88, bottom=0.14)
         except Exception:
             pass
         return figure
@@ -5142,7 +5244,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self.header_label = QtWidgets.QLabel("Select a row to preview shape-memory graphs.")
+        self.header_label = QtWidgets.QLabel("Select a row to preview manual stress/strain graphs.")
         self.header_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
@@ -5150,7 +5252,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
 
         self._stack = QtWidgets.QStackedLayout()
         self._placeholder = QtWidgets.QLabel(
-            "Select a row to preview shape-memory graphs."
+            "Select a row to preview manual stress/strain graphs."
         )
         self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
@@ -5212,7 +5314,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
             for idx, record in enumerate(records)
         )
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
-        self.header_label.setText(title or "Shape memory stress/strain")
+        self.header_label.setText(title or "Manual stress/strain")
         if records and signature == self._record_signature and self._tab_widget.count() == len(signature):
             self._stack.setCurrentWidget(self._tab_widget)
             return
@@ -5224,7 +5326,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
             self._saved_fracture_selection = None
             self._update_picked_labels(None)
             if not records:
-                self._placeholder.setText("No shape-memory graphs available for this microwire.")
+                self._placeholder.setText("No manual stress/strain graphs available for this microwire.")
                 self._stack.setCurrentWidget(self._placeholder)
                 return
             for record in records:
@@ -5257,10 +5359,10 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                 page_layout = QtWidgets.QVBoxLayout(page)
                 page_layout.setContentsMargins(0, 0, 0, 0)
                 page_layout.addWidget(canvas, 1)
-                label = _record_label_for_display(record) or record.sample or "Shape memory"
+                label = _record_label_for_display(record) or record.sample or "Manual stress/strain"
                 self._tab_widget.addTab(page, label)
             if self._tab_widget.count() == 0:
-                self._placeholder.setText("No shape-memory graphs available for this microwire.")
+                self._placeholder.setText("No manual stress/strain graphs available for this microwire.")
                 self._stack.setCurrentWidget(self._placeholder)
             else:
                 self._record_signature = signature
@@ -5287,7 +5389,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._refresh_saved_picked_labels()
 
     def clear(self, message: str) -> None:
-        self.header_label.setText("Shape memory stress/strain")
+        self.header_label.setText("Manual stress/strain")
         self._clear_tabs()
         self._record_signature = ()
         self._update_hover_label(None)
@@ -5761,24 +5863,24 @@ def _shape_memory_stress_strain_preview_items(
                 partial(
                     _open_pyplot_for_paths,
                     paths,
-                    "Shape Memory Stress/Strain",
+                    "Manual Stress/Strain",
                     logger,
                     auto_plot=True,
                     open_origin=False,
                 ),
-                tooltip="Open this shape-memory file in the PyPlot Shape Memory Stress/Strain plugin.",
+                tooltip="Open this manual stress/strain file in PyPlot.",
             ),
             _GraphPreviewAction(
                 "Open in Origin",
                 partial(
                     _open_pyplot_for_paths,
                     paths,
-                    "Shape Memory Stress/Strain",
+                    "Manual Stress/Strain",
                     logger,
                     auto_plot=True,
                     open_origin=True,
                 ),
-                tooltip="Send this shape-memory file to Origin via PyPlot.",
+                tooltip="Send this manual stress/strain file to Origin via PyPlot.",
             ),
         )
         items.append(_GraphPreviewItem(title, pixmap, actions=actions))
@@ -6562,6 +6664,11 @@ def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
     for source in sources:
         root = Path(source).expanduser()
         try:
+            if root.is_file() and path.resolve() == root.resolve():
+                return path.stem
+        except Exception:
+            pass
+        try:
             rel = path.resolve().relative_to(root.resolve())
         except Exception:
             continue
@@ -6965,6 +7072,50 @@ def _graph_records_to_frame(
     return pd.DataFrame(rows, columns=columns)
 
 
+def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame:
+    frame = _graph_records_to_frame(
+        records,
+        MINI_DMA_COLUMN,
+        sample_column="_sample",
+    )
+    if MINI_DMA_STRAIN_COLUMN not in frame.columns:
+        frame[MINI_DMA_STRAIN_COLUMN] = [[] for _ in range(len(frame.index))]
+    if MINI_DMA_TRANSITION_COLUMN not in frame.columns:
+        frame[MINI_DMA_TRANSITION_COLUMN] = [[] for _ in range(len(frame.index))]
+    if MINI_DMA_BREAK_COLUMN not in frame.columns:
+        frame[MINI_DMA_BREAK_COLUMN] = ""
+    if not records or frame.empty:
+        return frame
+
+    grouped: Dict[str, List[MiniDmaRecord]] = {}
+    for record in records:
+        sample = getattr(record, "sample", None)
+        if isinstance(sample, str) and sample.strip():
+            grouped.setdefault(sample, []).append(record)
+    for index, row in frame.iterrows():
+        sample = row.get("_sample", "")
+        group = grouped.get(sample, []) if isinstance(sample, str) else []
+        strain_lines: List[str] = []
+        transition_lines: List[str] = []
+        break_lines: List[str] = []
+        for record in group:
+            for line in getattr(record, "strain_summary", ()) or ():
+                if line and line not in strain_lines:
+                    strain_lines.append(str(line))
+            for line in getattr(record, "transition_summary", ()) or ():
+                if line and line not in transition_lines:
+                    transition_lines.append(str(line))
+            break_summary = getattr(record, "break_summary", "") or ""
+            if break_summary and break_summary not in break_lines:
+                break_lines.append(str(break_summary))
+        frame.at[index, MINI_DMA_STRAIN_COLUMN] = strain_lines
+        frame.at[index, MINI_DMA_TRANSITION_COLUMN] = transition_lines
+        frame.at[index, MINI_DMA_BREAK_COLUMN] = (
+            list(dict.fromkeys(break_lines)) if break_lines else ""
+        )
+    return frame
+
+
 def _drop_visible_sample_column(section: "MiniDatabaseSection") -> None:
     frame = section.model.frame() if hasattr(section, "model") else None
     if not isinstance(frame, pd.DataFrame):
@@ -7042,6 +7193,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._pending_count_cache: int | None = None
         self._pending_scan_in_progress = False
         self._pending_scan_generation = 0
+        self._suppress_pending_scan_once = True
         self._pending_scan_thread: QtCore.QThread | None = None
         self._pending_scan_worker: Optional[_PendingScanWorker] = None
         self._progress_dialog: QtWidgets.QProgressDialog | None = None
@@ -7202,30 +7354,39 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             pass
 
     def _auto_fit_columns(self) -> None:
+        if self._project_load_batch_mode:
+            return
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return
+        model = getattr(table, "model", lambda: None)()
+        source_model = None
+        if hasattr(model, "sourceModel"):
+            try:
+                source_model = model.sourceModel()
+            except Exception:
+                source_model = None
+        decoration_model = source_model if isinstance(source_model, DataFrameModel) else model
+        if isinstance(decoration_model, DataFrameModel):
+            decoration_model.suppress_decorations(True)
         try:
             table.resizeColumnsToContents()
         except Exception:
             return
-        model = getattr(table, "model", lambda: None)()
+        finally:
+            if isinstance(decoration_model, DataFrameModel):
+                decoration_model.suppress_decorations(False)
         frame: Optional[pd.DataFrame] = None
         if hasattr(model, "frame"):
             try:
                 frame = model.frame()
             except Exception:
                 frame = None
-        if frame is None and hasattr(model, "sourceModel"):
+        if frame is None and source_model is not None and hasattr(source_model, "frame"):
             try:
-                source_model = model.sourceModel()
+                frame = source_model.frame()
             except Exception:
-                source_model = None
-            if source_model is not None and hasattr(source_model, "frame"):
-                try:
-                    frame = source_model.frame()
-                except Exception:
-                    frame = None
+                frame = None
         if frame is None or getattr(frame, "empty", False):
             return
         try:
@@ -7962,8 +8123,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         else:
             self.refresh_button.setEnabled(True)
             if pending_count is None:
-                message = "Scanning for new or updated files…"
-                if not self._pending_scan_in_progress:
+                if getattr(self, "_suppress_pending_scan_once", False):
+                    self._suppress_pending_scan_once = False
+                    message = "Connected folder(s); press Refresh to scan for new files."
+                else:
+                    message = "Scanning for new or updated files..."
+                if not self._pending_scan_in_progress and message.startswith("Scanning"):
                     self._request_pending_scan()
             elif pending_count:
                 message = f"⚠️ {pending_count} new or updated file(s) pending processing."
@@ -8043,6 +8208,26 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         extra_payload = _json_safe(self.data.extra)
         if not isinstance(extra_payload, (dict, list, tuple, str, int, float, bool)) and extra_payload is not None:
             extra_payload = str(extra_payload)
+        project_payloads: Dict[str, Dict[str, str]] = {}
+        payload_refs = {}
+        if isinstance(self.data.extra, Mapping):
+            payloads_extra = self.data.extra.get("payloads")
+            if isinstance(payloads_extra, Mapping):
+                payload_refs = {
+                    str(key): str(value)
+                    for key, value in payloads_extra.items()
+                    if isinstance(key, str) and isinstance(value, str) and value.strip()
+                }
+        for name in sorted(set(payload_refs.values())):
+            try:
+                stored_payload = self.store.load_payload(name)
+            except Exception:
+                stored_payload = None
+            if stored_payload is None:
+                continue
+            encoded_payload = _encode_project_payload(stored_payload)
+            if encoded_payload is not None:
+                project_payloads[name] = encoded_payload
         return {
             "section": self.section_key,
             "title": self.section_title,
@@ -8052,6 +8237,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             "extra": extra_payload,
             "sources": list(self.data.sources),
             "processed": dict(self.data.processed),
+            "payloads": project_payloads,
         }
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
@@ -8106,6 +8292,22 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.model.set_frame(frame)
         self._pending_count_cache = 0
         self.store.save(self.data)
+        project_payloads = payload.get("payloads")
+        if isinstance(project_payloads, Mapping):
+            for name, encoded in project_payloads.items():
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                decoded = _decode_project_payload(encoded)
+                if decoded is None:
+                    continue
+                try:
+                    self.store.save_payload(name.strip(), decoded)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to restore project payload %s for section %s",
+                        name,
+                        self.section_key,
+                    )
         self._populate_sources_list()
         if self._project_load_batch_mode:
             self._reset_progress_ui()
@@ -9672,6 +9874,21 @@ class AnnealingSection(MiniDatabaseSection):
         for idx, path in enumerate(paths, start=1):
             self._check_cancelled()
             metadata = _metadata_from_path(path)
+            if (
+                not getattr(metadata, "composition_token", None)
+                or getattr(metadata, "draw_x", None) is None
+                or getattr(metadata, "piece_y", None) is None
+            ):
+                self.logger.warning(
+                    "Skipping %s because the microwire draw/piece identifiers could not be parsed",
+                    path,
+                )
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped: {path.name}")
+                    except Exception:
+                        pass
+                continue
             try:
                 df = _load_annealing(path, expected_setpoint_mA=metadata.setpoint_mA)
             except Exception:
@@ -10929,6 +11146,8 @@ class MicroscopeSection(MiniDatabaseSection):
         QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
 
     def _ensure_table_autosized(self) -> None:
+        if self._project_load_batch_mode:
+            return
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return
@@ -13012,10 +13231,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
             )
         else:
             self._hide_internal_columns()
-        try:
-            self.table_view.resizeColumnsToContents()
-        except Exception:
-            pass
+        if not MiniDatabaseSection._project_load_batch_mode:
+            try:
+                self.table_view.resizeColumnsToContents()
+            except Exception:
+                pass
         self._restore_selection(selected_key)
         self._update_preview()
         total = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
@@ -15046,6 +15266,8 @@ class VideoSection(MiniDatabaseSection):
         QtCore.QTimer.singleShot(0, self._autosize_video_table)
 
     def _autosize_video_table(self) -> None:
+        if self._project_load_batch_mode:
+            return
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
         try:
@@ -17735,12 +17957,29 @@ class MiniDmaSection(MiniDatabaseSection):
             label = run_path.name
             if variant:
                 label = f"{variant} - {label}"
+            strain_summary: Tuple[str, ...] = ()
+            transition_summary: Tuple[str, ...] = ()
+            break_summary = ""
+            try:
+                sweep_summary = mini_dma_core.summarize_current_sweep(run)
+                strain_summary = tuple(
+                    mini_dma_core.format_current_sweep_strain_summary(sweep_summary)
+                )
+                transition_summary = tuple(
+                    mini_dma_core.format_current_sweep_transition_summary(sweep_summary)
+                )
+                break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
+            except Exception:
+                self.logger.exception("Failed to summarize Mini DMA run %s", run_path)
             record = MiniDmaRecord(
                 path=run_path,
                 sample=sample or raw_sample or getattr(run, "sample_name", "") or run_path.name,
                 data=run.frame,
                 key=key,
                 label=label,
+                strain_summary=strain_summary,
+                transition_summary=transition_summary,
+                break_summary=break_summary,
             )
             if variant:
                 setattr(record, "variant", variant)
@@ -17754,11 +17993,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     progress(idx, total, f"Parsed {run_path.name}")
                 except Exception:
                     pass
-        table = _graph_records_to_frame(
-            records,
-            MINI_DMA_COLUMN,
-            sample_column="_sample",
-        )
+        table = _mini_dma_records_to_frame(records)
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -17848,7 +18083,7 @@ class MiniDmaSection(MiniDatabaseSection):
 
 class ShapeMemoryStressStrainSection(MiniDatabaseSection):
     section_key = "shape_memory_stress_strain"
-    section_title = "Shape memory stress/strain"
+    section_title = "Manual stress/strain"
     supported_suffixes = (".txt",)
     HIDDEN_SECTION_COLUMNS = (
         "Sample",
@@ -17906,25 +18141,25 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self.controls_layout.addWidget(self.open_graphs_button)
         self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
         self.open_pyplot_button.setToolTip(
-            "Open the selected shape-memory files in PyPlot."
+            "Open the selected manual stress/strain files in PyPlot."
         )
         self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
         self.controls_layout.addWidget(self.open_pyplot_button)
         self.open_origin_button = QtWidgets.QPushButton("Open in Origin")
         self.open_origin_button.setToolTip(
-            "Send the selected shape-memory files to Origin via PyPlot."
+            "Send the selected manual stress/strain files to Origin via PyPlot."
         )
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
         self.clear_values_button = QtWidgets.QPushButton("Clear selected values")
         self.clear_values_button.setToolTip(
-            "Clear saved standard/fracture values for the selected shape-memory rows."
+            "Clear saved standard/fracture values for the selected manual stress/strain rows."
         )
         self.clear_values_button.clicked.connect(self._clear_selected_values)
         self.controls_layout.addWidget(self.clear_values_button)
         self.visibility_button = QtWidgets.QPushButton("Visibility...")
         self.visibility_button.setToolTip(
-            "Show or hide specific shape-memory graphs."
+            "Show or hide specific manual stress/strain graphs."
         )
         self.visibility_button.clicked.connect(self._open_visibility_dialog)
         self.controls_layout.addWidget(self.visibility_button)
@@ -18154,7 +18389,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception(
-                "Failed to persist shape-memory visibility settings"
+                "Failed to persist manual stress/strain visibility settings"
             )
 
     def _visible_records(
@@ -18174,7 +18409,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             QtWidgets.QMessageBox.information(
                 self,
                 self.section_title,
-                "No shape-memory graphs are available yet.",
+                "No manual stress/strain graphs are available yet.",
             )
             return
         groups = _visibility_groups_from_records(self._all_records)
@@ -18744,7 +18979,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         records = self._selected_preview_records()
         if not records:
-            panel.clear("Select a row to preview shape-memory graphs.")
+            panel.clear("Select a row to preview manual stress/strain graphs.")
             return
         first = records[0]
         title = getattr(first, "sample", None) or self.section_title
@@ -19010,7 +19245,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         try:
             self.store.save(self.data)
         except Exception:
-            self.logger.exception("Failed to persist cleared shape-memory values")
+            self.logger.exception("Failed to persist cleared manual stress/strain values")
         try:
             self.data_updated.emit()
         except Exception:
@@ -19354,10 +19589,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             )
             return
         dialog = _GraphGalleryDialog(
-            "Shape memory stress/strain graphs",
+            "Manual stress/strain graphs",
             items,
             parent=self,
-            empty_message="No shape-memory graphs available.",
+            empty_message="No manual stress/strain graphs available.",
         )
         dialog.exec()
 
@@ -19381,7 +19616,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         _open_pyplot_for_paths(
             paths,
-            "Shape Memory Stress/Strain",
+            "Manual Stress/Strain",
             self.logger,
             auto_plot=True,
             open_origin=False,
@@ -19407,7 +19642,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             return
         _open_pyplot_for_paths(
             paths,
-            "Shape Memory Stress/Strain",
+            "Manual Stress/Strain",
             self.logger,
             auto_plot=True,
             open_origin=True,
@@ -21981,7 +22216,7 @@ class CompareSection(MiniDatabaseSection):
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
         graph_row.addWidget(self.open_dma_button)
-        self.open_shape_memory_button = QtWidgets.QPushButton("Open shape-memory graphs")
+        self.open_shape_memory_button = QtWidgets.QPushButton("Open manual stress/strain graphs")
         self.open_shape_memory_button.clicked.connect(
             lambda: self._open_preview_graph("shape_memory_stress_strain")
         )
@@ -22062,10 +22297,10 @@ class CompareSection(MiniDatabaseSection):
         )
         self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
         self.shape_memory_gallery = _GraphGalleryWidget(
-            "Select a row to preview shape-memory graphs.",
+            "Select a row to preview manual stress/strain graphs.",
             self.graph_preview_panel,
         )
-        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Shape memory")
+        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Manual stress/strain")
         self.fmr_gallery = _GraphGalleryWidget(
             "Select a row to preview FMR graphs.",
             self.graph_preview_panel,
@@ -22489,6 +22724,8 @@ class CompareSection(MiniDatabaseSection):
         return 1
 
     def _update_matrix_column_widths(self) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         if not isinstance(getattr(self, "matrix_view", None), QtWidgets.QTableView):
             return
         frame = self.matrix_model.frame()
@@ -22942,7 +23179,7 @@ class CompareSection(MiniDatabaseSection):
                     "Select a row to preview DMA iso-stress graphs."
                 )
                 self.shape_memory_gallery.clear(
-                    "Select a row to preview shape-memory graphs."
+                    "Select a row to preview manual stress/strain graphs."
                 )
                 self.fmr_gallery.clear("Select a row to preview FMR graphs.")
                 return
@@ -23025,7 +23262,7 @@ class CompareSection(MiniDatabaseSection):
             )
             self.shape_memory_gallery.set_items(
                 shape_memory_items,
-                "No shape-memory graphs available for this microwire.",
+                "No manual stress/strain graphs available for this microwire.",
             )
 
             fmr_records = self._ensure_fmr_groups().get(key, [])
@@ -23116,14 +23353,14 @@ class CompareSection(MiniDatabaseSection):
             empty_message = "No DMA iso-stress graphs available."
         elif kind == "shape_memory_stress_strain":
             records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
-            title = "Shape memory stress/strain graphs"
+            title = "Manual stress/strain graphs"
             items = _shape_memory_stress_strain_preview_items(
                 records,
                 self.logger,
                 width_px=GRAPH_PREVIEW_WIDTH,
                 height_px=GRAPH_PREVIEW_HEIGHT,
             )
-            empty_message = "No shape-memory graphs available."
+            empty_message = "No manual stress/strain graphs available."
         else:
             records = self._ensure_fmr_groups().get(key, [])
             title = "FMR graphs"
@@ -23411,7 +23648,7 @@ class AssemblySection(QtWidgets.QWidget):
             ("transition_temps", "Transition temps"),
             ("dma_iso_stress", "DMA iso-stress"),
             ("mini_dma", "Mini DMA"),
-            ("shape_memory_stress_strain", "Shape memory stress/strain"),
+            ("shape_memory_stress_strain", "Manual stress/strain"),
             ("fmr", "FMR"),
             ("strain", "Strain"),
         ]
@@ -23470,7 +23707,7 @@ class AssemblySection(QtWidgets.QWidget):
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
         graph_row.addWidget(self.open_dma_button)
-        self.open_shape_memory_button = QtWidgets.QPushButton("Open shape-memory graphs")
+        self.open_shape_memory_button = QtWidgets.QPushButton("Open manual stress/strain graphs")
         self.open_shape_memory_button.clicked.connect(
             lambda: self._open_preview_graph("shape_memory_stress_strain")
         )
@@ -23599,10 +23836,10 @@ class AssemblySection(QtWidgets.QWidget):
         )
         self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
         self.shape_memory_gallery = _GraphGalleryWidget(
-            "Select a row to preview shape-memory graphs.",
+            "Select a row to preview manual stress/strain graphs.",
             self.graph_preview_panel,
         )
-        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Shape memory")
+        self.graph_preview_tabs.addTab(self.shape_memory_gallery, "Manual stress/strain")
         self.fmr_gallery = _GraphGalleryWidget(
             "Select a row to preview FMR graphs.",
             self.graph_preview_panel,
@@ -24551,7 +24788,7 @@ class AssemblySection(QtWidgets.QWidget):
                     self._filter_hidden_records(payload, "shape_memory_stress_strain")
                 )
             else:
-                _mark_missing("Shape memory stress/strain")
+                _mark_missing("Manual stress/strain")
         self._cached_shape_memory_stress_strain_records = list(
             shape_memory_stress_strain_records
         )
@@ -25474,6 +25711,8 @@ class AssemblySection(QtWidgets.QWidget):
             "Fracture current (mA)": SHAPE_MEMORY_FRACTURE_CURRENT_COLUMN,
             "Fracture current density (A/mm^2)": SHAPE_MEMORY_FRACTURE_CURRENT_DENSITY_COLUMN,
             "Graph — other mA": ANNEALING_OTHER_GRAPH_COLUMN,
+            "Shape memory stress/strain graphs": SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+            "Shape memory stress/strain graphs (Origin)": SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
         }
         return legacy_map.get(text, text)
 
@@ -26241,7 +26480,7 @@ class AssemblySection(QtWidgets.QWidget):
                 self.vsm_hysteresis_gallery.clear("Select a row to preview VSM hysteresis graphs.")
                 self.vsm_temperature_gallery.clear("Select a row to preview VSM temperature scans.")
                 self.dma_iso_gallery.clear("Select a row to preview DMA iso-stress graphs.")
-                self.shape_memory_gallery.clear("Select a row to preview shape-memory graphs.")
+                self.shape_memory_gallery.clear("Select a row to preview manual stress/strain graphs.")
                 self.fmr_gallery.clear("Select a row to preview FMR graphs.")
                 return
             key = _row_to_microwire_key(row)
@@ -26322,7 +26561,7 @@ class AssemblySection(QtWidgets.QWidget):
             )
             self.shape_memory_gallery.set_items(
                 shape_memory_items,
-                "No shape-memory graphs available for this microwire.",
+                "No manual stress/strain graphs available for this microwire.",
             )
 
             fmr_records = self._ensure_fmr_groups().get(key, [])
@@ -26425,6 +26664,16 @@ class AssemblySection(QtWidgets.QWidget):
         add("vsm_temperature_scan", [VSM_TEMPERATURE_SCAN_COLUMN])
         add("dma_iso_stress", [DMA_ISOSTRESS_COLUMN])
         add(
+            "mini_dma",
+            [
+                MINI_DMA_COLUMN,
+                MINI_DMA_ORIGIN_COLUMN,
+                MINI_DMA_STRAIN_COLUMN,
+                MINI_DMA_TRANSITION_COLUMN,
+                MINI_DMA_BREAK_COLUMN,
+            ],
+        )
+        add(
             "shape_memory_stress_strain",
             [
                 SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
@@ -26483,7 +26732,7 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
         add_group("Mini DMA", section_map.get("mini_dma", []))
         add_group(
-            "Shape memory stress/strain",
+            "Manual stress/strain",
             section_map.get("shape_memory_stress_strain", []),
         )
         add_group("FMR", section_map.get("fmr", []))
@@ -26704,14 +26953,14 @@ class AssemblySection(QtWidgets.QWidget):
             empty_message = "No DMA iso-stress graphs available."
         elif kind == "shape_memory_stress_strain":
             records = self._ensure_shape_memory_stress_strain_groups().get(key, [])
-            title = "Shape memory stress/strain graphs"
+            title = "Manual stress/strain graphs"
             items = _shape_memory_stress_strain_preview_items(
                 records,
                 self.logger,
                 width_px=GRAPH_PREVIEW_WIDTH,
                 height_px=GRAPH_PREVIEW_HEIGHT,
             )
-            empty_message = "No shape-memory graphs available."
+            empty_message = "No manual stress/strain graphs available."
         else:
             records = self._ensure_fmr_groups().get(key, [])
             title = "FMR graphs"
@@ -27281,9 +27530,9 @@ class AssemblySection(QtWidgets.QWidget):
         if has_shape_memory:
             shape_memory_section = """
             <div class="preview-section">
-              <div class="preview-title">Shape memory stress/strain</div>
+              <div class="preview-title">Manual stress/strain</div>
               <div id="preview-shape-memory" class="preview-stack"></div>
-              <div id="preview-shape-memory-empty" class="preview-empty">No shape-memory graphs</div>
+              <div id="preview-shape-memory-empty" class="preview-empty">No manual stress/strain graphs</div>
             </div>
             """
         fmr_section = ""
@@ -27675,7 +27924,7 @@ class AssemblySection(QtWidgets.QWidget):
       if (field === 'DMA iso-stress graphs') {{
         return row.dataset.dma || '';
       }}
-      if (field === 'Shape memory stress/strain graphs') {{
+      if (field === 'Manual stress/strain graphs') {{
         return row.dataset.shapeMemory || '';
       }}
       if (field === 'FMR graphs') {{
@@ -27727,7 +27976,7 @@ class AssemblySection(QtWidgets.QWidget):
         'VSM hysteresis graphs',
         'VSM temperature scan graphs',
         'DMA iso-stress graphs',
-        'Shape memory stress/strain graphs',
+        'Manual stress/strain graphs',
         'FMR graphs',
       ]);
       const compare = document.createElement('table');
@@ -28337,8 +28586,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._recent_projects_menu: QtWidgets.QMenu | None = None
         self._load_recent_projects_setting()
         raw_auto = self.settings.value(self._project_settings_key("auto_open_last"), False)
-        self._auto_open_last: bool = bool(raw_auto)
+        self._auto_open_last: bool = _settings_bool(raw_auto, False)
+        raw_auto_latest = self.settings.value(
+            self._project_settings_key("auto_open_latest_database"), False
+        )
+        self._auto_open_latest_database: bool = _settings_bool(raw_auto_latest, False)
+        self._database_project_dir: Optional[Path] = None
+        stored_database_dir = _sanitise_existing_directory(
+            self.settings.value(self._project_settings_key("database_dir"), "")
+        )
+        if stored_database_dir:
+            self._database_project_dir = Path(stored_database_dir)
         self._auto_open_last_action: QtGui.QAction | None = None
+        self._auto_open_latest_database_action: QtGui.QAction | None = None
+        self._database_project_dir_action: QtGui.QAction | None = None
         self._data_menu: QtWidgets.QMenu | None = None
         self._show_imported_action: QtGui.QAction | None = None
         self._separate_imported_action: QtGui.QAction | None = None
@@ -28361,6 +28622,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._retabify_pending = False
         self._dirty = False
         self._suppress_dirty = False
+        self._project_load_in_progress = False
+        self._auto_open_in_progress = False
 
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
@@ -28467,7 +28730,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         self.tab_widget.addTab(
             self.shape_memory_stress_strain_section,
-            "Shape memory stress/strain",
+            "Manual stress/strain",
         )
         self.sections["shape_memory_stress_strain"] = (
             self.shape_memory_stress_strain_section
@@ -29219,14 +29482,43 @@ class BuilderWindow(QtWidgets.QMainWindow):
             title = f"{self._base_title} - {self._project_path.name}"
         self.setWindowTitle(title)
 
+    def _database_project_dir_label(self) -> str:
+        if isinstance(self._database_project_dir, Path):
+            return f"Database folder: {self._database_project_dir}"
+        return "Set database folder..."
+
+    def _update_database_settings_actions(self) -> None:
+        if self._database_project_dir_action is not None:
+            self._database_project_dir_action.setText(self._database_project_dir_label())
+        if self._auto_open_latest_database_action is not None:
+            self._auto_open_latest_database_action.setChecked(
+                self._auto_open_latest_database
+            )
+            self._auto_open_latest_database_action.setEnabled(
+                isinstance(self._database_project_dir, Path)
+            )
+
     def _setup_settings_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         settings_menu = menu_bar.addMenu("Settings")
-        auto_open_action = QtGui.QAction("Open last project on startup", self)
+        auto_open_action = QtGui.QAction("Open last/recent project on startup", self)
         auto_open_action.setCheckable(True)
         auto_open_action.setChecked(self._auto_open_last)
         auto_open_action.toggled.connect(self._toggle_auto_open_last)
         settings_menu.addAction(auto_open_action)
         self._auto_open_last_action = auto_open_action
+
+        latest_database_action = QtGui.QAction("Open latest database project on startup", self)
+        latest_database_action.setCheckable(True)
+        latest_database_action.setChecked(self._auto_open_latest_database)
+        latest_database_action.toggled.connect(self._toggle_auto_open_latest_database)
+        settings_menu.addAction(latest_database_action)
+        self._auto_open_latest_database_action = latest_database_action
+
+        database_dir_action = QtGui.QAction(self._database_project_dir_label(), self)
+        database_dir_action.triggered.connect(self._choose_database_project_dir)
+        settings_menu.addAction(database_dir_action)
+        self._database_project_dir_action = database_dir_action
+        self._update_database_settings_actions()
 
     def _setup_data_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         data_menu = menu_bar.addMenu("Data")
@@ -29549,30 +29841,101 @@ class BuilderWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-    def _maybe_auto_open_last_project(self) -> None:
-        if not self._auto_open_last:
-            return
-        last_path = _sanitise_existing_file(
-            self.settings.value(self._project_settings_key("last_path"), "")
+    def _toggle_auto_open_latest_database(self, enabled: bool) -> None:
+        self._auto_open_latest_database = bool(enabled)
+        try:
+            self.settings.setValue(
+                self._project_settings_key("auto_open_latest_database"),
+                int(bool(enabled)),
+            )
+        except Exception:
+            pass
+        self._update_database_settings_actions()
+
+    def _choose_database_project_dir(self) -> None:
+        start_dir = self._database_project_dir
+        if start_dir is None:
+            start_dir = self._project_dialog_start_directory()
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Microwire Database Folder",
+            str(start_dir),
         )
+        if not selected:
+            return
+        database_dir = Path(selected)
+        latest = _latest_database_project_in_dir(database_dir)
+        if latest is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Database Folder",
+                "No *_latest.pydpj file was found in the selected folder.",
+            )
+            return
+        self._database_project_dir = database_dir
+        try:
+            self.settings.setValue(
+                self._project_settings_key("database_dir"),
+                str(database_dir),
+            )
+        except Exception:
+            pass
+        self._auto_open_latest_database = True
+        try:
+            self.settings.setValue(
+                self._project_settings_key("auto_open_latest_database"),
+                1,
+            )
+        except Exception:
+            pass
+        self._update_database_settings_actions()
+        self.logger.info("Microwire database folder set to %s", database_dir)
+
+    def _maybe_auto_open_last_project(self) -> None:
+        if getattr(self, "_auto_open_in_progress", False) or getattr(
+            self, "_project_load_in_progress", False
+        ):
+            return
         candidate: Optional[Path] = None
-        if last_path:
-            path_obj = Path(last_path)
-            if path_obj.exists():
-                candidate = path_obj
-        else:
-            try:
-                self.settings.remove(self._project_settings_key("last_path"))
-            except Exception:
-                pass
-        if candidate is None and self._recent_projects:
-            fallback = Path(self._recent_projects[0])
-            if fallback.exists():
-                candidate = fallback
+        if self._auto_open_latest_database and isinstance(self._database_project_dir, Path):
+            candidate = _latest_database_project_in_dir(self._database_project_dir)
+            if candidate is None:
+                self.logger.warning(
+                    "No latest Microwire database project found in %s",
+                    self._database_project_dir,
+                )
+        if candidate is None and self._auto_open_last:
+            last_path = _sanitise_existing_file(
+                self.settings.value(self._project_settings_key("last_path"), "")
+            )
+            if last_path:
+                path_obj = Path(last_path)
+                if path_obj.exists():
+                    candidate = _resolve_latest_database_project(path_obj)
+            else:
+                try:
+                    self.settings.remove(self._project_settings_key("last_path"))
+                except Exception:
+                    pass
+            if candidate is None and self._recent_projects:
+                fallback = Path(self._recent_projects[0])
+                if fallback.exists():
+                    candidate = _resolve_latest_database_project(fallback)
         if candidate is None:
             return
         try:
-            self._load_project_from_path(candidate)
+            if (
+                self._auto_open_latest_database
+                and isinstance(self._database_project_dir, Path)
+                and candidate.parent == self._database_project_dir
+                and candidate.name.endswith("_latest.pydpj")
+            ):
+                self.logger.info("Opening latest Microwire database project: %s", candidate)
+            self._auto_open_in_progress = True
+            try:
+                self._load_project_from_path(candidate)
+            finally:
+                self._auto_open_in_progress = False
         except Exception:
             self.logger.exception("Failed to auto-open last project %s", candidate)
 
@@ -29668,7 +30031,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._save_recent_projects_setting()
             self._update_recent_projects_menu()
             return
-        self._load_project_from_path(candidate)
+        self._load_project_from_path(_resolve_latest_database_project(candidate))
 
     def _open_project(self) -> None:
         start_dir = self._project_dialog_start_directory()
@@ -29685,9 +30048,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._load_project_from_path(target)
 
     def _load_project_from_path(self, target: Path) -> None:
+        if getattr(self, "_project_load_in_progress", False):
+            self.logger.warning("Project load already in progress; ignoring request for %s", target)
+            return
+        self._project_load_in_progress = True
         progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         total_steps = max(len(self.sections) + 1, 1)
         last_pump = 0.0
+        show_progress_dialog = not _builder_dialogs_suppressed()
 
         def _pump_events(step: int | None = None, label: str | None = None) -> None:
             """Keep the UI responsive while loading a project."""
@@ -29711,19 +30079,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     pass
                 last_pump = now
 
-        try:
-            progress_dialog = QtWidgets.QProgressDialog(
-                "Loading project…", "", 0, total_steps, self
-            )
-            progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-            progress_dialog.setCancelButton(None)
-            progress_dialog.setMinimumDuration(150)
-            progress_dialog.setAutoClose(False)
-            progress_dialog.setAutoReset(False)
-            progress_dialog.show()
-            _pump_events(0, "Loading project…")
-        except Exception:
-            progress_dialog = None
+        if show_progress_dialog:
+            try:
+                progress_dialog = QtWidgets.QProgressDialog(
+                    "Loading project…", "", 0, total_steps, self
+                )
+                progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+                progress_dialog.setCancelButton(None)
+                progress_dialog.setMinimumDuration(150)
+                progress_dialog.setAutoClose(False)
+                progress_dialog.setAutoReset(False)
+                progress_dialog.show()
+                _pump_events(0, "Loading project…")
+            except Exception:
+                progress_dialog = None
 
         self._suppress_dirty = True
         try:
@@ -29767,7 +30136,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             importer(assembly_payload or {})
                         except Exception as exc:
                             self.logger.error("Failed to load section assemble: %s", exc)
-            MiniDatabaseSection._project_load_batch_mode = False
             self._update_imported_data_item()
             if isinstance(assembly, AssemblySection):
                 show_imported = getattr(assembly, "_show_imported", True)
@@ -29795,6 +30163,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._dirty = False
             self.logger.info("Project loaded from %s", target)
             _pump_events(total_steps, "Finishing…")
+            MiniDatabaseSection._project_load_batch_mode = False
             if not _builder_dialogs_suppressed():
                 QtWidgets.QMessageBox.information(
                     self,
@@ -29809,6 +30178,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 f"Failed to load project file:\n{exc}",
             )
         finally:
+            self._project_load_in_progress = False
             MiniDatabaseSection._project_load_batch_mode = False
             self._suppress_dirty = False
             if progress_dialog is not None:

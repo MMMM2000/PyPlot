@@ -1222,6 +1222,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
             self.serial = None
             self.connected = False
+            for timer_name in ("timer", "time_timer"):
+                timer = getattr(self, timer_name, None)
+                try:
+                    if timer is not None:
+                        timer.stop()
+                except Exception:
+                    pass
             try:
                 self._stop_pg_timer()
             except Exception:
@@ -1408,12 +1415,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 folder = re.sub(r'[<>:"/\\|?*]', "_", folder)
                 target_dir = os.path.join(self.root_log_dir, folder)
         os.makedirs(target_dir, exist_ok=True)
-        disk_file_base = re.sub(r'[<>:"/\\|?*]', "_", file_base)
-        full_path = os.path.join(target_dir, f"{disk_file_base}.txt")
+        safe_file_base = re.sub(r'[<>:"/\\|?*]', "_", file_base)
+        full_path = os.path.join(target_dir, f"{safe_file_base}.txt")
 
         self.log_dir = target_dir
         self.ui.lineEdit_log_dir.setText(self.log_dir)
-        self.ui.lineEdit_log_file.setText(file_base)
+        self.ui.lineEdit_log_file.setText(safe_file_base)
 
         # If the file already exists, ask the user what to do.
         mode = "w"

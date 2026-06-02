@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PyQt6 import QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -45,22 +46,37 @@ def _ensure_app() -> QtWidgets.QApplication:
 
 def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> None:
     source_only = {
-        "Shape memory stress/strain graphs": [
+        "Manual stress/strain graphs": [
             "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
             "30mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
         ],
     }
     with_origin = {
-        "Shape memory stress/strain graphs": ["30mA"],
-        "Shape memory stress/strain graphs (Origin)": "shape_memory.oggu",
+        "Manual stress/strain graphs": ["30mA"],
+        "Manual stress/strain graphs (Origin)": "shape_memory.oggu",
     }
 
     assert launcher_module._microwire_word_graph_sections_for_row(source_only) == {}
     assert launcher_module._microwire_word_graph_sections_for_row(with_origin) == {
-        "Shape memory stress/strain": {
+        "Manual stress/strain": {
             "sources": [],
             "graphs": ["shape_memory.oggu"],
             "references": ["30mA", "shape_memory.oggu"],
+        }
+    }
+
+
+def test_microwire_word_graph_sections_accept_legacy_shape_memory_columns() -> None:
+    row = {
+        "Shape memory stress/strain graphs": ["30mA"],
+        "Shape memory stress/strain graphs (Origin)": "legacy_shape_memory.oggu",
+    }
+
+    assert launcher_module._microwire_word_graph_sections_for_row(row) == {
+        "Manual stress/strain": {
+            "sources": [],
+            "graphs": ["legacy_shape_memory.oggu"],
+            "references": ["30mA", "legacy_shape_memory.oggu"],
         }
     }
 
@@ -690,7 +706,7 @@ def test_launcher_pyplot_automation_generates_summary_and_artifacts(tmp_path: Pa
     [
         (None, "file not found"),
         ("{not-json", "not valid JSON"),
-        ({"kind": "builder", "version": 1}, "reserved"),
+        ({"kind": "builder", "version": 1}, "project"),
         ({"kind": "pyplot", "version": 99}, "Only version 1 is supported"),
         ({"kind": "pyplot", "version": 1, "plugin": "Nope"}, "Unknown PyPlot plugin"),
     ],
@@ -712,6 +728,890 @@ def test_automation_recipe_validation_errors(
 
     assert exit_code == 2
     assert message_fragment in capsys.readouterr().out
+
+
+def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    scan_path = tmp_path / "202602010101-TSCN-a000-example.txt"
+    scan_path.write_text(
+        "\n".join(
+            [
+                "@Samplename: Ni50Fe27Ga23 5-4",
+                "@@End of Header.",
+                "Time_since_start Applied_Field Signal_X_direction Sample_Temperature_For_Plot_",
+                "New Section: Section 0:",
+                "0 10000 0.00051 25.0",
+                "1 10000 0.00050 26.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bad_scan_path = tmp_path / "bad-scan.txt"
+    bad_scan_path.write_text("not a VSM temperature scan", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "vsm_temperature_scan",
+                        "paths": [str(scan_path), str(bad_scan_path)],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    second_exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+    assert second_exit_code == 0
+    assert project_path.read_text(encoding="utf-8") != output_project.read_text(encoding="utf-8")
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["vsm_temperature_scan"]
+    assert section_payload["rows"]
+    assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == "pickle-base64"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "ok"
+    assert manifest["copied_project"] == str(output_project.resolve())
+    assert manifest["commands"][0]["record_count"] == 1
+    assert manifest["commands"][0]["updated_count"] == 1
+    assert manifest["commands"][0]["skipped_count"] == 1
+    assert manifest["commands"][0]["skipped_sources"] == [str(bad_scan_path)]
+    assert '"kind": "builder"' in capsys.readouterr().out
+
+
+def test_builder_automation_recipe_updates_annealing_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    annealing_path = tmp_path / "Ni50Fe27Ga23 12_2 s1 1000mA.txt"
+    annealing_path.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n", encoding="utf-8")
+    bad_path = tmp_path / "bad_annealing.txt"
+    bad_path.write_text("not valid annealing data\n", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "annealing",
+                        "paths": [str(annealing_path), str(bad_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["annealing"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["annealing"]
+    assert section_payload["payloads"]["annealing_records"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row["_sources"] == [str(annealing_path)]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "annealing"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 1
+    assert update_command["skipped_count"] == 1
+    assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+
+
+def test_builder_automation_recipe_updates_vsm_hysteresis_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    hysteresis_path = tmp_path / "Ni50Fe27Ga23 12_2 202507101320-Hys-a140-T-30-00.VSM-Hys-Data"
+    hysteresis_path.write_text(
+        "\n".join(
+            [
+                "@Section 0",
+                "Column 0: Time since start, Time [s]",
+                "Column 1: Applied Field, Applied Field [Oe]",
+                "Column 2: Signal parallel with sample, Moment [emu]",
+                "@@END Columns",
+                "@@End of Header.",
+                "@@Data",
+                "New Section: Section 0:",
+                "0.0 0.0 0.0",
+                "1.0 5.0 0.2",
+                "2.0 -5.0 -0.2",
+                "@@END Data",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bad_path = tmp_path / "bad_hysteresis.VSM-Hys-Data"
+    bad_path.write_text("not a VSM hysteresis file", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "vsm_hysteresis",
+                        "paths": [str(hysteresis_path), str(bad_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["vsm_hysteresis"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["vsm_hysteresis"]
+    assert section_payload["payloads"]["vsm_hysteresis_records"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["_sample"] == "Ni50Fe27Ga23 12-2"
+    expected_graphs = ["T-30C — 202507101320-Hys-a140-T-30-00"]
+    assert row["VSM hysteresis graphs"] == expected_graphs
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "vsm_hysteresis"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 1
+    assert update_command["skipped_count"] == 1
+    assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+    assert assemble_row["VSM hysteresis graphs"] == expected_graphs
+
+
+def test_builder_automation_recipe_updates_dma_iso_stress_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_fixture = Path("tests/fixtures/dma_iso_stress/minimal_iso_stress.txt")
+    dma_path = tmp_path / "Ni50Fe27Ga23 12_2.txt"
+    dma_path.write_text(source_fixture.read_text(encoding="utf-8"), encoding="utf-8")
+    bad_path = tmp_path / "bad_dma.txt"
+    bad_path.write_text("not valid DMA data\n", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "dma_iso_stress",
+                        "paths": [str(dma_path), str(bad_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["dma_iso_stress"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["dma_iso_stress"]
+    assert section_payload["payloads"]["dma_iso_stress_records"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["_sample"] == "Ni50Fe27Ga23 12-2"
+    expected_graphs = ["Ni50Fe27Ga23 12_2"]
+    assert row["DMA iso-stress graphs"] == expected_graphs
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "dma_iso_stress"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 1
+    assert update_command["skipped_count"] == 1
+    assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+    assert assemble_row["DMA iso-stress graphs"] == expected_graphs
+
+
+def test_builder_automation_recipe_updates_fmr_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    fmr_path = tmp_path / "Ni50Fe27Ga23 12_2.csv"
+    fmr_path.write_text(
+        "\n".join(
+            [
+                "Sample Name,Ni50Fe27Ga23 12_2",
+                "Freq,35.8 GHz",
+                "Time,Field,X,Y",
+                "s,Oe,V,V",
+                "0,-100,1.0,0.1",
+                "1,0,0.5,0.2",
+                "2,100,0.2,0.3",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bad_path = tmp_path / "bad_fmr.csv"
+    bad_path.write_text("not valid FMR data\n", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "fmr",
+                        "paths": [str(fmr_path), str(bad_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["fmr"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["fmr"]
+    assert section_payload["payloads"]["fmr_records"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["_sample"] == "Ni50Fe27Ga23 12-2"
+    expected_graphs = ["Ni50Fe27Ga23 12_2"]
+    assert row["FMR graphs"] == expected_graphs
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "fmr"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 1
+    assert update_command["skipped_count"] == 1
+    assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+    assert assemble_row["FMR graphs"] == expected_graphs
+
+
+def test_builder_automation_recipe_updates_shape_memory_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    shape_path = tmp_path / "Ni50Fe27Ga23 12_2.txt"
+    shape_path.write_text(
+        "\n".join(
+            [
+                "Displacement\tLoad\tStrain\tStress",
+                "mm\tg\t%\tMPa",
+                "0.00\t0.00\t0.00\t0.00",
+                "0.10\t5.00\t0.20\t25.00",
+                "0.20\t8.00\t0.40\t50.00",
+                "0.15\t4.00\t0.30\t35.00",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bad_path = tmp_path / "bad_shape_memory.txt"
+    bad_path.write_text("not valid manual stress strain data\n", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "shape_memory_stress_strain",
+                        "paths": [str(shape_path), str(bad_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["shape_memory_stress_strain"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["shape_memory_stress_strain"]
+    assert section_payload["payloads"]["shape_memory_stress_strain_records"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["_sample"] == "Ni50Fe27Ga23 12-2"
+    expected_graphs = ["Ni50Fe27Ga23 12_2"]
+    assert row["Manual stress/strain graphs"] == expected_graphs
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "shape_memory_stress_strain"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 1
+    assert update_command["skipped_count"] == 1
+    assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+    assert assemble_row["Manual stress/strain graphs"] == expected_graphs
+
+
+def _write_mini_dma_run(path: Path, *, sample_name: str = "Ni50Fe27Ga23 12_2") -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "metadata.json").write_text(
+        json.dumps({"sample_name": sample_name, "initial_length_mm": 10.0}),
+        encoding="utf-8",
+    )
+    rows = [
+        "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,stress_mpa,resistance_ohm,current_set_mA,current_measured_mA,position_mm",
+        "0,current,50,1,0.00,50,100,1,1,0.000",
+        "1,current,50,1,0.05,50,101,10,10,0.005",
+        "2,current,50,1,0.10,50,102,20,20,0.010",
+        "3,current,100,2,0.15,100,110,1,1,0.015",
+        "4,current,100,2,0.25,100,112,10,10,0.025",
+        "5,current,100,2,0.35,100,114,20,20,0.035",
+    ]
+    (path / "measurement.csv").write_text("\n".join(rows), encoding="utf-8")
+    return path
+
+
+def _write_transition_mini_dma_run(
+    path: Path,
+    *,
+    sample_name: str = "Ni50Fe27Ga23 12_2",
+) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "sample_name": sample_name,
+                "initial_length_mm": 10.0,
+                "wire_diameter_mm": 0.0191,
+            }
+        ),
+        encoding="utf-8",
+    )
+    heating_current = np.linspace(1.0, 100.0, 120)
+    cooling_current = np.linspace(100.0, 1.0, 120)
+
+    def piecewise(current: np.ndarray, start: float, finish: float) -> np.ndarray:
+        before = 0.1 + current * 0.002
+        start_value = 0.1 + start * 0.002
+        transition = start_value + (current - start) * 0.04
+        finish_value = start_value + (finish - start) * 0.04
+        after = finish_value + (current - finish) * 0.003
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    current = np.concatenate([heating_current, cooling_current])
+    strain = np.concatenate(
+        [
+            piecewise(heating_current, 30.0, 70.0),
+            piecewise(cooling_current, 25.0, 65.0),
+        ]
+    )
+    rows = [
+        "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,stress_mpa,resistance_ohm,current_set_mA,current_measured_mA,position_mm"
+    ]
+    for index, (current_mA, strain_pct) in enumerate(zip(current, strain, strict=True)):
+        rows.append(
+            ",".join(
+                [
+                    str(index),
+                    "current",
+                    "50",
+                    "1",
+                    f"{strain_pct:.6f}",
+                    "50",
+                    "100",
+                    f"{current_mA:.6f}",
+                    f"{current_mA:.6f}",
+                    f"{strain_pct / 10.0:.6f}",
+                ]
+            )
+        )
+    (path / "measurement.csv").write_text("\n".join(rows), encoding="utf-8")
+    return path
+
+
+def test_builder_automation_recipe_updates_mini_dma_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_path = _write_mini_dma_run(tmp_path / "Ni50Fe27Ga23 12_2 test_run01")
+    bad_run = tmp_path / "bad-run"
+    bad_run.mkdir()
+    (bad_run / "measurement.csv").write_text("not,a,mini,dma\n", encoding="utf-8")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "mini_dma",
+                        "paths": [str(run_path), str(bad_run)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["mini_dma"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["mini_dma"]
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["Mini DMA strain by stress/load"] == [
+        "50 MPa: 0.1% @ 20 mA",
+        "100 MPa: 0.2% @ 20 mA",
+    ]
+    assert row["Mini DMA break point"] == ""
+    assert section_payload["payloads"]["mini_dma_records"]["encoding"] == "pickle-base64"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    command = manifest["commands"][0]
+    assert command["section"] == "mini_dma"
+    assert command["record_count"] == 1
+    assert command["updated_count"] == 1
+    assert command["skipped_count"] == 1
+    assert str(bad_run / "measurement.csv") in command["skipped_sources"]
+    rebuild_command = manifest["commands"][1]
+    assert rebuild_command["action"] == "rebuild_assemble"
+    assert rebuild_command["status"] == "ok"
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Mini DMA graphs"] == [run_path.name]
+    assert assemble_row["Mini DMA strain by stress/load"] == [
+        "50 MPa: 0.1% @ 20 mA",
+        "100 MPa: 0.2% @ 20 mA",
+    ]
+
+
+def test_builder_automation_recipe_updates_mini_dma_transition_currents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_path = _write_transition_mini_dma_run(tmp_path / "Ni50Fe27Ga23 12_2 test_run02")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "mini_dma",
+                        "paths": [str(run_path)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["mini_dma"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    row = output_payload["sections"]["mini_dma"]["rows"][0]
+    assert row["Mini DMA transition currents by stress/load"] == [
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+    ]
+    assemble_row = output_payload["sections"]["assemble"]["rows"][0]
+    assert assemble_row["Mini DMA transition currents by stress/load"] == [
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+    ]
+
+
+def test_builder_automation_recipe_promotes_database_latest_and_archives_previous(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest_project = database_dir / "microwire_database_latest.pydpj"
+    latest_project.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    latest_manifest = database_dir / "update_manifest_latest.json"
+    latest_manifest.write_text(
+        json.dumps({"kind": "builder", "status": "old"}),
+        encoding="utf-8",
+    )
+    scan_path = tmp_path / "202602010101-TSCN-a000-example.txt"
+    scan_path.write_text(
+        "\n".join(
+            [
+                "@Samplename: Ni50Fe27Ga23 5-4",
+                "@@End of Header.",
+                "Time_since_start Applied_Field Signal_X_direction Sample_Temperature_For_Plot_",
+                "New Section: Section 0:",
+                "0 10000 0.00051 25.0",
+                "1 10000 0.00050 26.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "database_dir": str(database_dir),
+                "timestamp": "2026-05-26_1512",
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "vsm_temperature_scan",
+                        "paths": [str(scan_path)],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    assert latest_project.exists()
+    assert (database_dir / "update_manifest_latest.json").exists()
+    archived_project = database_dir / "archive" / "microwire_database_2026-05-26_1512.pydpj"
+    archived_manifest = database_dir / "archive" / "update_manifest_2026-05-26_1512.json"
+    assert archived_project.exists()
+    assert archived_manifest.exists()
+    latest_payload = json.loads(latest_project.read_text(encoding="utf-8"))
+    assert latest_payload["sections"]["vsm_temperature_scan"]["rows"]
+    latest_manifest_payload = json.loads(
+        (database_dir / "update_manifest_latest.json").read_text(encoding="utf-8")
+    )
+    assert latest_manifest_payload["database"]["latest_project"] == str(latest_project.resolve())
+    assert latest_manifest_payload["database"]["archived_project"] == str(archived_project.resolve())
+
+
+def test_builder_automation_recipe_can_exclude_named_subdirectories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_root = tmp_path / "mini_dma"
+    good_run = _write_mini_dma_run(data_root / "good_run")
+    archived_run = _write_mini_dma_run(data_root / "archive" / "old_run", sample_name="Ni50Fe27Ga23 12_3")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "mini_dma",
+                        "paths": [str(data_root)],
+                        "exclude_dir_names": ["archive"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    payload = json.loads(output_project.read_text(encoding="utf-8"))
+    rows = payload["sections"]["mini_dma"]["rows"]
+    assert len(rows) == 1
+    assert str(good_run) in rows[0]["_sources"]
+    assert str(archived_run) not in rows[0]["_sources"]
 
 
 def test_automation_recipe_rejects_origin_when_unavailable(

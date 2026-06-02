@@ -25,6 +25,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import numpy as np
 import pandas as pd
 
+from plotting.shared.transition_analysis import estimate_temperature_transition_points
+
 try:
     from .video import extract_video_metrics
 except ImportError:
@@ -228,7 +230,7 @@ OUTPUT_COLUMNS = [
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
     "Mini DMA graphs",
-    "Shape memory stress/strain graphs",
+    "Manual stress/strain graphs",
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
     "FMR graphs",
@@ -253,12 +255,15 @@ VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
 MINI_DMA_COLUMN = "Mini DMA graphs"
-SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
+MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
+MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
+MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
+SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Manual stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
 VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
 DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
 MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
-SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
+SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Manual stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
 SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"
@@ -299,6 +304,12 @@ for _graph_column, _origin_column in (
 ):
     if _graph_column in OUTPUT_COLUMNS and _origin_column not in OUTPUT_COLUMNS:
         OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(_graph_column) + 1, _origin_column)
+
+for _mini_dma_extra_column in reversed(
+    (MINI_DMA_STRAIN_COLUMN, MINI_DMA_TRANSITION_COLUMN, MINI_DMA_BREAK_COLUMN)
+):
+    if _mini_dma_extra_column not in OUTPUT_COLUMNS:
+        OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(MINI_DMA_ORIGIN_COLUMN) + 1, _mini_dma_extra_column)
 
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
@@ -812,6 +823,9 @@ class MiniDmaRecord:
     data: pd.DataFrame
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
+    strain_summary: Tuple[str, ...] = ()
+    transition_summary: Tuple[str, ...] = ()
+    break_summary: str = ""
 
 
 @dataclass
@@ -4700,7 +4714,7 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
     DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
     MINI_DMA_ORIGIN_COLUMN: "Mini DMA graphs (Origin)",
-    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Shape memory stress/strain graphs (Origin)",
+    SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Manual stress/strain graphs (Origin)",
     FMR_ORIGIN_COLUMN: "FMR graphs (Origin)",
     RVT_POINT_COUNT_COLUMN: "R vs T points",
     RVT_TEMPERATURE_RANGE_COLUMN: "R vs T temperature range (deg C)",
@@ -4799,7 +4813,7 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
     ("Mini DMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
     (
-        "Shape memory stress/strain",
+        "Manual stress/strain",
         (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
         (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,),
     ),
@@ -6813,6 +6827,27 @@ def build_database(
             if cleaned:
                 transition_temps_map[_microwire_key_to_str(key_parts)] = cleaned
     transition_temps_map = dict(transition_temps_map)
+    if vsm_temperature_groups:
+        for key, records in vsm_temperature_groups.items():
+            key_str = _microwire_key_to_str(key)
+            entry = transition_temps_map.setdefault(key_str, {})
+            for record in records:
+                data = getattr(record, "data", None)
+                if not isinstance(data, pd.DataFrame) or data.empty:
+                    continue
+                try:
+                    estimated = estimate_temperature_transition_points(data)
+                except Exception:
+                    log.exception(
+                        "Failed to estimate transition temps from VSM temperature scan %s",
+                        getattr(record, "path", ""),
+                    )
+                    continue
+                for label in ("As", "Af", "Ms", "Mf"):
+                    if label not in entry and estimated.get(label) is not None:
+                        entry[label] = float(estimated[label])
+            if not entry:
+                transition_temps_map.pop(key_str, None)
 
     current_density_map: Dict[str, Dict[str, object]] = {}
     if current_density_entries:
@@ -7031,6 +7066,18 @@ def build_database(
         for candidate_key in microscope_index.keys():
             if candidate_key not in grouped:
                 grouped[candidate_key] = []
+    for collection in (
+        vsm_hysteresis_groups,
+        vsm_temperature_groups,
+        dma_isostress_groups,
+        mini_dma_groups,
+        shape_memory_stress_strain_groups,
+        fmr_groups,
+        strain_records,
+    ):
+        for candidate_key in collection.keys():
+            if candidate_key not in grouped:
+                grouped[candidate_key] = []
 
     if include_fabrication_draw_siblings and fabrication_index.piece_level:
         relevant_piece_limits: Dict[Tuple[str, int], Optional[int]] = {}
@@ -7058,6 +7105,7 @@ def build_database(
             vsm_hysteresis_groups,
             vsm_temperature_groups,
             dma_isostress_groups,
+            mini_dma_groups,
             shape_memory_stress_strain_groups,
             fmr_groups,
             strain_records,
@@ -7446,6 +7494,25 @@ def build_database(
             labels = [_record_label(record) for record in mini_dma_entries if _record_label(record)]
             if labels:
                 row[MINI_DMA_COLUMN] = list(dict.fromkeys(labels))
+            strain_lines: List[str] = []
+            transition_lines: List[str] = []
+            break_lines: List[str] = []
+            for record in mini_dma_entries:
+                for line in getattr(record, "strain_summary", ()) or ():
+                    if line and line not in strain_lines:
+                        strain_lines.append(str(line))
+                for line in getattr(record, "transition_summary", ()) or ():
+                    if line and line not in transition_lines:
+                        transition_lines.append(str(line))
+                break_summary = getattr(record, "break_summary", "") or ""
+                if break_summary and break_summary not in break_lines:
+                    break_lines.append(str(break_summary))
+            if strain_lines:
+                row[MINI_DMA_STRAIN_COLUMN] = strain_lines
+            if transition_lines:
+                row[MINI_DMA_TRANSITION_COLUMN] = transition_lines
+            if break_lines:
+                row[MINI_DMA_BREAK_COLUMN] = list(dict.fromkeys(break_lines))
             _assign_pyplot_origin_artifacts(
                 row,
                 records=mini_dma_entries,
@@ -7477,8 +7544,8 @@ def build_database(
                 row,
                 records=shape_memory_records,
                 origin_column=SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
-                plugin_name="Shape Memory Stress/Strain",
-                display_prefix="Shape memory stress/strain Origin graph",
+                plugin_name="Manual Stress/Strain",
+                display_prefix="Manual stress/strain Origin graph",
                 section_token="shape_memory_stress_strain",
             )
         shape_memory_entry = shape_memory_entry_map.get(key_str, {})
@@ -7860,6 +7927,9 @@ __all__ = [
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
     "MINI_DMA_COLUMN",
+    "MINI_DMA_STRAIN_COLUMN",
+    "MINI_DMA_TRANSITION_COLUMN",
+    "MINI_DMA_BREAK_COLUMN",
     "SHAPE_MEMORY_STRESS_STRAIN_COLUMN",
     "VSM_HYSTERESIS_ORIGIN_COLUMN",
     "VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN",

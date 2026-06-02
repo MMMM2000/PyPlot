@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, List, Sequence, Tuple, cast
 import numpy as np
 import pandas as pd
 
+from plotting.shared.transition_analysis import estimate_temperature_transition_points
+
 try:
     import matplotlib.pyplot as plt
 except Exception:  # pragma: no cover - optional dependency
@@ -760,6 +762,11 @@ class VSMTemperatureScanProcessor:
                 self.derivative_moving_avg_window,
             ).tolist()
         return result
+
+    def estimate_transition_points(self, frame: pd.DataFrame) -> dict[str, float]:
+        """Estimate As/Af/Ms/Mf from VSM temperature-scan tangent intersections."""
+
+        return estimate_temperature_transition_points(frame)
 
     def set_split_directions(self, enabled: bool) -> None:
         self.split_directions = bool(enabled)

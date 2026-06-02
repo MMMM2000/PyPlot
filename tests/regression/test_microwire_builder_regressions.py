@@ -172,6 +172,98 @@ def test_video_missing_sources_highlight_whole_row_red() -> None:
     assert foreground is not None and foreground.color().name() == "#ffd6d6"
 
 
+def test_auto_fit_columns_does_not_render_graph_decorations(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.MiniDatabaseSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        frame = pd.DataFrame({"Graph": ["a", "b"], "Value": [1, 2]})
+        section.model.set_frame(frame)
+        calls: list[str] = []
+
+        def decoration_provider(row: pd.Series, column: str) -> None:
+            calls.append(f"{row.name}:{column}")
+            return None
+
+        section.model.set_decoration_provider(decoration_provider)
+
+        def resize_columns(table: QtWidgets.QTableView) -> None:
+            model = table.model()
+            assert model is not None
+            for row in range(model.rowCount()):
+                for column in range(model.columnCount()):
+                    model.data(
+                        model.index(row, column),
+                        QtCore.Qt.ItemDataRole.DecorationRole,
+                    )
+
+        monkeypatch.setattr(QtWidgets.QTableView, "resizeColumnsToContents", resize_columns)
+
+        section._auto_fit_columns()
+
+        assert calls == []
+    finally:
+        section.close()
+
+
+def test_auto_fit_columns_skips_during_project_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.MiniDatabaseSection(logging.getLogger("test"), lambda *_args: None)
+    resize_calls: list[str] = []
+    try:
+        section.model.set_frame(pd.DataFrame({"Graph": ["a"]}))
+        monkeypatch.setattr(
+            QtWidgets.QTableView,
+            "resizeColumnsToContents",
+            lambda *_args: resize_calls.append("resize"),
+        )
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+
+        section._auto_fit_columns()
+
+        assert resize_calls == []
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        section.close()
+
+
+def test_current_density_refresh_skips_resize_during_project_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.CurrentDensitySection(
+        QtWidgets.QWidget(),
+        QtWidgets.QWidget(),
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    resize_calls: list[str] = []
+    try:
+        monkeypatch.setattr(
+            section,
+            "_calculate_frame",
+            lambda: pd.DataFrame({"Composition": ["Ni50Fe27Ga23"], "Microwire": ["1/1"]}),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QTableView,
+            "resizeColumnsToContents",
+            lambda *_args: resize_calls.append("resize"),
+        )
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+
+        section.refresh_data()
+
+        assert resize_calls == []
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        section.close()
+
+
 def test_video_section_open_button_enables_and_opens_selected_sources(tmp_path: Path) -> None:
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -784,6 +876,113 @@ def test_suspend_disk_writes_flushes_latest_state_to_disk(
         ]
         assert fresh_store.load_payload("video_index") == {"fresh": True}
     finally:
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+
+def test_project_payload_embeds_graph_records_independent_of_global_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial_root = tmp_path / "initial"
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: initial_root)
+    builder_storage.MiniDatabaseStore._memory_data = {}
+    builder_storage.MiniDatabaseStore._memory_payloads = {}
+    builder_storage.MiniDatabaseStore._pending_sections = set()
+    builder_storage.MiniDatabaseStore._pending_payloads = set()
+    builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        record = builder_ui.VsmTemperatureScanRecord(
+            path=tmp_path / "scan.txt",
+            sample="Sample",
+            data=pd.DataFrame(
+                {
+                    "temperature": [10.0, 20.0],
+                    "field": [10000.0, 10000.0],
+                    "signal": [1.0, 1.1],
+                    "section_index": [0, 0],
+                }
+            ),
+        )
+        table = pd.DataFrame(
+            [
+                {
+                    "Sample": "Sample",
+                    builder_ui.VSM_TEMPERATURE_SCAN_COLUMN: "scan.txt",
+                }
+            ]
+        )
+        section.data = builder_storage.MiniDatabaseData(
+            sources=[str(tmp_path)],
+            processed={str(record.path): 1.0},
+            table=table,
+            extra={"payloads": {"vsm_temperature_scan_records": "vsm_temperature_scan_records"}},
+        )
+        section.store.save(section.data)
+        section.store.save_payload("vsm_temperature_scan_records", [record])
+
+        project_payload = section.export_project_payload()
+
+        fresh_root = tmp_path / "fresh"
+        monkeypatch.setattr(builder_storage, "_storage_root", lambda: fresh_root)
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        restored = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_args: None)
+        try:
+            restored.import_project_payload(project_payload)
+            payload = restored.store.load_payload("vsm_temperature_scan_records")
+            assert isinstance(payload, list)
+            assert len(payload) == 1
+            assert payload[0].sample == "Sample"
+            assert payload[0].data["signal"].tolist() == [1.0, 1.1]
+        finally:
+            restored.close()
+    finally:
+        section.close()
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+
+def test_section_startup_does_not_begin_recursive_pending_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(builder_storage, "_storage_root", lambda: tmp_path)
+    builder_storage.MiniDatabaseStore._memory_data = {}
+    builder_storage.MiniDatabaseStore._memory_payloads = {}
+    builder_storage.MiniDatabaseStore._pending_sections = set()
+    builder_storage.MiniDatabaseStore._pending_payloads = set()
+    builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication([])
+    source_dir = tmp_path / "vsm"
+    source_dir.mkdir()
+    (source_dir / "scan.txt").write_text("placeholder", encoding="utf-8")
+    store = builder_storage.MiniDatabaseStore("vsm_temperature_scan")
+    store.save(
+        builder_storage.MiniDatabaseData(
+            sources=[str(source_dir)],
+            processed={},
+            table=pd.DataFrame(),
+            extra={},
+        )
+    )
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        assert section._pending_scan_in_progress is False
+        assert section._pending_scan_thread is None
+        assert "press Refresh" in section.status_label.text()
+    finally:
+        section.close()
         builder_storage.MiniDatabaseStore._memory_data = {}
         builder_storage.MiniDatabaseStore._memory_payloads = {}
         builder_storage.MiniDatabaseStore._pending_sections = set()

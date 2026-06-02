@@ -24,7 +24,7 @@ class ShapeMemoryEntry:
     frame: pd.DataFrame
 
 
-@register_plugin("Shape Memory Stress/Strain")
+@register_plugin("Manual Stress/Strain")
 class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
     """Plot segmented loading/unloading loops from manual stress/strain logs."""
 
@@ -114,7 +114,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         return container
 
     def plot_action_label(self) -> str:  # type: ignore[override]
-        return "Plot Shape Memory Stress/Strain"
+        return "Plot Manual Stress/Strain"
 
     def load_data(self) -> None:  # type: ignore[override]
         paths = self.host.ensure_data_selection(self)
@@ -143,7 +143,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         if self._summary_label is not None:
             if entries:
                 self._summary_label.setText(
-                    f"Loaded {len(entries)} shape-memory file(s). Click Plot to build segmented curves."
+                    f"Loaded {len(entries)} manual stress/strain file(s). Click Plot to build segmented curves."
                 )
             else:
                 self._summary_label.setText(
@@ -154,7 +154,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
             short = "\n".join(failures[:8])
             suffix = "\n..." if len(failures) > 8 else ""
             self._log(f"Some files were skipped:\n{short}{suffix}", level="error")
-        self._log(f"Loaded {len(entries)} shape-memory file(s).")
+        self._log(f"Loaded {len(entries)} manual stress/strain file(s).")
         self.update_ui()
 
     def _segmentation_tolerance(self) -> float:
@@ -330,7 +330,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
                 plots_created += 1
 
         self._set_tab_bar_visible(len(self._plot_tabs) > 1)
-        self._log(f"Generated {plots_created} shape-memory graph(s).")
+        self._log(f"Generated {plots_created} manual stress/strain graph(s).")
         self.update_ui()
 
     def update_ui(self) -> None:  # type: ignore[override]

@@ -13,6 +13,34 @@ from typing import Any, Callable, Iterator, cast
 from PyQt6 import QtWidgets
 
 _ORIGIN_TOKEN_RE = re.compile(r"[^0-9A-Za-z_]")
+_ORIGIN_SUBSCRIPT_TRANSLATION = str.maketrans(
+    {
+        "₀": r"\-(0)",
+        "₁": r"\-(1)",
+        "₂": r"\-(2)",
+        "₃": r"\-(3)",
+        "₄": r"\-(4)",
+        "₅": r"\-(5)",
+        "₆": r"\-(6)",
+        "₇": r"\-(7)",
+        "₈": r"\-(8)",
+        "₉": r"\-(9)",
+    }
+)
+_ORIGIN_SUPERSCRIPT_TRANSLATION = str.maketrans(
+    {
+        "⁰": r"\+(0)",
+        "¹": r"\+(1)",
+        "²": r"\+(2)",
+        "³": r"\+(3)",
+        "⁴": r"\+(4)",
+        "⁵": r"\+(5)",
+        "⁶": r"\+(6)",
+        "⁷": r"\+(7)",
+        "⁸": r"\+(8)",
+        "⁹": r"\+(9)",
+    }
+)
 
 
 def _ensure_origin_sdk_on_path() -> None:
@@ -199,7 +227,9 @@ def escape_origin_text(text: str) -> str:
 def _origin_display_text(text: str) -> str:
     """Normalize text for broad Origin font/template compatibility."""
 
-    value = unicodedata.normalize("NFKC", str(text or ""))
+    value = str(text or "").translate(_ORIGIN_SUBSCRIPT_TRANSLATION)
+    value = value.translate(_ORIGIN_SUPERSCRIPT_TRANSLATION)
+    value = unicodedata.normalize("NFKC", value)
     return (
         value
         .replace("\u2013", "-")  # en dash

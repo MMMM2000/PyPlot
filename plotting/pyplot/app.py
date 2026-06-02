@@ -1290,16 +1290,18 @@ class PyPlotWorkbench(PyPlotWindow):
                 self._current_plugin.deactivate()
             except Exception:
                 pass
-        for child in self.findChildren(QtWidgets.QMenu):
-            try:
-                child.close()
-            except Exception:
-                pass
-        for child in self.findChildren(QtWidgets.QDialog):
-            try:
-                child.close()
-            except Exception:
-                pass
+        for child in list(self.children()):
+            if isinstance(child, QtWidgets.QMenu):
+                try:
+                    child.close()
+                except Exception:
+                    pass
+        for widget in list(QtWidgets.QApplication.topLevelWidgets()):
+            if isinstance(widget, QtWidgets.QDialog) and widget.parent() is self:
+                try:
+                    widget.close()
+                except Exception:
+                    pass
         graph_format_dialog = getattr(self, "_graph_format_dialog", None)
         if isinstance(graph_format_dialog, QtWidgets.QDialog):
             try:
