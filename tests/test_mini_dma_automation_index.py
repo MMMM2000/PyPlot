@@ -29,6 +29,26 @@ def test_mini_dma_automation_index_extracts_metadata(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (run_dir / "measurement.csv").write_text("a,b\n1,2\n3,4\n", encoding="utf-8")
+    (run_dir / "run_quality.json").write_text(
+        json.dumps(
+            {
+                "analyzer_version": "test",
+                "run_type": "normal_measurement",
+                "include_in_optimization_summary": True,
+                "exclusion_reasons": [],
+                "current_loop_count_estimate": 2,
+                "stress_error_rms_mpa": 1.2,
+                "stress_error_p95_abs_mpa": 2.3,
+                "stress_error_max_abs_mpa": 3.4,
+                "stress_error_median_abs_mpa": 1.0,
+                "current_hold_elapsed_s": 5.0,
+                "total_elapsed_s": 100.0,
+                "current_compliance_ratio": 0.95,
+                "biggest_problems": ["none"],
+            }
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "setup.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
     rows = mini_dma_automation_index.discover_runs(
@@ -46,6 +66,10 @@ def test_mini_dma_automation_index_extracts_metadata(tmp_path: Path) -> None:
     assert row["raw_scale_sample_count"] == 42
     assert row["measurement_rows"] == 2
     assert row["setup_rows"] == 1
+    assert row["run_type"] == "normal_measurement"
+    assert row["include_in_optimization_summary"] is True
+    assert row["stress_error_rms_mpa"] == 1.2
+    assert row["biggest_problems"] == "none"
 
 
 def test_mini_dma_automation_index_writes_csv_and_jsonl(tmp_path: Path) -> None:

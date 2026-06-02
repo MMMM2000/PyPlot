@@ -42,6 +42,7 @@ Keep only reusable tools, templates, schemas, recipes, and report generators in 
 6. After each run, append or regenerate the automation index and produce the standard report:
 
    ```powershell
+   uv run python scripts/mini_dma_run_quality.py <run-folder> --write
    uv run python scripts/mini_dma_report.py G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/<campaign>/campaign.yaml
    ```
 
@@ -109,6 +110,32 @@ Every campaign report must include the same core plots so results can be compare
 - stress error RMS, p95, max, and recovery/hold metrics when available
 
 Additional exploratory plots are welcome, but they must not replace the core plot pair.
+
+## Normal Runs As Evidence
+
+Campaign analysis should include normal non-optimization runs as reference evidence when they are relevant to the same control logic or sample family. This prevents good daytime measurements from being ignored just because they were not created by a bench-plan worker.
+
+Each run should be analyzed once with:
+
+```powershell
+uv run python scripts/mini_dma_run_quality.py <run-folder> --write
+```
+
+This writes `run_quality.json` next to `metadata.json`. The raw CSV files remain the source of truth; `run_quality.json` is a derived cache that can be regenerated when the analyzer improves.
+
+The quality summary records:
+
+- run type: `optimization_probe`, `validation`, `normal_measurement`, `failed_setup`, or `excluded`
+- inclusion status and exclusion reasons
+- sample, wire, length, diameter
+- control logic version/fingerprint and git branch/commit
+- measurement rows and estimated current-loop count
+- stress error mean, median, RMS, p95, and max
+- current-hold time and fraction
+- current compliance ratio
+- biggest problem tags
+
+Do not blindly include every run. Early bring-up attempts, setup failures, wire breaks, short runs, and runs with too few current loops should be classified and shown as excluded with reasons. The indexer reads cached `run_quality.json` when present and includes these fields in `runs_index.csv/jsonl`.
 
 ## Temperature And Ramp-Speed Optimization
 

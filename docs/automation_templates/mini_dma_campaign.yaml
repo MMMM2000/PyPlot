@@ -80,6 +80,7 @@ reporting:
   report_path: reports/mini_dma_optimization_report.pdf
   image_dir: reports/images
   summary_path: analysis/summary.json
+  run_quality_cache: run_quality.json
   require_core_plots: true
   core_plots:
     - stress_vs_time
