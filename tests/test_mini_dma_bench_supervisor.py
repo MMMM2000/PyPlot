@@ -208,6 +208,111 @@ def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, mon
     assert _FakePopen.instances[0].terminated is True
 
 
+def test_supervisor_treats_finished_recipe_completed_metadata_as_completed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    plan_path = tmp_path / "bench-plan.json"
+    status_path = tmp_path / "status.json"
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    _write_recipe(recipe_path)
+    _write_plan(plan_path, recipe_path, summary_path=tmp_path / "summary.json")
+    run_dir = tmp_path / "runs" / "run01"
+    run_dir.mkdir(parents=True)
+    metadata_path = run_dir / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "stop": {
+                    "reason": "recipe_completed",
+                    "category": "normal",
+                    "detail": "Recipe completed.",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_time = bench_supervisor.time.time()
+    os.utime(metadata_path, (old_time, old_time))
+
+    def _fake_safe_off(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "channel": kwargs["channel"],
+            "states": {"4": {"output_on": False}},
+        }
+
+    monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(bench_supervisor, "FINISHED_METADATA_CHILD_GRACE_S", 0.0)
+    _FakePopen.instances.clear()
+
+    result = bench_supervisor.run_supervised_mini_dma_bench(
+        plan_path,
+        python_executable="python-test",
+        launcher_path="launcher.py",
+        status_path=status_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        poll_interval_s=0.1,
+        popen_factory=_NeverExitsPopen,
+        safe_off_fn=_fake_safe_off,
+    )
+
+    assert result["state"] == "completed"
+    assert result["child_returncode"] == 0
+    assert result["supervisor_recovery"]["reason"] == "finished_metadata_child_still_running"
+    assert result["supervisor_recovery"]["stop"]["reason"] == "recipe_completed"
+    assert isinstance(_FakePopen.instances[0], _NeverExitsPopen)
+    assert _FakePopen.instances[0].terminated is True
+
+
+def test_safe_channel_off_retries_transient_serial_access_error(monkeypatch) -> None:
+    class _FakeDriver:
+        instances: list["_FakeDriver"] = []
+
+        def __init__(self, **_kwargs: Any) -> None:
+            self.index = len(self.instances)
+            self.closed = False
+            self.instances.append(self)
+
+        def connect(self) -> None:
+            if self.index == 0:
+                raise RuntimeError("could not open port 'COM3': PermissionError(13, 'Access is denied.')")
+
+        def set_output(self, *, channel: int, output_on: bool) -> None:
+            self.output = (channel, output_on)
+
+        def output_state(self, *, channel: int) -> bool:
+            return channel == 3
+
+        def measure(self, *, channel: int) -> dict[str, float]:
+            return {"voltage_V": 12.0 if channel == 3 else 0.0, "current_mA": 100.0 if channel == 3 else 0.0}
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(bench_supervisor, "identify_hmp_with_blank_retry", lambda *_args, **_kwargs: "HMP4040")
+
+    result = bench_supervisor._safe_channel_off(  # noqa: SLF001
+        channel=4,
+        port_name="COM3",
+        baudrate=115200,
+        driver_factory=_FakeDriver,
+        attempts=2,
+        retry_s=0.0,
+    )
+
+    assert result["status"] == "ok"
+    assert result["attempt"] == 2
+    assert result["states"]["4"]["output_on"] is False
+    assert len(_FakeDriver.instances) == 2
+    assert all(driver.closed for driver in _FakeDriver.instances)
+
+
 def test_normalize_windows_path_env_keeps_one_path_key() -> None:
     env = bench_supervisor._normalize_windows_path_env(  # noqa: SLF001
         {"PATH": "A", "Path": "B", "OTHER": "C"}
