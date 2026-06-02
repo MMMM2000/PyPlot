@@ -16,6 +16,7 @@ from .bench_automation import MiniDmaBenchAutomationError, load_mini_dma_bench_p
 
 
 DEFAULT_SAFE_CHANNEL = 4
+FINISHED_METADATA_CHILD_GRACE_S = 5.0
 
 
 def _utc_timestamp() -> str:
@@ -66,6 +67,28 @@ def _latest_run_dir(log_dir: Path | None) -> str | None:
     if not candidates:
         return None
     return str(max(candidates, key=lambda path: path.stat().st_mtime))
+
+
+def _latest_run_finished_metadata(log_dir: Path | None) -> dict[str, Any] | None:
+    latest = _latest_run_dir(log_dir)
+    if latest is None:
+        return None
+    metadata_path = Path(latest) / "metadata.json"
+    metadata = _read_json_if_exists(metadata_path)
+    if metadata is None or str(metadata.get("session_state") or "") != "finished":
+        return None
+    try:
+        age_s = max(0.0, time.time() - metadata_path.stat().st_mtime)
+    except Exception:
+        age_s = 0.0
+    if age_s < FINISHED_METADATA_CHILD_GRACE_S:
+        return None
+    return {
+        "run_dir": latest,
+        "metadata_path": str(metadata_path),
+        "stop": metadata.get("stop"),
+        "age_s": age_s,
+    }
 
 
 def _safe_channel_off(
@@ -120,6 +143,7 @@ def _status_payload(
     stdout_path: Path,
     stderr_path: Path,
     safe_off: Mapping[str, Any] | None = None,
+    supervisor_recovery: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     lock_payload = _read_json_if_exists(lock_path)
     summary_payload = _read_json_if_exists(summary_path)
@@ -143,6 +167,7 @@ def _status_payload(
         "stdout_tail": _read_text_if_exists(stdout_path, max_chars=1200),
         "stderr_tail": _read_text_if_exists(stderr_path, max_chars=1200),
         "safe_off": None if safe_off is None else dict(safe_off),
+        "supervisor_recovery": None if supervisor_recovery is None else dict(supervisor_recovery),
     }
 
 
@@ -213,6 +238,7 @@ def run_supervised_mini_dma_bench(
     started_utc = _utc_timestamp()
     safe_off: dict[str, Any] | None = None
     child_returncode: int | None = None
+    supervisor_recovery: dict[str, Any] | None = None
     with stdout_file.open("ab", buffering=0) as stdout_handle, stderr_file.open("ab", buffering=0) as stderr_handle:
         child = popen_factory(
             command,
@@ -238,6 +264,7 @@ def run_supervised_mini_dma_bench(
                 log_dir=plan.log_dir,
                 stdout_path=stdout_file,
                 stderr_path=stderr_file,
+                supervisor_recovery=supervisor_recovery,
             ),
         )
         interrupted = False
@@ -247,6 +274,14 @@ def run_supervised_mini_dma_bench(
                 if child_returncode is not None:
                     break
                 time.sleep(max(0.1, float(poll_interval_s)))
+                finished_metadata = _latest_run_finished_metadata(plan.log_dir)
+                if finished_metadata is not None:
+                    child_returncode = _terminate_child_if_running(child)
+                    supervisor_recovery = {
+                        "reason": "finished_metadata_child_still_running",
+                        **finished_metadata,
+                    }
+                    break
                 _atomic_write_json(
                     status_file,
                     _status_payload(
@@ -261,6 +296,7 @@ def run_supervised_mini_dma_bench(
                         log_dir=plan.log_dir,
                         stdout_path=stdout_file,
                         stderr_path=stderr_file,
+                        supervisor_recovery=supervisor_recovery,
                     ),
                 )
         except BaseException:
@@ -290,6 +326,7 @@ def run_supervised_mini_dma_bench(
         stdout_path=stdout_file,
         stderr_path=stderr_file,
         safe_off=safe_off,
+        supervisor_recovery=supervisor_recovery,
     )
     _atomic_write_json(status_file, final_payload)
     return final_payload
