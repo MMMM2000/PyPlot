@@ -9,6 +9,7 @@
 
 ## Master Coordination Workflow
 - When the user asks for new work, decide whether it belongs in an existing worker, a new worker, or this master thread.
+- Track active, ready, blocked, deferred, and integrated worker tasks in a single ledger. Use `docs/worker_coordination_workflow.md` and `docs/automation_templates/worker_task_ledger.yaml` as the default workflow/template when several workers or substantial deferred branches exist.
 - Use worker `/goal`s for substantial, risky, long-running, or hardware-adjacent tasks. The user does not need to set these manually.
 - A worker branch is ready for integration only after it reports:
   - branch and commit,
@@ -24,6 +25,7 @@
 - Create and merge final PRs from the master thread by default. Use a separate PR-finalization worker only if PR cleanup becomes substantial.
 - Check active worker status opportunistically when the user prompts the master thread.
 - For Mini DMA optimization campaigns, the master thread owns creating or approving the campaign manifest before delegating live hardware work.
+- Monitor automations should inspect and steer workers, not silently perform implementation or start hardware from the master thread.
 
 ## Worker Thread Workflow
 - Work in a dedicated branch/worktree.
@@ -47,6 +49,7 @@
 - Use worker worktrees for durable implementation that needs commits, screenshots, GUI runs, branch review, or later merging.
 - Use subagents for temporary investigation, code archaeology, review, test planning, diff audits, or parallel diagnosis inside a master or worker thread.
 - Avoid endlessly appending scope to a running worker. Once a worker has a coherent batch, let it finish, integrate it, and start the next cluster from the updated integration branch.
+- On this Windows machine, create PyPlot worker threads inside the PyPlot project with a new worktree and `no environment` selected. Avoid generic Chats/local-environment workers for PyPlot implementation unless the user explicitly asks for that mode.
 
 ## Integration Regression Ledger
 - Treat accepted worker behavior as part of the integration contract, not just the code diff.
