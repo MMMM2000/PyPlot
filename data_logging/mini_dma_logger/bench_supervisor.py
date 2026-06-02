@@ -17,6 +17,8 @@ from .bench_automation import MiniDmaBenchAutomationError, load_mini_dma_bench_p
 
 DEFAULT_SAFE_CHANNEL = 4
 FINISHED_METADATA_CHILD_GRACE_S = 5.0
+SAFE_OFF_CONNECT_ATTEMPTS = 6
+SAFE_OFF_CONNECT_RETRY_S = 0.5
 
 
 def _utc_timestamp() -> str:
@@ -105,36 +107,67 @@ def _safe_channel_off(
     port_name: str,
     baudrate: int,
     driver_factory: Callable[..., HmpSerialDriver] = HmpSerialDriver,
+    attempts: int = SAFE_OFF_CONNECT_ATTEMPTS,
+    retry_s: float = SAFE_OFF_CONNECT_RETRY_S,
 ) -> dict[str, Any]:
-    driver = driver_factory(port_name=port_name, baudrate=baudrate, timeout_s=0.8)
-    try:
-        driver.connect()
-        idn = identify_hmp_with_blank_retry(driver, attempts=6, delay_s=0.35)
-        driver.set_output(channel=channel, output_on=False)
-        states = {
-            str(ch): {
-                "output_on": driver.output_state(channel=ch),
-                "readback": driver.measure(channel=ch),
-            }
-            for ch in (1, 3, channel)
-        }
-        return {
-            "status": "ok",
-            "channel": channel,
-            "idn": idn,
-            "states": states,
-        }
-    except Exception as exc:
-        return {
-            "status": "error",
-            "channel": channel,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    finally:
+    last_error: Exception | None = None
+    attempts = max(1, int(attempts))
+    for attempt in range(1, attempts + 1):
+        driver = driver_factory(port_name=port_name, baudrate=baudrate, timeout_s=0.8)
         try:
-            driver.close()
-        except Exception:
-            pass
+            driver.connect()
+            idn = identify_hmp_with_blank_retry(driver, attempts=6, delay_s=0.35)
+            driver.set_output(channel=channel, output_on=False)
+            states = {
+                str(ch): {
+                    "output_on": driver.output_state(channel=ch),
+                    "readback": driver.measure(channel=ch),
+                }
+                for ch in (1, 3, channel)
+            }
+            return {
+                "status": "ok",
+                "channel": channel,
+                "idn": idn,
+                "states": states,
+                "attempt": attempt,
+            }
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            message = str(exc)
+            transient_access_error = (
+                "Access is denied" in message
+                or "PermissionError" in message
+                or "could not open port" in message
+            )
+            if not transient_access_error:
+                break
+            time.sleep(max(0.0, float(retry_s)))
+        finally:
+            try:
+                driver.close()
+            except Exception:
+                pass
+    assert last_error is not None
+    return {
+        "status": "error",
+        "channel": channel,
+        "error": f"{type(last_error).__name__}: {last_error}",
+        "attempts": attempts,
+    }
+
+
+def _finished_metadata_is_normal(supervisor_recovery: Mapping[str, Any] | None) -> bool:
+    if not supervisor_recovery:
+        return False
+    stop = supervisor_recovery.get("stop")
+    if not isinstance(stop, Mapping):
+        return False
+    reason = str(stop.get("reason") or "")
+    category = str(stop.get("category") or "")
+    return reason == "recipe_completed" or category == "normal"
 
 
 def _status_payload(
@@ -323,12 +356,12 @@ def run_supervised_mini_dma_bench(
 
     state = "completed" if child_returncode == 0 else "failed"
     final_payload = _status_payload(
-        state=state,
+        state="completed" if _finished_metadata_is_normal(supervisor_recovery) else state,
         started_utc=started_utc,
         plan_path=resolved_plan_path,
         command=command,
         child_pid=child_pid,
-        child_returncode=child_returncode,
+        child_returncode=0 if _finished_metadata_is_normal(supervisor_recovery) else child_returncode,
         lock_path=plan.bench_lock.lock_path,
         summary_path=plan.summary_path,
         log_dir=plan.log_dir,
