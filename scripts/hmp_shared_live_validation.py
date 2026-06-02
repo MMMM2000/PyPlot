@@ -67,6 +67,40 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _classify_current_path(
+    rows: list[dict[str, Any]],
+    *,
+    voltage_limit_v: float,
+    target_current_mA: float,
+) -> dict[str, Any]:
+    measured_currents = [float(row["measured_current_mA"] or 0.0) for row in rows]
+    measured_voltages = [float(row["measured_voltage_V"] or 0.0) for row in rows]
+    max_current_mA = max(measured_currents, default=0.0)
+    max_voltage_v = max(measured_voltages, default=0.0)
+    voltage_limited = bool(rows) and max_voltage_v >= max(0.0, float(voltage_limit_v)) - 0.25
+    near_open_current_mA = max(0.5, min(2.0, float(target_current_mA) * 0.025))
+    open_circuit = voltage_limited and max_current_mA <= near_open_current_mA
+    current_reached = max_current_mA >= max(0.0, float(target_current_mA)) * 0.95
+    if current_reached:
+        status = "current_reached"
+    elif open_circuit:
+        status = "open_circuit_or_broken_wire"
+    elif voltage_limited:
+        status = "voltage_limited"
+    else:
+        status = "current_below_target"
+    return {
+        "status": status,
+        "max_measured_current_mA": max_current_mA,
+        "max_measured_voltage_V": max_voltage_v,
+        "target_current_mA": float(target_current_mA),
+        "voltage_limit_v": float(voltage_limit_v),
+        "voltage_limited": voltage_limited,
+        "open_circuit": open_circuit,
+        "current_reached": current_reached,
+    }
+
+
 def _current_profile(start_mA: float, stop_mA: float, *, step_mA: float) -> list[float]:
     values: list[float] = []
     value = float(start_mA)
@@ -403,6 +437,10 @@ def run_validation(args: argparse.Namespace) -> dict[str, Any]:
     _write_rows(mini_path, mini_rows)
     metadata = {
         "kind": "shared_hmp_live_validation",
+        "validation_scope": (
+            "electrical_shared_broker_validation; this harness does not run a full Mini DMA saved recipe "
+            "or prove mechanical iso-stress/iso-strain control"
+        ),
         "idn": idn,
         "broker_port": port,
         "broker_thread_alive_at_snapshot": thread.is_alive(),
@@ -418,8 +456,26 @@ def run_validation(args: argparse.Namespace) -> dict[str, Any]:
             "mini_ramp_rate_mA_s": args.mini_ramp_rate_mA_s,
         },
         "initial_state": initial_state,
-        "current_annealing": {"rows": len(ca_rows), **ca_result, "csv_path": ca_path},
-        "mini_dma_iso_stress": {"rows": len(mini_rows), **mini_result, "csv_path": mini_path},
+        "current_annealing": {
+            "rows": len(ca_rows),
+            **ca_result,
+            "csv_path": ca_path,
+            "current_path": _classify_current_path(
+                ca_rows,
+                voltage_limit_v=args.ca_voltage_limit_v,
+                target_current_mA=args.max_current_mA,
+            ),
+        },
+        "mini_dma_current_sweep": {
+            "rows": len(mini_rows),
+            **mini_result,
+            "csv_path": mini_path,
+            "current_path": _classify_current_path(
+                mini_rows,
+                voltage_limit_v=args.mini_voltage_limit_v,
+                target_current_mA=args.max_current_mA,
+            ),
+        },
         "edge_results": edge_results,
         "final_state": final_state,
         "broker_snapshot": snapshot,
@@ -430,7 +486,12 @@ def run_validation(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run live shared-HMP validation for Current Annealing plus Mini DMA.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run electrical live shared-HMP broker validation for Current Annealing plus a "
+            "Mini DMA current-sweep channel client. This does not execute a full Mini DMA saved recipe."
+        )
+    )
     parser.add_argument("--port", default="COM3")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--output-dir", default="artifacts/hmp-live-validation")
