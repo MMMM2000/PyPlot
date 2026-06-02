@@ -374,9 +374,11 @@ def test_mini_dma_bench_plan_stops_session_when_recipe_automation_stops(tmp_path
     stop_events = [event for event in events if event[0] == "stop_session"]
     assert stop_events
     assert stop_events[-1][1][0] == "recipe_control_stop"
+    assert stop_events[-1][1][1] == "Recipe stopped before completion and recovery was offered."
     run_summary = summary["runs"][0]
     assert run_summary["task_text"] == "Manual mode"
     assert run_summary["stop_metadata"]["reason"] == "recipe_control_stop"
+    assert run_summary["stop_metadata"]["detail"] == "Recipe stopped before completion and recovery was offered."
     assert run_summary["control_trace_stop"]["reason"] == "correction_travel_limit"
 
 
