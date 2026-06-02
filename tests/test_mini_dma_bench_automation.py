@@ -546,6 +546,110 @@ def test_mini_dma_bench_plan_acquires_shared_hmp_lock_for_execution(tmp_path: Pa
     assert ("start", None) in events
 
 
+def test_mini_dma_bench_plan_applies_sample_identity_before_recipe_start(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-stress.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "default_max_run_duration_s": 1,
+                "bench_lock": {"enabled": False},
+                "sample_identity": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/2",
+                    "condition": "heat shield",
+                    "sample_name": "Ni50Fe27Ga23 12/2 heat shield",
+                    "log_name": "Ni50Fe27Ga23 12_2 heat shield iso-stress",
+                    "builder_project_path": "G:/My Drive/1 Projects/Praha/microwire_project.pydpj",
+                    "diameter_mm": 0.0191,
+                },
+                "length_setup": {
+                    "starting_length_mm": 48.0,
+                    "preload_length_mm": 48.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[tuple[str, object]] = []
+
+    class _FakeText:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.value = ""
+
+        def setText(self, value: str) -> None:
+            self.value = value
+            events.append((self.name, value))
+
+    class _FakeSpin:
+        def setValue(self, value: float) -> None:
+            events.append(("diameter", value))
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            pass
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self.edit_name_composition = _FakeText("composition")
+            self.edit_name_wire = _FakeText("microwire")
+            self.edit_name_specimen = _FakeText("specimen")
+            self.edit_name_condition = _FakeText("condition")
+            self.edit_sample_name = _FakeText("sample_name")
+            self.edit_log_name = _FakeText("log_name")
+            self.edit_project_path = _FakeText("builder_project")
+            self.spin_diameter = _FakeSpin()
+
+        def _sync_auto_name_fields(self) -> None:
+            events.append(("sync", None))
+
+        def _persist_settings_if_enabled(self) -> None:
+            events.append(("persist", None))
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            pass
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            events.append(("recipe", path.name))
+
+        def _start_auto_ramp(self) -> None:
+            events.append(("start", None))
+
+        def close(self) -> None:
+            pass
+
+    bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    recipe_index = events.index(("recipe", "iso-stress.recipe.json"))
+    assert events.index(("composition", "Ni50Fe27Ga23")) < recipe_index
+    assert events.index(("microwire", "12/2")) < recipe_index
+    assert events.index(("condition", "heat shield")) < recipe_index
+    assert events.index(("sample_name", "Ni50Fe27Ga23 12/2 heat shield")) < recipe_index
+    assert events.index(("log_name", "Ni50Fe27Ga23 12_2 heat shield iso-stress")) < recipe_index
+    assert events.index(("builder_project", "G:\\My Drive\\1 Projects\\Praha\\microwire_project.pydpj")) < recipe_index
+    assert ("diameter", 0.0191) in events
+
+
 def test_mini_dma_bench_plan_uses_next_run_for_existing_output(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
