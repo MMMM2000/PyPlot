@@ -13610,6 +13610,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Move skipped because the requested displacement rounds to the current motor step. "
                 f"Use at least {_format_compact_unit(min_step_mm, 'mm')} with the current calibration."
             )
+            if (
+                self._automation_active
+                and self._current_sweep_freezes_live_stiffness()
+                and self._automation_phase != "current_hold"
+            ):
+                detail = (
+                    "Closed-loop load/stress correction could not make progress because the requested "
+                    f"target {_format_compact_unit(position_mm, 'mm')} rounds to the current Tic step "
+                    f"{target_steps} during {self._automation_phase or 'unknown'}."
+                )
+                self._stop_auto_ramp(
+                    log_completion=False,
+                    offer_recovery=True,
+                    stop_reason="closed_loop_no_progress",
+                    stop_detail=detail,
+                )
             return False
         selected_speed_mm_s = (
             self._motion_speed_for_current_context(manual_jog=manual_jog)

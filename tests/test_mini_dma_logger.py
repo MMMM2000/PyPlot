@@ -11976,6 +11976,38 @@ def test_current_sweep_stops_when_closed_loop_feedback_repeatedly_worsens(
         _close_test_window(window)
 
 
+def test_current_sweep_target_ramp_stops_when_correction_rounds_to_current_motor_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._current_position_steps = 1261
+    window._current_position_mm = 1261 / 800.0
+    window._last_commanded_position_steps = None
+    window._last_motion_command_time_s = None
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+
+    try:
+        moved = window._move_to_position_mm(1.57625, speed_mm_s=0.5)
+
+        assert moved is False
+        assert window._automation_active is False
+        stop = window._session_stop_metadata()
+        assert stop["reason"] == "closed_loop_no_progress"
+        assert stop["category"] == "fault"
+        assert "rounds to the current Tic step 1261" in str(stop["detail"])
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_ignores_correction_travel_limit(
     tmp_path: Path,
     qtbot,
