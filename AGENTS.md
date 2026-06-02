@@ -31,6 +31,10 @@
 - Keep scope narrow and aligned with the delegated task.
 - Do not run hardware commands unless explicitly authorized in that worker task.
 - For UI or graph work, verify with screenshots or generated-output evidence from the worker branch.
+- Commit and push coherent completed work after verification so the master thread can integrate from a durable branch instead of an uncommitted patch.
+- For hardware-adjacent work, commit and push the relevant code/tooling before live execution whenever practical, so run metadata can point to a clean source state.
+- If useful diagnostic/tooling changes are made while a task later becomes blocked, commit and push those changes when safe, but mark the handoff as blocked/not ready for integration.
+- Do not merge to `main` or create final PRs from a worker unless the master thread explicitly delegates that responsibility.
 - Report completion with branch, commit, tests/checks, screenshot paths when relevant, and integration notes.
 - When ready or blocked, send a concise completion handoff back to the master coordination thread.
 - If blocked, report the blocker, current branch, git status, and what was already verified.
