@@ -321,6 +321,29 @@ def test_safe_channel_off_retries_transient_serial_access_error(monkeypatch) -> 
     assert all(driver.closed for driver in _FakeDriver.instances)
 
 
+def test_release_child_lock_allows_owner_purpose_match_with_pid_mismatch(tmp_path: Path) -> None:
+    lock_path = tmp_path / "bench.lock"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": 13920,
+                "owner": "codex-mini-dma-live-opt-recovery-2658",
+                "purpose": "Mini DMA 12/2 48 mm 80 mA optimization recovery run 5 at 0.8 mA/s",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bench_supervisor._release_child_lock_if_held(  # noqa: SLF001
+        lock_path,
+        56228,
+        owner="codex-mini-dma-live-opt-recovery-2658",
+        purpose="Mini DMA 12/2 48 mm 80 mA optimization recovery run 5 at 0.8 mA/s",
+    )
+
+    assert not lock_path.exists()
+
+
 def test_normalize_windows_path_env_keeps_one_path_key() -> None:
     env = bench_supervisor._normalize_windows_path_env(  # noqa: SLF001
         {"PATH": "A", "Path": "B", "OTHER": "C"}

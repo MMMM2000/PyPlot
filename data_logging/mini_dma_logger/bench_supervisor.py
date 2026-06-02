@@ -62,7 +62,13 @@ def _read_text_if_exists(path: Path | None, *, max_chars: int = 4000) -> str:
     return text if len(text) <= max_chars else text[-max_chars:]
 
 
-def _release_child_lock_if_held(lock_path: Path | None, child_pid: int | None) -> None:
+def _release_child_lock_if_held(
+    lock_path: Path | None,
+    child_pid: int | None,
+    *,
+    owner: str | None = None,
+    purpose: str | None = None,
+) -> None:
     if lock_path is None or child_pid is None:
         return
     payload = _read_json_if_exists(lock_path)
@@ -72,7 +78,9 @@ def _release_child_lock_if_held(lock_path: Path | None, child_pid: int | None) -
         lock_pid = int(payload.get("pid") or 0)
     except (TypeError, ValueError):
         return
-    if lock_pid != int(child_pid):
+    owner_matches = owner is not None and str(payload.get("owner") or "") == str(owner)
+    purpose_matches = purpose is not None and str(payload.get("purpose") or "") == str(purpose)
+    if lock_pid != int(child_pid) and not (owner_matches and purpose_matches):
         return
     try:
         Path(lock_path).unlink()
@@ -373,7 +381,12 @@ def run_supervised_mini_dma_bench(
             )
 
     state = "completed" if child_returncode == 0 else "failed"
-    _release_child_lock_if_held(plan.bench_lock.lock_path, child_pid)
+    _release_child_lock_if_held(
+        plan.bench_lock.lock_path,
+        child_pid,
+        owner=plan.bench_lock.owner,
+        purpose=plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+    )
     final_payload = _status_payload(
         state="completed" if _finished_metadata_is_normal(supervisor_recovery) else state,
         started_utc=started_utc,
