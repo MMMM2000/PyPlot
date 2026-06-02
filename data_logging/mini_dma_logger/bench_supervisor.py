@@ -69,7 +69,11 @@ def _latest_run_dir(log_dir: Path | None) -> str | None:
     return str(max(candidates, key=lambda path: path.stat().st_mtime))
 
 
-def _latest_run_finished_metadata(log_dir: Path | None) -> dict[str, Any] | None:
+def _latest_run_finished_metadata(
+    log_dir: Path | None,
+    *,
+    not_before_s: float,
+) -> dict[str, Any] | None:
     latest = _latest_run_dir(log_dir)
     if latest is None:
         return None
@@ -78,9 +82,13 @@ def _latest_run_finished_metadata(log_dir: Path | None) -> dict[str, Any] | None
     if metadata is None or str(metadata.get("session_state") or "") != "finished":
         return None
     try:
-        age_s = max(0.0, time.time() - metadata_path.stat().st_mtime)
+        mtime_s = metadata_path.stat().st_mtime
+        age_s = max(0.0, time.time() - mtime_s)
     except Exception:
+        mtime_s = 0.0
         age_s = 0.0
+    if mtime_s < not_before_s - 1.0:
+        return None
     if age_s < FINISHED_METADATA_CHILD_GRACE_S:
         return None
     return {
@@ -236,6 +244,7 @@ def run_supervised_mini_dma_bench(
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     started_utc = _utc_timestamp()
+    started_wall_s = time.time()
     safe_off: dict[str, Any] | None = None
     child_returncode: int | None = None
     supervisor_recovery: dict[str, Any] | None = None
@@ -274,7 +283,7 @@ def run_supervised_mini_dma_bench(
                 if child_returncode is not None:
                     break
                 time.sleep(max(0.1, float(poll_interval_s)))
-                finished_metadata = _latest_run_finished_metadata(plan.log_dir)
+                finished_metadata = _latest_run_finished_metadata(plan.log_dir, not_before_s=started_wall_s)
                 if finished_metadata is not None:
                     child_returncode = _terminate_child_if_running(child)
                     supervisor_recovery = {
