@@ -62,6 +62,24 @@ def _read_text_if_exists(path: Path | None, *, max_chars: int = 4000) -> str:
     return text if len(text) <= max_chars else text[-max_chars:]
 
 
+def _release_child_lock_if_held(lock_path: Path | None, child_pid: int | None) -> None:
+    if lock_path is None or child_pid is None:
+        return
+    payload = _read_json_if_exists(lock_path)
+    if not payload:
+        return
+    try:
+        lock_pid = int(payload.get("pid") or 0)
+    except (TypeError, ValueError):
+        return
+    if lock_pid != int(child_pid):
+        return
+    try:
+        Path(lock_path).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _latest_run_dir(log_dir: Path | None) -> str | None:
     if log_dir is None or not log_dir.exists():
         return None
@@ -355,6 +373,7 @@ def run_supervised_mini_dma_bench(
             )
 
     state = "completed" if child_returncode == 0 else "failed"
+    _release_child_lock_if_held(plan.bench_lock.lock_path, child_pid)
     final_payload = _status_payload(
         state="completed" if _finished_metadata_is_normal(supervisor_recovery) else state,
         started_utc=started_utc,

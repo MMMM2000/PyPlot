@@ -161,6 +161,8 @@ def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, mon
     stderr_path = tmp_path / "stderr.log"
     _write_recipe(recipe_path)
     _write_plan(plan_path, recipe_path, summary_path=tmp_path / "summary.json")
+    lock_path = tmp_path / "bench.lock"
+    lock_path.write_text(json.dumps({"pid": 12345, "owner": "test-owner"}), encoding="utf-8")
     run_dir = tmp_path / "runs" / "run01"
     run_dir.mkdir(parents=True)
     metadata_path = run_dir / "metadata.json"
@@ -204,6 +206,8 @@ def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, mon
     assert result["supervisor_recovery"]["reason"] == "finished_metadata_child_still_running"
     assert result["supervisor_recovery"]["stop"]["reason"] == "closed_loop_no_progress"
     assert result["safe_off"]["states"]["4"]["output_on"] is False
+    assert result["lock"] is None
+    assert not lock_path.exists()
     assert isinstance(_FakePopen.instances[0], _NeverExitsPopen)
     assert _FakePopen.instances[0].terminated is True
 
@@ -219,6 +223,8 @@ def test_supervisor_treats_finished_recipe_completed_metadata_as_completed(
     stderr_path = tmp_path / "stderr.log"
     _write_recipe(recipe_path)
     _write_plan(plan_path, recipe_path, summary_path=tmp_path / "summary.json")
+    lock_path = tmp_path / "bench.lock"
+    lock_path.write_text(json.dumps({"pid": 12345, "owner": "test-owner"}), encoding="utf-8")
     run_dir = tmp_path / "runs" / "run01"
     run_dir.mkdir(parents=True)
     metadata_path = run_dir / "metadata.json"
@@ -265,6 +271,8 @@ def test_supervisor_treats_finished_recipe_completed_metadata_as_completed(
     assert result["child_returncode"] == 0
     assert result["supervisor_recovery"]["reason"] == "finished_metadata_child_still_running"
     assert result["supervisor_recovery"]["stop"]["reason"] == "recipe_completed"
+    assert result["lock"] is None
+    assert not lock_path.exists()
     assert isinstance(_FakePopen.instances[0], _NeverExitsPopen)
     assert _FakePopen.instances[0].terminated is True
 
