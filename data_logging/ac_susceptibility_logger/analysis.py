@@ -705,6 +705,10 @@ def _plot_delta_chi_curve_grid(points: pd.DataFrame, ranking: pd.DataFrame, outp
         & (points["negative_fraction"] <= 0.05)
         & np.isfinite(points["chi_prime_app"])
     ].copy()
+    ranking_lookup = {
+        (float(row.frequency_hz), float(row.excitation_mA)): row
+        for row in ranking.itertuples(index=False)
+    }
     fig_width = max(11.0, 1.55 * len(excitations) + 2.4)
     fig_height = max(12.0, 0.92 * len(frequencies) + 2.0)
     fig, axes = plt.subplots(
@@ -726,6 +730,21 @@ def _plot_delta_chi_curve_grid(points: pd.DataFrame, ranking: pd.DataFrame, outp
                 (clean_points["frequency_hz"] == frequency)
                 & np.isclose(clean_points["excitation_mA"], excitation)
             ].sort_values("current_set_mA")
+            ranking_row = ranking_lookup.get((frequency, excitation))
+            if ranking_row is not None and np.isfinite(ranking_row.mean_abs_percent_change_vs_low):
+                percent = float(ranking_row.mean_abs_percent_change_vs_low)
+                percent_text = f"{percent:.0f}%" if percent >= 100.0 else f"{percent:.1f}%"
+                axis.text(
+                    0.03,
+                    0.92,
+                    percent_text,
+                    ha="left",
+                    va="top",
+                    transform=axis.transAxes,
+                    fontsize=6,
+                    color="0.2",
+                    bbox={"facecolor": "white", "alpha": 0.72, "edgecolor": "none", "pad": 0.8},
+                )
             if data.empty:
                 axis.set_facecolor("#e0e0e0")
                 axis.text(0.5, 0.5, "filtered", ha="center", va="center", transform=axis.transAxes, fontsize=6)
@@ -743,17 +762,18 @@ def _plot_delta_chi_curve_grid(points: pd.DataFrame, ranking: pd.DataFrame, outp
                         low = direction_data.head(min(5, len(direction_data)))
                     baseline = float(np.nanmedian(low["chi_prime_app"]))
                     direction_data["delta_chi_prime_app"] = direction_data["chi_prime_app"] - baseline
-                    plotted.append(direction_data["delta_chi_prime_app"])
+                    display_data = _filter_delta_curve_outliers(direction_data)
+                    plotted.append(display_data["delta_chi_prime_app"])
                     axis.plot(
-                        direction_data["current_set_mA"],
-                        direction_data["delta_chi_prime_app"],
+                        display_data["current_set_mA"],
+                        display_data["delta_chi_prime_app"],
                         linewidth=0.8,
                         marker="o",
                         markersize=marker_size,
                         label=direction,
                     )
                 if plotted:
-                    _set_tight_y_limits(axis, pd.concat(plotted, ignore_index=True))
+                    _set_robust_y_limits(axis, pd.concat(plotted, ignore_index=True))
                 axis.axhline(0.0, color="0.5", linewidth=0.4)
             axis.tick_params(axis="both", labelsize=5, length=2, pad=1)
             if y_index == 0:
@@ -769,10 +789,46 @@ def _plot_delta_chi_curve_grid(points: pd.DataFrame, ranking: pd.DataFrame, outp
         fig.legend(handles, labels, loc="upper right", fontsize=8, frameon=False)
     fig.suptitle("Delta apparent chi' vs DC current for all measured conditions", fontsize=13)
     fig.supxlabel("LCR excitation current columns; x-axis inside each cell is DC heating current [mA]", fontsize=9)
-    fig.supylabel("Frequency rows; y-axis inside each cell is delta chi' vs low-current baseline", fontsize=9)
+    fig.supylabel("Frequency rows; y-axis is delta chi' vs low-current baseline; labels show approx percent change", fontsize=9)
     fig.tight_layout(rect=(0.04, 0.04, 0.98, 0.96))
     fig.savefig(output_dir / "all_conditions_delta_chi_curves_grid.png")
     plt.close(fig)
+
+
+def _filter_delta_curve_outliers(direction_data: pd.DataFrame) -> pd.DataFrame:
+    if len(direction_data) < 8:
+        return direction_data
+    working = direction_data.sort_values("current_set_mA").copy()
+    values = working["delta_chi_prime_app"].astype("float64")
+    rolling = values.rolling(window=5, center=True, min_periods=3).median()
+    rolling = rolling.fillna(values.rolling(window=3, center=True, min_periods=1).median())
+    residual = values - rolling
+    residual_mad = _robust_sigma(residual)
+    central_range = float(values.quantile(0.9) - values.quantile(0.1))
+    threshold = max(residual_mad * 7.0 if math.isfinite(residual_mad) else 0.0, central_range * 0.35, 10.0)
+    filtered = working[residual.abs() <= threshold].copy()
+    if len(filtered) < max(4, len(working) * 0.6):
+        return working
+    return filtered
+
+
+def _set_robust_y_limits(axis: object, values: pd.Series) -> None:
+    clean = pd.Series(values, dtype="float64").replace([np.inf, -np.inf], np.nan).dropna()
+    if clean.empty:
+        return
+    if len(clean) >= 8:
+        lower = float(clean.quantile(0.03))
+        upper = float(clean.quantile(0.97))
+    else:
+        lower = float(clean.min())
+        upper = float(clean.max())
+    if not math.isfinite(lower) or not math.isfinite(upper):
+        return
+    if lower == upper:
+        margin = max(abs(lower) * 0.05, 1.0)
+    else:
+        margin = max((upper - lower) * 0.12, 1.0)
+    axis.set_ylim(lower - margin, upper + margin)
 
 
 def _plot_condition_heatmaps(ranking: pd.DataFrame, output_dir: Path) -> None:
