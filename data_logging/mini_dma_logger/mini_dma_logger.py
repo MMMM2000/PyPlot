@@ -6803,6 +6803,47 @@ class MainWindow(QtWidgets.QMainWindow):
                 return channel
         return None
 
+    def _dashboard_equivalent_axis_values(
+        self,
+        source_key: str,
+        target_key: str,
+        source_values: Sequence[float],
+    ) -> list[float] | None:
+        finite_values = [float(value) for value in source_values if math.isfinite(float(value))]
+        if not finite_values:
+            return []
+        diameter_mm = float(self.spin_diameter.value())
+        length_mm = float(self.spin_initial_length.value())
+
+        converted: list[float] = []
+        for value in finite_values:
+            converted_value: float | None = None
+            if source_key == "load_g" and target_key == "stress_mpa":
+                converted_value = stress_mpa_from_load_g(value, diameter_mm)
+            elif source_key == "stress_mpa" and target_key == "load_g":
+                converted_value = load_g_from_stress_mpa(value, diameter_mm)
+            elif source_key == "position_mm" and target_key == "strain_pct" and length_mm > 0.0:
+                converted_value = (value / length_mm) * 100.0
+            elif source_key == "strain_pct" and target_key == "position_mm" and length_mm > 0.0:
+                converted_value = (value / 100.0) * length_mm
+            elif (
+                source_key == "current_relative_position_mm"
+                and target_key == "current_relative_strain_pct"
+                and length_mm > 0.0
+            ):
+                converted_value = (value / length_mm) * 100.0
+            elif (
+                source_key == "current_relative_strain_pct"
+                and target_key == "current_relative_position_mm"
+                and length_mm > 0.0
+            ):
+                converted_value = (value / 100.0) * length_mm
+            else:
+                return None
+            if converted_value is not None and math.isfinite(float(converted_value)):
+                converted.append(float(converted_value))
+        return converted
+
     def _compact_plot_label(self, label: str) -> str:
         compact = re.sub(r"\s*\([^)]*\)", "", label).strip()
         compact = compact.replace("Effective load", "Load")
@@ -18695,6 +18736,28 @@ class MainWindow(QtWidgets.QMainWindow):
         if curve is not None:
             curve.setData(list(x_values), list(y_values), connect="finite")
 
+    def _set_pyqtgraph_view_range_from_values(
+        self,
+        view: Any | None,
+        values: Sequence[float] | None,
+    ) -> None:
+        if view is None or values is None:
+            return
+        finite_values = [float(value) for value in values if math.isfinite(float(value))]
+        if not finite_values:
+            return
+        low = min(finite_values)
+        high = max(finite_values)
+        if math.isclose(low, high):
+            padding = max(abs(low) * 0.05, 1.0)
+            low -= padding
+            high += padding
+        else:
+            padding = (high - low) * 0.05
+            low -= padding
+            high += padding
+        view.setYRange(low, high, padding=0.0)
+
     def _disable_pyqtgraph_axis_scaling(self, axis: Any) -> None:
         try:
             axis.enableAutoSIPrefix(False)
@@ -21430,12 +21493,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     width=0.75,
                     symbol="s",
                 )
-                right_x, right_y = self._plot_xy_values(display_points, x_channel, y_right_channel)
-                self._set_pyqtgraph_curve_data(bundle.right_curve, right_x, right_y)
+                equivalent_axis_values = self._dashboard_equivalent_axis_values(
+                    y_left_channel.key,
+                    y_right_channel.key,
+                    left_y,
+                )
+                if equivalent_axis_values is None:
+                    right_x, right_y = self._plot_xy_values(display_points, x_channel, y_right_channel)
+                    self._set_pyqtgraph_curve_data(bundle.right_curve, right_x, right_y)
+                else:
+                    self._set_pyqtgraph_curve_data(bundle.right_curve, [], [])
                 if bundle.sync_right_view is not None:
                     bundle.sync_right_view()
                 if bundle.right_view is not None:
-                    bundle.right_view.enableAutoRange()
+                    if equivalent_axis_values is None:
+                        bundle.right_view.enableAutoRange()
+                    else:
+                        self._set_pyqtgraph_view_range_from_values(
+                            bundle.right_view,
+                            equivalent_axis_values,
+                        )
             else:
                 self._set_pyqtgraph_curve_data(bundle.right_curve, [], [])
         for bundle in self._dashboard_plot_bundles[len(active_tiles[:4]):]:

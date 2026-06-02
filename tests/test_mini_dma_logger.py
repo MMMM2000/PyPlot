@@ -1747,6 +1747,54 @@ def test_dashboard_plot_updates_pyqtgraph_left_and_right_curves(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_dashboard_plot_uses_secondary_axis_without_duplicate_equivalent_curve(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.02)
+    window.spin_initial_length.setValue(40.0)
+    window._session_points = [
+        window._capture_measurement_point(
+            elapsed_s=0.0,
+            position_mm=0.0,
+            effective_position_mm=0.0,
+            raw_load_g=21.2,
+            load_g=0.0,
+        ),
+        window._capture_measurement_point(
+            elapsed_s=1.0,
+            position_mm=0.2,
+            effective_position_mm=0.2,
+            raw_load_g=22.0,
+            load_g=0.8,
+        ),
+    ]
+
+    try:
+        window._plot_tiles[0].y_right_combo.setCurrentIndex(
+            window._plot_tiles[0].y_right_combo.findData("stress_mpa")
+        )
+        window._refresh_plots()
+
+        bundle = window._dashboard_plot_bundles[0]
+        x_values, y_values = bundle.left_curve.getData()
+        right_x_values, right_y_values = bundle.right_curve.getData()
+        assert list(x_values) == pytest.approx([0.0, 1.0])
+        assert list(y_values) == pytest.approx([0.0, 0.8])
+        assert right_x_values is None or len(right_x_values) == 0
+        assert right_y_values is None or len(right_y_values) == 0
+        assert bundle.plot_item.getAxis("right").labelText == "Stress (MPa)"
+        assert bundle.right_view is not None
+        right_range = bundle.right_view.viewRange()[1]
+        expected_stress = mini_dma_mod.stress_mpa_from_load_g(0.8, window.spin_diameter.value())
+        assert expected_stress is not None
+        assert right_range[0] < 0.0
+        assert right_range[1] > expected_stress
+    finally:
+        _close_test_window(window)
+
+
 def test_dashboard_plot_panel_keeps_axis_padding_and_compact_log(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
