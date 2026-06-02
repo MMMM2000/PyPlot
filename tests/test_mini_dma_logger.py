@@ -11912,6 +11912,70 @@ def test_current_sweep_stops_when_correction_travel_exceeds_limit(
         _close_test_window(window)
 
 
+def test_current_sweep_stops_when_closed_loop_feedback_repeatedly_worsens(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _fail_move(*_args: object, **_kwargs: object) -> bool:
+        pytest.fail("no-progress stop should happen before sending another move")
+
+    window._move_to_position_mm = _fail_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(46.944)
+    window.spin_current_sweep_max_seek_mm.setValue(7.80)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        197.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -20.0
+    window._seek_last_value_by_key[seek_key] = 70.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 6.7275
+    window._seek_no_response_count_by_key[seek_key] = 3
+    window._seek_travel_by_key[seek_key] = 1.10
+    window._current_position_mm = 6.7275
+    window._effective_position_mm = 6.7275
+    window._latest_scale_timestamp = time.time()
+    window._latest_scale_value_g = mini_dma_mod.load_g_from_stress_mpa(
+        90.0,
+        window.spin_diameter.value(),
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert window._automation_active is False
+        assert "feedback kept moving away from target" in window.log_output.toPlainText()
+        stop = window._session_stop_metadata()
+        assert stop["reason"] == "closed_loop_no_progress"
+        assert stop["category"] == "fault"
+        assert stop["label"] == "Closed-loop no-progress guard"
+        assert "absolute travel allowance 7.8 mm" in str(stop["detail"])
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_ignores_correction_travel_limit(
     tmp_path: Path,
     qtbot,

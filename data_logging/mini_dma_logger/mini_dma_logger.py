@@ -57,7 +57,7 @@ SESSION_SETUP_TX = "setup.txt"
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-28.1"
+CONTROL_LOGIC_VERSION = "2026-06-02.1"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 CONTROL_LOGIC_FEATURES = [
     "mandatory_setup_length_refreeze",
@@ -82,6 +82,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_defers_to_current_hold",
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
+    "current_sweep_closed_loop_no_progress_guard",
     "single_prompt_length_setup",
 ]
 CONTROL_TRACE_FIELDNAMES = [
@@ -435,6 +436,9 @@ SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
+CURRENT_SWEEP_NO_PROGRESS_WARNINGS = 4
+CURRENT_SWEEP_NO_PROGRESS_MIN_TRAVEL_MM = 1.0
+CURRENT_SWEEP_NO_PROGRESS_MIN_MOTOR_STEPS = 20.0
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -10666,6 +10670,56 @@ class MainWindow(QtWidgets.QMainWindow):
         current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
         return current_travel_mm + abs(float(next_travel_mm)) > limit_mm
 
+    def _current_sweep_no_progress_min_travel_mm(self) -> float:
+        return max(
+            CURRENT_SWEEP_NO_PROGRESS_MIN_TRAVEL_MM,
+            self._motor_step_mm() * CURRENT_SWEEP_NO_PROGRESS_MIN_MOTOR_STEPS,
+        )
+
+    def _current_sweep_no_progress_guard_triggered(
+        self,
+        seek_key: tuple[str, int, float],
+        next_travel_mm: float,
+    ) -> bool:
+        if not self._current_sweep_freezes_live_stiffness():
+            return False
+        if self._automation_phase == "current_hold":
+            return False
+        warning_count = self._seek_no_response_count_by_key.get(seek_key, 0)
+        if warning_count < CURRENT_SWEEP_NO_PROGRESS_WARNINGS:
+            return False
+        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+        total_travel_mm = current_travel_mm + abs(float(next_travel_mm))
+        return total_travel_mm >= self._current_sweep_no_progress_min_travel_mm()
+
+    def _stop_for_current_sweep_no_progress(
+        self,
+        seek_key: tuple[str, int, float],
+        next_travel_mm: float,
+    ) -> None:
+        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+        total_travel_mm = current_travel_mm + abs(float(next_travel_mm))
+        warning_count = self._seek_no_response_count_by_key.get(seek_key, 0)
+        detail = (
+            "Closed-loop load/stress correction stopped after repeated worsening feedback "
+            f"for {seek_key[0]} target {seek_key[2]:.6g}"
+            f"{'' if seek_key[1] is None else f' plateau {seek_key[1]}'}: "
+            f"{warning_count} consecutive warning(s), "
+            f"{_format_compact_unit(total_travel_mm, 'mm')} correction travel "
+            f"(minimum no-progress travel {_format_compact_unit(self._current_sweep_no_progress_min_travel_mm(), 'mm')}, "
+            f"absolute travel allowance {_format_compact_unit(self._seek_max_travel_mm(), 'mm')})."
+        )
+        self._log(
+            "Recipe stopped because closed-loop load/stress feedback kept moving away "
+            f"from target after {_format_compact_unit(total_travel_mm, 'mm')} correction travel."
+        )
+        self._stop_auto_ramp(
+            log_completion=False,
+            offer_recovery=True,
+            stop_reason="closed_loop_no_progress",
+            stop_detail=detail,
+        )
+
     def _stop_for_current_sweep_travel_limit(
         self,
         seek_key: tuple[str, int, float],
@@ -12107,6 +12161,22 @@ class MainWindow(QtWidgets.QMainWindow):
             and nudge_mm <= self._motor_step_mm() + 1e-12
         ):
             backlash_takeup_mm = 0.0
+        if self._current_sweep_no_progress_guard_triggered(seek_key, nudge_mm + backlash_takeup_mm):
+            self._stop_for_current_sweep_no_progress(seek_key, nudge_mm + backlash_takeup_mm)
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=effective_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                correction_mm=nudge_mm,
+                backlash_mm=backlash_takeup_mm,
+                result="stopped",
+                reason="closed_loop_no_progress",
+            )
+            return False
         if self._current_sweep_travel_limit_exceeded(seek_key, nudge_mm + backlash_takeup_mm):
             self._stop_for_current_sweep_travel_limit(seek_key, nudge_mm + backlash_takeup_mm)
             self._write_control_trace(
@@ -13964,6 +14034,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "emergency_stop": ("operator", "Emergency stop"),
             "wire_break_or_contact_loss": ("fault", "Wire break or contact loss"),
             "mechanical_load_loss": ("fault", "Mechanical load loss or slack"),
+            "closed_loop_no_progress": ("fault", "Closed-loop no-progress guard"),
             "correction_travel_limit": ("fault", "Correction travel limit"),
             "automation_timeout": ("fault", "Bench automation timeout"),
             "recipe_control_stop": ("fault", "Recipe stopped by control/error condition"),
