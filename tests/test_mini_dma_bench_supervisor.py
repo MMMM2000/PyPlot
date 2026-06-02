@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,23 @@ class _FakePopen:
         return self.poll() or 0
 
 
+class _NeverExitsPopen(_FakePopen):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._polls = [None]
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        return self._polls[0]
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._polls = [1]
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._polls[0] or 0
+
+
 def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, monkeypatch) -> None:
     recipe_path = tmp_path / "recipe.json"
     plan_path = tmp_path / "bench-plan.json"
@@ -133,6 +151,60 @@ def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, mo
         "--mini-dma-bench-plan",
     ]
     assert _FakePopen.instances[0].kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, monkeypatch) -> None:
+    recipe_path = tmp_path / "recipe.json"
+    plan_path = tmp_path / "bench-plan.json"
+    status_path = tmp_path / "status.json"
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = tmp_path / "stderr.log"
+    _write_recipe(recipe_path)
+    _write_plan(plan_path, recipe_path, summary_path=tmp_path / "summary.json")
+    run_dir = tmp_path / "runs" / "run01"
+    run_dir.mkdir(parents=True)
+    metadata_path = run_dir / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "stop": {"reason": "closed_loop_no_progress"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    old_time = bench_supervisor.time.time() - 30.0
+    os.utime(metadata_path, (old_time, old_time))
+
+    def _fake_safe_off(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "channel": kwargs["channel"],
+            "states": {"4": {"output_on": False}},
+        }
+
+    monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
+    _FakePopen.instances.clear()
+
+    result = bench_supervisor.run_supervised_mini_dma_bench(
+        plan_path,
+        python_executable="python-test",
+        launcher_path="launcher.py",
+        status_path=status_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        poll_interval_s=0.1,
+        popen_factory=_NeverExitsPopen,
+        safe_off_fn=_fake_safe_off,
+    )
+
+    assert result["state"] == "failed"
+    assert result["child_returncode"] == 1
+    assert result["supervisor_recovery"]["reason"] == "finished_metadata_child_still_running"
+    assert result["supervisor_recovery"]["stop"]["reason"] == "closed_loop_no_progress"
+    assert result["safe_off"]["states"]["4"]["output_on"] is False
+    assert isinstance(_FakePopen.instances[0], _NeverExitsPopen)
+    assert _FakePopen.instances[0].terminated is True
 
 
 def test_normalize_windows_path_env_keeps_one_path_key() -> None:
