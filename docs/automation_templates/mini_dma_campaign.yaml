@@ -81,6 +81,8 @@ reporting:
   image_dir: reports/images
   summary_path: analysis/summary.json
   run_quality_cache: run_quality.json
+  per_run_core_plot_pattern: reports/images/{run_name}_core.png
+  send_per_run_core_plot_to_master: true
   require_core_plots: true
   core_plots:
     - stress_vs_time

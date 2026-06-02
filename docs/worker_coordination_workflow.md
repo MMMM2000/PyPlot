@@ -136,5 +136,6 @@ uv run python scripts/mini_dma_run_quality.py <run-folder> --write
 uv run python scripts/mini_dma_report.py <campaign.yaml>
 ```
 
-The worker handoff must include the run folder, stop reason, control logic fingerprint, source commit, stress-error metrics, current compliance summary, current-hold behavior, and final HMP channel state.
+During live optimization, each run handoff should also include a phone-readable core plot image, generated immediately after that run rather than only in the final report. The image should use the standard two-panel view: stress vs time on the left, strain vs measured current on the right, with current-hold periods highlighted and annotations for the run folder, ramp settings, stop reason, and key stress-error metrics.
 
+The worker handoff must include the run folder, stop reason, control logic fingerprint, source commit, stress-error metrics, current compliance summary, current-hold behavior, per-run core plot artifact path, and final HMP channel state.
