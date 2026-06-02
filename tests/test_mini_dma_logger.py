@@ -11183,10 +11183,31 @@ def test_automation_tolerance_uses_automatic_load_floor(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
-def test_current_sweep_automation_tolerance_uses_configured_recipe_value(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_automation_tolerance_defaults_to_automatic(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.spin_diameter.setValue(0.02)
     window.spin_current_sweep_tolerance.setValue(2.0)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+
+    try:
+        sweep_step = mini_dma_mod.AutomationStep(
+            "ramp_target",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="1",
+        )
+
+        assert window._automation_tolerance_for_step(sweep_step) == pytest.approx(
+            mini_dma_mod.stress_mpa_from_load_g(0.005, 0.02)
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_automation_tolerance_can_use_configured_recipe_value(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.02)
+    window.spin_current_sweep_tolerance.setValue(2.0)
+    window._current_sweep_tolerance_mode = "configured"
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
 
     try:

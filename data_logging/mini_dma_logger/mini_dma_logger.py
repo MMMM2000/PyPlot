@@ -3192,6 +3192,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._supply_last_setpoint_mA: float | None = None
         self._heating_program_current_mA: float | None = None
         self._heating_program_direction = 1.0
+        self._current_sweep_tolerance_mode = "automatic"
         self._automation_active = False
         self._automation_steps: list[AutomationStep] = []
         self._automation_index = 0
@@ -11171,6 +11172,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if (
             self._is_current_sweep_mode(self._automation_name)
             and step.note not in {"setup_preload", "setup_return_zero"}
+            and self._current_sweep_tolerance_mode == "configured"
         ):
             return max(0.0001, float(self.spin_current_sweep_tolerance.value()))
         return self._auto_requested_tolerance_for_basis(step.basis)
@@ -14317,8 +14319,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.spin_current_sweep_first_overheating_target_mpa.value()
                 ),
                 "reverse_current": True,
-                "tolerance": float(self.spin_current_sweep_tolerance.value()),
-                "tolerance_mode": "configured",
+                "tolerance": (
+                    float(self.spin_current_sweep_tolerance.value())
+                    if self._current_sweep_tolerance_mode == "configured"
+                    else self._auto_requested_tolerance_for_basis(self._current_sweep_basis())
+                ),
+                "tolerance_mode": self._current_sweep_tolerance_mode,
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
                 "dynamic_balance_effective_speed_cap_mm_s": self._current_sweep_dynamic_speed_cap_mm_s(),
                 "dynamic_balance_max_correction_mm": self._current_sweep_max_correction_mm(),
@@ -15567,6 +15573,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
                 "reverse_current": bool(self.check_current_sweep_reverse_current.isChecked()),
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
+                "tolerance_mode": self._current_sweep_tolerance_mode,
                 "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "balance_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
                 "max_seek_mm": float(self.spin_current_sweep_max_seek_mm.value()),
@@ -15684,6 +15691,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.check_current_sweep_reverse_current.setChecked(bool(current_sweep.get("reverse_current", self.check_current_sweep_reverse_current.isChecked())))
             self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
+            tolerance_mode = str(current_sweep.get("tolerance_mode", "automatic")).strip().lower()
+            self._current_sweep_tolerance_mode = "configured" if tolerance_mode in {"configured", "fixed", "manual"} else "automatic"
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
             self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
             self.spin_current_sweep_max_seek_mm.setValue(float(current_sweep.get("max_seek_mm", self.spin_current_sweep_max_seek_mm.value())))
