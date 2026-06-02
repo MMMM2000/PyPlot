@@ -23,6 +23,7 @@
 - Keep integration branches named clearly, for example `codex/integration-mini-dma-ready-review`.
 - Create and merge final PRs from the master thread by default. Use a separate PR-finalization worker only if PR cleanup becomes substantial.
 - Check active worker status opportunistically when the user prompts the master thread.
+- For Mini DMA optimization campaigns, the master thread owns creating or approving the campaign manifest before delegating live hardware work.
 
 ## Worker Thread Workflow
 - Work in a dedicated branch/worktree.
@@ -33,6 +34,7 @@
 - Report completion with branch, commit, tests/checks, screenshot paths when relevant, and integration notes.
 - When ready or blocked, send a concise completion handoff back to the master coordination thread.
 - If blocked, report the blocker, current branch, git status, and what was already verified.
+- For Mini DMA optimization workers, do not start live hardware from chat memory or isolated artifacts. Start from a campaign manifest, run `scripts/mini_dma_campaign_check.py`, and report the checker result before live execution.
 
 ## Delegation Strategy
 - Choose the split that gives the cleanest reasoning, least conflict, and fastest useful feedback; do not default to either one worker for everything or one worker per issue.
@@ -57,6 +59,20 @@
 - Avoid hidden modal dialogs in automation paths. Provide noninteractive overrides for bench/agent workflows.
 - Make safety state observable: active process, hardware ownership, channel leases, output state, current recipe step, stop reason, and artifact paths.
 - Keep manual UI workflows pleasant, but do not make automation depend on clicking through the UI.
+
+## Mini DMA Optimization Campaigns
+- Treat Mini DMA optimization as a repeatable campaign, not an ad hoc run.
+- Keep raw run history and reports in `G:\My Drive\1 Projects\Praha\mini DMA\automation_history`; keep reusable templates, recipes, schemas, scripts, and docs in the repo.
+- Every optimization campaign should have a `campaign.yaml` based on `docs/automation_templates/mini_dma_campaign.yaml`.
+- Before live optimization hardware, run:
+  - `uv run python scripts/mini_dma_campaign_check.py <campaign.yaml>`
+- The campaign manifest must define sample identity, length, diameter source, approved control source, hardware channels, voltage/current limits, safety rails, run stages, and reporting outputs.
+- Optimization workers must start from the latest approved control logic named by the campaign, normally latest `main` or the current Mini DMA integration branch. Do not use a random stale worker branch just because it has local artifacts.
+- If the campaign checker says the branch is dirty, behind the approved base, missing control source, or missing report paths, stop and ask the master thread to fix the campaign or integration state before running hardware.
+- After campaign runs, generate the standard report with:
+  - `uv run python scripts/mini_dma_report.py <campaign.yaml>`
+- Standard reports must include stress vs time, strain vs current, and current-hold highlighting. Exploratory plots may be added, but do not replace the core plot pair.
+- For temperature/current-ramp optimization, encode fixed ramp speeds and dynamic-ramp candidates as explicit campaign stages so precision/time comparisons are repeatable.
 
 ## Environment
 - Use `uv` for project Python commands and environment sync by default.
