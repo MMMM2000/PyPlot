@@ -90,6 +90,7 @@ def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) 
         "recommended_chi_prime_curves.png",
         "recommended_chi_double_prime_curves.png",
         "top_complex_susceptibility_curves.png",
+        "all_conditions_delta_chi_curves_grid.png",
         "all_conditions_delta_chi_heatmap.png",
         "all_conditions_snr_heatmap.png",
         "all_conditions_percent_heatmap.png",
@@ -117,6 +118,7 @@ def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) 
     assert "wire_dc_resistance_ohm" in origin_prime.columns
     assert copied["chi_prime_plot"].exists()
     assert copied["complex_plot"].exists()
+    assert copied["delta_curve_grid"].exists()
     assert copied["delta_heatmap"].exists()
 
 

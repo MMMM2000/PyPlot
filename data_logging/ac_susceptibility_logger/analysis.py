@@ -520,6 +520,7 @@ def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysis
             "- `recommended_chi_double_prime_curves.png`",
             "- `top_complex_susceptibility_curves.png`",
             "- `high_percent_chi_prime_curves.png`",
+            "- `all_conditions_delta_chi_curves_grid.png`",
             "- `all_conditions_delta_chi_heatmap.png`",
             "- `all_conditions_snr_heatmap.png`",
             "- `all_conditions_percent_heatmap.png`",
@@ -557,6 +558,7 @@ def plot_recommended_curves(points: pd.DataFrame, ranking: pd.DataFrame, output_
             output_dir / "high_percent_chi_prime_curves.png",
             include_percent=True,
         )
+    _plot_delta_chi_curve_grid(points, ranking, output_dir)
     _plot_condition_heatmaps(ranking, output_dir)
 
 
@@ -691,6 +693,88 @@ def _plot_complex(points: pd.DataFrame, selection: pd.DataFrame, path: Path) -> 
     plt.close(fig)
 
 
+def _plot_delta_chi_curve_grid(points: pd.DataFrame, ranking: pd.DataFrame, output_dir: Path) -> None:
+    if ranking.empty:
+        return
+    frequencies = sorted((float(value) for value in ranking["frequency_hz"].dropna().unique()), reverse=True)
+    excitations = sorted(float(value) for value in ranking["excitation_mA"].dropna().unique())
+    if not frequencies or not excitations:
+        return
+    clean_points = points[
+        points["direction"].isin(["up", "down"])
+        & (points["negative_fraction"] <= 0.05)
+        & np.isfinite(points["chi_prime_app"])
+    ].copy()
+    fig_width = max(11.0, 1.55 * len(excitations) + 2.4)
+    fig_height = max(12.0, 0.92 * len(frequencies) + 2.0)
+    fig, axes = plt.subplots(
+        len(frequencies),
+        len(excitations),
+        figsize=(fig_width, fig_height),
+        dpi=180,
+        sharex=True,
+        sharey=False,
+    )
+    if len(frequencies) == 1:
+        axes = np.array([axes])
+    if len(excitations) == 1:
+        axes = axes.reshape(len(frequencies), 1)
+    for y_index, frequency in enumerate(frequencies):
+        for x_index, excitation in enumerate(excitations):
+            axis = axes[y_index, x_index]
+            data = clean_points[
+                (clean_points["frequency_hz"] == frequency)
+                & np.isclose(clean_points["excitation_mA"], excitation)
+            ].sort_values("current_set_mA")
+            if data.empty:
+                axis.set_facecolor("#e0e0e0")
+                axis.text(0.5, 0.5, "filtered", ha="center", va="center", transform=axis.transAxes, fontsize=6)
+            else:
+                plotted = []
+                for direction, marker_size in (("up", 1.8), ("down", 1.8)):
+                    direction_data = data[data["direction"] == direction].copy()
+                    if direction_data.empty:
+                        continue
+                    low = direction_data[
+                        (direction_data["current_set_mA"] >= 15.0)
+                        & (direction_data["current_set_mA"] <= 20.0)
+                    ]
+                    if low.empty:
+                        low = direction_data.head(min(5, len(direction_data)))
+                    baseline = float(np.nanmedian(low["chi_prime_app"]))
+                    direction_data["delta_chi_prime_app"] = direction_data["chi_prime_app"] - baseline
+                    plotted.append(direction_data["delta_chi_prime_app"])
+                    axis.plot(
+                        direction_data["current_set_mA"],
+                        direction_data["delta_chi_prime_app"],
+                        linewidth=0.8,
+                        marker="o",
+                        markersize=marker_size,
+                        label=direction,
+                    )
+                if plotted:
+                    _set_tight_y_limits(axis, pd.concat(plotted, ignore_index=True))
+                axis.axhline(0.0, color="0.5", linewidth=0.4)
+            axis.tick_params(axis="both", labelsize=5, length=2, pad=1)
+            if y_index == 0:
+                axis.set_title(f"{excitation:g} mA", fontsize=8)
+            if x_index == 0:
+                axis.set_ylabel(format_frequency(frequency), fontsize=8)
+            else:
+                axis.set_yticklabels([])
+            if y_index != len(frequencies) - 1:
+                axis.set_xticklabels([])
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="upper right", fontsize=8, frameon=False)
+    fig.suptitle("Delta apparent chi' vs DC current for all measured conditions", fontsize=13)
+    fig.supxlabel("LCR excitation current columns; x-axis inside each cell is DC heating current [mA]", fontsize=9)
+    fig.supylabel("Frequency rows; y-axis inside each cell is delta chi' vs low-current baseline", fontsize=9)
+    fig.tight_layout(rect=(0.04, 0.04, 0.98, 0.96))
+    fig.savefig(output_dir / "all_conditions_delta_chi_curves_grid.png")
+    plt.close(fig)
+
+
 def _plot_condition_heatmaps(ranking: pd.DataFrame, output_dir: Path) -> None:
     if ranking.empty:
         return
@@ -816,13 +900,22 @@ def run_analysis(config: SusceptibilityAnalysisConfig) -> dict[str, Path]:
         "snr_heatmap": config.output_dir / "all_conditions_snr_heatmap.png",
         "percent_heatmap": config.output_dir / "all_conditions_percent_heatmap.png",
         "complex_plot": config.output_dir / "top_complex_susceptibility_curves.png",
+        "delta_curve_grid": config.output_dir / "all_conditions_delta_chi_curves_grid.png",
     }
 
 
 def copy_preview_images(outputs: dict[str, Path], preview_dir: Path) -> dict[str, Path]:
     preview_dir.mkdir(parents=True, exist_ok=True)
     copied: dict[str, Path] = {}
-    for key in ("chi_prime_plot", "complex_plot", "high_percent_plot", "delta_heatmap", "snr_heatmap", "percent_heatmap"):
+    for key in (
+        "chi_prime_plot",
+        "complex_plot",
+        "high_percent_plot",
+        "delta_curve_grid",
+        "delta_heatmap",
+        "snr_heatmap",
+        "percent_heatmap",
+    ):
         path = outputs.get(key)
         if path is None or not path.exists():
             continue
