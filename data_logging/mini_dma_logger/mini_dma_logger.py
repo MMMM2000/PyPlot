@@ -110,6 +110,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_keeps_shortened_return_leg",
     "voltage_limit_preserves_rate_limited_nominal_return",
     "voltage_limit_unwind_obeys_current_hold",
+    "voltage_limit_unwind_waits_for_target_recovery",
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
     "fault_stop_metadata_preserved_on_app_close",
@@ -20159,19 +20160,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_setpoint_mA = setpoint_mA
 
         try:
-            self._seek_distribution_target(step.basis, step.target_value, tolerance)
+            target_recovered = self._seek_distribution_target(step.basis, step.target_value, tolerance)
         except Exception as exc:
             self._log(f"Recipe stopped: {exc}")
             self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return True
 
         if setpoint_mA <= target_mA + 1e-12:
+            current_value = self._current_distribution_value(step.basis, require_after_last_move=False)
+            if not target_recovered:
+                self._write_control_trace(
+                    decision="wait",
+                    basis=step.basis,
+                    target_value=step.target_value,
+                    current_value=current_value,
+                    tolerance=tolerance,
+                    result="waiting",
+                    reason="current_returned_waiting_for_target_recovery",
+                )
+                return False
             self._record_current_sweep_duration(step, finished_s=time.monotonic())
             self._write_control_trace(
                 decision="voltage_limit_unwind_complete",
                 basis=step.basis,
                 target_value=step.target_value,
-                current_value=self._current_distribution_value(step.basis, require_after_last_move=False),
+                current_value=current_value,
                 tolerance=tolerance,
                 result="completed",
                 reason="current_returned_to_sweep_start",

@@ -9005,6 +9005,73 @@ def test_current_sweep_hold_pauses_voltage_limit_unwind_schedule(tmp_path: Path,
         _close_test_window(window)
 
 
+def test_voltage_limit_unwind_waits_for_target_recovery_before_completing(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(float(current_mA))
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_last_setpoint_mA = 10.0
+    window._current_sweep_voltage_limit_step_index = 4
+    window._current_sweep_voltage_limit_started_s = 100.0
+    window._current_sweep_voltage_limit_start_mA = 10.0
+    window._current_distribution_value = lambda *_args, **_kwargs: 0.0  # type: ignore[method-assign]
+    window._seek_distribution_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+    trace_rows: list[dict[str, object]] = []
+    window._write_control_trace = lambda **kwargs: trace_rows.append(dict(kwargs))  # type: ignore[method-assign]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 120.0)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=50.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=True,
+        note="4",
+    )
+
+    try:
+        assert window._handle_current_sweep_voltage_unwind(
+            step,
+            step_index=4,
+            ramp_rate_mA_s=1.0,
+            target_mA=1.0,
+        ) is False
+
+        assert supply.commands == [pytest.approx(1.0)]
+        assert window._current_sweep_voltage_limit_step_index == 4
+        assert window._active_current_sweep_step_index == 4
+        assert trace_rows[-1]["reason"] == "current_returned_waiting_for_target_recovery"
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_open_circuit_zero_current_stops_recipe_and_offers_recovery(
     tmp_path: Path,
     qtbot,
