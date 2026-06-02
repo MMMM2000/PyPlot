@@ -53,6 +53,17 @@ INDEX_COLUMNS = [
     "biggest_problems",
 ]
 
+DEFAULT_EXCLUDED_DIR_NAMES = {
+    "archive",
+    "automated",
+    "automated_control_tests",
+    "automation_history",
+    "campaigns",
+    "legacy_imports",
+    "plans",
+    "reports",
+}
+
 
 @dataclass(frozen=True)
 class SourceRoot:
@@ -176,14 +187,19 @@ def _run_row(source: SourceRoot, run_dir: Path, indexed_utc: str) -> dict[str, A
     return row
 
 
-def discover_runs(sources: Sequence[SourceRoot]) -> list[dict[str, Any]]:
+def discover_runs(
+    sources: Sequence[SourceRoot], exclude_names: Iterable[str] = ()
+) -> list[dict[str, Any]]:
     indexed_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    excluded = {name.lower() for name in exclude_names}
     rows: list[dict[str, Any]] = []
     for source in sources:
         if not source.path.exists():
             continue
         for run_dir in sorted((path for path in source.path.iterdir() if path.is_dir()), key=lambda path: path.name.lower()):
-            if run_dir.name.lower() in {"reports", "plans", "campaigns", "legacy_imports"}:
+            if run_dir.name.lower() in DEFAULT_EXCLUDED_DIR_NAMES:
+                continue
+            if run_dir.name.lower() in excluded:
                 continue
             rows.append(_run_row(source, run_dir, indexed_utc))
     rows.sort(key=lambda row: (str(row["source_name"]).lower(), str(row["run_name"]).lower()))
@@ -220,6 +236,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Source root to scan, either NAME=PATH or PATH. Repeat for multiple roots.",
     )
+    parser.add_argument(
+        "--exclude-name",
+        action="append",
+        default=[],
+        help="Exact run-folder name to skip. Repeat for multiple active or out-of-scope runs.",
+    )
     parser.add_argument("--output-dir", required=True, help="Directory that receives runs_index.csv/jsonl.")
     return parser
 
@@ -227,7 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     sources = [_parse_source(value) for value in args.source]
-    rows = discover_runs(sources)
+    rows = discover_runs(sources, exclude_names=args.exclude_name)
     write_index(rows, Path(args.output_dir).expanduser())
     print(f"Indexed {len(rows)} Mini DMA automation runs into {Path(args.output_dir).expanduser()}")
     return 0

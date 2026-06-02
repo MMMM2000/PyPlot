@@ -89,3 +89,39 @@ def test_mini_dma_automation_index_writes_csv_and_jsonl(tmp_path: Path) -> None:
     assert (output_dir / "runs_index.jsonl").exists()
     assert "run01" in (output_dir / "runs_index.csv").read_text(encoding="utf-8")
     assert "run01" in (output_dir / "runs_index.jsonl").read_text(encoding="utf-8")
+
+
+def test_mini_dma_automation_index_excludes_named_active_run(tmp_path: Path) -> None:
+    source = tmp_path / "mini DMA"
+    completed = source / "Ni50Fe27Ga23 12_2 iso-stress"
+    active = source / "Ni48Fe25Ga23Co4 1_3 iso-stress"
+    completed.mkdir(parents=True)
+    active.mkdir()
+    (completed / "metadata.json").write_text("{}", encoding="utf-8")
+    (active / "metadata.json").write_text("{}", encoding="utf-8")
+
+    rows = mini_dma_automation_index.discover_runs(
+        [mini_dma_automation_index.SourceRoot("top-level", source)],
+        exclude_names=["Ni48Fe25Ga23Co4 1_3 iso-stress"],
+    )
+
+    assert [row["run_name"] for row in rows] == ["Ni50Fe27Ga23 12_2 iso-stress"]
+
+
+def test_mini_dma_automation_index_skips_organizational_folders(tmp_path: Path) -> None:
+    source = tmp_path / "mini DMA"
+    run = source / "Ni50Fe27Ga23 12_2 iso-stress"
+    history = source / "automation_history"
+    automated = source / "automated"
+    run.mkdir(parents=True)
+    history.mkdir()
+    automated.mkdir()
+    (run / "metadata.json").write_text("{}", encoding="utf-8")
+    (history / "metadata.json").write_text("{}", encoding="utf-8")
+    (automated / "metadata.json").write_text("{}", encoding="utf-8")
+
+    rows = mini_dma_automation_index.discover_runs(
+        [mini_dma_automation_index.SourceRoot("top-level", source)]
+    )
+
+    assert [row["run_name"] for row in rows] == ["Ni50Fe27Ga23 12_2 iso-stress"]
