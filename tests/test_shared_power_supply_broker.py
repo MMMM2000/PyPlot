@@ -222,6 +222,6 @@ def test_broker_json_client_uses_configurable_request_timeout(monkeypatch: pytes
     monkeypatch.setattr("data_logging.shared_power_supply.protocol.socket.create_connection", _create_connection)
 
     client = BrokerJsonClient(host="127.0.0.1", port=8765, timeout_s=9.5)
-    assert client.snapshot() == {}
+    assert client.request("snapshot")["snapshot"] == {}
     assert seen["address"] == ("127.0.0.1", 8765)
     assert seen["timeout"] == pytest.approx(9.5)
