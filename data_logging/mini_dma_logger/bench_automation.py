@@ -45,6 +45,18 @@ class MiniDmaBenchGuardrails:
 
 
 @dataclass(frozen=True)
+class MiniDmaSampleIdentity:
+    composition: str | None = None
+    microwire: str | None = None
+    specimen: str | None = None
+    condition: str | None = None
+    sample_name: str | None = None
+    log_name: str | None = None
+    builder_project_path: Path | None = None
+    diameter_mm: float | None = None
+
+
+@dataclass(frozen=True)
 class MiniDmaBenchLockConfig:
     enabled: bool
     timeout_s: float = DEFAULT_BENCH_LOCK_TIMEOUT_S
@@ -60,6 +72,7 @@ class MiniDmaBenchPlan:
     log_dir: Path | None
     summary_path: Path | None
     max_total_duration_s: float | None
+    sample_identity: MiniDmaSampleIdentity
     guardrails: MiniDmaBenchGuardrails
     bench_lock: MiniDmaBenchLockConfig
     runs: tuple[MiniDmaBenchRun, ...]
@@ -134,6 +147,29 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     if payload.get("summary_path") is not None:
         summary_path = _resolve_plan_path(base, payload["summary_path"], field="summary_path", must_exist=False)
     max_total_duration_s = _optional_float(payload, "max_total_duration_s")
+    raw_sample = payload.get("sample_identity", {})
+    if raw_sample is None:
+        raw_sample = {}
+    if not isinstance(raw_sample, Mapping):
+        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'sample_identity' must be an object.")
+    builder_project_path = None
+    if raw_sample.get("builder_project_path") is not None:
+        builder_project_path = _resolve_plan_path(
+            base,
+            raw_sample["builder_project_path"],
+            field="sample_identity.builder_project_path",
+            must_exist=False,
+        )
+    sample_identity = MiniDmaSampleIdentity(
+        composition=None if raw_sample.get("composition") is None else str(raw_sample["composition"]),
+        microwire=None if raw_sample.get("microwire") is None else str(raw_sample["microwire"]),
+        specimen=None if raw_sample.get("specimen") is None else str(raw_sample["specimen"]),
+        condition=None if raw_sample.get("condition") is None else str(raw_sample["condition"]),
+        sample_name=None if raw_sample.get("sample_name") is None else str(raw_sample["sample_name"]),
+        log_name=None if raw_sample.get("log_name") is None else str(raw_sample["log_name"]),
+        builder_project_path=builder_project_path,
+        diameter_mm=_optional_float(raw_sample, "diameter_mm"),
+    )
     raw_guardrails = payload.get("guardrails", {})
     if raw_guardrails is None:
         raw_guardrails = {}
@@ -258,6 +294,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         log_dir=log_dir,
         summary_path=summary_path,
         max_total_duration_s=max_total_duration_s,
+        sample_identity=sample_identity,
         guardrails=guardrails,
         bench_lock=bench_lock,
         runs=tuple(runs),
@@ -312,6 +349,36 @@ def _apply_bench_guardrails(window: Any, guardrails: MiniDmaBenchGuardrails) -> 
         return
     setattr(window, "_bench_allow_mechanical_slack_takeup", guardrails.allow_mechanical_slack_takeup)
     setattr(window, "_bench_mechanical_slack_max_seek_mm", guardrails.mechanical_slack_max_seek_mm)
+
+
+def _set_text_if_present(window: Any, attr_name: str, value: str | None) -> None:
+    if value is None:
+        return
+    widget = getattr(window, attr_name, None)
+    set_text = getattr(widget, "setText", None)
+    if callable(set_text):
+        set_text(value)
+
+
+def _apply_sample_identity(window: Any, sample: MiniDmaSampleIdentity) -> None:
+    _set_text_if_present(window, "edit_name_composition", sample.composition)
+    _set_text_if_present(window, "edit_name_wire", sample.microwire)
+    _set_text_if_present(window, "edit_name_specimen", sample.specimen)
+    _set_text_if_present(window, "edit_name_condition", sample.condition)
+    _set_text_if_present(window, "edit_project_path", None if sample.builder_project_path is None else str(sample.builder_project_path))
+    sync = getattr(window, "_sync_auto_name_fields", None)
+    if callable(sync):
+        sync()
+    _set_text_if_present(window, "edit_sample_name", sample.sample_name)
+    _set_text_if_present(window, "edit_log_name", sample.log_name)
+    if sample.diameter_mm is not None:
+        spin = getattr(window, "spin_diameter", None)
+        set_value = getattr(spin, "setValue", None)
+        if callable(set_value):
+            set_value(float(sample.diameter_mm))
+    persist = getattr(window, "_persist_settings_if_enabled", None)
+    if callable(persist):
+        persist()
 
 
 def _prefer_next_output_run(window: Any) -> None:
@@ -611,6 +678,20 @@ def run_mini_dma_bench_plan(
             "mode": "dry_run",
             "plan_path": str(plan.path),
             "run_count": len(plan.runs),
+            "sample_identity": {
+                "composition": plan.sample_identity.composition,
+                "microwire": plan.sample_identity.microwire,
+                "specimen": plan.sample_identity.specimen,
+                "condition": plan.sample_identity.condition,
+                "sample_name": plan.sample_identity.sample_name,
+                "log_name": plan.sample_identity.log_name,
+                "builder_project_path": (
+                    None
+                    if plan.sample_identity.builder_project_path is None
+                    else str(plan.sample_identity.builder_project_path)
+                ),
+                "diameter_mm": plan.sample_identity.diameter_mm,
+            },
             "bench_lock": {
                 "enabled": plan.bench_lock.enabled,
                 "timeout_s": plan.bench_lock.timeout_s,
@@ -687,6 +768,7 @@ def run_mini_dma_bench_plan(
                     continue
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
+                    _apply_sample_identity(window, plan.sample_identity)
                     run_summary = _execute_run(
                         run,
                         app=app,
