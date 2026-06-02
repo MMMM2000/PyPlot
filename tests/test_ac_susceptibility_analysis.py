@@ -113,6 +113,8 @@ def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) 
     assert "The percent column is normalized by the low-current apparent susceptibility window" in report
     assert "origin_chi_prime_curves.csv" in report
     assert "origin_condition_summary.csv" in report
+    origin_prime = pd.read_csv(out_dir / "origin_chi_prime_curves.csv")
+    assert "wire_dc_resistance_ohm" in origin_prime.columns
     assert copied["chi_prime_plot"].exists()
     assert copied["complex_plot"].exists()
     assert copied["delta_heatmap"].exists()

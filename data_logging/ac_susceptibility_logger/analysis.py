@@ -242,6 +242,7 @@ def summarize_sweep_points(sweep: pd.DataFrame, config: SusceptibilityAnalysisCo
             l_wire_nH=("lcr_primary", lambda s: float(np.nanmedian(s)) * 1e9),
             l_wire_noise_nH=("lcr_primary", lambda s: _robust_sigma(s) * 1e9),
             r_wire_ohm=("lcr_secondary", "median"),
+            wire_dc_resistance_ohm=("psu_resistance_ohm", "median"),
             current_actual_mA=("current_actual_mA", "median"),
             n_reads=("lcr_primary", "size"),
             negative_fraction=("lcr_primary", lambda s: float((s < 0).mean())),
@@ -367,8 +368,19 @@ def rank_conditions(metrics: pd.DataFrame, config: SusceptibilityAnalysisConfig)
 
 def export_origin_ready_tables(points: pd.DataFrame, output_dir: Path) -> None:
     base_columns = ["frequency_hz", "excitation_mA", "h_ac_oe", "direction", "current_set_mA", "current_actual_mA"]
-    prime = points[base_columns + ["chi_prime_app", "chi_prime_noise", "l_wire_nH", "l_empty_nH"]].copy()
-    loss = points[base_columns + ["chi_double_prime_app", "r_wire_ohm", "r_empty_ohm"]].copy()
+    prime = points[
+        base_columns
+        + [
+            "chi_prime_app",
+            "chi_prime_noise",
+            "l_wire_nH",
+            "l_empty_nH",
+            "wire_dc_resistance_ohm",
+            "r_wire_ohm",
+            "r_empty_ohm",
+        ]
+    ].copy()
+    loss = points[base_columns + ["chi_double_prime_app", "wire_dc_resistance_ohm", "r_wire_ohm", "r_empty_ohm"]].copy()
     prime.to_csv(output_dir / "origin_chi_prime_curves.csv", index=False)
     loss.to_csv(output_dir / "origin_chi_double_prime_curves.csv", index=False)
 
@@ -578,6 +590,19 @@ def _set_tight_y_limits(axis: object, values: pd.Series) -> None:
         axis.axhline(0.0, color="0.35", linewidth=0.6)
 
 
+def _plot_direction_lines(axis: object, data: pd.DataFrame, y_column: str) -> None:
+    for direction, marker in (("up", "o"), ("down", "s")):
+        direction_data = data[data["direction"] == direction]
+        axis.plot(
+            direction_data["current_set_mA"],
+            direction_data[y_column],
+            marker=marker,
+            markersize=3,
+            linewidth=1.2,
+            label=direction,
+        )
+
+
 def _condition_title(row: pd.Series, *, include_delta: bool = True, include_percent: bool = False) -> str:
     title = f"{format_frequency(row.frequency_hz)}, {row.excitation_mA:g} mA ({row.h_ac_oe:.2f} Oe)"
     details: list[str] = []
@@ -607,26 +632,29 @@ def _plot_component(
     if selection.empty:
         return
     height_per_panel = 3.1 if include_percent else 2.8
-    fig, axes = plt.subplots(len(selection), 1, figsize=(10, height_per_panel * len(selection)), dpi=160, sharex=True)
+    fig, axes = plt.subplots(
+        len(selection), 2, figsize=(12, height_per_panel * len(selection)), dpi=160, sharex=True
+    )
     if len(selection) == 1:
-        axes = [axes]
-    for axis, (_, row) in zip(axes, selection.iterrows()):
+        axes = np.array([axes])
+    for row_index, (_, row) in enumerate(selection.iterrows()):
         data = _clean_component_points(points, row, component)
-        for direction, marker in (("up", "o"), ("down", "s")):
-            direction_data = data[data["direction"] == direction]
-            axis.plot(
-                direction_data["current_set_mA"],
-                direction_data[component],
-                marker=marker,
-                markersize=3,
-                linewidth=1.2,
-                label=direction,
-            )
-        _set_tight_y_limits(axis, data[component])
-        axis.set_ylabel(label)
-        axis.set_title(_condition_title(row, include_percent=include_percent), fontsize=10 if include_percent else None)
-        axis.legend(fontsize=8)
-    axes[-1].set_xlabel("DC heating current set [mA]")
+        susc_axis = axes[row_index, 0]
+        resistance_axis = axes[row_index, 1]
+        _plot_direction_lines(susc_axis, data, component)
+        _set_tight_y_limits(susc_axis, data[component])
+        susc_axis.set_ylabel(label)
+        susc_axis.set_title(
+            _condition_title(row, include_percent=include_percent), fontsize=10 if include_percent else None
+        )
+        susc_axis.legend(fontsize=8)
+        _plot_direction_lines(resistance_axis, data, "wire_dc_resistance_ohm")
+        _set_tight_y_limits(resistance_axis, data["wire_dc_resistance_ohm"])
+        resistance_axis.set_ylabel("DC wire R [ohm]")
+        resistance_axis.set_title("DC wire resistance")
+        resistance_axis.legend(fontsize=8)
+    for axis in axes[-1, :]:
+        axis.set_xlabel("DC heating current set [mA]")
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -635,7 +663,7 @@ def _plot_component(
 def _plot_complex(points: pd.DataFrame, selection: pd.DataFrame, path: Path) -> None:
     if selection.empty:
         return
-    fig, axes = plt.subplots(len(selection), 2, figsize=(12, 3.2 * len(selection)), dpi=160, sharex=True)
+    fig, axes = plt.subplots(len(selection), 3, figsize=(15, 3.2 * len(selection)), dpi=160, sharex=True)
     if len(selection) == 1:
         axes = np.array([axes])
     for row_index, (_, row) in enumerate(selection.iterrows()):
@@ -644,20 +672,18 @@ def _plot_complex(points: pd.DataFrame, selection: pd.DataFrame, path: Path) -> 
         ):
             axis = axes[row_index, col_index]
             data = _clean_component_points(points, row, component)
-            for direction, marker in (("up", "o"), ("down", "s")):
-                direction_data = data[data["direction"] == direction]
-                axis.plot(
-                    direction_data["current_set_mA"],
-                    direction_data[component],
-                    marker=marker,
-                    markersize=3,
-                    linewidth=1.2,
-                    label=direction,
-                )
+            _plot_direction_lines(axis, data, component)
             _set_tight_y_limits(axis, data[component])
             axis.set_ylabel(label)
             axis.set_title(_condition_title(row, include_delta=False))
             axis.legend(fontsize=8)
+        resistance_axis = axes[row_index, 2]
+        resistance_data = _clean_component_points(points, row, "wire_dc_resistance_ohm")
+        _plot_direction_lines(resistance_axis, resistance_data, "wire_dc_resistance_ohm")
+        _set_tight_y_limits(resistance_axis, resistance_data["wire_dc_resistance_ohm"])
+        resistance_axis.set_ylabel("DC wire R [ohm]")
+        resistance_axis.set_title("DC wire resistance")
+        resistance_axis.legend(fontsize=8)
     for axis in axes[-1, :]:
         axis.set_xlabel("DC heating current set [mA]")
     fig.tight_layout()
