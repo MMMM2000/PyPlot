@@ -28,6 +28,11 @@ import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
+from plotting.shared.experiment_processes import (
+    ExperimentProcessSpec,
+    launch_experiment_process,
+)
+
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
 
@@ -57,6 +62,38 @@ def _lazy(module: str, attr: str = "main") -> LauncherFactory:
         return callable_target(*args, **kwargs)
 
     return factory
+
+
+def _experiment_process_launcher(
+    display_name: str,
+    module: str,
+    resource_tag: str,
+) -> LauncherFactory:
+    def factory(*_args: Any, **_kwargs: Any) -> QtWidgets.QWidget | None:
+        launch_experiment_process(
+            ExperimentProcessSpec(
+                display_name=display_name,
+                module=module,
+                resource_tag=resource_tag,
+            )
+        )
+        return None
+
+    return factory
+
+
+EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
+    "current_annealing": ExperimentProcessSpec(
+        display_name="Current Annealing Logger",
+        module="data_logging.current_annealing_logger.current_annealing_logger",
+        resource_tag="current_annealing",
+    ),
+    "mini_dma": ExperimentProcessSpec(
+        display_name="Mini DMA Logger",
+        module="data_logging.mini_dma_logger.mini_dma_logger",
+        resource_tag="mini_dma",
+    ),
+}
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1257,6 +1294,17 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Run a machine-facing automation recipe JSON file.",
     )
     parser.add_argument(
+        "--mini-dma-bench-plan",
+        default=None,
+        help="Run or dry-run an explicitly armed Mini DMA bench automation plan JSON file.",
+    )
+    parser.add_argument(
+        "--experiment-process",
+        choices=tuple(EXPERIMENT_PROCESS_MODULES),
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--pyplot-list-plugins",
         action="store_true",
         help="List available PyPlot plugin names and exit.",
@@ -1530,6 +1578,14 @@ def _is_pyplot_automation_requested(args: argparse.Namespace) -> bool:
         or getattr(args, "pyplot_plot_image", None)
         or getattr(args, "pyplot_summary_json", None)
     )
+
+
+def _is_mini_dma_bench_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "mini_dma_bench_plan", None))
+
+
+def _is_experiment_process_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "experiment_process", None))
 
 
 def _is_pyplot_session_requested(args: argparse.Namespace) -> bool:
@@ -1940,12 +1996,16 @@ def _word_project_value_items(value: object) -> list[object]:
         return []
     if isinstance(value, float) and value != value:
         return []
-    if isinstance(value, list):
-        return [item for item in value if item not in (None, "", [], {})]
-    if isinstance(value, tuple):
-        return [item for item in value if item not in (None, "", [], {})]
-    if value in ("", [], {}):
-        return []
+    if isinstance(value, (list, tuple, set)):
+        items: list[object] = []
+        for item in value:
+            items.extend(_word_project_value_items(item))
+        return items
+    try:
+        if value in ("", [], {}):
+            return []
+    except Exception:
+        pass
     return [value]
 
 
@@ -1954,8 +2014,6 @@ def _word_project_merge_value(existing: object, incoming: object) -> object:
     if not incoming_items:
         return existing
     existing_items = _word_project_value_items(existing)
-    if not existing_items:
-        return incoming_items if len(incoming_items) > 1 else incoming_items[0]
     merged: list[object] = []
     seen: set[str] = set()
     for item in [*existing_items, *incoming_items]:
@@ -4037,13 +4095,56 @@ def _run_pyplot_automation(args: argparse.Namespace, qt_args: list[str]) -> int:
     request = _pyplot_request_from_legacy_args(args)
     return _run_pyplot_automation_request(request, qt_args)
 
+
+def _run_mini_dma_bench_plan(args: argparse.Namespace, qt_args: list[str]) -> int:
+    from data_logging.mini_dma_logger.bench_automation import (
+        MiniDmaBenchAutomationError,
+        run_mini_dma_bench_plan,
+    )
+
+    try:
+        summary = run_mini_dma_bench_plan(str(getattr(args, "mini_dma_bench_plan")), qt_args=qt_args)
+    except MiniDmaBenchAutomationError as exc:
+        print(f"[mini-dma-bench] {exc}")
+        return 2
+    except Exception as exc:
+        print(f"[mini-dma-bench] {type(exc).__name__}: {exc}")
+        return 1
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
+def _run_experiment_process(args: argparse.Namespace) -> int:
+    key = getattr(args, "experiment_process", None)
+    spec = EXPERIMENT_PROCESS_MODULES.get(key)
+    if spec is None:
+        print(f"[experiment-process] Unknown experiment process: {key}")
+        return 2
+    try:
+        module_obj = import_module(spec.module)
+        main_func = getattr(module_obj, "main")
+        main_func()
+    except Exception as exc:
+        print(f"[experiment-process] {spec.display_name}: {type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        return 1
+    return 0
+
+
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
-    "Current Annealing Logger": _lazy(
-        "data_logging.current_annealing_logger", "main"
+    "Current Annealing Logger": _experiment_process_launcher(
+        "Current Annealing Logger",
+        "data_logging.current_annealing_logger.current_annealing_logger",
+        "current_annealing",
     ),
-    "Mini DMA Logger": _lazy(
-        "data_logging.mini_dma_logger", "main"
+    "Mini DMA Logger": _experiment_process_launcher(
+        "Mini DMA Logger",
+        "data_logging.mini_dma_logger.mini_dma_logger",
+        "mini_dma",
+    ),
+    "Shared HMP PSU Setup": _lazy(
+        "data_logging.shared_power_supply.setup_ui", "main"
     ),
     "Manual Stress/Strain Logger": _lazy(
         "data_logging.manual_stress_strain_logger", "main"
@@ -4704,6 +4805,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_visual_check(args))
     if getattr(args, "automation_recipe", None):
         raise SystemExit(_run_automation_recipe(args, qt_args))
+    if _is_mini_dma_bench_requested(args):
+        raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
+    if _is_experiment_process_requested(args):
+        raise SystemExit(_run_experiment_process(args))
     if _is_microwire_word_report_requested(args):
         raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):

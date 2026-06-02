@@ -281,6 +281,17 @@ def test_launcher_detects_microwire_eda_cli_flags() -> None:
     assert args.microwire_eda_force_project_rebuild is False
 
 
+def test_launcher_detects_mini_dma_bench_plan_flag() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--mini-dma-bench-plan",
+            "bench-plan.json",
+        ]
+    )
+    assert launcher_module._is_mini_dma_bench_requested(args) is True  # noqa: SLF001
+    assert args.mini_dma_bench_plan == "bench-plan.json"
+
+
 def test_launcher_detects_microwire_word_report_cli_flags() -> None:
     args, _qt_args = launcher_module._parse_launcher_args(
         [
@@ -530,6 +541,71 @@ def test_microwire_word_report_project_exports_rvst_through_pyplot(
     assert origin_artifacts["rvst_residual.oggu"].display_text == "R vs T residual from PyPlot"
     assert frame.iloc[0]["R vs T graphs (Origin)"] == "rvst.oggu"
     assert frame.iloc[0]["R vs T residual graphs (Origin)"] == "rvst_residual.oggu"
+
+
+@pytest.mark.parametrize(
+    ("name", "module", "resource_tag"),
+    [
+        (
+            "Mini DMA Logger",
+            "data_logging.mini_dma_logger.mini_dma_logger",
+            "mini_dma",
+        ),
+        (
+            "Current Annealing Logger",
+            "data_logging.current_annealing_logger.current_annealing_logger",
+            "current_annealing",
+        ),
+    ],
+)
+def test_hardware_experiment_loggers_launch_in_child_process(
+    name: str,
+    module: str,
+    resource_tag: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[object] = []
+    monkeypatch.setattr(
+        launcher_module,
+        "launch_experiment_process",
+        lambda spec: launched.append(spec),
+    )
+
+    result = launcher_module.LOGGERS[name]()
+
+    assert result is None
+    assert launched
+    spec = launched[0]
+    assert getattr(spec, "display_name") == name
+    assert getattr(spec, "module") == module
+    assert getattr(spec, "resource_tag") == resource_tag
+
+
+def test_experiment_process_cli_dispatches_registered_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    class _Module:
+        @staticmethod
+        def main() -> None:
+            called.append("main")
+
+    monkeypatch.setattr(
+        launcher_module,
+        "import_module",
+        lambda module: _Module
+        if module == "data_logging.current_annealing_logger.current_annealing_logger"
+        else pytest.fail(f"unexpected module import: {module}"),
+    )
+
+    args, _qt_args = launcher_module._parse_launcher_args(
+        ["--experiment-process", "current_annealing"]
+    )
+
+    assert launcher_module._is_experiment_process_requested(args)
+    assert launcher_module._run_experiment_process(args) == 0
+    assert called == ["main"]
 
 
 def test_run_microwire_eda_cli_passes_copy_safe_and_findings_options(

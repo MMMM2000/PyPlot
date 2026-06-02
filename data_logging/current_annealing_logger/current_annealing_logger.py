@@ -27,6 +27,9 @@ from .ui_en import Ui_MainWindow
 from plotting.shared.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
 from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
+from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING
+from data_logging.shared_power_supply.protocol import BrokerJsonClient
+from plotting.shared.power_guard import create_experiment_sleep_guard
 
 import numpy as np
 import matplotlib
@@ -133,7 +136,20 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": True,
     },
+    "shared_hmp_broker": {
+        "label": "Shared HMP broker",
+        "start_current_mA": 1,
+        "min_start_current_mA": 1,
+        "max_voltage": 30.0,
+        "channel_select": 1,
+        "reset_on_start": False,
+        "voltage_first": False,
+        "shared_broker": True,
+    },
 }
+
+INCREASING_CYCLE_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
+DECREASING_CYCLE_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
 
 
 class MeasurementHistoryDialog(QtWidgets.QDialog):
@@ -276,6 +292,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_voltage = 30.0
         self.reset_on_start = True
         self.channel_select = 3
+        self._shared_broker_client: Any = None
+        self._shared_broker_lease_id: str | None = None
+        self._shared_broker_owner = "current_annealing_logger"
+        self._sleep_guard: Any = None
         self._init_supply_profile()
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
@@ -424,6 +444,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
         if hasattr(self.ui, 'comboBox_supply'):
             self.ui.comboBox_supply.currentIndexChanged.connect(self.handle_supply_profile_changed)
+        if hasattr(self.ui, 'lineEdit_broker_host'):
+            self.ui.lineEdit_broker_host.textChanged.connect(self.handle_broker_settings_changed)
+        if hasattr(self.ui, 'spinBox_broker_port'):
+            self.ui.spinBox_broker_port.valueChanged.connect(self.handle_broker_settings_changed)
         if hasattr(self.ui, 'pushButton_browse_dir'):
             self.ui.pushButton_browse_dir.clicked.connect(self.handle_browse_log_dir)
         if hasattr(self.ui, 'pushButton_open_dir'):
@@ -594,52 +618,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     def _record_zero_placeholder(self) -> None:
-        """Visualise leading zero-current samples without persisting them."""
+        """Ignore leading zero-current samples without drawing fake points."""
 
-        if self._nonzero_current_seen:
-            return
-        ax1 = getattr(self, 'ax1', None)
-        ax2 = getattr(self, 'ax2', None)
-        if ax1 is None or ax2 is None:
-            return
-
-        if self._zero_placeholder_line1 is None:
-            marker = Line2D([], [], linestyle='None', marker='o', color=self.line_color)
-            try:
-                marker.set_markersize(5)
-            except Exception:
-                pass
-            ax1.add_line(marker)
-            self._zero_placeholder_line1 = marker
-        if self._zero_placeholder_line2 is None:
-            marker = Line2D([], [], linestyle='None', marker='o', color=self.line_color)
-            try:
-                marker.set_markersize(5)
-            except Exception:
-                pass
-            ax2.add_line(marker)
-            self._zero_placeholder_line2 = marker
-
-        self._zero_placeholder_count += 1
-        zeros = [0.0] * self._zero_placeholder_count
-        indices = list(range(self._zero_placeholder_count))
-        if self._zero_placeholder_line1 is not None:
-            self._zero_placeholder_line1.set_data(zeros, zeros)
-        if self._zero_placeholder_line2 is not None:
-            self._zero_placeholder_line2.set_data(indices, zeros)
-
-        for axis in (ax1, ax2):
-            axis.relim()
-            axis.autoscale_view()
-
-        canvas = getattr(self, 'canvas', None)
-        if canvas is not None:
-            try:
-                canvas.draw_idle()
-                canvas.flush_events()
-            except Exception:
-                canvas.draw()
-        self._zero_placeholders_active = True
+        self._clear_zero_placeholders()
 
     def _clear_zero_placeholders(self) -> None:
         """Remove any temporary zero-current markers from the plots."""
@@ -835,6 +816,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_index = len(self._samples_current)
         self._redraw_segments()
 
+    @staticmethod
+    def _cycle_color(direction: float, cycle_index: int) -> str:
+        palette = INCREASING_CYCLE_COLORS if direction >= 0 else DECREASING_CYCLE_COLORS
+        return palette[(max(1, cycle_index) - 1) % len(palette)]
+
+    def _segment_colors(self, currents: List[float]) -> List[str]:
+        if len(currents) < 2:
+            return []
+        step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
+        tolerance = max(0.5, step_value * 0.6)
+        inc_count = 0
+        dec_count = 0
+        current_direction: float | None = None
+        colors: List[str] = []
+        for idx in range(1, len(currents)):
+            diff = currents[idx] - currents[idx - 1]
+            if abs(diff) <= tolerance * 0.2 and current_direction is not None:
+                direction = current_direction
+            else:
+                direction = 1.0 if diff >= 0 else -1.0
+            if current_direction is None or direction != current_direction:
+                if direction >= 0:
+                    inc_count += 1
+                else:
+                    dec_count += 1
+                current_direction = direction
+            cycle_index = inc_count if direction >= 0 else dec_count
+            colors.append(self._cycle_color(direction, cycle_index))
+        return colors
+
     def _redraw_segments(self) -> None:
         ax1 = getattr(self, 'ax1', None)
         ax2 = getattr(self, 'ax2', None)
@@ -852,27 +863,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     canvas.draw()
             return
         if len(currents) == 1:
-            marker1 = Line2D([currents[0]], [resistances[0]], color='r', marker='o', linestyle='None')
-            marker2 = Line2D([1], [resistances[0]], color='r', marker='o', linestyle='None')
+            marker_color = self._cycle_color(1.0, 1)
+            marker1 = Line2D([currents[0]], [resistances[0]], color=marker_color, marker='o', linestyle='None')
+            marker2 = Line2D([1], [resistances[0]], color=marker_color, marker='o', linestyle='None')
             ax1.add_line(marker1)
             ax2.add_line(marker2)
             self._segment_lines_ax1.append(marker1)
             self._segment_lines_ax2.append(marker2)
         else:
-            step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
-            tolerance = max(0.5, step_value * 0.6)
+            colors = self._segment_colors(currents)
             for idx in range(1, len(currents)):
                 prev_c = currents[idx - 1]
                 curr_c = currents[idx]
                 prev_r = resistances[idx - 1]
                 curr_r = resistances[idx]
-                diff = curr_c - prev_c
-                if abs(diff) <= tolerance * 0.2:
-                    color = '#27ae60'
-                elif diff >= 0:
-                    color = '#d32f2f'
-                else:
-                    color = '#1976d2'
+                color = colors[idx - 1]
                 seg1 = Line2D([prev_c, curr_c], [prev_r, curr_r], color=color, marker='o', linestyle='-')
                 seg2 = Line2D([idx, idx + 1], [prev_r, curr_r], color=color, marker='o', linestyle='-')
                 ax1.add_line(seg1)
@@ -1049,6 +1054,144 @@ class MainWindow(QtWidgets.QMainWindow):
             if w is not None:
                 w.setEnabled(enabled)
 
+    def _set_broker_controls_visible(self, visible: bool) -> None:
+        for name in ('label_broker_host', 'lineEdit_broker_host', 'spinBox_broker_port'):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setVisible(visible)
+
+    def _using_shared_broker(self) -> bool:
+        return str(getattr(self, "supply_profile_id", "")) == "shared_hmp_broker"
+
+    def _shared_broker_channel(self) -> int:
+        channel = int(getattr(self, "channel_select", 0) or 0)
+        if channel <= 0:
+            raise RuntimeError("Select a confirmed shared HMP broker channel first.")
+        return channel
+
+    def _shared_broker_port(self) -> int:
+        widget = getattr(self.ui, "spinBox_broker_port", None)
+        if isinstance(widget, QtWidgets.QSpinBox):
+            return int(widget.value())
+        return 8765
+
+    def _shared_broker_host(self) -> str:
+        widget = getattr(self.ui, "lineEdit_broker_host", None)
+        if isinstance(widget, QtWidgets.QLineEdit):
+            return widget.text().strip() or "127.0.0.1"
+        return "127.0.0.1"
+
+    def _get_shared_broker_client(self) -> Any:
+        if self._shared_broker_client is None:
+            self._shared_broker_client = BrokerJsonClient(
+                host=self._shared_broker_host(),
+                port=self._shared_broker_port(),
+            )
+        return self._shared_broker_client
+
+    def handle_broker_settings_changed(self) -> None:
+        self._shared_broker_client = None
+        try:
+            self.settings.setValue("shared_broker_host", self._shared_broker_host())
+            self.settings.setValue("shared_broker_port", self._shared_broker_port())
+        except Exception:
+            pass
+
+    def _connect_shared_broker_mode(self) -> None:
+        self.is_connected = True
+        self.ui.pushButton_connect_port.setText("Disconnect broker")
+        self._set_port_controls_enabled(False)
+        self.ui.frame_command_and_response.setEnabled(False)
+        self.ui.frame_process_settings.setEnabled(True)
+        self._show_connect_overlay(False)
+        self.handle_mode_changed(self.operation_mode)
+        self._update_mode_action_state()
+
+    def _disconnect_shared_broker_mode(self) -> None:
+        if self.process_running:
+            self.handle_toggle_process_clicked()
+        else:
+            self.send_safe_end_commands()
+        self.is_connected = False
+        self._shared_broker_client = None
+        self._shared_broker_lease_id = None
+        self.ui.pushButton_connect_port.setText("Connect to broker")
+        self._set_port_controls_enabled(True)
+        self.ui.frame_command_and_response.setEnabled(False)
+        self.ui.frame_process_settings.setEnabled(False)
+        self._show_connect_overlay(True)
+        self._update_mode_action_state()
+
+    def _ensure_shared_broker_lease(self) -> str:
+        if self._shared_broker_lease_id:
+            return self._shared_broker_lease_id
+        channel = self._shared_broker_channel()
+        lease = self._get_shared_broker_client().lease(
+            channel=channel,
+            owner=self._shared_broker_owner,
+            role=ROLE_CURRENT_ANNEALING,
+        )
+        lease_id = str(lease.get("lease_id") or "")
+        if not lease_id:
+            raise RuntimeError("Shared HMP broker did not return a lease id.")
+        self._shared_broker_lease_id = lease_id
+        return lease_id
+
+    def _initialize_shared_broker_output(self) -> None:
+        channel = self._shared_broker_channel()
+        lease_id = self._ensure_shared_broker_lease()
+        self._get_shared_broker_client().configure_channel(
+            channel=channel,
+            lease_id=lease_id,
+            voltage_v=self._voltage_limit_value(),
+            current_a=max(0.0, float(self.current_current_set)),
+            output_on=True,
+        )
+
+    def _read_shared_broker_sample(self) -> bool:
+        channel = self._shared_broker_channel()
+        readback = self._get_shared_broker_client().measure_channel(channel=channel)
+        voltage = readback.get("voltage_V")
+        current_mA = readback.get("current_mA")
+        if voltage is None or current_mA is None:
+            return False
+        self.current_voltage = float(voltage)
+        self.current_current_read = float(current_mA) / 1000.0
+        if abs(self.current_current_read) < 1e-12:
+            self._skip_current_sample = True
+            self.sample_ready = True
+            return True
+        self._skip_current_sample = False
+        self._zero_current_count = 0
+        self._contact_lost = False
+        self._nonzero_current_seen = True
+        self.current_resistance = self.current_voltage / self.current_current_read
+        self.serial_response = (
+            f"broker CH{channel}: {self.current_voltage:.6g} V, "
+            f"{float(current_mA):.6g} mA"
+        )
+        self.sample_ready = True
+        return True
+
+    def _set_shared_broker_current(self) -> None:
+        channel = self._shared_broker_channel()
+        lease_id = self._ensure_shared_broker_lease()
+        self._get_shared_broker_client().set_current(
+            channel=channel,
+            lease_id=lease_id,
+            current_mA=max(0.0, float(self.current_current_set) * 1000.0),
+        )
+
+    def _shutdown_shared_broker_output(self) -> None:
+        lease_id = self._shared_broker_lease_id
+        if not lease_id:
+            return
+        channel = self._shared_broker_channel()
+        client = self._get_shared_broker_client()
+        client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+        client.release(channel=channel, lease_id=lease_id)
+        self._shared_broker_lease_id = None
+
     def _handle_loop_value_changed(self, value: int) -> None:
         try:
             loops = max(1, int(value))
@@ -1173,6 +1316,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.f_out.close()
             self.f_out = None
 
+    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> None:
+        if self._skip_current_sample:
+            return
+        if self.first_sample:
+            self.first_sample = False
+            return
+
+        self._write_sample_to_file(initial_sample=False)
+        self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
+
+        now = time.perf_counter()
+        if self.last_sample_time is not None:
+            dt = now - self.last_sample_time
+            if dt > 0:
+                rate = 1.0 / dt
+                self._rate_window.append(rate)
+                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                if self.total_steps:
+                    remaining = max(0, self.total_steps - self.step_idx)
+                    self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
+        self.last_sample_time = now
+        self.step_idx += 1
+        self._note_loop_sample()
+        if hasattr(self.ui, 'progressBar_process') and self.total_steps:
+            self.ui.progressBar_process.setMaximum(self.total_steps)
+            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+        if record_voltage_progress:
+            self._record_voltage_progress()
+
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
         spin = getattr(self.ui, 'spinBox_loops', None)
         if isinstance(spin, QtWidgets.QSpinBox):
@@ -1197,6 +1369,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # Connect signals and slots
     def handle_connect_port_clicked(self):
+        if self._using_shared_broker():
+            if not self.is_connected:
+                self._connect_shared_broker_mode()
+            else:
+                self._disconnect_shared_broker_mode()
+            return
         if not self.is_connected:
             # Use selected port name from dropdown if available
             port_name = ''
@@ -1373,26 +1551,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     except ZeroDivisionError:
                         self.lock.unlock()
                         return
-                    initial_sample = self.first_sample
-                    self._write_sample_to_file(initial_sample=initial_sample)
-                    if not initial_sample:
-                        # progress and rate tracking on each sample
-                        now = time.perf_counter()
-                        if self.last_sample_time is not None:
-                            dt = now - self.last_sample_time
-                            if dt > 0:
-                                rate = 1.0 / dt
-                                self._rate_window.append(rate)
-                                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-                                if self.total_steps:
-                                    remaining = max(0, self.total_steps - self.step_idx)
-                                    self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
-                        self.last_sample_time = now
-                        self.step_idx += 1
-                        self._note_loop_sample()
-                        if hasattr(self.ui, 'progressBar_process') and self.total_steps:
-                            self.ui.progressBar_process.setMaximum(self.total_steps)
-                            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
                 if (
                     self.current_increment > 0
                     and self.current_voltage >= self.max_voltage
@@ -1759,6 +1917,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.setValue("supply_profile", profile_id)
         except Exception:
             pass
+        shared = self._using_shared_broker()
+        self._set_broker_controls_visible(shared)
+        for name in (
+            "lineEdit_serial_command",
+            "pushButton_send_serial_command",
+            "comboBox_port",
+            "comboBox_baudrate",
+            "pushButton_refresh_ports",
+        ):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setEnabled(not shared)
+        if hasattr(self.ui, "lineEdit_broker_host"):
+            self.ui.lineEdit_broker_host.setText(
+                self.settings.value("shared_broker_host", "127.0.0.1", type=str)
+            )
+        if hasattr(self.ui, "spinBox_broker_port"):
+            self.ui.spinBox_broker_port.setValue(
+                int(self.settings.value("shared_broker_port", 8765, type=int))
+            )
+        if not shared:
+            self._shared_broker_lease_id = None
         self._refresh_command_profiles()
 
     def handle_supply_profile_changed(self) -> None:
@@ -2142,12 +2322,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.send_serial_command()
         
     def send_serial_command(self):
+        if self._using_shared_broker():
+            raise RuntimeError("Raw serial commands are disabled in shared HMP broker mode.")
         self.ser_mcu.write(bytes(self.serial_command, encoding='ascii'))
         self.ui.label_last_command.setText(self.serial_command)
 
     def _send_current_setpoint(self) -> None:
         """Apply the next current setpoint, refreshing voltage first when required."""
 
+        if self._using_shared_broker():
+            self._set_shared_broker_current()
+            self.ui.label_last_command.setText(
+                f"broker set CH{self._shared_broker_channel()} current "
+                f"{self.current_current_set * 1000.0:.1f} mA"
+            )
+            return
         if bool(getattr(self, "voltage_first", False)):
             limit_v = self._voltage_limit_value()
             self.serial_command = f"VOLT {limit_v:.1f}\n"
@@ -2550,22 +2739,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.f_out = None
         if self.operation_mode == 1:
             self.ui.pushButton_hold_current.setText("Hold current now!")
-        # Immediately ramp the supply to zero before running the shutdown sequence
-        try:
-            channel = int(getattr(self, "channel_select", 0) or 0)
-        except Exception:
-            channel = 0
-        try:
-            ramp_cmds = []
-            if channel > 0:
-                ramp_cmds.append(f"INST:NSEL {channel}\n")
-            ramp_cmds.extend(["CURR 0.000\n", "OUTP OFF\n"])
-            for cmd in ramp_cmds:
-                self.serial_command = cmd
-                self.send_serial_command()
-                self.simple_delay(100)
-        except Exception:
-            pass
+        if not self._using_shared_broker():
+            # Immediately ramp the supply to zero before running the shutdown sequence
+            try:
+                channel = int(getattr(self, "channel_select", 0) or 0)
+            except Exception:
+                channel = 0
+            try:
+                ramp_cmds = []
+                if channel > 0:
+                    ramp_cmds.append(f"INST:NSEL {channel}\n")
+                ramp_cmds.extend(["CURR 0.000\n", "OUTP OFF\n"])
+                for cmd in ramp_cmds:
+                    self.serial_command = cmd
+                    self.send_serial_command()
+                    self.simple_delay(100)
+            except Exception:
+                pass
         try:
             self.send_safe_end_commands()
         except Exception:
@@ -2600,28 +2790,33 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.operation_mode == 1:
             self.sample_ready = False
             self.expecting_voltage = True
-            self.serial_command = "MEAS:VOLT?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            # wait boundedly, allow stopping
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            if self._using_shared_broker():
+                if not self._read_shared_broker_sample():
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
-                
-            self.sample_ready = False
-            self.expecting_voltage = False
-            self.serial_command = "MEAS:CURR?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            else:
+                self.serial_command = "MEAS:VOLT?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                # wait boundedly, allow stopping
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
+
+                self.sample_ready = False
+                self.expecting_voltage = False
+                self.serial_command = "MEAS:CURR?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
+                    return
                 
             self.curr_value_x = self.current_current_read * 1000.0
             self.curr_value_y = self.current_resistance
@@ -2629,11 +2824,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            skip_sample = bool(self._skip_current_sample)
-            if not skip_sample:
-                if self.first_sample:
-                    self.first_sample = False
-                self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
+            self._accept_measurement_sample()
 
 
             # Iterate the current set point
@@ -2655,27 +2846,32 @@ class MainWindow(QtWidgets.QMainWindow):
         elif self.operation_mode == 2:
             self.sample_ready = False
             self.expecting_voltage = True
-            self.serial_command = "MEAS:VOLT?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            if self._using_shared_broker():
+                if not self._read_shared_broker_sample():
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
-                
-            self.sample_ready = False
-            self.expecting_voltage = False
-            self.serial_command = "MEAS:CURR?\n"
-            # Use this command for the simulator; use the first for real hardware
-            #self.serial_command = "*RRAWO\n"
-            self.send_serial_command()
-            if not self.wait_for_sample(3000):
-                if not self.process_running:
+            else:
+                self.serial_command = "MEAS:VOLT?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
                     return
-                self.warn_no_response_and_abort()
-                return
+
+                self.sample_ready = False
+                self.expecting_voltage = False
+                self.serial_command = "MEAS:CURR?\n"
+                # Use this command for the simulator; use the first for real hardware
+                #self.serial_command = "*RRAWO\n"
+                self.send_serial_command()
+                if not self.wait_for_sample(3000):
+                    if not self.process_running:
+                        return
+                    self.warn_no_response_and_abort()
+                    return
                 
             self.curr_value_x = self.current_current_read * 1000.0
             self.curr_value_y = self.current_resistance
@@ -2685,14 +2881,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Signal that a new sample arrived so command sequencing can continue
             skip_sample = bool(self._skip_current_sample)
             if not skip_sample:
-                if self.first_sample:
-                    self.first_sample = False
-                self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
-
-
-
-            if not skip_sample:
-                self._record_voltage_progress()
+                self._accept_measurement_sample(record_voltage_progress=True)
 
             # Trigger the hold-current routine as if the button were pressed
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
@@ -2755,13 +2944,28 @@ class MainWindow(QtWidgets.QMainWindow):
         
 
     def send_safe_end_commands(self):
+        if self._using_shared_broker():
+            self._shutdown_shared_broker_output()
+            self.ui.label_last_command.setText("broker output off")
+            self._release_experiment_sleep_guard()
+            return
         for i in range(0, len(self.commands_safe_end)):
             self.serial_command = self.commands_safe_end[i]
             self.send_serial_command()
             self.simple_delay(200)
+        self._release_experiment_sleep_guard()
             
 
     def send_init_commands(self):
+        if self.process_running:
+            self._acquire_experiment_sleep_guard()
+        if self._using_shared_broker():
+            if self.process_running:
+                self._initialize_shared_broker_output()
+            self.ui.label_last_command.setText(
+                f"broker lease CH{self._shared_broker_channel()}"
+            )
+            return
         for cmd in self.commands_init:
             if not self.process_running:
                 break
@@ -2776,6 +2980,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 # delay.  A brief 200 ms gap gives the supply time to process
                 # each command while keeping the UI responsive.
                 self.simple_delay(200)
+
+    def _acquire_experiment_sleep_guard(self) -> None:
+        try:
+            if self._sleep_guard is not None:
+                return
+            self._sleep_guard = create_experiment_sleep_guard("Current annealing experiment")
+            self._sleep_guard.acquire()
+            self._show_status_message("Sleep prevention active while annealing is running.", timeout_ms=5000)
+        except Exception as exc:
+            self._sleep_guard = None
+            self._show_status_message(f"Could not enable sleep prevention: {exc}", timeout_ms=10000)
+
+    def _release_experiment_sleep_guard(self) -> None:
+        guard = self._sleep_guard
+        self._sleep_guard = None
+        if guard is None:
+            return
+        try:
+            guard.release()
+            self._show_status_message("Sleep prevention released.", timeout_ms=5000)
+        except Exception as exc:
+            self._show_status_message(f"Could not release sleep prevention: {exc}", timeout_ms=10000)
             
     def simple_delay(self, delay_ms):
         self.wait = True
@@ -3258,6 +3484,59 @@ class MainWindow(QtWidgets.QMainWindow):
             except OSError:
                 pass
 
+    def _ui_text(self, attr: str) -> str:
+        widget = getattr(self.ui, attr, None)
+        if widget is None:
+            return ""
+        text_fn = getattr(widget, "text", None)
+        if callable(text_fn):
+            try:
+                return str(text_fn()).strip()
+            except Exception:
+                return ""
+        return ""
+
+    def _metadata_payload(self, output_path: str) -> Dict[str, Any]:
+        loops, infinite = self._current_loop_settings()
+        reverse = bool(getattr(getattr(self, "ui", None), "checkBox_reverse", None).isChecked()) if hasattr(self.ui, "checkBox_reverse") else False
+        supply_widget = getattr(self.ui, "comboBox_supply", None)
+        supply = ""
+        if supply_widget is not None:
+            try:
+                supply = str(supply_widget.currentText())
+            except Exception:
+                supply = str(getattr(self, "supply_profile_id", ""))
+        return {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "output_file": str(output_path),
+            "composition": self._ui_text("lineEdit_composition"),
+            "microwire": self._ui_text("lineEdit_microwire"),
+            "sample": self._ui_text("lineEdit_sample"),
+            "load": self._ui_text("lineEdit_load"),
+            "notes": self._ui_text("lineEdit_notes"),
+            "start_current_mA": int(getattr(self, "start_current_mA", 1)),
+            "max_current_mA": int(getattr(self, "max_current_mA", 10)),
+            "step_mA": int(getattr(self, "current_step_mA", 1)),
+            "hold_duration_s": int(getattr(self, "hold_duration_s", 0)),
+            "reverse_enabled": reverse,
+            "loops": loops,
+            "loops_infinite": infinite,
+            "supply": supply,
+            "supply_profile": str(getattr(self, "supply_profile_id", "")),
+        }
+
+    def _write_metadata_file(self, output_path: str) -> None:
+        output = Path(output_path)
+        metadata_dir = output.parent / "metadata" / output.stem
+        try:
+            metadata_dir.mkdir(parents=True, exist_ok=True)
+            (metadata_dir / "metadata.json").write_text(
+                json.dumps(self._metadata_payload(output_path), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
     def prepare_output_file(self) -> bool:
         """Create or prepare the output file, prompting if it exists.
 
@@ -3301,6 +3580,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         self.f_name = path
+        self._write_metadata_file(path)
         # subsequent writes will append
         return True
 
@@ -3339,6 +3619,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.port_name = self.ui.comboBox_port.currentData()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._release_experiment_sleep_guard()
         if self.ser_mcu.isOpen():
             self.handle_connect_port_clicked()
             # self.ser_mcu.close()

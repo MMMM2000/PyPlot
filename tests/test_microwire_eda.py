@@ -539,3 +539,4 @@ def test_eda_window_shows_progress_dialog(qtbot, monkeypatch: pytest.MonkeyPatch
 
     assert window._progress_dialog is None
     assert "Working..." in window.log_view.toPlainText()
+    window.close()
