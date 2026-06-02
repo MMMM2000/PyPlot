@@ -11168,6 +11168,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return basis, plateau, round(float(target_value), 9)
 
     def _automation_tolerance_for_step(self, step: AutomationStep) -> float:
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and step.note not in {"setup_preload", "setup_return_zero"}
+        ):
+            return max(0.0001, float(self.spin_current_sweep_tolerance.value()))
         return self._auto_requested_tolerance_for_basis(step.basis)
 
     def _log_waiting_for_feedback(self, message: str) -> None:
@@ -14312,8 +14317,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.spin_current_sweep_first_overheating_target_mpa.value()
                 ),
                 "reverse_current": True,
-                "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
-                "tolerance_mode": "automatic",
+                "tolerance": float(self.spin_current_sweep_tolerance.value()),
+                "tolerance_mode": "configured",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
                 "dynamic_balance_effective_speed_cap_mm_s": self._current_sweep_dynamic_speed_cap_mm_s(),
                 "dynamic_balance_max_correction_mm": self._current_sweep_max_correction_mm(),
