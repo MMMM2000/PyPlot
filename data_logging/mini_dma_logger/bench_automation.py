@@ -551,6 +551,8 @@ def _execute_run(
                 stop_reason = "recipe_control_stop"
                 if prior_stop_metadata and prior_stop_metadata.get("reason"):
                     stop_reason = str(prior_stop_metadata["reason"])
+                    if prior_stop_metadata.get("detail"):
+                        detail = str(prior_stop_metadata["detail"])
                 stop_session(
                     reason=stop_reason,
                     detail=detail,
