@@ -372,10 +372,16 @@ def _apply_sample_identity(window: Any, sample: MiniDmaSampleIdentity) -> None:
     _set_text_if_present(window, "edit_sample_name", sample.sample_name)
     _set_text_if_present(window, "edit_log_name", sample.log_name)
     if sample.diameter_mm is not None:
+        stop_project_import = getattr(window, "_stop_builder_project_import_thread", None)
+        if callable(stop_project_import):
+            stop_project_import()
         spin = getattr(window, "spin_diameter", None)
         set_value = getattr(spin, "setValue", None)
         if callable(set_value):
             set_value(float(sample.diameter_mm))
+        mark_imported = getattr(window, "_mark_diameter_imported", None)
+        if callable(mark_imported):
+            mark_imported(True)
     persist = getattr(window, "_persist_settings_if_enabled", None)
     if callable(persist):
         persist()
@@ -567,6 +573,7 @@ def _execute_run(
     *,
     app: Any,
     window: Any,
+    sample_identity: MiniDmaSampleIdentity,
     guardrails: MiniDmaBenchGuardrails,
     sleep_fn: Callable[[float], None],
     total_deadline_s: float | None,
@@ -577,6 +584,7 @@ def _execute_run(
         deadline_s = min(deadline_s, total_deadline_s)
 
     window._load_recipe_from_path(run.recipe_path)
+    _apply_sample_identity(window, sample_identity)
     _apply_length_setup_automation(window, run)
     _apply_bench_guardrails(window, guardrails)
     _prefer_next_output_run(window)
@@ -773,6 +781,7 @@ def run_mini_dma_bench_plan(
                         run,
                         app=app,
                         window=window,
+                        sample_identity=plan.sample_identity,
                         guardrails=plan.guardrails,
                         sleep_fn=sleep_fn,
                         total_deadline_s=total_deadline_s,

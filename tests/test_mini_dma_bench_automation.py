@@ -590,7 +590,11 @@ def test_mini_dma_bench_plan_applies_sample_identity_before_recipe_start(tmp_pat
             events.append((self.name, value))
 
     class _FakeSpin:
+        def __init__(self) -> None:
+            self.value = 0.0
+
         def setValue(self, value: float) -> None:
+            self.value = value
             events.append(("diameter", value))
 
     class _FakeApp:
@@ -613,6 +617,12 @@ def test_mini_dma_bench_plan_applies_sample_identity_before_recipe_start(tmp_pat
         def _sync_auto_name_fields(self) -> None:
             events.append(("sync", None))
 
+        def _stop_builder_project_import_thread(self) -> None:
+            events.append(("stop_builder_import", None))
+
+        def _mark_diameter_imported(self, imported: bool) -> None:
+            events.append(("diameter_imported", imported))
+
         def _persist_settings_if_enabled(self) -> None:
             events.append(("persist", None))
 
@@ -626,9 +636,10 @@ def test_mini_dma_bench_plan_applies_sample_identity_before_recipe_start(tmp_pat
 
         def _load_recipe_from_path(self, path: Path) -> None:
             events.append(("recipe", path.name))
+            self.spin_diameter.setValue(0.017)
 
         def _start_auto_ramp(self) -> None:
-            events.append(("start", None))
+            events.append(("start", self.spin_diameter.value))
 
         def close(self) -> None:
             pass
@@ -648,6 +659,14 @@ def test_mini_dma_bench_plan_applies_sample_identity_before_recipe_start(tmp_pat
     assert events.index(("log_name", "Ni50Fe27Ga23 12_2 heat shield iso-stress")) < recipe_index
     assert events.index(("builder_project", "G:\\My Drive\\1 Projects\\Praha\\microwire_project.pydpj")) < recipe_index
     assert ("diameter", 0.0191) in events
+    assert ("diameter", 0.017) in events
+    assert events[-4:] == [
+        ("diameter", 0.0191),
+        ("diameter_imported", True),
+        ("persist", None),
+        ("start", 0.0191),
+    ]
+    assert events.count(("stop_builder_import", None)) == 2
 
 
 def test_mini_dma_bench_plan_uses_next_run_for_existing_output(tmp_path: Path) -> None:
