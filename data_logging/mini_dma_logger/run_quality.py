@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-ANALYZER_VERSION = "2026-06-02.1"
+ANALYZER_VERSION = "2026-06-02.2"
 CURRENT_PHASES = {"current", "current_hold", "current_limit_unwind"}
-FAILED_STOP_REASONS = {"not_started", "failed_setup", "wire_break_or_contact_loss"}
+FAILED_STOP_REASONS = {"not_started", "failed_setup"}
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -151,7 +151,7 @@ def classify_run(metadata: dict[str, Any], rows: list[dict[str, str]]) -> str:
     stop_reason = str(_metadata_mapping(metadata, "stop").get("reason") or "")
     if stop_reason in {"not_started", "failed_setup"}:
         return "failed_setup"
-    if stop_reason in {"wire_break_or_contact_loss", "timeout"}:
+    if stop_reason == "timeout":
         return "excluded"
     recipe_summary = str(metadata.get("recipe_summary") or "").lower()
     run_name = str(metadata.get("sample_name") or "").lower()

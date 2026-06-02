@@ -77,8 +77,20 @@ def test_run_quality_excludes_short_failed_run(tmp_path: Path) -> None:
     quality = analyze_run_quality(run_dir)
 
     assert not quality.include_in_optimization_summary
-    assert "stop_reason:wire_break_or_contact_loss" in quality.exclusion_reasons
     assert "measurement_rows<100" in quality.exclusion_reasons
+    assert "current_loops<1" in quality.exclusion_reasons
+
+
+def test_run_quality_includes_wire_break_after_useful_sweep_data(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-wire-break"
+    _write_run(run_dir, rows=120, stop_reason="wire_break_or_contact_loss")
+
+    quality = analyze_run_quality(run_dir)
+
+    assert quality.include_in_optimization_summary
+    assert quality.run_type == "normal_measurement"
+    assert "stop_reason:wire_break_or_contact_loss" not in quality.exclusion_reasons
+    assert "stopped:wire_break_or_contact_loss" in quality.biggest_problems
 
 
 def test_run_quality_writes_cache(tmp_path: Path) -> None:
