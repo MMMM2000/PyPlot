@@ -20,8 +20,8 @@ The current sample metadata used for the automated analysis:
 
 ```text
 sample: Ni50Fe27Ga23 12/2
-metallic core diameter: 17 um
-glass outer diameter: 55 um
+metallic core diameter: 19.1 um from the .pydpj microscope row
+glass outer diameter: 58.6 um from the .pydpj microscope row
 ```
 
 ## Coil Metadata
@@ -60,9 +60,9 @@ Run from the PyPlot repo root with the project virtual environment:
   --sweep "G:\My Drive\1 Projects\Praha\ac_susceptibility\12-2microwire_20260527_111344.tsv" `
   --baseline "G:\My Drive\1 Projects\Praha\ac_susceptibility\ac_susc_empty_coil_baseline_20260528_170049.tsv" `
   --out-dir "artifacts\ac_susceptibility_analysis\automation_12-2_20260529_pc" `
-  --sample-name "Ni50Fe27Ga23 12/2" `
-  --core-diameter-um 17 `
-  --glass-diameter-um 55 `
+  --project-file "G:\My Drive\1 Projects\Praha\microwire_project.pydpj" `
+  --composition "Ni50Fe27Ga23" `
+  --microwire "12/2" `
   --preview-dir "C:\tmp\codex-images"
 ```
 
@@ -96,6 +96,12 @@ excitation-coil inner cross-section:
 
 ```text
 filling_factor = (core_diameter / excitation_coil_inner_diameter)^2
+```
+
+For the `Ni50Fe27Ga23 12/2` sample this currently uses:
+
+```text
+filling_factor = (19.1 um / 1300 um)^2 = 0.0002158639
 ```
 
 This is appropriate for comparing conditions within this fixture, but it is

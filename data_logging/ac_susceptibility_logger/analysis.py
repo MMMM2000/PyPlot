@@ -177,6 +177,55 @@ class SusceptibilityAnalysisConfig:
         return (self.sample.core_diameter_m / coil_diameter) ** 2
 
 
+def load_sample_geometry_from_project(project_file: Path, composition: str, microwire: str) -> SampleGeometry:
+    data = json.loads(project_file.read_text(encoding="utf-8"))
+    sections = data.get("sections", {})
+    if not isinstance(sections, dict):
+        raise ValueError(f"{project_file} does not look like a microwire Data Builder project")
+
+    normalized_target = microwire.replace("-", "/").replace("_", "/")
+    section_priority = ("microscope", "assemble", "strain", "videos", "fabrication")
+    for section_name in section_priority:
+        section = sections.get(section_name)
+        rows = section.get("rows") if isinstance(section, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_composition = str(row.get("Composition", "")).strip()
+            row_microwire = str(row.get("Microwire", "")).strip().replace("-", "/").replace("_", "/")
+            if row_composition != composition or row_microwire != normalized_target:
+                continue
+            core = _project_row_float(row, "d")
+            if core is None:
+                continue
+            glass = _project_row_float(row, "D")
+            return SampleGeometry(
+                name=f"{composition} {normalized_target}",
+                core_diameter_um=core,
+                glass_diameter_um=glass,
+            )
+    raise ValueError(f"no usable d diameter found for {composition} {microwire} in {project_file}")
+
+
+def _project_row_float(row: dict[str, object], diameter_prefix: str) -> float | None:
+    for key, value in row.items():
+        if not isinstance(key, str):
+            continue
+        if diameter_prefix == "d" and not key.startswith("d ("):
+            continue
+        if diameter_prefix == "D" and not key.startswith("D ("):
+            continue
+        try:
+            numeric = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            return numeric
+    return None
+
+
 def _robust_sigma(values: pd.Series | np.ndarray) -> float:
     series = pd.Series(values, dtype="float64").dropna()
     if series.empty:
@@ -1157,8 +1206,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--baseline", required=True, type=Path, help="Empty-coil baseline TSV.")
     parser.add_argument("--out-dir", required=True, type=Path, help="Output analysis folder.")
     parser.add_argument("--sample-name", default="microwire", help="Sample name for metadata.")
-    parser.add_argument("--core-diameter-um", required=True, type=float, help="Metallic core diameter in micrometers.")
+    parser.add_argument("--core-diameter-um", type=float, help="Metallic core diameter in micrometers.")
     parser.add_argument("--glass-diameter-um", type=float, help="Glass outer diameter in micrometers.")
+    parser.add_argument("--project-file", type=Path, help="Optional .pydpj project for sample geometry lookup.")
+    parser.add_argument("--composition", help="Composition key used with --project-file, for example Ni50Fe27Ga23.")
+    parser.add_argument("--microwire", help="Microwire key used with --project-file, for example 12/2.")
     parser.add_argument("--coil-turns", default=350, type=int)
     parser.add_argument("--coil-length-mm", default=11.0, type=float)
     parser.add_argument("--coil-inner-diameter-mm", default=1.3, type=float)
@@ -1169,14 +1221,30 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    project_geometry = None
+    if args.project_file is not None:
+        if not args.composition or not args.microwire:
+            raise SystemExit("--project-file requires --composition and --microwire")
+        project_geometry = load_sample_geometry_from_project(args.project_file, args.composition, args.microwire)
+    core_diameter_um = args.core_diameter_um
+    glass_diameter_um = args.glass_diameter_um
+    sample_name = args.sample_name
+    if project_geometry is not None:
+        sample_name = project_geometry.name if args.sample_name == "microwire" else args.sample_name
+        core_diameter_um = core_diameter_um if core_diameter_um is not None else project_geometry.core_diameter_um
+        glass_diameter_um = (
+            glass_diameter_um if glass_diameter_um is not None else project_geometry.glass_diameter_um
+        )
+    if core_diameter_um is None:
+        raise SystemExit("provide --core-diameter-um, or provide --project-file with --composition and --microwire")
     config = SusceptibilityAnalysisConfig(
         sweep_files=tuple(args.sweep),
         baseline_file=args.baseline,
         output_dir=args.out_dir,
         sample=SampleGeometry(
-            name=args.sample_name,
-            core_diameter_um=args.core_diameter_um,
-            glass_diameter_um=args.glass_diameter_um,
+            name=sample_name,
+            core_diameter_um=core_diameter_um,
+            glass_diameter_um=glass_diameter_um,
         ),
         excitation_coil=ExcitationCoilGeometry(
             turns=args.coil_turns,

@@ -61,6 +61,35 @@ def test_format_frequency_uses_khz_for_readability() -> None:
     assert analysis.format_frequency(100_000.0) == "100 kHz"
 
 
+def test_load_sample_geometry_from_project_prefers_microscope_diameter(tmp_path: Path) -> None:
+    project = tmp_path / "project.pydpj"
+    project.write_text(
+        """
+{
+  "sections": {
+    "videos": {
+      "rows": [
+        {"Composition": "Ni50Fe27Ga23", "Microwire": "12/2", "d (µm)": "17", "D (µm)": "55"}
+      ]
+    },
+    "microscope": {
+      "rows": [
+        {"Composition": "Ni50Fe27Ga23", "Microwire": "12/2", "d (µm)": 19.1, "D (µm)": 58.6}
+      ]
+    }
+  }
+}
+""",
+        encoding="utf-8",
+    )
+
+    geometry = analysis.load_sample_geometry_from_project(project, "Ni50Fe27Ga23", "12/2")
+
+    assert geometry.name == "Ni50Fe27Ga23 12/2"
+    assert geometry.core_diameter_um == pytest.approx(19.1)
+    assert geometry.glass_diameter_um == pytest.approx(58.6)
+
+
 def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.tsv"
     sweep = tmp_path / "sweep.tsv"
