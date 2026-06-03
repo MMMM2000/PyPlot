@@ -48,6 +48,7 @@ def test_compute_apparent_susceptibility_uses_empty_coil_and_filling_factor() ->
     result = analysis.compute_apparent_susceptibility(points, baseline, config)
 
     assert result.loc[0, "filling_factor"] == pytest.approx(0.01)
+    assert result.loc[0, "relative_l_change"] == pytest.approx(0.03)
     assert result.loc[0, "chi_prime_app"] == pytest.approx(3.0)
     assert result.loc[0, "chi_double_prime_app"] == pytest.approx(0.5)
     assert result.loc[0, "delta_l_vs_empty_nH"] == pytest.approx(300.0)
@@ -95,6 +96,7 @@ def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) 
         "all_conditions_snr_heatmap.png",
         "all_conditions_percent_heatmap.png",
         "SUSCEPTIBILITY_REPORT.md",
+        "SUSCEPTIBILITY_EQUATION_AUDIT.md",
         "analysis_metadata.json",
     ]
     for name in expected:
@@ -105,16 +107,30 @@ def test_run_analysis_writes_repeatable_tables_report_and_plots(tmp_path: Path) 
     assert ranking.loc[0, "frequency_hz"] == pytest.approx(1000.0)
     assert ranking.loc[0, "excitation_mA"] == pytest.approx(5.0)
     assert ranking.loc[0, "mean_abs_delta_chi_prime"] == pytest.approx(2.0)
+    assert ranking.loc[0, "mean_chi_prime_martensite_window"] == pytest.approx(1.0)
+    assert ranking.loc[0, "mean_chi_prime_austenite_window"] == pytest.approx(3.0)
+    assert ranking.loc[0, "mean_chi_prime_austenite_over_martensite"] == pytest.approx(3.0)
+    assert ranking.loc[0, "mean_percent_change_austenite_vs_martensite"] == pytest.approx(200.0)
+    assert ranking.loc[0, "mean_percent_drop_martensite_to_austenite"] == pytest.approx(-200.0)
+    assert ranking.loc[0, "mean_relative_l_change_martensite_window"] == pytest.approx(0.01)
+    assert ranking.loc[0, "mean_relative_l_change_austenite_window"] == pytest.approx(0.03)
+    assert ranking.loc[0, "mean_relative_l_change_austenite_over_martensite"] == pytest.approx(3.0)
     assert bool(ranking.loc[0, "recommended_quality"])
 
     report = (out_dir / "SUSCEPTIBILITY_REPORT.md").read_text(encoding="utf-8")
     assert "AC Susceptibility Analysis" in report
     assert "synthetic" in report
     assert "1 kHz" in report
-    assert "The percent column is normalized by the low-current apparent susceptibility window" in report
+    assert "relative_L_change = (L_wire - L_empty) / L_empty" in report
+    assert "The filling factor is kept in the apparent susceptibility" in report
+    assert "drop M->A" in report
     assert "origin_chi_prime_curves.csv" in report
     assert "origin_condition_summary.csv" in report
+    audit = (out_dir / "SUSCEPTIBILITY_EQUATION_AUDIT.md").read_text(encoding="utf-8")
+    assert "chi_prime_app = relative_l_change / filling_factor" in audit
+    assert "chi_A_over_chi_M = chi_A / chi_M" in audit
     origin_prime = pd.read_csv(out_dir / "origin_chi_prime_curves.csv")
+    assert "relative_l_change" in origin_prime.columns
     assert "wire_dc_resistance_ohm" in origin_prime.columns
     assert copied["chi_prime_plot"].exists()
     assert copied["complex_plot"].exists()

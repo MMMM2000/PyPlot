@@ -69,7 +69,7 @@ Run from the PyPlot repo root with the project virtual environment:
 `--preview-dir` copies the most important PNGs to an ASCII/simple path so the
 Codex UI can preview them reliably when paths with diacritics fail.
 
-This command was rerun successfully on the Windows PC on 2026-05-29. The
+This command was rerun successfully on the Windows PC on 2026-06-03. The
 generated artifacts are in:
 
 ```text
@@ -82,9 +82,14 @@ The current workflow reports apparent complex susceptibility from the
 one-coil LCR measurement:
 
 ```text
+relative_l_change = (L_wire - L_empty) / L_empty
 chi_prime_app = (L_wire - L_empty) / (L_empty * filling_factor)
 chi_double_prime_app = (R_wire - R_empty) / (2*pi*f*L_empty*filling_factor)
 ```
+
+`relative_l_change` is the boss's `(L-L0)/L0` term. The reported
+`chi_prime_app` keeps the filling-factor correction, so
+`chi_prime_app = relative_l_change / filling_factor`.
 
 `filling_factor` defaults to the metallic core cross-section divided by the
 excitation-coil inner cross-section:
@@ -115,10 +120,12 @@ recommended_chi_prime_curves.png
 recommended_chi_double_prime_curves.png
 top_complex_susceptibility_curves.png
 high_percent_chi_prime_curves.png
+all_conditions_delta_chi_curves_grid.png
 all_conditions_delta_chi_heatmap.png
 all_conditions_snr_heatmap.png
 all_conditions_percent_heatmap.png
 SUSCEPTIBILITY_REPORT.md
+SUSCEPTIBILITY_EQUATION_AUDIT.md
 analysis_metadata.json
 ```
 
@@ -127,23 +134,25 @@ The Origin-ready CSVs are intentionally long-form. In Origin, import
 direction, then plot `current_set_mA` against `chi_prime_app`. Use
 `origin_chi_double_prime_curves.csv` the same way for the loss component.
 Use `origin_condition_summary.csv` for report overview graphs across all
-measured frequency/excitation conditions.
+measured frequency/excitation conditions. The summary includes `chi_M`,
+`chi_A`, `chi_A/chi_M`, percent change A vs M, and percent drop M to A columns.
 
 ## Current Best Conditions
 
-The prior manual analysis ranked these conditions as strongest and cleanest:
+The current automated analysis ranks these conditions as strongest and cleanest:
 
 ```text
-20 kHz, 20 mA excitation, H_ac about 8.00 Oe, delta chi' about 38.5, SNR about 52.6
-20 kHz, 10 mA excitation, H_ac about 4.00 Oe, delta chi' about 34.8, SNR about 39.3
-100 kHz, 20 mA excitation, delta chi' about 23.5, SNR about 36.9
-100 kHz, 10 mA excitation, delta chi' about 23.0, SNR about 34.3
-20 kHz, 5 mA excitation, delta chi' about 34.4, SNR about 30.6
+20 kHz, 20 mA excitation, H_ac about 8.00 Oe, chi_A/chi_M about 0.484, drop M->A about 51.6%, SNR about 52.6
+20 kHz, 10 mA excitation, H_ac about 4.00 Oe, chi_A/chi_M about 0.525, drop M->A about 47.5%, SNR about 39.3
+100 kHz, 20 mA excitation, chi_A/chi_M about 0.648, drop M->A about 35.2%, SNR about 36.9
+100 kHz, 10 mA excitation, chi_A/chi_M about 0.649, drop M->A about 35.1%, SNR about 34.3
+20 kHz, 5 mA excitation, chi_A/chi_M about 0.483, drop M->A about 51.7%, SNR about 30.6
 ```
 
-Percent changes can look huge, including over 1000 percent, when the low-current
-denominator is near zero or noisy. Prefer the curves, direction consistency,
-absolute `delta chi_prime`, and SNR ranking over percent alone.
+Percent changes can look huge or change sign when the martensite-window
+denominator is near zero, negative, or noisy. Prefer the curves, direction
+consistency, positive `chi_M`/`chi_A`, absolute `delta chi_prime`, and SNR
+ranking over percent alone.
 
 The generated high-percent plot is mostly a diagnostic: it shows that the
 largest percent values come from low-frequency or low-excitation conditions
@@ -171,9 +180,9 @@ On the Origin PC:
 3. Build a graph template with current on the x-axis, up/down directions as
    separate series, and one panel or page per selected frequency/excitation.
 4. Export Origin graph objects or high-resolution images.
-5. Assemble the supervisor-facing DOCX from `SUSCEPTIBILITY_REPORT.md`, the
-   Origin graphs, and a short methods section describing the one-coil apparent
-   susceptibility formula.
+5. Assemble the supervisor-facing DOCX from `SUSCEPTIBILITY_REPORT.md`,
+   `SUSCEPTIBILITY_EQUATION_AUDIT.md`, the Origin graphs, and a short methods
+   section describing the one-coil apparent susceptibility formula.
 
 Once the Origin workflow is stable for two or three datasets, it is worth adding
 an automated PyPlot panel or plugin. For now, keeping this as a CLI/module is

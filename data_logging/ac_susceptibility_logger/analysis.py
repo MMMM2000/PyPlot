@@ -259,6 +259,7 @@ def compute_apparent_susceptibility(
     result = points.merge(baseline_summary, on=["frequency_hz", "excitation_mA"], how="left")
     filling = config.filling_factor
     result["filling_factor"] = filling
+    result["relative_l_change"] = (result["l_wire_h"] - result["l_empty_h"]) / result["l_empty_h"]
     result["chi_prime_app"] = (result["l_wire_h"] - result["l_empty_h"]) / (result["l_empty_h"] * filling)
     omega = 2.0 * math.pi * result["frequency_hz"]
     result["chi_double_prime_app"] = (result["r_wire_ohm"] - result["r_empty_ohm"]) / (
@@ -300,7 +301,11 @@ def compute_change_metrics(points: pd.DataFrame, sweep: pd.DataFrame, config: Su
                 high = high.tail(5)
             chi_low = float(np.nanmedian(low["chi_prime_app"]))
             chi_high = float(np.nanmedian(high["chi_prime_app"]))
+            relative_l_low = float(np.nanmedian(low["relative_l_change"]))
+            relative_l_high = float(np.nanmedian(high["relative_l_change"]))
             dchi = chi_high - chi_low
+            chi_ratio = chi_high / chi_low if chi_low else float("nan")
+            relative_l_ratio = relative_l_high / relative_l_low if relative_l_low else float("nan")
             chi_noise = float(np.nanmedian(direction_points["chi_prime_noise"]))
             rows.append(
                 {
@@ -310,9 +315,25 @@ def compute_change_metrics(points: pd.DataFrame, sweep: pd.DataFrame, config: Su
                     "direction": direction,
                     "chi_prime_low_window": chi_low,
                     "chi_prime_high_window": chi_high,
+                    "chi_prime_martensite_window": chi_low,
+                    "chi_prime_austenite_window": chi_high,
+                    "chi_prime_austenite_over_martensite": chi_ratio,
                     "delta_chi_prime_high_minus_low": dchi,
                     "abs_delta_chi_prime": abs(dchi),
+                    "percent_change_austenite_vs_martensite": (chi_ratio - 1.0) * 100.0
+                    if math.isfinite(chi_ratio)
+                    else float("nan"),
+                    "percent_drop_martensite_to_austenite": (1.0 - chi_ratio) * 100.0
+                    if math.isfinite(chi_ratio)
+                    else float("nan"),
                     "percent_change_vs_low": dchi / abs(chi_low) * 100.0 if chi_low else float("nan"),
+                    "relative_l_change_martensite_window": relative_l_low,
+                    "relative_l_change_austenite_window": relative_l_high,
+                    "relative_l_change_austenite_over_martensite": relative_l_ratio,
+                    "delta_relative_l_change_high_minus_low": relative_l_high - relative_l_low,
+                    "percent_change_relative_l_austenite_vs_martensite": (relative_l_ratio - 1.0) * 100.0
+                    if math.isfinite(relative_l_ratio)
+                    else float("nan"),
                     "chi_prime_noise": chi_noise,
                     "chi_prime_snr": abs(dchi) / (chi_noise * math.sqrt(2.0)) if chi_noise > 0 else float("nan"),
                     "negative_ls_percent_raw": negative_percent,
@@ -335,8 +356,18 @@ def rank_conditions(metrics: pd.DataFrame, config: SusceptibilityAnalysisConfig)
             "delta_chi_prime_high_minus_low",
             "chi_prime_low_window",
             "chi_prime_high_window",
+            "chi_prime_martensite_window",
+            "chi_prime_austenite_window",
+            "chi_prime_austenite_over_martensite",
             "abs_delta_chi_prime",
+            "percent_change_austenite_vs_martensite",
+            "percent_drop_martensite_to_austenite",
             "percent_change_vs_low",
+            "relative_l_change_martensite_window",
+            "relative_l_change_austenite_window",
+            "relative_l_change_austenite_over_martensite",
+            "delta_relative_l_change_high_minus_low",
+            "percent_change_relative_l_austenite_vs_martensite",
             "chi_prime_noise",
             "chi_prime_snr",
             "negative_ls_percent_raw",
@@ -350,6 +381,39 @@ def rank_conditions(metrics: pd.DataFrame, config: SusceptibilityAnalysisConfig)
         paired[["chi_prime_low_window_up", "chi_prime_low_window_down"]].abs().mean(axis=1)
     )
     paired["mean_chi_prime_high_window"] = paired[["chi_prime_high_window_up", "chi_prime_high_window_down"]].mean(axis=1)
+    paired["mean_chi_prime_martensite_window"] = paired[
+        ["chi_prime_martensite_window_up", "chi_prime_martensite_window_down"]
+    ].mean(axis=1)
+    paired["mean_chi_prime_austenite_window"] = paired[
+        ["chi_prime_austenite_window_up", "chi_prime_austenite_window_down"]
+    ].mean(axis=1)
+    paired["mean_chi_prime_austenite_over_martensite"] = paired[
+        ["chi_prime_austenite_over_martensite_up", "chi_prime_austenite_over_martensite_down"]
+    ].mean(axis=1)
+    paired["mean_percent_change_austenite_vs_martensite"] = paired[
+        ["percent_change_austenite_vs_martensite_up", "percent_change_austenite_vs_martensite_down"]
+    ].mean(axis=1)
+    paired["mean_percent_drop_martensite_to_austenite"] = paired[
+        ["percent_drop_martensite_to_austenite_up", "percent_drop_martensite_to_austenite_down"]
+    ].mean(axis=1)
+    paired["mean_relative_l_change_martensite_window"] = paired[
+        ["relative_l_change_martensite_window_up", "relative_l_change_martensite_window_down"]
+    ].mean(axis=1)
+    paired["mean_relative_l_change_austenite_window"] = paired[
+        ["relative_l_change_austenite_window_up", "relative_l_change_austenite_window_down"]
+    ].mean(axis=1)
+    paired["mean_relative_l_change_austenite_over_martensite"] = paired[
+        ["relative_l_change_austenite_over_martensite_up", "relative_l_change_austenite_over_martensite_down"]
+    ].mean(axis=1)
+    paired["mean_delta_relative_l_change_high_minus_low"] = paired[
+        ["delta_relative_l_change_high_minus_low_up", "delta_relative_l_change_high_minus_low_down"]
+    ].mean(axis=1)
+    paired["mean_percent_change_relative_l_austenite_vs_martensite"] = paired[
+        [
+            "percent_change_relative_l_austenite_vs_martensite_up",
+            "percent_change_relative_l_austenite_vs_martensite_down",
+        ]
+    ].mean(axis=1)
     paired["mean_chi_prime_snr"] = paired[["chi_prime_snr_up", "chi_prime_snr_down"]].mean(axis=1)
     paired["mean_abs_percent_change_vs_low"] = (
         paired[["percent_change_vs_low_up", "percent_change_vs_low_down"]].abs().mean(axis=1)
@@ -359,6 +423,8 @@ def rank_conditions(metrics: pd.DataFrame, config: SusceptibilityAnalysisConfig)
     paired["recommended_quality"] = (
         (paired["negative_ls_percent"] < config.reliable_negative_percent_limit)
         & (paired["mean_chi_prime_snr"] >= config.reliable_min_snr)
+        & (paired["mean_chi_prime_martensite_window"] > 0.0)
+        & (paired["mean_chi_prime_austenite_window"] > 0.0)
     )
     return paired.sort_values(
         ["recommended_quality", "literature_field_range", "mean_chi_prime_snr", "mean_abs_delta_chi_prime"],
@@ -371,6 +437,7 @@ def export_origin_ready_tables(points: pd.DataFrame, output_dir: Path) -> None:
     prime = points[
         base_columns
         + [
+            "relative_l_change",
             "chi_prime_app",
             "chi_prime_noise",
             "l_wire_nH",
@@ -396,7 +463,17 @@ def export_condition_summary_for_origin(ranking: pd.DataFrame, output_dir: Path)
         "h_ac_oe",
         "mean_abs_delta_chi_prime",
         "mean_abs_chi_prime_low_window",
+        "mean_chi_prime_martensite_window",
         "mean_chi_prime_high_window",
+        "mean_chi_prime_austenite_window",
+        "mean_chi_prime_austenite_over_martensite",
+        "mean_percent_change_austenite_vs_martensite",
+        "mean_percent_drop_martensite_to_austenite",
+        "mean_relative_l_change_martensite_window",
+        "mean_relative_l_change_austenite_window",
+        "mean_relative_l_change_austenite_over_martensite",
+        "mean_delta_relative_l_change_high_minus_low",
+        "mean_percent_change_relative_l_austenite_vs_martensite",
         "mean_chi_prime_snr",
         "mean_abs_percent_change_vs_low",
         "negative_ls_percent",
@@ -451,14 +528,22 @@ def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysis
             "",
             "## Formula",
             "",
+            "`relative_L_change = (L_wire - L_empty) / L_empty`",
+            "",
             "`chi_prime_app = (L_wire - L_empty) / (L_empty * filling_factor)`",
             "",
             "`chi_double_prime_app = (R_wire - R_empty) / (2*pi*f*L_empty*filling_factor)`",
             "",
+            "`chi_A_over_chi_M = median(chi_prime_app at high DC current) / median(chi_prime_app at low DC current)`",
+            "",
+            "`percent_drop_M_to_A = (1 - chi_A_over_chi_M) * 100`",
+            "",
+            "The filling factor is kept in the apparent susceptibility. The uncorrected `(L-L0)/L0` term is exported separately as `relative_l_change`.",
+            "",
             "## Recommended Conditions",
             "",
-            "| Frequency | Excitation | H_ac | mean abs delta chi_prime | SNR | approx percent |",
-            "|---:|---:|---:|---:|---:|---:|",
+            "| Frequency | Excitation | H_ac | chi_M | chi_A | chi_A/chi_M | drop M->A | SNR |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     recommended = ranking[ranking["recommended_quality"] & ranking["literature_field_range"]]
@@ -468,19 +553,21 @@ def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysis
             f"{format_frequency(row.frequency_hz)} | "
             f"{row.excitation_mA:g} mA | "
             f"{row.h_ac_oe:.2f} Oe | "
-            f"{_format_float(row.mean_abs_delta_chi_prime)} | "
-            f"{row.mean_chi_prime_snr:.1f} | "
-            f"{row.mean_abs_percent_change_vs_low:.1f}% |"
+            f"{_format_float(row.mean_chi_prime_martensite_window)} | "
+            f"{_format_float(row.mean_chi_prime_austenite_window)} | "
+            f"{_format_float(row.mean_chi_prime_austenite_over_martensite)} | "
+            f"{row.mean_percent_drop_martensite_to_austenite:.1f}% | "
+            f"{row.mean_chi_prime_snr:.1f} |"
         )
     high_percent = ranking[
-        np.isfinite(ranking["mean_abs_percent_change_vs_low"])
-        & (ranking["mean_abs_percent_change_vs_low"] >= 500.0)
-    ].sort_values("mean_abs_percent_change_vs_low", ascending=False)
+        np.isfinite(ranking["mean_percent_drop_martensite_to_austenite"])
+        & (ranking["mean_percent_drop_martensite_to_austenite"].abs() >= 500.0)
+    ].sort_values("mean_percent_drop_martensite_to_austenite", key=lambda s: s.abs(), ascending=False)
     lines.extend(
         [
             "",
-            "The percent column is normalized by the low-current apparent susceptibility window. "
-            "Very high percentages appear when that low-current denominator is small, crosses near zero, or is noisy. "
+            "Low DC current is treated as the martensite window; high DC current is treated as the heated austenite window. "
+            "Very high or sign-changing percentages appear when the martensite-window denominator is small, crosses near zero, or is noisy. "
             "For choosing report conditions, prefer the actual chi' curves, mean abs delta chi', and SNR.",
         ]
     )
@@ -490,8 +577,8 @@ def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysis
                 "",
                 "## High Percent Conditions",
                 "",
-                "| Frequency | Excitation | H_ac | mean low-window abs chi_prime | mean abs delta chi_prime | approx percent | SNR |",
-                "|---:|---:|---:|---:|---:|---:|---:|",
+                "| Frequency | Excitation | H_ac | chi_M | chi_A | chi_A/chi_M | drop M->A | SNR |",
+                "|---:|---:|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for _, row in high_percent.head(12).iterrows():
@@ -500,9 +587,10 @@ def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysis
                 f"{format_frequency(row.frequency_hz)} | "
                 f"{row.excitation_mA:g} mA | "
                 f"{row.h_ac_oe:.2f} Oe | "
-                f"{_format_float(row.mean_abs_chi_prime_low_window)} | "
-                f"{_format_float(row.mean_abs_delta_chi_prime)} | "
-                f"{row.mean_abs_percent_change_vs_low:.1f}% | "
+                f"{_format_float(row.mean_chi_prime_martensite_window)} | "
+                f"{_format_float(row.mean_chi_prime_austenite_window)} | "
+                f"{_format_float(row.mean_chi_prime_austenite_over_martensite)} | "
+                f"{row.mean_percent_drop_martensite_to_austenite:.1f}% | "
                 f"{row.mean_chi_prime_snr:.1f} |"
             )
     lines.extend(
@@ -524,9 +612,73 @@ def _write_markdown_report(ranking: pd.DataFrame, config: SusceptibilityAnalysis
             "- `all_conditions_delta_chi_heatmap.png`",
             "- `all_conditions_snr_heatmap.png`",
             "- `all_conditions_percent_heatmap.png`",
+            "- `SUSCEPTIBILITY_EQUATION_AUDIT.md`",
         ]
     )
     (output_dir / "SUSCEPTIBILITY_REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_equation_audit(ranking: pd.DataFrame, config: SusceptibilityAnalysisConfig, output_dir: Path) -> None:
+    recommended = ranking[ranking["recommended_quality"] & ranking["literature_field_range"]]
+    if recommended.empty:
+        recommended = ranking.sort_values(["mean_chi_prime_snr", "mean_abs_delta_chi_prime"], ascending=False).head(6)
+    else:
+        recommended = recommended.sort_values(["mean_chi_prime_snr", "mean_abs_delta_chi_prime"], ascending=False).head(6)
+
+    lines = [
+        "# Susceptibility Equation Audit",
+        "",
+        "## Main Calculation",
+        "",
+        "- `L_empty` is the matched empty-coil inductance baseline for the same frequency and LCR excitation current.",
+        "- `L_wire` is the measured inductance with the microwire in the coil.",
+        "- `relative_l_change = (L_wire - L_empty) / L_empty`.",
+        "- `chi_prime_app = relative_l_change / filling_factor`.",
+        f"- The current filling factor is `{config.filling_factor:.8g}`.",
+        "",
+        "So the boss's `(L-L0)/L0` term is present, but it is not the final susceptibility value. "
+        "It is divided by the filling factor because the microwire core occupies only a small fraction of the coil volume.",
+        "",
+        "## Relative Change",
+        "",
+        "- Low DC heating current is used as the martensite-window estimate `chi_M`.",
+        "- High DC heating current is used as the heated austenite-window estimate `chi_A`.",
+        "- `chi_A_over_chi_M = chi_A / chi_M`.",
+        "- `percent_change_A_vs_M = (chi_A_over_chi_M - 1) * 100`.",
+        "- `percent_drop_M_to_A = (1 - chi_A_over_chi_M) * 100`.",
+        "",
+        "For the good 20 kHz and 100 kHz conditions, `chi_A/chi_M` is below 1, so the susceptibility decreases on heating. "
+        "A displayed `drop M->A` of about 52% means `chi_A/chi_M` is about 0.48, not 1.52.",
+        "",
+        "## Best Conditions",
+        "",
+        "| Frequency | Excitation | H_ac | chi_M | chi_A | chi_A/chi_M | change A vs M | drop M->A | SNR |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for _, row in recommended.iterrows():
+        lines.append(
+            "| "
+            f"{format_frequency(row.frequency_hz)} | "
+            f"{row.excitation_mA:g} mA | "
+            f"{row.h_ac_oe:.2f} Oe | "
+            f"{_format_float(row.mean_chi_prime_martensite_window)} | "
+            f"{_format_float(row.mean_chi_prime_austenite_window)} | "
+            f"{_format_float(row.mean_chi_prime_austenite_over_martensite)} | "
+            f"{row.mean_percent_change_austenite_vs_martensite:.1f}% | "
+            f"{row.mean_percent_drop_martensite_to_austenite:.1f}% | "
+            f"{row.mean_chi_prime_snr:.1f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Caveats",
+            "",
+            "- The absolute `chi_prime_app` scale depends directly on the filling factor and therefore on the core/coil geometry.",
+            "- Relative ratios cancel the constant filling factor, but they still depend on clean martensite/austenite windows.",
+            "- Very large percentages at low frequency are diagnostic only when `chi_M` is near zero, negative, or noisy.",
+        ]
+    )
+    (output_dir / "SUSCEPTIBILITY_EQUATION_AUDIT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def plot_recommended_curves(points: pd.DataFrame, ranking: pd.DataFrame, output_dir: Path) -> None:
@@ -553,9 +705,9 @@ def plot_recommended_curves(points: pd.DataFrame, ranking: pd.DataFrame, output_
     )
     _plot_complex(points, selection.head(3), output_dir / "top_complex_susceptibility_curves.png")
     high_percent = ranking[
-        np.isfinite(ranking["mean_abs_percent_change_vs_low"])
-        & (ranking["mean_abs_percent_change_vs_low"] >= 500.0)
-    ].sort_values("mean_abs_percent_change_vs_low", ascending=False)
+        np.isfinite(ranking["mean_percent_drop_martensite_to_austenite"])
+        & (ranking["mean_percent_drop_martensite_to_austenite"].abs() >= 500.0)
+    ].sort_values("mean_percent_drop_martensite_to_austenite", key=lambda s: s.abs(), ascending=False)
     if not high_percent.empty:
         _plot_component(
             points,
@@ -618,9 +770,10 @@ def _condition_title(row: pd.Series, *, include_delta: bool = True, include_perc
     if include_delta:
         details.append(f"dchi'={row.mean_abs_delta_chi_prime:.3g}")
     if include_percent:
-        details.append(f"{row.mean_abs_percent_change_vs_low:.1f}% vs low chi'")
-        if "mean_abs_chi_prime_low_window" in row:
-            details.append(f"low |chi'|={row.mean_abs_chi_prime_low_window:.3g}")
+        if "mean_percent_drop_martensite_to_austenite" in row:
+            details.append(f"drop M->A={row.mean_percent_drop_martensite_to_austenite:.1f}%")
+        if "mean_chi_prime_austenite_over_martensite" in row:
+            details.append(f"A/M={row.mean_chi_prime_austenite_over_martensite:.3g}")
     if "mean_chi_prime_snr" in row:
         details.append(f"SNR={row.mean_chi_prime_snr:.1f}")
     if details:
@@ -738,9 +891,9 @@ def _plot_delta_chi_curve_grid(points: pd.DataFrame, ranking: pd.DataFrame, outp
                 & np.isclose(clean_points["excitation_mA"], excitation)
             ].sort_values("current_set_mA")
             ranking_row = ranking_lookup.get((frequency, excitation))
-            if ranking_row is not None and np.isfinite(ranking_row.mean_abs_percent_change_vs_low):
-                percent = float(ranking_row.mean_abs_percent_change_vs_low)
-                percent_text = f"{percent:.0f}%" if percent >= 100.0 else f"{percent:.1f}%"
+            if ranking_row is not None and np.isfinite(ranking_row.mean_percent_drop_martensite_to_austenite):
+                percent = float(ranking_row.mean_percent_drop_martensite_to_austenite)
+                percent_text = f"{percent:.0f}%" if abs(percent) >= 100.0 else f"{percent:.1f}%"
                 axis.text(
                     0.03,
                     0.92,
@@ -796,7 +949,7 @@ def _plot_delta_chi_curve_grid(points: pd.DataFrame, ranking: pd.DataFrame, outp
         fig.legend(handles, labels, loc="upper right", fontsize=8, frameon=False)
     fig.suptitle("Delta apparent chi' vs DC current for all measured conditions", fontsize=13)
     fig.supxlabel("LCR excitation current columns; x-axis inside each cell is DC heating current [mA]", fontsize=9)
-    fig.supylabel("Frequency rows; y-axis is delta chi' vs low-current baseline; labels show approx percent change", fontsize=9)
+    fig.supylabel("Frequency rows; y-axis is delta chi' vs low-current baseline; labels show percent drop M->A", fontsize=9)
     fig.tight_layout(rect=(0.04, 0.04, 0.98, 0.96))
     fig.savefig(output_dir / "all_conditions_delta_chi_curves_grid.png")
     plt.close(fig)
@@ -857,13 +1010,15 @@ def _plot_condition_heatmaps(ranking: pd.DataFrame, output_dir: Path) -> None:
         output_dir / "all_conditions_snr_heatmap.png",
     )
     percent_data = ranking.copy()
-    percent_data["percent_plot_value"] = np.log10(percent_data["mean_abs_percent_change_vs_low"].clip(lower=1.0))
+    percent_data["percent_plot_value"] = np.log10(
+        percent_data["mean_percent_drop_martensite_to_austenite"].abs().clip(lower=1.0)
+    )
     _plot_condition_heatmap(
         percent_data,
         "percent_plot_value",
-        "log10 approx percent vs low chi'",
+        "log10 abs percent drop M->A",
         output_dir / "all_conditions_percent_heatmap.png",
-        annotate_column="mean_abs_percent_change_vs_low",
+        annotate_column="mean_percent_drop_martensite_to_austenite",
         annotation_suffix="%",
     )
 
@@ -938,6 +1093,7 @@ def run_analysis(config: SusceptibilityAnalysisConfig) -> dict[str, Path]:
     export_condition_summary_for_origin(ranking, config.output_dir)
     plot_recommended_curves(susceptibility, ranking, config.output_dir)
     _write_markdown_report(ranking, config, config.output_dir)
+    _write_equation_audit(ranking, config, config.output_dir)
 
     metadata = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -956,6 +1112,7 @@ def run_analysis(config: SusceptibilityAnalysisConfig) -> dict[str, Path]:
     return {
         "output_dir": config.output_dir,
         "report": config.output_dir / "SUSCEPTIBILITY_REPORT.md",
+        "equation_audit": config.output_dir / "SUSCEPTIBILITY_EQUATION_AUDIT.md",
         "ranking": config.output_dir / "apparent_susceptibility_condition_ranking.csv",
         "chi_prime_plot": config.output_dir / "recommended_chi_prime_curves.png",
         "high_percent_plot": config.output_dir / "high_percent_chi_prime_curves.png",
