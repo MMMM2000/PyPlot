@@ -536,7 +536,14 @@ def plot_recommended_curves(points: pd.DataFrame, ranking: pd.DataFrame, output_
     selection = recommended.sort_values(["mean_chi_prime_snr", "mean_abs_delta_chi_prime"], ascending=False).head(6)
     if selection.empty:
         selection = ranking.sort_values(["mean_chi_prime_snr", "mean_abs_delta_chi_prime"], ascending=False).head(6)
-    _plot_component(points, selection, "chi_prime_app", "apparent chi'", output_dir / "recommended_chi_prime_curves.png")
+    _plot_component(
+        points,
+        selection,
+        "chi_prime_app",
+        "apparent chi'",
+        output_dir / "recommended_chi_prime_curves.png",
+        include_percent=True,
+    )
     _plot_component(
         points,
         selection,
