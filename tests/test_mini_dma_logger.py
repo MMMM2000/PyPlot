@@ -12256,6 +12256,51 @@ def test_current_sweep_no_conduction_guard_stops_zero_readback(tmp_path: Path, q
         _close_test_window(window)
 
 
+def test_current_hold_escape_requires_large_error_moving_away(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    signal_away = mini_dma_mod.ScaleControlSignal(
+        value=75.0,
+        latest_value=76.0,
+        noise=0.2,
+        slope_per_s=3.0,
+        sample_count=6,
+        timestamp_s=10.0,
+    )
+    signal_recovering = mini_dma_mod.ScaleControlSignal(
+        value=75.0,
+        latest_value=74.0,
+        noise=0.2,
+        slope_per_s=-3.0,
+        sample_count=6,
+        timestamp_s=10.0,
+    )
+
+    try:
+        escape, reason = window._current_sweep_hold_escape_needed(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            signed_error=25.0,
+            error_value=25.0,
+            tolerance=0.2,
+            held_s=2.1,
+            filtered_signal=signal_away,
+        )
+        assert escape is True
+        assert "driving the target away" in reason
+
+        escape, _reason = window._current_sweep_hold_escape_needed(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            signed_error=25.0,
+            error_value=25.0,
+            tolerance=0.2,
+            held_s=2.1,
+            filtered_signal=signal_recovering,
+        )
+        assert escape is False
+    finally:
+        _close_test_window(window)
+
+
 def test_tensile_load_seek_uses_motion_direction_independent_of_scale_sign(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)
