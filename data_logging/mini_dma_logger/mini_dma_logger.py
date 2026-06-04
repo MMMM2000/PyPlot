@@ -35,6 +35,13 @@ except Exception:  # pragma: no cover - import guard
 from plotting.shared.logfiles import append_text_with_rotation
 from plotting.shared.power_guard import create_experiment_sleep_guard
 from plotting.shared.utils import ensure_app_theme, install_standard_menu
+from data_logging.mini_dma_logger.predictive_controller import (
+    PredictiveAdvice,
+    PredictiveControllerTuning,
+    PredictiveSnapshot,
+    advise_predictive_control,
+    estimate_predictive_features,
+)
 from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
 from data_logging.shared_power_supply.bench_guard import identify_hmp_with_blank_retry
 from data_logging.shared_power_supply.driver import HmpSerialDriver
@@ -78,8 +85,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-29.2"
-CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
+CONTROL_LOGIC_VERSION = "2026-06-04.predictive-clock.1"
+CONTROL_LOGIC_PROFILE = "experimental-predictive-current-ramp-clock"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -119,6 +126,7 @@ CONTROL_LOGIC_FEATURES = [
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
+    "experimental_predictive_current_ramp_clock",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -3734,6 +3742,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_started_s = 0.0
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_schedule_update_s = 0.0
+        self._active_current_sweep_last_predictive_trace_s = 0.0
+        self._active_current_sweep_last_predictive_phase = ""
+        self._active_current_sweep_last_predictive_scale = 1.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA: float | None = None
         self._active_current_sweep_display_target_mA: float | None = None
@@ -19984,6 +19995,164 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_schedule_update_s = float(now_s)
 
+    def _reset_current_sweep_predictive_clock_trace(self) -> None:
+        self._active_current_sweep_last_predictive_trace_s = 0.0
+        self._active_current_sweep_last_predictive_phase = ""
+        self._active_current_sweep_last_predictive_scale = 1.0
+
+    def _predictive_current_sweep_target_mpa(self, step: AutomationStep) -> float | None:
+        if step.target_value is None or not step.basis:
+            return None
+        if step.basis == HSW_BASIS_STRESS_MPA:
+            return float(step.target_value)
+        if step.basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            return stress_mpa_from_load_g(float(step.target_value), diameter_mm)
+        return None
+
+    def _predictive_current_sweep_tuning(self, step: AutomationStep, tolerance: float) -> PredictiveControllerTuning:
+        target_tolerance_mpa = abs(float(tolerance))
+        if step.basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            stress_tolerance = stress_mpa_from_load_g(target_tolerance_mpa, diameter_mm)
+            if stress_tolerance is not None and math.isfinite(float(stress_tolerance)):
+                target_tolerance_mpa = abs(float(stress_tolerance))
+        return PredictiveControllerTuning(
+            target_tolerance_mpa=max(1e-6, target_tolerance_mpa),
+            hold_pause_factor=max(
+                1e-12,
+                self._current_sweep_hold_setting(
+                    step.current_hold_pause_tolerance_factor,
+                    self._control_config().current_sweep_hold_pause_factor
+                    if self._control_config() is not None
+                    else float(self.spin_current_sweep_hold_pause_factor.value()),
+                    CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                ),
+            ),
+            hold_resume_factor=max(0.0, self._current_sweep_hold_resume_factor(step)),
+            motor_step_mm=self._motor_step_mm(),
+            max_correction_mm=self._current_sweep_max_correction_mm(),
+            max_correction_stress_mpa=self._current_sweep_max_correction_stress_mpa(),
+        )
+
+    def _predictive_current_sweep_snapshots(self, step: AutomationStep) -> list[PredictiveSnapshot]:
+        target_mpa = self._predictive_current_sweep_target_mpa(step)
+        if target_mpa is None or not math.isfinite(float(target_mpa)):
+            return []
+        live_point = self._capture_live_plot_point()
+        points: list[MeasurementPoint] = []
+        points.extend(self._session_points[-80:])
+        points.extend(self._live_plot_points[-80:])
+        if live_point is not None:
+            points.append(live_point)
+        unique: dict[float, MeasurementPoint] = {}
+        for point in points:
+            if point.stress_mpa is None:
+                continue
+            if not math.isfinite(float(point.stress_mpa)):
+                continue
+            unique[round(float(point.elapsed_s), 6)] = point
+        snapshots: list[PredictiveSnapshot] = []
+        voltage_limit = max(0.001, float(self.spin_supply_voltage_limit.value()))
+        for point in sorted(unique.values(), key=lambda item: float(item.elapsed_s))[-80:]:
+            current_mA = point.current_measured_mA
+            if current_mA is None:
+                current_mA = point.current_set_mA
+            snapshots.append(
+                PredictiveSnapshot(
+                    elapsed_s=float(point.elapsed_s),
+                    stress_mpa=float(point.stress_mpa),
+                    target_mpa=float(target_mpa),
+                    current_mA=None if current_mA is None else float(current_mA),
+                    strain_pct=None if point.strain_pct is None else float(point.strain_pct),
+                    voltage_V=None if point.voltage_V is None else float(point.voltage_V),
+                    voltage_limit_V=voltage_limit,
+                    automation_phase=point.automation_phase,
+                )
+            )
+        return snapshots
+
+    def _predictive_current_sweep_advice(
+        self,
+        step: AutomationStep,
+        *,
+        tolerance: float,
+    ) -> tuple[PredictiveAdvice, float] | None:
+        if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return None
+        tuning = self._predictive_current_sweep_tuning(step, tolerance)
+        features = estimate_predictive_features(
+            self._predictive_current_sweep_snapshots(step),
+            window_s=tuning.prediction_horizon_s,
+        )
+        if features is None:
+            return None
+        advice = advise_predictive_control(features, tuning)
+        current_value = features.stress_mpa
+        if step.basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            load_value = load_g_from_stress_mpa(current_value, diameter_mm)
+            if load_value is not None:
+                current_value = float(load_value)
+        now_s = time.monotonic()
+        should_trace = (
+            advice.ramp_scale < 0.999
+            or advice.phase.value != self._active_current_sweep_last_predictive_phase
+            or now_s - self._active_current_sweep_last_predictive_trace_s >= 2.0
+        )
+        if should_trace:
+            self._write_control_trace(
+                decision="predictive_ramp_clock",
+                basis=step.basis,
+                target_value=step.target_value,
+                current_value=current_value,
+                error_value=features.stress_error_mpa,
+                tolerance=tolerance,
+                result="advisory",
+                reason=(
+                    f"phase={advice.phase.value};confidence={advice.confidence:.3f};"
+                    f"scale={advice.ramp_scale:.3f};predicted_error={advice.predicted_error_mpa:.3f};"
+                    f"hold={int(advice.hold_current)}:{advice.hold_reason or 'none'}"
+                ),
+            )
+            self._active_current_sweep_last_predictive_trace_s = now_s
+            self._active_current_sweep_last_predictive_phase = advice.phase.value
+        self._active_current_sweep_last_predictive_scale = float(advice.ramp_scale)
+        return advice, float(features.stress_error_mpa)
+
+    def _apply_current_sweep_predictive_ramp_clock(
+        self,
+        step: AutomationStep,
+        *,
+        now_s: float,
+        tolerance: float,
+    ) -> None:
+        last_s = self._active_current_sweep_last_schedule_update_s
+        if last_s <= 0.0:
+            self._active_current_sweep_last_schedule_update_s = float(now_s)
+            return
+        dt_s = max(0.0, float(now_s) - float(last_s))
+        if dt_s <= 0.0:
+            return
+        scale = 1.0
+        advice_state = self._predictive_current_sweep_advice(step, tolerance=tolerance)
+        if advice_state is not None:
+            advice, _error_mpa = advice_state
+            scale = min(scale, max(0.0, min(1.0, float(advice.ramp_scale))))
+        if self._current_sweep_post_hold_throttle_until_s > 0.0:
+            active_until_s = min(float(now_s), self._current_sweep_post_hold_throttle_until_s)
+            throttle_dt_s = max(0.0, active_until_s - float(last_s))
+            if throttle_dt_s > 0.0:
+                throttle_factor = min(1.0, max(0.0, SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR))
+                scale = min(scale, throttle_factor)
+            if float(now_s) >= self._current_sweep_post_hold_throttle_until_s:
+                self._current_sweep_post_hold_throttle_until_s = 0.0
+        self._active_current_sweep_started_s += dt_s * (1.0 - scale)
+        self._active_current_sweep_last_schedule_update_s = float(now_s)
+
     def _current_sweep_hold_setting(
         self,
         step_value: float | None,
@@ -20631,6 +20800,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_wall_started_s = now_s
             self._active_current_sweep_last_schedule_update_s = now_s
             self._current_sweep_post_hold_throttle_until_s = 0.0
+            self._reset_current_sweep_predictive_clock_trace()
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
@@ -20669,8 +20839,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 tolerance=tolerance,
             )
 
-        elapsed_s = max(0.0, now_s - self._active_current_sweep_started_s)
-        self._apply_current_sweep_post_hold_ramp_throttle(now_s=now_s)
+        self._apply_current_sweep_predictive_ramp_clock(step, now_s=now_s, tolerance=tolerance)
         elapsed_s = max(0.0, now_s - self._active_current_sweep_started_s)
         desired_mA = start_mA + direction * ramp_rate_mA_s * elapsed_s
         if direction >= 0.0:
@@ -20710,6 +20879,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_wall_started_s = 0.0
             self._active_current_sweep_last_schedule_update_s = 0.0
             self._current_sweep_post_hold_throttle_until_s = 0.0
+            self._reset_current_sweep_predictive_clock_trace()
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0

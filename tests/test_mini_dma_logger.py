@@ -15122,6 +15122,83 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
         _close_test_window(window)
 
 
+def test_current_sweep_predictive_clock_slows_transformation_window(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_initial_length.setValue(33.68)
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._session_active = True
+    window._session_start_monotonic = time.monotonic() - 10.0
+    window._active_current_sweep_started_s = 100.0
+    window._active_current_sweep_last_schedule_update_s = 101.0
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=80.0,
+        current_ramp_rate_mA_s=0.4,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=3.0,
+        current_hold_resume_tolerance_factor=1.5,
+        current_hold_resume_stable_s=0.5,
+    )
+
+    try:
+        for index, stress in enumerate((48.0, 43.0, 35.0, 25.0)):
+            window._session_points.append(
+                mini_dma_mod.MeasurementPoint(
+                    elapsed_s=float(index),
+                    timestamp_utc="2026-06-04T00:00:00Z",
+                    raw_position_mm=0.0,
+                    position_mm=0.0,
+                    raw_load_g=0.0,
+                    load_g=0.0,
+                    preload_state=mini_dma_mod.PRELOAD_ACTIVE,
+                    strain_pct=0.02 * index,
+                    stress_mpa=stress,
+                    current_zero_position_mm=None,
+                    current_l0_mm=None,
+                    current_relative_position_mm=None,
+                    current_relative_strain_pct=0.02 * index,
+                    current_set_mA=20.0 + index,
+                    current_measured_mA=20.0 + index,
+                    voltage_V=12.0,
+                    resistance_ohm=None,
+                    power_W=None,
+                    automation_phase="current",
+                    automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                    automation_target_value=50.0,
+                    plateau_index=1,
+                    plateau_label=None,
+                    load_raw_last_g=None,
+                    load_mean_g=None,
+                    load_std_g=None,
+                    load_min_g=None,
+                    load_max_g=None,
+                    load_sample_count=0,
+                    scale_sample_rate_hz=None,
+                )
+            )
+
+        window._apply_current_sweep_predictive_ramp_clock(step, now_s=102.0, tolerance=0.25)
+
+        assert window._active_current_sweep_started_s > 100.0
+        assert window._active_current_sweep_last_predictive_scale < 1.0
+        assert window._active_current_sweep_last_predictive_phase == "transformation"
+    finally:
+        window._session_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_load_target_ramp_uses_target_stage_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -16409,7 +16486,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "filtered-current-hold-setup-ui"
+        assert first_logic["profile"] == "experimental-predictive-current-ramp-clock"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
@@ -16417,6 +16494,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
+        assert "experimental_predictive_current_ramp_clock" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]
