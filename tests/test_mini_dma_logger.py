@@ -15184,7 +15184,7 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
         _close_test_window(window)
 
 
-def test_current_sweep_predictive_clock_slows_transformation_window(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_predictive_clock_is_replay_only_for_live_baseline_guard(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.spin_diameter.setValue(0.0191)
     window.spin_initial_length.setValue(33.68)
@@ -15253,9 +15253,9 @@ def test_current_sweep_predictive_clock_slows_transformation_window(tmp_path: Pa
 
         window._apply_current_sweep_predictive_ramp_clock(step, now_s=102.0, tolerance=0.25)
 
-        assert window._active_current_sweep_started_s > 100.0
-        assert window._active_current_sweep_last_predictive_scale < 1.0
-        assert window._active_current_sweep_last_predictive_phase == "transformation"
+        assert window._active_current_sweep_started_s == pytest.approx(100.0)
+        assert window._active_current_sweep_last_predictive_scale == pytest.approx(1.0)
+        assert window._active_current_sweep_last_predictive_phase == ""
     finally:
         window._session_active = False
         _close_test_window(window)
@@ -16548,7 +16548,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "experimental-predictive-current-ramp-clock"
+        assert first_logic["profile"] == "experimental-baseline-current-ramp-with-readback-guard"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
@@ -16556,7 +16556,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
-        assert "experimental_predictive_current_ramp_clock" in first_logic["features"]
+        assert "experimental_predictive_replay_only" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]

@@ -85,8 +85,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-04.predictive-clock.1"
-CONTROL_LOGIC_PROFILE = "experimental-predictive-current-ramp-clock"
+CONTROL_LOGIC_VERSION = "2026-06-04.baseline-guard.1"
+CONTROL_LOGIC_PROFILE = "experimental-baseline-current-ramp-with-readback-guard"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -127,7 +127,7 @@ CONTROL_LOGIC_FEATURES = [
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
-    "experimental_predictive_current_ramp_clock",
+    "experimental_predictive_replay_only",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -20199,28 +20199,8 @@ class MainWindow(QtWidgets.QMainWindow):
         now_s: float,
         tolerance: float,
     ) -> None:
-        last_s = self._active_current_sweep_last_schedule_update_s
-        if last_s <= 0.0:
-            self._active_current_sweep_last_schedule_update_s = float(now_s)
-            return
-        dt_s = max(0.0, float(now_s) - float(last_s))
-        if dt_s <= 0.0:
-            return
-        scale = 1.0
-        advice_state = self._predictive_current_sweep_advice(step, tolerance=tolerance)
-        if advice_state is not None:
-            advice, _error_mpa = advice_state
-            scale = min(scale, max(0.0, min(1.0, float(advice.ramp_scale))))
-        if self._current_sweep_post_hold_throttle_until_s > 0.0:
-            active_until_s = min(float(now_s), self._current_sweep_post_hold_throttle_until_s)
-            throttle_dt_s = max(0.0, active_until_s - float(last_s))
-            if throttle_dt_s > 0.0:
-                throttle_factor = min(1.0, max(0.0, SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR))
-                scale = min(scale, throttle_factor)
-            if float(now_s) >= self._current_sweep_post_hold_throttle_until_s:
-                self._current_sweep_post_hold_throttle_until_s = 0.0
-        self._active_current_sweep_started_s += dt_s * (1.0 - scale)
-        self._active_current_sweep_last_schedule_update_s = float(now_s)
+        _ = step, tolerance
+        self._apply_current_sweep_post_hold_ramp_throttle(now_s=now_s)
 
     def _current_sweep_hold_setting(
         self,
