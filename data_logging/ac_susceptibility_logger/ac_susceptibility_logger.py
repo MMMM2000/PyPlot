@@ -1906,10 +1906,10 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_broker_port = QtWidgets.QSpinBox(self.frame_ac_hardware_details)
         self.spinBox_ac_broker_port.setRange(1, 65535)
         self.spinBox_ac_broker_port.setValue(AC_DEFAULT_BROKER_PORT)
-        self.spinBox_ac_broker_channel = QtWidgets.QSpinBox(self.frame_ac_hardware_details)
-        self.spinBox_ac_broker_channel.setRange(0, 4)
-        self.spinBox_ac_broker_channel.setSpecialValueText("Select channel...")
-        self.spinBox_ac_broker_channel.setValue(AC_DEFAULT_BROKER_CHANNEL)
+        self.comboBox_ac_broker_channel = QtWidgets.QComboBox(self.frame_ac_hardware_details)
+        self.comboBox_ac_broker_channel.addItem("Select channel...", 0)
+        for channel in range(1, 5):
+            self.comboBox_ac_broker_channel.addItem(f"CH{channel}", channel)
         details_grid.addWidget(self.label_ac_broker_host, 2, 0)
         details_grid.addWidget(self.lineEdit_ac_broker_host, 2, 1)
         broker_row = QtWidgets.QHBoxLayout()
@@ -1919,7 +1919,7 @@ class MainWindow(CurrentAnnealingWindow):
         broker_row.addWidget(self.spinBox_ac_broker_port)
         self.label_ac_broker_channel = QtWidgets.QLabel("CH:", self.frame_ac_hardware_details)
         broker_row.addWidget(self.label_ac_broker_channel)
-        broker_row.addWidget(self.spinBox_ac_broker_channel)
+        broker_row.addWidget(self.comboBox_ac_broker_channel)
         details_grid.addLayout(broker_row, 2, 2, 1, 2)
         connect_port_button = getattr(self.ui, "pushButton_connect_port", None)
         if isinstance(connect_port_button, QtWidgets.QPushButton):
@@ -2139,7 +2139,9 @@ class MainWindow(CurrentAnnealingWindow):
             signal = getattr(shared, "currentIndexChanged", None) or getattr(shared, "valueChanged", None) or getattr(shared, "textChanged", None)
             if signal is not None:
                 signal.connect(lambda *_args: self._sync_ac_psu_from_shared_controls())
-        self.spinBox_ac_broker_channel.valueChanged.connect(self._handle_ac_broker_channel_changed)
+        self.comboBox_ac_broker_channel.currentIndexChanged.connect(
+            lambda *_args: self._handle_ac_broker_channel_changed()
+        )
         for edit in (self.lineEdit_lcr_frequencies, self.lineEdit_lcr_levels):
             edit.editingFinished.connect(self._store_lcr_settings)
             edit.editingFinished.connect(self._update_ac_sweep_estimate)
@@ -2429,6 +2431,13 @@ class MainWindow(CurrentAnnealingWindow):
     def auto_detect_power_supply(self) -> list[sweep.PowerSupplyCandidate]:
         self._auto_detect_used_connected_psu = False
         backend = self._selected_ac_psu_backend()
+        if backend == "shared_hmp_broker":
+            self._sync_ac_psu_from_shared_controls()
+            self.label_lcr_status.setText(
+                "Kept Shared HMP broker selection; skipped serial PSU auto-detect."
+            )
+            self._store_lcr_settings()
+            return []
         resource = self._selected_ac_psu_resource()
         if bool(getattr(self, "is_connected", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
             self._auto_detect_used_connected_psu = True
@@ -2490,7 +2499,12 @@ class MainWindow(CurrentAnnealingWindow):
         if not candidates:
             backend = self._selected_ac_psu_backend()
             resource = self._selected_ac_psu_resource()
-            if bool(getattr(self, "_auto_detect_used_connected_psu", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
+            if backend == "shared_hmp_broker":
+                self._sync_ac_psu_from_shared_controls()
+                self.label_lcr_status.setText(
+                    "Kept Shared HMP broker selection; choose the broker channel manually."
+                )
+            elif bool(getattr(self, "_auto_detect_used_connected_psu", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
                 self.label_lcr_status.setText(
                     f"Using connected AC {sweep.POWER_SUPPLY_PROFILES[backend]['label']} on {resource}; "
                     "skipped ID probe because the port is already open."
@@ -3415,11 +3429,11 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(port_spin, QtWidgets.QSpinBox):
             self._ac_shared_broker_port = int(port_spin.value())
         try:
-            channel_spin = getattr(self, "spinBox_ac_broker_channel", None)
+            channel_combo = getattr(self, "comboBox_ac_broker_channel", None)
         except RuntimeError:
-            channel_spin = None
-        if isinstance(channel_spin, QtWidgets.QSpinBox):
-            self._ac_shared_broker_channel = int(channel_spin.value())
+            channel_combo = None
+        if isinstance(channel_combo, QtWidgets.QComboBox):
+            self._ac_shared_broker_channel = int(channel_combo.currentData() or 0)
 
     def _backend_from_ac_supply_combo(self) -> str:
         combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
@@ -3514,9 +3528,13 @@ class MainWindow(CurrentAnnealingWindow):
         if hasattr(self, "spinBox_ac_broker_port"):
             with QtCore.QSignalBlocker(self.spinBox_ac_broker_port):
                 self.spinBox_ac_broker_port.setValue(self._ac_shared_broker_port)
-        if hasattr(self, "spinBox_ac_broker_channel"):
-            with QtCore.QSignalBlocker(self.spinBox_ac_broker_channel):
-                self.spinBox_ac_broker_channel.setValue(self._ac_shared_broker_channel)
+        if hasattr(self, "comboBox_ac_broker_channel"):
+            with QtCore.QSignalBlocker(self.comboBox_ac_broker_channel):
+                channel_index = self.comboBox_ac_broker_channel.findData(self._ac_shared_broker_channel)
+                if channel_index < 0:
+                    channel_index = self.comboBox_ac_broker_channel.findData(0)
+                if channel_index >= 0:
+                    self.comboBox_ac_broker_channel.setCurrentIndex(channel_index)
 
     def _store_ac_psu_profile_settings(self, backend: str | None = None) -> None:
         backend = backend or self._ac_psu_backend
@@ -3598,9 +3616,17 @@ class MainWindow(CurrentAnnealingWindow):
             channel_text = "Select channel..."
         return f"{self._selected_ac_broker_host()}:{self._selected_ac_broker_port()}/{channel_text}"
 
-    def _handle_ac_broker_channel_changed(self, value: int) -> None:
-        self._ac_shared_broker_channel = int(value or 0)
-        self._ac_shared_broker_channel_confirmed = int(value or 0) > 0
+    def _handle_ac_broker_channel_changed(self) -> None:
+        try:
+            channel_combo = getattr(self, "comboBox_ac_broker_channel", None)
+        except RuntimeError:
+            channel_combo = None
+        if isinstance(channel_combo, QtWidgets.QComboBox):
+            channel = int(channel_combo.currentData() or 0)
+        else:
+            channel = AC_DEFAULT_BROKER_CHANNEL
+        self._ac_shared_broker_channel = channel
+        self._ac_shared_broker_channel_confirmed = channel > 0
         self._sync_ac_psu_from_shared_controls()
         try:
             loading_settings = bool(getattr(self, "_ac_loading_settings", False))
@@ -3658,7 +3684,7 @@ class MainWindow(CurrentAnnealingWindow):
             "label_ac_broker_port",
             "spinBox_ac_broker_port",
             "label_ac_broker_channel",
-            "spinBox_ac_broker_channel",
+            "comboBox_ac_broker_channel",
         ):
             try:
                 widget = getattr(self, name, None)

@@ -39,6 +39,14 @@ def _isolate_ac_qsettings(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
 
 
+def _make_ac_broker_channel_combo() -> QtWidgets.QComboBox:
+    combo = QtWidgets.QComboBox()
+    combo.addItem("Select channel...", 0)
+    for channel in range(1, 5):
+        combo.addItem(f"CH{channel}", channel)
+    return combo
+
+
 def _show_single_ac_plot_tile(window: object, tile_index: int = 0) -> object:
     for tile in window._plot_tiles:
         tile.visible.setChecked(False)
@@ -2007,10 +2015,8 @@ def test_ac_logger_shared_broker_requires_manual_channel_selection_for_sweep_con
     window.spinBox_ac_broker_port = QtWidgets.QSpinBox()
     window.spinBox_ac_broker_port.setRange(1, 65535)
     window.spinBox_ac_broker_port.setValue(8765)
-    window.spinBox_ac_broker_channel = QtWidgets.QSpinBox()
-    window.spinBox_ac_broker_channel.setRange(0, 4)
-    window.spinBox_ac_broker_channel.setSpecialValueText("Select channel...")
-    window.spinBox_ac_broker_channel.setValue(0)
+    window.comboBox_ac_broker_channel = _make_ac_broker_channel_combo()
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(0))
     window.label_ac_broker_host = QtWidgets.QLabel()
     window.label_ac_broker_port = QtWidgets.QLabel()
     window.label_ac_broker_channel = QtWidgets.QLabel()
@@ -2035,8 +2041,8 @@ def test_ac_logger_shared_broker_requires_manual_channel_selection_for_sweep_con
     with pytest.raises(ValueError, match="shared HMP broker channel"):
         window._build_ac_sweep_config()
 
-    window.spinBox_ac_broker_channel.setValue(3)
-    window._handle_ac_broker_channel_changed(3)
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(3))
+    window._handle_ac_broker_channel_changed()
     config = window._build_ac_sweep_config()
 
     assert config.psu_backend == "shared_hmp_broker"
@@ -2086,9 +2092,7 @@ def test_ac_logger_shared_broker_ignores_legacy_unconfirmed_channel_and_shows_pi
     window.lineEdit_ac_broker_host = QtWidgets.QLineEdit()
     window.spinBox_ac_broker_port = QtWidgets.QSpinBox()
     window.spinBox_ac_broker_port.setRange(1, 65535)
-    window.spinBox_ac_broker_channel = QtWidgets.QSpinBox()
-    window.spinBox_ac_broker_channel.setRange(0, 4)
-    window.spinBox_ac_broker_channel.setSpecialValueText("Select channel...")
+    window.comboBox_ac_broker_channel = _make_ac_broker_channel_combo()
     window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
     window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
     window.spinBox_ac_voltage_limit.setValue(30.0)
@@ -2096,26 +2100,27 @@ def test_ac_logger_shared_broker_ignores_legacy_unconfirmed_channel_and_shows_pi
     window._load_ac_psu_profile_settings("shared_hmp_broker")
     window._sync_ac_psu_from_shared_controls()
 
-    assert window.spinBox_ac_broker_channel.value() == 0
+    assert window.comboBox_ac_broker_channel.currentData() == 0
+    assert window.comboBox_ac_broker_channel.currentText() == "Select channel..."
     assert window._ac_shared_broker_channel_confirmed is False
     assert "Select channel" in window.label_ac_psu_status.text()
     assert "Select channel" in window.label_ac_hardware_status.text()
     assert window.ui.comboBox_port.isHidden()
     assert window.ui.comboBox_baudrate.isHidden()
     assert window.lineEdit_ac_broker_host.isVisible()
-    assert window.spinBox_ac_broker_channel.isVisible()
+    assert window.comboBox_ac_broker_channel.isVisible()
     with pytest.raises(ValueError, match="shared HMP broker channel"):
         window._selected_ac_broker_channel()
 
-    window.spinBox_ac_broker_channel.setValue(1)
-    window._handle_ac_broker_channel_changed(1)
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(1))
+    window._handle_ac_broker_channel_changed()
 
     assert window._selected_ac_broker_channel() == 1
     assert settings.value("psu_profiles/shared_hmp_broker/broker_channel_confirmed", False, type=bool) is True
     assert "CH1" in window.label_ac_hardware_status.text()
 
-    window.spinBox_ac_broker_channel.setValue(3)
-    window._handle_ac_broker_channel_changed(3)
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(3))
+    window._handle_ac_broker_channel_changed()
 
     assert window._selected_ac_broker_channel() == 3
     assert settings.value("psu_profiles/shared_hmp_broker/broker_channel", 0, type=int) == 3
@@ -2865,6 +2870,49 @@ def test_ac_logger_auto_setup_keeps_manual_psu_when_id_probe_fails(monkeypatch: 
         assert window._selected_ac_psu_backend() == "owon_spe6102"
         assert window._selected_ac_psu_resource() == "COM6"
         assert "kept the manually selected" in window.label_lcr_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_auto_setup_preserves_shared_broker_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "auto_setup_preserves_shared_broker")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM3 - HMP4030", "COM3")])
+    calls = {"detect": 0}
+
+    def _detect(*_args: object, **_kwargs: object) -> list[sweep.PowerSupplyCandidate]:
+        calls["detect"] += 1
+        return [
+            sweep.PowerSupplyCandidate(
+                label="COM3 - HMP4030",
+                resource="COM3",
+                backend_id="hmp4030",
+                baudrate=115200,
+                idn="Rohde&Schwarz,HMP4030",
+            )
+        ]
+
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", _detect)
+
+    window = ac_logger.MainWindow()
+    try:
+        window._set_combo_data(window.ui.comboBox_supply, "shared_hmp_broker")
+        window.pushButton_ac_hardware_details.setChecked(True)
+        window._set_ac_hardware_details_visible(True)
+        window.handle_auto_setup_clicked()
+
+        assert calls["detect"] == 0
+        assert window._selected_ac_psu_backend() == "shared_hmp_broker"
+        assert window.ui.comboBox_supply.currentData() == "shared_hmp_broker"
+        assert window.comboBox_ac_broker_channel.currentText() == "Select channel..."
+        assert not window.comboBox_ac_broker_channel.isHidden()
+        assert window.ui.comboBox_port.isHidden()
+        assert "Shared HMP broker" in window.label_ac_hardware_status.text()
+        assert "Select channel" in window.label_ac_hardware_status.text()
     finally:
         window.close()
         app.processEvents()
