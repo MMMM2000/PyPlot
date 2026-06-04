@@ -93,11 +93,31 @@ run_plan:
       current_ramp_rate_mA_s: 0.3
       repeat: 1
       run_condition: slower-ramp boundary probe; rejected because RMS and max error worsened versus 0.4 mA/s
+    - id: experimental_adaptive_hold_gain_0p4
+      recipe_path: docs/recipes/iso-stress-50mpa-1-to-80-to-1ma-0p4.recipe.json
+      current_ramp_rate_mA_s: 0.4
+      repeat: 1
+      run_condition: rejected adaptive current-hold gain code experiment; shortened run but worsened RMS, p95, and max stress error versus selected 0.4 repeat
+    - id: experimental_slope_lookahead_0p4
+      recipe_path: docs/recipes/iso-stress-50mpa-1-to-80-to-1ma-0p4.recipe.json
+      current_ramp_rate_mA_s: 0.4
+      repeat: 1
+      run_condition: rejected current-hold slope-lookahead code experiment; improved over adaptive gain but remained worse than selected 0.4 repeat
+    - id: experimental_hold1p0_0p4
+      recipe_path: docs/recipes/iso-stress-50mpa-1-to-80-to-1ma-0p4-hold1p0.recipe.json
+      current_ramp_rate_mA_s: 0.4
+      repeat: 1
+      run_condition: rejected longer held-current resume confirmation; increased measurement time without improving stress-error metrics
   comparison_policy:
     baseline_stage: future_baseline_0p8
     selected_stage: baseline_0p4_selected_precision_time
     selected_control_logic_version: 2026-05-29.2
-    rejected_control_logic_changes: run30_fast_recovery_experiment_0p8
+    rejected_control_logic_changes:
+      - run30_fast_recovery_experiment_0p8
+      - run36_adaptive_hold_gain_0p4
+      - run37_slope_lookahead_0p4
+    rejected_campaign_parameter_changes:
+      - run38_hold1p0_0p4
     slower_ramps_must_justify_time_cost: true
     next_adjustment_rule: if the first run is bad, adjust only the smallest justified campaign parameter before rerun
 runs:
@@ -127,6 +147,18 @@ runs:
     path: G:/My Drive/1 Projects/Praha/mini DMA/automated_control_tests/Ni50Fe27Ga23 12_2 heat shield iso-stress_run35
     stage: baseline_0p3_boundary_probe
     disposition: rejected_rms_and_max_worse_than_0p4
+  - id: run36_adaptive_hold_gain_0p4
+    path: G:/My Drive/1 Projects/Praha/mini DMA/automated_control_tests/Ni50Fe27Ga23 12_2 heat shield iso-stress_run36
+    stage: experimental_adaptive_hold_gain_0p4
+    disposition: rejected_worse_precision_for_shorter_time
+  - id: run37_slope_lookahead_0p4
+    path: G:/My Drive/1 Projects/Praha/mini DMA/automated_control_tests/Ni50Fe27Ga23 12_2 heat shield iso-stress_run37
+    stage: experimental_slope_lookahead_0p4
+    disposition: rejected_worse_rms_p95_max_than_selected_0p4
+  - id: run38_hold1p0_0p4
+    path: G:/My Drive/1 Projects/Praha/mini DMA/automated_control_tests/Ni50Fe27Ga23 12_2 heat shield iso-stress_run38
+    stage: experimental_hold1p0_0p4
+    disposition: rejected_slower_and_less_precise_than_selected_0p4
 reporting:
   required: true
   report_path: reports/mini_dma_12_2_heat_shield_33p68mm_report.pdf
