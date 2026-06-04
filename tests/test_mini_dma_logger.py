@@ -4840,6 +4840,25 @@ def test_recipe_setup_panel_is_collapsible_and_can_disable_setup(tmp_path: Path,
         _close_test_window(window)
 
 
+def test_current_sweep_setup_disabled_starts_session_before_current(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+
+        steps = window._build_automation_recipe()[0]
+        actions = [step.action for step in steps]
+
+        assert actions[0] == "start_session"
+        assert actions.index("start_session") < actions.index("set_current")
+        assert actions.index("start_session") < actions.index("sweep_current")
+    finally:
+        _close_test_window(window)
+
+
 def test_recipe_file_controls_are_hidden_until_enabled_and_track_status(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "recipe.recipe.json"

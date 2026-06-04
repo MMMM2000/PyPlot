@@ -19868,6 +19868,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise ValueError("Set a non-zero target ramp rate.")
             targets = self._build_numeric_targets(target_start, target_end, target_step)
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
+            if not steps:
+                steps.append(AutomationStep("start_session", note="recipe_start"))
             previous_target: float | None = 0.0
 
             def _append_current_sweep_plateau(*, target: float, plateau_basis: str, note: str) -> None:
