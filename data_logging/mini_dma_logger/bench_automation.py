@@ -66,6 +66,20 @@ class MiniDmaBenchLockConfig:
 
 
 @dataclass(frozen=True)
+class MiniDmaHardwareConfig:
+    supply_profile: str | None = None
+    shared_broker_host: str | None = None
+    shared_broker_port: int | None = None
+    current_sweep_channel: int | None = None
+    motor_supply_enabled: bool | None = None
+    motor_supply_channel: int | None = None
+    motor_supply_voltage_v: float | None = None
+    motor_supply_current_limit_a: float | None = None
+    supply_voltage_limit_v: float | None = None
+    manual_current_mA: float | None = None
+
+
+@dataclass(frozen=True)
 class MiniDmaBenchPlan:
     path: Path
     execute: bool
@@ -73,6 +87,7 @@ class MiniDmaBenchPlan:
     summary_path: Path | None
     max_total_duration_s: float | None
     sample_identity: MiniDmaSampleIdentity
+    hardware: MiniDmaHardwareConfig
     guardrails: MiniDmaBenchGuardrails
     bench_lock: MiniDmaBenchLockConfig
     runs: tuple[MiniDmaBenchRun, ...]
@@ -219,6 +234,37 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         purpose=bench_lock_purpose,
         lock_path=bench_lock_path,
     )
+    raw_hardware = payload.get("hardware", {})
+    if raw_hardware is None:
+        raw_hardware = {}
+    if not isinstance(raw_hardware, Mapping):
+        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'hardware' must be an object.")
+    hardware = MiniDmaHardwareConfig(
+        supply_profile=None if raw_hardware.get("supply_profile") is None else str(raw_hardware["supply_profile"]),
+        shared_broker_host=(
+            None if raw_hardware.get("shared_broker_host") is None else str(raw_hardware["shared_broker_host"])
+        ),
+        shared_broker_port=(
+            None if raw_hardware.get("shared_broker_port") is None else int(raw_hardware["shared_broker_port"])
+        ),
+        current_sweep_channel=(
+            None
+            if raw_hardware.get("current_sweep_channel") is None
+            else int(raw_hardware["current_sweep_channel"])
+        ),
+        motor_supply_enabled=(
+            None
+            if raw_hardware.get("motor_supply_enabled") is None
+            else bool(raw_hardware["motor_supply_enabled"])
+        ),
+        motor_supply_channel=(
+            None if raw_hardware.get("motor_supply_channel") is None else int(raw_hardware["motor_supply_channel"])
+        ),
+        motor_supply_voltage_v=_optional_float(raw_hardware, "motor_supply_voltage_v"),
+        motor_supply_current_limit_a=_optional_float(raw_hardware, "motor_supply_current_limit_a"),
+        supply_voltage_limit_v=_optional_float(raw_hardware, "supply_voltage_limit_v"),
+        manual_current_mA=_optional_float(raw_hardware, "manual_current_mA"),
+    )
     default_max_run_duration_s = _as_float(
         payload.get("default_max_run_duration_s", DEFAULT_MAX_RUN_DURATION_S),
         field="default_max_run_duration_s",
@@ -295,6 +341,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         summary_path=summary_path,
         max_total_duration_s=max_total_duration_s,
         sample_identity=sample_identity,
+        hardware=hardware,
         guardrails=guardrails,
         bench_lock=bench_lock,
         runs=tuple(runs),
@@ -358,6 +405,48 @@ def _set_text_if_present(window: Any, attr_name: str, value: str | None) -> None
     set_text = getattr(widget, "setText", None)
     if callable(set_text):
         set_text(value)
+
+
+def _set_combo_data_if_present(window: Any, attr_name: str, value: object | None) -> None:
+    if value is None:
+        return
+    combo = getattr(window, attr_name, None)
+    find_data = getattr(combo, "findData", None)
+    set_current_index = getattr(combo, "setCurrentIndex", None)
+    if not callable(find_data) or not callable(set_current_index):
+        return
+    index = find_data(value)
+    if index is None or int(index) < 0:
+        raise MiniDmaBenchAutomationError(f"Could not select {attr_name} value {value!r}.")
+    set_current_index(int(index))
+
+
+def _set_spin_value_if_present(window: Any, attr_name: str, value: float | int | None) -> None:
+    if value is None:
+        return
+    spin = getattr(window, attr_name, None)
+    set_value = getattr(spin, "setValue", None)
+    if callable(set_value):
+        set_value(value)
+
+
+def _apply_hardware_config(window: Any, hardware: MiniDmaHardwareConfig) -> None:
+    _set_combo_data_if_present(window, "combo_supply_profile", hardware.supply_profile)
+    _set_text_if_present(window, "edit_shared_broker_host", hardware.shared_broker_host)
+    _set_spin_value_if_present(window, "spin_shared_broker_port", hardware.shared_broker_port)
+    _set_combo_data_if_present(window, "combo_current_sweep_supply_channel", hardware.current_sweep_channel)
+    checkbox = getattr(window, "check_motor_supply_power", None)
+    set_checked = getattr(checkbox, "setChecked", None)
+    if callable(set_checked) and hardware.motor_supply_enabled is not None:
+        set_checked(bool(hardware.motor_supply_enabled))
+    _set_combo_data_if_present(window, "combo_motor_supply_channel", hardware.motor_supply_channel)
+    _set_spin_value_if_present(window, "spin_motor_supply_voltage", hardware.motor_supply_voltage_v)
+    _set_spin_value_if_present(window, "spin_motor_supply_current_limit", hardware.motor_supply_current_limit_a)
+    _set_spin_value_if_present(window, "spin_supply_voltage_limit", hardware.supply_voltage_limit_v)
+    _set_spin_value_if_present(window, "spin_supply_manual_current", hardware.manual_current_mA)
+    persist = getattr(window, "_persist_settings_if_enabled", None)
+    if callable(persist):
+        persist()
 
 
 def _apply_sample_identity(window: Any, sample: MiniDmaSampleIdentity) -> None:
@@ -700,6 +789,18 @@ def run_mini_dma_bench_plan(
                 ),
                 "diameter_mm": plan.sample_identity.diameter_mm,
             },
+            "hardware": {
+                "supply_profile": plan.hardware.supply_profile,
+                "shared_broker_host": plan.hardware.shared_broker_host,
+                "shared_broker_port": plan.hardware.shared_broker_port,
+                "current_sweep_channel": plan.hardware.current_sweep_channel,
+                "motor_supply_enabled": plan.hardware.motor_supply_enabled,
+                "motor_supply_channel": plan.hardware.motor_supply_channel,
+                "motor_supply_voltage_v": plan.hardware.motor_supply_voltage_v,
+                "motor_supply_current_limit_a": plan.hardware.motor_supply_current_limit_a,
+                "supply_voltage_limit_v": plan.hardware.supply_voltage_limit_v,
+                "manual_current_mA": plan.hardware.manual_current_mA,
+            },
             "bench_lock": {
                 "enabled": plan.bench_lock.enabled,
                 "timeout_s": plan.bench_lock.timeout_s,
@@ -776,6 +877,7 @@ def run_mini_dma_bench_plan(
                     continue
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
+                    _apply_hardware_config(window, plan.hardware)
                     _apply_sample_identity(window, plan.sample_identity)
                     run_summary = _execute_run(
                         run,

@@ -109,6 +109,49 @@ def test_mini_dma_bench_plan_dry_run_validates_recipe_paths(tmp_path: Path) -> N
     assert summary_path.exists()
 
 
+def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "hardware": {
+                    "supply_profile": "shared_hmp_broker",
+                    "shared_broker_host": "127.0.0.1",
+                    "shared_broker_port": 8765,
+                    "current_sweep_channel": 4,
+                    "motor_supply_enabled": True,
+                    "motor_supply_channel": 3,
+                    "motor_supply_voltage_v": 12.0,
+                    "motor_supply_current_limit_a": 0.5,
+                    "supply_voltage_limit_v": 32.05,
+                    "manual_current_mA": 1.0,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = bench_automation.run_mini_dma_bench_plan(plan_path)
+
+    assert summary["hardware"] == {
+        "supply_profile": "shared_hmp_broker",
+        "shared_broker_host": "127.0.0.1",
+        "shared_broker_port": 8765,
+        "current_sweep_channel": 4,
+        "motor_supply_enabled": True,
+        "motor_supply_channel": 3,
+        "motor_supply_voltage_v": 12.0,
+        "motor_supply_current_limit_a": 0.5,
+        "supply_voltage_limit_v": 32.05,
+        "manual_current_mA": 1.0,
+    }
+
+
 def test_mini_dma_bench_plan_requires_automated_lengths_for_execution(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
@@ -204,6 +247,139 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert ("recipe", "iso-strain.recipe.json") in events
     assert ("slack_takeup", (True, 10.0)) in events
     assert ("start", None) in events
+
+
+def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "default_max_run_duration_s": 1,
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "hardware": {
+                    "supply_profile": "shared_hmp_broker",
+                    "shared_broker_host": "127.0.0.1",
+                    "shared_broker_port": 8765,
+                    "current_sweep_channel": 4,
+                    "motor_supply_enabled": True,
+                    "motor_supply_channel": 3,
+                    "motor_supply_voltage_v": 12.0,
+                    "motor_supply_current_limit_a": 0.5,
+                    "supply_voltage_limit_v": 32.05,
+                    "manual_current_mA": 1.0,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[tuple[str, object]] = []
+
+    class _FakeCombo:
+        def __init__(self, values: list[object]) -> None:
+            self.values = values
+            self.current: object | None = None
+
+        def findData(self, value: object) -> int:
+            try:
+                return self.values.index(value)
+            except ValueError:
+                return -1
+
+        def setCurrentIndex(self, index: int) -> None:
+            self.current = self.values[index]
+            events.append(("combo", self.current))
+
+    class _FakeSpin:
+        def __init__(self) -> None:
+            self.value: float | int | None = None
+
+        def setValue(self, value: float | int) -> None:
+            self.value = value
+            events.append(("spin", value))
+
+    class _FakeLineEdit:
+        def __init__(self) -> None:
+            self.value = ""
+
+        def setText(self, value: str) -> None:
+            self.value = value
+            events.append(("text", value))
+
+    class _FakeCheck:
+        def __init__(self) -> None:
+            self.checked = False
+
+        def setChecked(self, value: bool) -> None:
+            self.checked = bool(value)
+            events.append(("check", self.checked))
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            pass
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+            self.combo_supply_profile = _FakeCombo(["hmp4040", "shared_hmp_broker"])
+            self.edit_shared_broker_host = _FakeLineEdit()
+            self.spin_shared_broker_port = _FakeSpin()
+            self.combo_current_sweep_supply_channel = _FakeCombo([0, 1, 2, 3, 4])
+            self.check_motor_supply_power = _FakeCheck()
+            self.combo_motor_supply_channel = _FakeCombo([0, 1, 2, 3, 4])
+            self.spin_motor_supply_voltage = _FakeSpin()
+            self.spin_motor_supply_current_limit = _FakeSpin()
+            self.spin_supply_voltage_limit = _FakeSpin()
+            self.spin_supply_manual_current = _FakeSpin()
+
+        def _persist_settings_if_enabled(self) -> None:
+            events.append(("persist", None))
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            events.append(("start", None))
+
+        def close(self) -> None:
+            return
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert summary["runs"][0]["status"] == "completed"
+    assert events.index(("combo", "shared_hmp_broker")) < events.index(("start", None))
+    assert ("text", "127.0.0.1") in events
+    assert ("combo", 4) in events
+    assert ("check", True) in events
+    assert ("combo", 3) in events
+    assert ("spin", 12.0) in events
+    assert ("spin", 0.5) in events
+
 
 def test_mini_dma_bench_plan_records_startup_log_when_not_started(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
