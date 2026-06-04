@@ -98,7 +98,7 @@ def test_yaml_campaign_template_parses() -> None:
 
     assert payload["kind"] == "mini_dma_optimization_campaign"
     assert payload["sample"]["length_mm"] == 52.0
-    assert payload["run_plan"]["stages"][0]["id"] == "baseline_1p0"
+    assert payload["run_plan"]["stages"][0]["id"] == "baseline_0p8"
 
 
 def test_mini_dma_report_generates_standard_outputs(tmp_path: Path) -> None:

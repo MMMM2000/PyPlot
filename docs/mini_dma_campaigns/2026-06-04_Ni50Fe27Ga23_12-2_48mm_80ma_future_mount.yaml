@@ -1,0 +1,98 @@
+schema_version: 1
+kind: mini_dma_optimization_campaign
+campaign:
+  id: 2026-06-04_Ni50Fe27Ga23_12-2_48mm_80ma_future_mount
+  title: Ni50Fe27Ga23 12/2 48 mm 80 mA Mini DMA future mounted-wire run
+  root: G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-04_Ni50Fe27Ga23_12-2_48mm_80ma_future_mount
+  owner_thread: codex/mini-dma-live-opt-12-2-12e8
+objective:
+  primary: prepare a repeatable Mini DMA iso-stress current-sweep run for the next operator-confirmed mounted 12/2 wire without driving hardware now
+  optimize_for_generalization: true
+  success_metrics:
+    - stress_error_rms_mpa
+    - stress_error_p95_abs_mpa
+    - stress_error_max_abs_mpa
+    - current_hold_elapsed_s
+    - total_measurement_time_s
+    - strain_current_curve_quality
+  tradeoff_question: check whether the default 0.8 mA/s ramp gives acceptable stress precision before trying slower ramps
+  avoid_sample_specific_magic_values: true
+  hard_values_policy: use hard caps only for safety or campaign-local experiments; do not tune permanent control logic to one sample/run
+sample:
+  composition: Ni50Fe27Ga23
+  microwire: 12/2
+  length_mm: 47.964
+  diameter_mm: 0.0191
+  diameter_source: previous 12/2 bench-plan/run metadata; operator must reconfirm after mounting
+  mounted_wire_status: not_mounted_as_of_2026-06-04
+  operator_confirmation_required:
+    - wire is mounted and mechanically intact
+    - sample identity is Ni50Fe27Ga23 12/2 or this manifest is updated before use
+    - unloaded gauge length is measured and length_mm is updated if it differs
+    - diameter source is still appropriate for the mounted specimen
+control_source:
+  required_base_ref: origin/codex/integration-mini-dma-ready-review
+  required_branch_prefix: codex/
+  require_clean_git: true
+  require_up_to_date_with_base: true
+  approved_control_logic_version: 2026-05-29.2
+hardware:
+  require_shared_hmp: true
+  broker_host: 127.0.0.1
+  broker_port: 8765
+  hmp_resource: COM3
+  motor_channel: CH3
+  current_channel: CH4
+  preserve_channels:
+    - CH3
+  reserved_elsewhere:
+    - role: ac_susceptibility
+      rule: respect active broker leases and roles; do not directly probe or control the AC channel
+  current_voltage_limit_v: 32.05
+  current_max_setpoint_mA: 80.0
+  operator_confirmation_required:
+    - broker profile exposes CH3 for Mini DMA motor rail and CH4 for Mini DMA current sweep
+    - CH3 motor rail is preserved according to broker state and Mini DMA preflight
+    - CH4 current path is connected through the mounted wire and output is off before Mini DMA ownership
+    - no active broker lease conflicts with CH3 or CH4
+safety:
+  max_stress_mpa: 300.0
+  recovery_stress_mpa: 50.0
+  wire_break_stops_plan: true
+  allow_mechanical_slack_takeup: true
+  max_correction_travel_fraction: 0.15
+  live_authorization_required: true
+run_plan:
+  target_basis: stress_mpa
+  target_mpa: 50.0
+  first_overheating:
+    enabled: false
+  stages:
+    - id: future_baseline_0p8
+      recipe_path: docs/recipes/iso-stress-50mpa-1-to-80-to-1ma.recipe.json
+      current_ramp_rate_mA_s: 0.8
+      repeat: 1
+    - id: future_repeat_0p8_if_promising
+      recipe_path: docs/recipes/iso-stress-50mpa-1-to-80-to-1ma.recipe.json
+      current_ramp_rate_mA_s: 0.8
+      repeat: 1
+      run_condition: repeat only if the first run has intact current path and acceptable stress-control behavior
+  comparison_policy:
+    baseline_stage: future_baseline_0p8
+    slower_ramps_must_justify_time_cost: true
+    next_adjustment_rule: if the first run is bad, adjust only the smallest justified campaign parameter before rerun
+reporting:
+  required: true
+  report_path: reports/mini_dma_12_2_future_mount_report.pdf
+  image_dir: reports/images/future_mount_12_2
+  summary_path: analysis/mini_dma_12_2_future_mount_summary.json
+  run_quality_cache: run_quality.json
+  per_run_core_plot_pattern: reports/images/future_mount_12_2/{run_name}_core.png
+  send_per_run_core_plot_to_master: true
+  require_core_plots: true
+  core_plots:
+    - stress_vs_time
+    - strain_vs_current
+  highlight_current_hold: true
+  include_trace_replay: true
+  include_ramp_speed_comparison: true
