@@ -285,6 +285,16 @@ class MicrowireEdaWindow(QtWidgets.QMainWindow):
         self._worker = None
         self._thread = None
 
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._progress_dialog is not None:
+            self._progress_dialog.close()
+            self._progress_dialog = None
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(3000)
+        super().closeEvent(event)
+
     def _open_report(self) -> None:
         if self._last_result is None:
             return

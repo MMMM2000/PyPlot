@@ -45,7 +45,13 @@ FabricationIndex = core.FabricationIndex
 MeasurementMetadata = core.MeasurementMetadata
 MeasurementRecord = core.MeasurementRecord
 ShapeMemoryStressStrainRecord = core.ShapeMemoryStressStrainRecord
+MiniDmaRecord = core.MiniDmaRecord
+VsmTemperatureScanRecord = core.VsmTemperatureScanRecord
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = core.SHAPE_MEMORY_STRESS_STRAIN_COLUMN
+MINI_DMA_COLUMN = core.MINI_DMA_COLUMN
+MINI_DMA_STRAIN_COLUMN = core.MINI_DMA_STRAIN_COLUMN
+MINI_DMA_TRANSITION_COLUMN = core.MINI_DMA_TRANSITION_COLUMN
+MINI_DMA_BREAK_COLUMN = core.MINI_DMA_BREAK_COLUMN
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = core.SHAPE_MEMORY_DISPLACEMENT_COLUMN
 SHAPE_MEMORY_LOAD_COLUMN = core.SHAPE_MEMORY_LOAD_COLUMN
 SHAPE_MEMORY_STRAIN_COLUMN = core.SHAPE_MEMORY_STRAIN_COLUMN
@@ -157,10 +163,10 @@ def test_vsm_temperature_preview_keeps_dual_axis_legend_in_section_order() -> No
         assert legend is not None
         labels = [text.get_text() for text in legend.get_texts()]
         assert labels == [
-            "10000 Oe ↑ S1",
-            "10000 Oe ↓ S2",
-            "5 Oe ↑ S1",
-            "5 Oe ↓ S2",
+            "10000 Oe \u2191 S1",
+            "10000 Oe \u2193 S2",
+            "5 Oe \u2191 S1",
+            "5 Oe \u2193 S2",
         ]
     finally:
         builder_ui.plt.close(figure)
@@ -549,6 +555,72 @@ def test_render_measurement_pixmap_uses_readable_default_preview_size() -> None:
     assert not pixmap.isNull()
     assert pixmap.width() >= builder_ui.ANNEALING_GRAPH_WIDTH
     assert pixmap.height() >= builder_ui.ANNEALING_GRAPH_HEIGHT
+
+
+def test_render_measurement_pixmap_keeps_pyplot_legend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    captured_figures = []
+    original = builder_ui.plot_annealing_curve
+
+    def _wrapped(*args: object, **kwargs: object) -> object:
+        figure, config = original(*args, **kwargs)
+        captured_figures.append(figure)
+        return figure, config
+
+    monkeypatch.setattr(builder_ui, "plot_annealing_curve", _wrapped)
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [10.0, 50.0, 100.0, 60.0, 20.0],
+                "R_ohm": [120.0, 150.0, 180.0, 160.0, 130.0],
+            }
+        ),
+        path=Path("Ni50Fe27Ga23 11_1 s1 1000mA.txt"),
+        metadata=None,
+    )
+
+    try:
+        pixmap = builder_ui._render_measurement_pixmap(record, logging.getLogger("test"))
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert not pixmap.isNull()
+        assert captured_figures
+        axes = captured_figures[0].axes[0]
+        title = axes.get_title()
+        assert "Ni" in title and "Fe" in title and "Ga" in title
+        assert "11/1" in title
+        assert "1000" in title and "mA" in title
+        assert axes.get_legend() is not None
+    finally:
+        for figure in captured_figures:
+            builder_ui.plt.close(figure)
+
+
+def test_annealing_display_keeps_pyplot_title_and_axis_labels() -> None:
+    display = builder_ui._AnnealingPlotDisplay.__new__(builder_ui._AnnealingPlotDisplay)
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [0.0, 50.0, 100.0, 50.0],
+                "R_ohm": [120.0, 150.0, 180.0, 160.0],
+            }
+        ),
+        path=Path("Ni50Fe27Ga23 1_1 1000 mA.csv"),
+        metadata=None,
+    )
+
+    figure = display._build_figure(record)
+    try:
+        axes = figure.axes[0]
+        assert axes.get_title()
+        assert "1/1" in axes.get_title()
+        assert "1000 mA" in axes.get_title()
+        assert axes.get_xlabel() == "Current [mA]"
+        assert axes.get_ylabel()
+        assert axes.get_legend() is not None
+    finally:
+        builder_ui.plt.close(figure)
 
 
 def test_shape_memory_preview_uses_dual_axis_overlay() -> None:
@@ -974,6 +1046,62 @@ def test_build_database_populates_shape_memory_graph_column(tmp_path: Path) -> N
 
     assert SHAPE_MEMORY_STRESS_STRAIN_COLUMN in result.dataframe.columns
     assert result.dataframe.iloc[0][SHAPE_MEMORY_STRESS_STRAIN_COLUMN] == ["loop"]
+
+
+def test_build_database_includes_mini_dma_strain_and_break_summary(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
+    anneal_path.write_text("placeholder", encoding="utf-8")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=5,
+        piece_y=4,
+        setpoint_mA=1000,
+        alt_variant=False,
+        measurement_id="test-measurement",
+        file_name=anneal_path.name,
+        relpath=anneal_path.name,
+        timestamp_mtime_utc="2026-03-11T00:00:00+00:00",
+    )
+    measurement = MeasurementRecord(
+        path=anneal_path,
+        metadata=metadata,
+        dataframe=pd.DataFrame({"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0], "I_mA": [100.0]}),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    mini_dma = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 mini_run01",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="mini_run01",
+        strain_summary=("50 MPa / 1.46 g: 0.1% @ 20 mA",),
+        transition_summary=("50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA",),
+        break_summary="400 MPa / 11.69 g @ 35 mA",
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[measurement],
+        mini_dma_records=[mini_dma],
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row[MINI_DMA_COLUMN] == ["mini_run01"]
+    assert row[MINI_DMA_STRAIN_COLUMN] == ["50 MPa / 1.46 g: 0.1% @ 20 mA"]
+    assert row[MINI_DMA_TRANSITION_COLUMN] == [
+        "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+    ]
+    assert row[MINI_DMA_BREAK_COLUMN] == ["400 MPa / 11.69 g @ 35 mA"]
 
 
 def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
@@ -4364,6 +4492,64 @@ def test_build_database_merges_current_density_and_transition_entries(tmp_path: 
     assert row["Mf (°C)"] == pytest.approx(8.0)
 
 
+def test_build_database_estimates_transition_temps_from_vsm_scan_records(tmp_path: Path) -> None:
+    anneal_path = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    anneal_path.write_text("0.1 0.2 2.0\n")
+    heating_x = np.linspace(0.0, 100.0, 101)
+    cooling_x = heating_x[::-1]
+    heating_y = np.piecewise(
+        heating_x,
+        [heating_x <= 30.0, (heating_x > 30.0) & (heating_x < 70.0), heating_x >= 70.0],
+        [
+            lambda value: 0.01 * value,
+            lambda value: 0.3 + 0.09 * (value - 30.0),
+            lambda value: 3.9 + 0.012 * (value - 70.0),
+        ],
+    )
+    cooling_y = np.piecewise(
+        cooling_x,
+        [cooling_x <= 25.0, (cooling_x > 25.0) & (cooling_x < 65.0), cooling_x >= 65.0],
+        [
+            lambda value: 0.01 * value,
+            lambda value: 0.25 + 0.09 * (value - 25.0),
+            lambda value: 3.85 + 0.012 * (value - 65.0),
+        ],
+    )
+    scan = VsmTemperatureScanRecord(
+        path=tmp_path / "scan.txt",
+        sample="Ni55Fe18Ga27 1_1",
+        data=pd.DataFrame(
+            {
+                "temperature": np.concatenate([heating_x, cooling_x]),
+                "field": [10000.0] * 202,
+                "signal": np.concatenate([heating_y, cooling_y]),
+                "section_index": [0] * 101 + [1] * 101,
+            }
+        ),
+        key=("Ni55Fe18Ga27", 1, 1, None),
+        label="scan",
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[anneal_path],
+            output_dir=tmp_path / "out",
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        vsm_temperature_scan_records=[scan],
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row["As (°C)"] == pytest.approx(30.0, abs=1.0)
+    assert row["Af (°C)"] == pytest.approx(70.0, abs=1.0)
+    assert row["Ms (°C)"] == pytest.approx(65.0, abs=1.0)
+    assert row["Mf (°C)"] == pytest.approx(25.0, abs=1.0)
+
+
 def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("openpyxl")
     from PIL import Image as PILImage
@@ -4839,13 +5025,14 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         assert "Af1 (mA)" in current_density_group
         assert "As2 (mA)" in current_density_group
         assert "Mf2-Af2 (mA)" in current_density_group
-        transition_group = groups.get("Transition temps")
-        assert transition_group == [
-            "As (°C)",
-            "Af (°C)",
-            "Ms (°C)",
-            "Mf (°C)",
-        ]
+        assert groups.get("Transition temps") == list(core.TRANSITION_TEMP_COLUMNS)
+        mini_dma_group = groups.get("Mini DMA")
+        assert isinstance(mini_dma_group, list)
+        assert core.MINI_DMA_COLUMN in mini_dma_group
+        assert core.MINI_DMA_ORIGIN_COLUMN in mini_dma_group
+        assert MINI_DMA_STRAIN_COLUMN in mini_dma_group
+        assert MINI_DMA_TRANSITION_COLUMN in mini_dma_group
+        assert MINI_DMA_BREAK_COLUMN in mini_dma_group
     finally:
         window._dirty = False
         window.hide()
@@ -5653,6 +5840,121 @@ def test_builder_close_stops_pending_scan_threads(tmp_path: Path) -> None:
             window.close()
 
 
+def test_builder_database_latest_resolver_prefers_root_latest(tmp_path: Path) -> None:
+    database_dir = tmp_path / "microwire_database"
+    archive_dir = database_dir / "archive"
+    working_dir = database_dir / "_working"
+    archive_dir.mkdir(parents=True)
+    working_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    archived = archive_dir / "microwire_database_2026-05-26_1732_1.pydpj"
+    working = working_dir / "microwire_database_2026-05-27_0930.pydpj"
+    for path in (latest, archived, working):
+        path.write_text("{}", encoding="utf-8")
+
+    assert builder_ui._resolve_latest_database_project(archived) == latest
+    assert builder_ui._resolve_latest_database_project(working) == latest
+    assert builder_ui._resolve_latest_database_project(latest) == latest
+
+
+def test_builder_database_latest_resolver_leaves_normal_projects(tmp_path: Path) -> None:
+    project_path = tmp_path / "ordinary_project.pydpj"
+    project_path.write_text("{}", encoding="utf-8")
+
+    assert builder_ui._resolve_latest_database_project(project_path) == project_path
+
+
+def test_builder_auto_open_prefers_configured_latest_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    latest.write_text("{}", encoding="utf-8")
+    old_project = tmp_path / "microwire_project.pydpj"
+    old_project.write_text("{}", encoding="utf-8")
+    window = BuilderWindow()
+    try:
+        window._auto_open_latest_database = True
+        window._auto_open_last = True
+        window._database_project_dir = database_dir
+        window.settings.setValue(window._project_settings_key("last_path"), str(old_project))
+        opened: list[Path] = []
+        monkeypatch.setattr(window, "_load_project_from_path", lambda path: opened.append(path))
+
+        window._maybe_auto_open_last_project()
+
+        assert opened == [latest]
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_auto_open_skips_reentrant_project_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    latest.write_text("{}", encoding="utf-8")
+    window = BuilderWindow()
+    try:
+        window._auto_open_latest_database = True
+        window._database_project_dir = database_dir
+        window._project_load_in_progress = True
+        opened: list[Path] = []
+        monkeypatch.setattr(window, "_load_project_from_path", lambda path: opened.append(path))
+
+        window._maybe_auto_open_last_project()
+
+        assert opened == []
+    finally:
+        window._project_load_in_progress = False
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_settings_menu_names_latest_database_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        settings_menu = next(
+            menu
+            for menu in window.menuBar().findChildren(QtWidgets.QMenu)
+            if menu.title() == "Settings"
+        )
+        action_texts = [action.text() for action in settings_menu.actions()]
+
+        assert "Open last/recent project on startup" in action_texts
+        assert "Open latest database project on startup" in action_texts
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_split_sample_variant_parses_suffix() -> None:
     from microwire_data_builder.ui import _split_sample_variant
 
@@ -5719,6 +6021,46 @@ def test_load_project_handles_missing_sections(
                 continue
             sources = getattr(getattr(section, "data", object()), "sources", [])
             assert list(sources) in ([], [fabrication_source])
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_load_project_suppressed_dialogs_skip_progress_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    window._auto_open_last = False
+    progress_dialog_attempts: list[object] = []
+
+    class _UnexpectedProgressDialog:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            progress_dialog_attempts.append(_args)
+            raise AssertionError("suppressed Builder project loads should not create dialogs")
+
+    try:
+        monkeypatch.setattr(QtWidgets, "QProgressDialog", _UnexpectedProgressDialog)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+        project_path = tmp_path / "partial_project.pydpj"
+        payload = {
+            "kind": window.PROJECT_KIND,
+            "version": window.PROJECT_VERSION,
+            "sections": {},
+        }
+        project_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        window._load_project_from_path(project_path)
+
+        assert progress_dialog_attempts == []
+        assert window._project_path == project_path
     finally:
         window._dirty = False
         window.hide()

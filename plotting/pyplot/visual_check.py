@@ -17,7 +17,7 @@ from .app import PyPlotWorkbench
 from .window import WorkbookData, WorksheetData
 
 
-_SHAPE_MEMORY_PLUGIN_NAME = "Shape Memory Stress/Strain"
+_SHAPE_MEMORY_PLUGIN_NAME = "Manual Stress/Strain"
 
 
 @dataclass
@@ -293,7 +293,7 @@ def run_shape_memory_visual_check(
 
     requested_inputs = list(input_paths or _default_shape_memory_inputs())
     if not requested_inputs:
-        result.errors.append("No input files were provided for shape-memory visual check.")
+        result.errors.append("No input files were provided for manual stress/strain visual check.")
         return result
 
     resolved_inputs: list[Path] = []
@@ -343,7 +343,7 @@ def run_shape_memory_visual_check(
 
         plugin = window._current_plugin
         if plugin is None:
-            result.errors.append("Shape-memory plugin instance is not available.")
+            result.errors.append("Manual stress/strain plugin instance is not available.")
             return result
         plugin.load_data()
         plugin.generate()

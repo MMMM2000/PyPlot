@@ -6600,56 +6600,60 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        self._make_layout_width_friendly(root.layout())
-        for widget in root.findChildren(QtWidgets.QWidget):
-            is_nowrap_label = (
-                isinstance(widget, QtWidgets.QLabel)
-                and (bool(widget.property("_mini_dma_no_word_wrap")) or widget.buddy() is not None)
+        layout = root.layout()
+        self._make_layout_width_friendly(layout)
+        for widget in self._iter_layout_widgets(layout):
+            self._make_control_widget_width_friendly(widget)
+
+    def _make_control_widget_width_friendly(self, widget: QtWidgets.QWidget) -> None:
+        is_nowrap_label = (
+            isinstance(widget, QtWidgets.QLabel)
+            and (bool(widget.property("_mini_dma_no_word_wrap")) or widget.buddy() is not None)
+        )
+        if not isinstance(
+            widget,
+            (
+                QtWidgets.QAbstractSpinBox,
+                QtWidgets.QPushButton,
+                QtWidgets.QToolButton,
+            ),
+        ) and not is_nowrap_label:
+            widget.setMinimumWidth(0)
+        policy = widget.sizePolicy()
+        if isinstance(widget, QtWidgets.QLabel):
+            widget.setWordWrap(not is_nowrap_label)
+            if is_nowrap_label:
+                widget.setMinimumWidth(max(widget.minimumWidth(), widget.sizeHint().width()))
+        if isinstance(widget, QtWidgets.QAbstractSpinBox):
+            widget.setMinimumWidth(max(widget.minimumWidth(), 130))
+            widget.lineEdit().setMinimumWidth(96)
+        if isinstance(widget, QtWidgets.QToolButton):
+            widget.setMinimumWidth(max(widget.minimumWidth(), 220))
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                policy.verticalPolicy(),
             )
-            if not isinstance(
-                widget,
-                (
-                    QtWidgets.QAbstractSpinBox,
-                    QtWidgets.QPushButton,
-                    QtWidgets.QToolButton,
-                ),
-            ) and not is_nowrap_label:
-                widget.setMinimumWidth(0)
-            policy = widget.sizePolicy()
-            if isinstance(widget, QtWidgets.QLabel):
-                widget.setWordWrap(not is_nowrap_label)
-                if is_nowrap_label:
-                    widget.setMinimumWidth(max(widget.minimumWidth(), widget.sizeHint().width()))
-            if isinstance(widget, QtWidgets.QAbstractSpinBox):
-                widget.setMinimumWidth(max(widget.minimumWidth(), 130))
-                widget.lineEdit().setMinimumWidth(96)
-            if isinstance(widget, QtWidgets.QToolButton):
-                widget.setMinimumWidth(max(widget.minimumWidth(), 220))
-                widget.setSizePolicy(
-                    QtWidgets.QSizePolicy.Policy.Expanding,
-                    policy.verticalPolicy(),
-                )
-            if isinstance(widget, QtWidgets.QComboBox):
-                widget.setMinimumContentsLength(0)
-                widget.setSizeAdjustPolicy(
-                    QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-                )
-            if isinstance(
-                widget,
-                (
-                    QtWidgets.QAbstractSpinBox,
-                    QtWidgets.QComboBox,
-                    QtWidgets.QLineEdit,
-                    QtWidgets.QPlainTextEdit,
-                    QtWidgets.QTextEdit,
-                ),
-            ):
-                widget.setSizePolicy(
-                    QtWidgets.QSizePolicy.Policy.Expanding,
-                    policy.verticalPolicy(),
-                )
-            if isinstance(widget, QtWidgets.QAbstractScrollArea):
-                widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        if isinstance(widget, QtWidgets.QComboBox):
+            widget.setMinimumContentsLength(0)
+            widget.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+        if isinstance(
+            widget,
+            (
+                QtWidgets.QAbstractSpinBox,
+                QtWidgets.QComboBox,
+                QtWidgets.QLineEdit,
+                QtWidgets.QPlainTextEdit,
+                QtWidgets.QTextEdit,
+            ),
+        ):
+            widget.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                policy.verticalPolicy(),
+            )
+        if isinstance(widget, QtWidgets.QAbstractScrollArea):
+            widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def _make_layout_width_friendly(self, layout: QtWidgets.QLayout | None) -> None:
         if layout is None:
@@ -6675,6 +6679,28 @@ class MainWindow(QtWidgets.QMainWindow):
             widget = item.widget()
             if widget is not None:
                 self._make_layout_width_friendly(widget.layout())
+
+    def _iter_layout_widgets(
+        self,
+        layout: QtWidgets.QLayout | None,
+        seen: set[int] | None = None,
+    ) -> Iterable[QtWidgets.QWidget]:
+        if layout is None:
+            return
+        if seen is None:
+            seen = set()
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                identity = id(widget)
+                if identity not in seen:
+                    seen.add(identity)
+                    yield widget
+                    yield from self._iter_layout_widgets(widget.layout(), seen)
+            yield from self._iter_layout_widgets(item.layout(), seen)
 
     def _install_settings_wheel_guard(self) -> None:
         control_root = self._control_scroll_area.widget() if self._control_scroll_area is not None else None
@@ -18989,6 +19015,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_recovery_position_target(self, target_mm: float, label: str) -> None:
         distance_mm = abs(target_mm - self._current_position_mm)
+        step_tolerance_mm = max(1e-6, 0.5 / max(1.0, float(self.spin_steps_per_mm.value())))
+        if distance_mm <= step_tolerance_mm:
+            self._log(f"Skipped displacement recovery: already at {label}.")
+            return
         return_duration_s = self._pending_recovery_return_duration_s or self._setup_return_duration_s()
         self._pending_recovery_return_duration_s = None
         speed_mm_s = self._setup_return_speed_for_distance_mm_s(

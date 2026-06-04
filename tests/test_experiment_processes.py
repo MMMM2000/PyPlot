@@ -17,9 +17,9 @@ from plotting.shared.experiment_processes import (
 
 def test_experiment_process_command_uses_module_entrypoint() -> None:
     spec = ExperimentProcessSpec(
-        display_name="Mini DMA Logger",
-        module="data_logging.mini_dma_logger.mini_dma_logger",
-        resource_tag="mini_dma",
+        display_name="AC Susceptibility Logger",
+        module="data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+        resource_tag="ac_susceptibility",
     )
 
     command = build_experiment_process_command(spec, executable=Path("python.exe"))
@@ -27,7 +27,7 @@ def test_experiment_process_command_uses_module_entrypoint() -> None:
     assert command == [
         "python.exe",
         "-m",
-        "data_logging.mini_dma_logger.mini_dma_logger",
+        "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
     ]
 
 

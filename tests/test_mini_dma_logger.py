@@ -15446,10 +15446,10 @@ def test_recipe_completion_stops_session_logging(tmp_path: Path, qtbot) -> None:
 
         window._handle_auto_ramp_tick()
 
-        assert window._automation_active is True
-        assert window._automation_name == mini_dma_mod.RECOVERY_POSITION
+        assert window._automation_active is False
         assert window._session_active is False
         assert "Recipe completed" in window.log_output.toPlainText()
+        assert "Skipped displacement recovery" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

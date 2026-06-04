@@ -22,8 +22,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, Sequence, cast, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Tuple, Sequence, cast, Protocol
 
+import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
@@ -91,6 +92,11 @@ EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
         display_name="Mini DMA Logger",
         module="data_logging.mini_dma_logger.mini_dma_logger",
         resource_tag="mini_dma",
+    ),
+    "ac_susceptibility": ExperimentProcessSpec(
+        display_name="AC Susceptibility Logger",
+        module="data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+        resource_tag="ac_susceptibility",
     ),
 }
 
@@ -392,16 +398,725 @@ def _validate_pyplot_project_file(path: Path) -> None:
         )
 
 
+def _validate_builder_project_payload(payload: dict[str, Any], *, path: Path) -> None:
+    if payload.get("kind") != "MicrowireDataBuilder":
+        raise _AutomationRecipeError(
+            f"Project '{path}' is not a Microwire Data Builder project."
+        )
+    if payload.get("version") != 1:
+        raise _AutomationRecipeError(
+            f"Project '{path}' uses unsupported Microwire Data Builder project version {payload.get('version')!r}."
+        )
+
+
+def _collect_builder_paths(
+    paths: Sequence[Path],
+    *,
+    supported_suffixes: Sequence[str],
+    exclude_dir_names: Sequence[str] = (),
+) -> list[Path]:
+    suffixes = {suffix.lower() for suffix in supported_suffixes}
+    excluded_names = {str(name).strip().lower() for name in exclude_dir_names if str(name).strip()}
+
+    def _is_excluded(candidate: Path, root: Path) -> bool:
+        if not excluded_names:
+            return False
+        try:
+            relative_parts = candidate.relative_to(root).parts
+        except ValueError:
+            relative_parts = candidate.parts
+        return any(part.lower() in excluded_names for part in relative_parts[:-1])
+
+    collected: list[Path] = []
+    for path in paths:
+        if path.is_dir():
+            for candidate in sorted(path.rglob("*")):
+                if not candidate.is_file():
+                    continue
+                if _is_excluded(candidate, path):
+                    continue
+                if suffixes and candidate.suffix.lower() not in suffixes:
+                    continue
+                collected.append(candidate)
+        elif path.is_file():
+            if suffixes and path.suffix.lower() not in suffixes:
+                continue
+            collected.append(path)
+    return list(dict.fromkeys(collected))
+
+
+def _record_path_key(record: object) -> str:
+    raw_path = getattr(record, "path", "")
+    try:
+        return str(Path(raw_path).resolve())
+    except Exception:
+        return str(raw_path)
+
+
+def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
+    return {
+        "annealing": {
+            "class": builder_ui.AnnealingSection,
+            "payload": "annealing_records",
+            "table_builder": lambda records: builder_ui._annealing_records_to_frame(records, LOGGER),
+        },
+        "vsm_hysteresis": {
+            "class": builder_ui.VsmHysteresisSection,
+            "payload": "vsm_hysteresis_records",
+            "graph_column": builder_ui.VSM_HYSTERESIS_COLUMN,
+        },
+        "vsm_temperature_scan": {
+            "class": builder_ui.VsmTemperatureScanSection,
+            "payload": "vsm_temperature_scan_records",
+            "graph_column": builder_ui.VSM_TEMPERATURE_SCAN_COLUMN,
+        },
+        "dma_iso_stress": {
+            "class": builder_ui.DmaIsoStressSection,
+            "payload": "dma_iso_stress_records",
+            "graph_column": builder_ui.DMA_ISOSTRESS_COLUMN,
+        },
+        "mini_dma": {
+            "class": builder_ui.MiniDmaSection,
+            "payload": "mini_dma_records",
+            "graph_column": builder_ui.MINI_DMA_COLUMN,
+            "table_builder": builder_ui._mini_dma_records_to_frame,
+        },
+        "shape_memory_stress_strain": {
+            "class": builder_ui.ShapeMemoryStressStrainSection,
+            "payload": "shape_memory_stress_strain_records",
+            "graph_column": builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+        },
+        "fmr": {
+            "class": builder_ui.FmrSection,
+            "payload": "fmr_records",
+            "graph_column": builder_ui.FMR_COLUMN,
+        },
+    }
+
+
+def _merge_builder_records(existing_records: Sequence[object], new_records: Sequence[object]) -> list[object]:
+    merged: dict[str, object] = {}
+    fallback_index = 0
+    for record in [*existing_records, *new_records]:
+        key = _record_path_key(record)
+        if not key:
+            fallback_index += 1
+            key = f"record-{fallback_index}"
+        merged[key] = record
+    return list(merged.values())
+
+
+def _run_builder_update_section_command(
+    *,
+    builder_ui: Any,
+    command: dict[str, Any],
+    command_index: int,
+    section_name: str,
+    sections: dict[str, Any],
+    base_dir: Path,
+) -> dict[str, Any]:
+    section_specs = _builder_section_specs(builder_ui)
+    spec = section_specs.get(section_name)
+    if spec is None:
+        supported = ", ".join(sorted(section_specs))
+        raise _AutomationRecipeError(
+            f"Unsupported builder update_section command {command_index}: section={section_name!r}. "
+            f"Supported sections: {supported}."
+        )
+
+    section_class = spec["class"]
+    payload_name = str(spec["payload"])
+    graph_column = spec.get("graph_column")
+    table_builder = spec.get("table_builder")
+    raw_paths = command.get("paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise _AutomationRecipeError(
+            f"{section_name} update requires a non-empty 'paths' array."
+        )
+    input_paths: list[Path] = []
+    for path_index, raw_path in enumerate(raw_paths):
+        path = _resolve_recipe_path_value(
+            raw_path,
+            base_dir=base_dir,
+            field_name=f"commands[{command_index}].paths[{path_index}]",
+        )
+        if path is None or not path.exists():
+            raise _AutomationRecipeError(f"Builder input path does not exist: {path}")
+        input_paths.append(path)
+
+    supported_suffixes = getattr(section_class, "supported_suffixes", ())
+    raw_exclude_dir_names = command.get("exclude_dir_names", [])
+    if raw_exclude_dir_names in (None, ""):
+        raw_exclude_dir_names = []
+    if not isinstance(raw_exclude_dir_names, list):
+        raise _AutomationRecipeError(
+            f"{section_name} update field 'exclude_dir_names' must be an array when provided."
+        )
+    candidates = _collect_builder_paths(
+        input_paths,
+        supported_suffixes=supported_suffixes,
+        exclude_dir_names=[str(name) for name in raw_exclude_dir_names],
+    )
+    section = section_class(LOGGER, lambda *_args: None)
+    try:
+        section.import_project_payload(sections.get(section_name, {}))
+        existing_payload = section.store.load_payload(payload_name)
+        existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
+        source_strings = [str(path) for path in input_paths]
+        section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
+        result = section.process(candidates)
+
+        processed_keys = set()
+        for processed_path in result.processed:
+            try:
+                processed_keys.add(str(Path(processed_path).resolve()))
+            except Exception:
+                processed_keys.add(str(processed_path))
+        skipped_sources: list[str] = []
+        for candidate in candidates:
+            try:
+                candidate_key = str(candidate.resolve())
+            except Exception:
+                candidate_key = str(candidate)
+            if candidate_key not in processed_keys:
+                skipped_sources.append(str(candidate))
+
+        new_payload = result.payloads.get(payload_name, [])
+        new_records = list(new_payload) if isinstance(new_payload, list) else []
+        merged_records = _merge_builder_records(existing_records, new_records)
+        if callable(table_builder):
+            section.data.table = table_builder(merged_records)
+        else:
+            section.data.table = builder_ui._graph_records_to_frame(
+                merged_records,
+                str(graph_column),
+                sample_column="_sample",
+            )
+        section.data.processed = {**section.data.processed, **result.processed}
+        if isinstance(result.extra, dict):
+            section.data.extra.update(result.extra)
+        section.data.extra["payloads"] = {payload_name: payload_name}
+        section.store.save_payload(payload_name, merged_records)
+        section.store.save(section.data)
+        sections[section_name] = section.export_project_payload()
+        return {
+            "action": "update_section",
+            "section": section_name,
+            "status": "ok",
+            "input_count": len(input_paths),
+            "candidate_count": len(candidates),
+            "updated_count": len(processed_keys),
+            "skipped_count": len(skipped_sources),
+            "skipped_sources": skipped_sources,
+            "record_count": len(merged_records),
+            "row_count": int(len(section.data.table.index)),
+            "sources": source_strings,
+        }
+    finally:
+        section.close()
+
+
+def _builder_section_has_payload(payload: object) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    for key in ("rows", "payloads", "sources", "imported_rows"):
+        value = payload.get(key)
+        if isinstance(value, Mapping) and value:
+            return True
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and value:
+            return True
+    return False
+
+
+def _builder_rebuild_sections_from_command(
+    command: Mapping[str, Any],
+    *,
+    sections: Mapping[str, Any],
+    command_index: int,
+) -> set[str]:
+    raw_sections = command.get("sections")
+    if raw_sections in (None, ""):
+        return {
+            str(key)
+            for key, payload in sections.items()
+            if key not in {"assemble", "compare"} and _builder_section_has_payload(payload)
+        }
+    if not isinstance(raw_sections, list):
+        raise _AutomationRecipeError(
+            f"Builder rebuild_assemble command {command_index} field 'sections' must be an array when provided."
+        )
+    selected = {str(value).strip() for value in raw_sections if str(value).strip()}
+    if not selected:
+        raise _AutomationRecipeError(
+            f"Builder rebuild_assemble command {command_index} field 'sections' must not be empty."
+        )
+    return selected
+
+
+def _decode_builder_section_payload(
+    builder_ui: Any,
+    sections: Mapping[str, Any],
+    section_name: str,
+    payload_name: str,
+) -> Any:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return None
+    payloads = section.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return None
+    encoded = payloads.get(payload_name)
+    decoder = getattr(builder_ui, "_decode_project_payload", None)
+    if not callable(decoder):
+        return None
+    return decoder(encoded)
+
+
+def _builder_section_rows_as_frame(
+    sections: Mapping[str, Any],
+    section_name: str,
+) -> pd.DataFrame:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return pd.DataFrame()
+    rows = section.get("rows")
+    columns = section.get("columns")
+    if not isinstance(rows, list):
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    if isinstance(columns, list):
+        ordered = [str(column) for column in columns if str(column) in frame.columns]
+        extra = [column for column in frame.columns if column not in ordered]
+        frame = frame[ordered + extra]
+    return frame
+
+
+def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
+    if frame.empty:
+        return {}
+    result: dict[str, dict[str, float]] = {}
+    for row in frame.to_dict(orient="records"):
+        key = str(row.get("_group_key") or "").strip()
+        if not key:
+            composition = str(row.get("Composition") or "").strip()
+            microwire = str(row.get("Microwire") or "").strip()
+            if composition and microwire:
+                key = f"{composition}|{microwire.replace('/', '|')}"
+        if not key:
+            continue
+        entry: dict[str, float] = {}
+        for label, column in {
+            "As": "As (°C)",
+            "Af": "Af (°C)",
+            "Ms": "Ms (°C)",
+            "Mf": "Mf (°C)",
+        }.items():
+            value = row.get(column)
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                entry[label] = numeric
+        if entry:
+            result[key] = entry
+    return result
+
+
+def _run_builder_rebuild_assemble_command_lightweight(
+    *,
+    builder_ui: Any,
+    command: dict[str, Any],
+    command_index: int,
+    sections: dict[str, Any],
+    output_project: Path,
+) -> dict[str, Any]:
+    selected = _builder_rebuild_sections_from_command(
+        command,
+        sections=sections,
+        command_index=command_index,
+    )
+    if not selected:
+        raise _AutomationRecipeError(
+            f"Builder rebuild_assemble command {command_index} has no section payloads to assemble."
+        )
+
+    def _payload(section_name: str, payload_name: str, fallback: Any) -> Any:
+        value = _decode_builder_section_payload(builder_ui, sections, section_name, payload_name)
+        return value if value is not None else fallback
+
+    config = builder_ui.BuilderConfig(
+        annealing_files=[],
+        fabrication_files=[],
+        output_dir=output_project.parent,
+        microscope_files=[],
+        video_files=[],
+        strain_files=[],
+        make_plots=False,
+        export_formats=(),
+        plot_backends=(),
+        output_name=output_project.stem,
+        include_microscope_crops=False,
+    )
+    transition_points = _transition_rows_to_map(
+        _builder_section_rows_as_frame(sections, "transition_temps")
+    )
+    result = builder_ui.build_database(
+        config,
+        logger=LOGGER,
+        fabrication_index=_payload("fabrication", "fabrication_index", builder_ui.FabricationIndex()),
+        measurement_records=(
+            _payload("annealing", "annealing_records", [])
+            if "annealing" in selected
+            else []
+        ),
+        vsm_hysteresis_records=(
+            _payload("vsm_hysteresis", "vsm_hysteresis_records", [])
+            if "vsm_hysteresis" in selected
+            else []
+        ),
+        vsm_temperature_scan_records=(
+            _payload("vsm_temperature_scan", "vsm_temperature_scan_records", [])
+            if "vsm_temperature_scan" in selected
+            else []
+        ),
+        dma_iso_stress_records=(
+            _payload("dma_iso_stress", "dma_iso_stress_records", [])
+            if "dma_iso_stress" in selected
+            else []
+        ),
+        mini_dma_records=(
+            _payload("mini_dma", "mini_dma_records", [])
+            if "mini_dma" in selected
+            else []
+        ),
+        shape_memory_stress_strain_records=(
+            _payload(
+                "shape_memory_stress_strain",
+                "shape_memory_stress_strain_records",
+                [],
+            )
+            if "shape_memory_stress_strain" in selected
+            else []
+        ),
+        fmr_records=(
+            _payload("fmr", "fmr_records", [])
+            if "fmr" in selected
+            else []
+        ),
+        microscope_index=(
+            _payload("microscope", "microscope_index", {})
+            if "microscope" in selected
+            else {}
+        ),
+        video_index=(
+            _payload("videos", "video_index", {})
+            if "videos" in selected
+            else {}
+        ),
+        strain_records=(
+            _payload("strain", "strain_records", {})
+            if "strain" in selected
+            else {}
+        ),
+        transition_temps=transition_points if "transition_temps" in selected else {},
+        skip_exports=True,
+        include_fabrication_draw_siblings=True,
+    )
+    dataframe = result.dataframe if hasattr(result, "dataframe") else pd.DataFrame()
+    if not isinstance(dataframe, pd.DataFrame):
+        dataframe = pd.DataFrame()
+    rows = [
+        {str(column): builder_ui._json_safe(row.get(column)) for column in dataframe.columns}
+        for row in dataframe.to_dict(orient="records")
+    ]
+    sections["assemble"] = {
+        "section": "assemble",
+        "title": "Assemble",
+        "columns": [str(column) for column in dataframe.columns],
+        "rows": rows,
+        "index": [builder_ui._json_safe(index) for index in dataframe.index.tolist()],
+    }
+    return {
+        "action": "rebuild_assemble",
+        "status": "ok",
+        "sections": sorted(selected),
+        "row_count": int(len(dataframe.index)),
+        "column_count": int(len(dataframe.columns)),
+    }
+
+
+def _timestamp_for_builder_database(recipe: Mapping[str, Any]) -> str:
+    raw = recipe.get("timestamp")
+    if raw is not None:
+        text = str(raw).strip()
+        if text:
+            return re.sub(r"[^0-9A-Za-z_-]+", "_", text)
+    return datetime.now().strftime("%Y-%m-%d_%H%M")
+
+
+def _builder_database_paths(
+    recipe: Mapping[str, Any],
+    *,
+    base_dir: Path,
+) -> dict[str, Path | str] | None:
+    raw_database_dir = recipe.get("database_dir")
+    if raw_database_dir in (None, ""):
+        return None
+    database_dir = _resolve_recipe_path_value(
+        raw_database_dir,
+        base_dir=base_dir,
+        field_name="database_dir",
+    )
+    if database_dir is None:
+        raise _AutomationRecipeError("Builder database field 'database_dir' must be a path.")
+    database_name = str(recipe.get("database_name") or "microwire_database").strip()
+    if not database_name:
+        database_name = "microwire_database"
+    database_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", database_name)
+    timestamp = _timestamp_for_builder_database(recipe)
+    archive_dir = database_dir / "archive"
+    return {
+        "database_dir": database_dir,
+        "database_name": database_name,
+        "timestamp": timestamp,
+        "latest_project": database_dir / f"{database_name}_latest.pydpj",
+        "latest_manifest": database_dir / "update_manifest_latest.json",
+        "archive_dir": archive_dir,
+        "archive_project": archive_dir / f"{database_name}_{timestamp}.pydpj",
+        "archive_manifest": archive_dir / f"update_manifest_{timestamp}.json",
+    }
+
+
+def _archive_existing_builder_database_latest(database_paths: Mapping[str, Path | str]) -> dict[str, str | None]:
+    latest_project = cast(Path, database_paths["latest_project"])
+    latest_manifest = cast(Path, database_paths["latest_manifest"])
+    archive_project = cast(Path, database_paths["archive_project"])
+    archive_manifest = cast(Path, database_paths["archive_manifest"])
+    archive_dir = cast(Path, database_paths["archive_dir"])
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archived_project: str | None = None
+    archived_manifest: str | None = None
+    if latest_project.exists():
+        target = archive_project
+        counter = 1
+        while target.exists():
+            target = archive_project.with_name(f"{archive_project.stem}_{counter}{archive_project.suffix}")
+            counter += 1
+        shutil.move(str(latest_project), str(target))
+        archived_project = str(target.resolve())
+    if latest_manifest.exists():
+        target = archive_manifest
+        counter = 1
+        while target.exists():
+            target = archive_manifest.with_name(f"{archive_manifest.stem}_{counter}{archive_manifest.suffix}")
+            counter += 1
+        shutil.move(str(latest_manifest), str(target))
+        archived_manifest = str(target.resolve())
+    return {
+        "archived_project": archived_project,
+        "archived_manifest": archived_manifest,
+    }
+
+
+def _run_builder_automation_recipe(recipe_path: Path) -> int:
+    try:
+        recipe = _load_json_object(recipe_path, label="Automation recipe")
+        base_dir = recipe_path.parent
+        if recipe.get("kind") != "builder":
+            raise _AutomationRecipeError("Builder automation recipe kind must be 'builder'.")
+        if recipe.get("version") != 1:
+            raise _AutomationRecipeError(
+                f"Unsupported builder automation recipe version {recipe.get('version')!r}. Only version 1 is supported."
+            )
+
+        database_paths = _builder_database_paths(recipe, base_dir=base_dir)
+        raw_project_value = recipe.get("project")
+        if raw_project_value in (None, "") and database_paths is not None:
+            latest_project = cast(Path, database_paths["latest_project"])
+            raw_project_value = str(latest_project) if latest_project.exists() else None
+        project_path = _resolve_recipe_path_value(
+            raw_project_value,
+            base_dir=base_dir,
+            field_name="project",
+        )
+        if project_path is None or not project_path.exists():
+            raise _AutomationRecipeError("Builder automation field 'project' must point to an existing .pydpj file.")
+
+        source_payload = _load_json_object(project_path, label="Microwire Data Builder project")
+        _validate_builder_project_payload(source_payload, path=project_path)
+
+        working_copy_dir = _resolve_recipe_path_value(
+            recipe.get("working_copy_dir"),
+            base_dir=base_dir,
+            field_name="working_copy_dir",
+        )
+        if working_copy_dir is None:
+            if database_paths is not None:
+                working_copy_dir = cast(Path, database_paths["database_dir"]) / "_working"
+            else:
+                working_copy_dir = (base_dir / "builder_automation").resolve()
+        working_copy_dir.mkdir(parents=True, exist_ok=True)
+
+        output_project = _resolve_recipe_path_value(
+            recipe.get("output_project"),
+            base_dir=base_dir,
+            field_name="output_project",
+        )
+        if output_project is None:
+            if database_paths is not None:
+                output_project = (
+                    working_copy_dir
+                    / f"{database_paths['database_name']}_{database_paths['timestamp']}.pydpj"
+                )
+            else:
+                output_project = working_copy_dir / f"{project_path.stem}.updated{project_path.suffix}"
+        output_project = output_project.with_suffix(".pydpj")
+        try:
+            same_project = project_path.resolve() == output_project.resolve()
+        except Exception:
+            same_project = str(project_path) == str(output_project)
+        if same_project and not bool(recipe.get("overwrite_source", False)):
+            raise _AutomationRecipeError(
+                "Builder automation refuses to overwrite the source .pydpj without overwrite_source=true."
+            )
+        output_project.parent.mkdir(parents=True, exist_ok=True)
+        if not same_project:
+            shutil.copy2(project_path, output_project)
+
+        project_payload = _load_json_object(output_project, label="Microwire Data Builder project copy")
+        _validate_builder_project_payload(project_payload, path=output_project)
+        sections = project_payload.get("sections")
+        if not isinstance(sections, dict):
+            sections = {}
+            project_payload["sections"] = sections
+
+        commands = recipe.get("commands")
+        if not isinstance(commands, list) or not commands:
+            raise _AutomationRecipeError("Builder automation field 'commands' must be a non-empty array.")
+
+        manifest_path = _resolve_recipe_path_value(
+            recipe.get("manifest_path"),
+            base_dir=base_dir,
+            field_name="manifest_path",
+        )
+        if manifest_path is None:
+            if database_paths is not None:
+                manifest_path = (
+                    working_copy_dir
+                    / f"update_manifest_{database_paths['timestamp']}.json"
+                )
+            else:
+                manifest_path = output_project.with_suffix(".manifest.json")
+
+        os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        from microwire_data_builder import storage as builder_storage
+        from microwire_data_builder import ui as builder_ui
+
+        original_storage_root = builder_storage._storage_root
+        automation_store = working_copy_dir / "_builder_store"
+        if automation_store.exists():
+            shutil.rmtree(automation_store)
+        builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+        command_results: list[dict[str, Any]] = []
+        try:
+            for index, command in enumerate(commands):
+                if not isinstance(command, dict):
+                    raise _AutomationRecipeError(f"Builder command {index} must be an object.")
+                action = str(command.get("action") or "").strip()
+                section_name = str(command.get("section") or "").strip()
+                if action == "rebuild_assemble":
+                    command_results.append(
+                        _run_builder_rebuild_assemble_command_lightweight(
+                            builder_ui=builder_ui,
+                            command=command,
+                            command_index=index,
+                            sections=sections,
+                            output_project=output_project,
+                        )
+                    )
+                    continue
+                if action != "update_section":
+                    raise _AutomationRecipeError(
+                        f"Unsupported builder command {index}: action={action!r}, section={section_name!r}."
+                    )
+                command_results.append(
+                    _run_builder_update_section_command(
+                        builder_ui=builder_ui,
+                        command=command,
+                        command_index=index,
+                        section_name=section_name,
+                        sections=sections,
+                        base_dir=base_dir,
+                    )
+                )
+        finally:
+            builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
+            builder_storage.MiniDatabaseStore._memory_data = {}
+            builder_storage.MiniDatabaseStore._memory_payloads = {}
+            builder_storage.MiniDatabaseStore._pending_sections = set()
+            builder_storage.MiniDatabaseStore._pending_payloads = set()
+            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+        project_payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        output_project.write_text(
+            json.dumps(project_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        manifest = {
+            "kind": "builder",
+            "version": 1,
+            "status": "ok",
+            "source_project": str(project_path.resolve()),
+            "copied_project": str(output_project.resolve()),
+            "manifest_path": str(manifest_path.resolve()),
+            "commands": command_results,
+        }
+        if database_paths is not None:
+            database_dir = cast(Path, database_paths["database_dir"])
+            latest_project = cast(Path, database_paths["latest_project"])
+            latest_manifest = cast(Path, database_paths["latest_manifest"])
+            database_dir.mkdir(parents=True, exist_ok=True)
+            archive_result = _archive_existing_builder_database_latest(database_paths)
+            shutil.copy2(output_project, latest_project)
+            manifest["database"] = {
+                "database_dir": str(database_dir.resolve()),
+                "database_name": str(database_paths["database_name"]),
+                "timestamp": str(database_paths["timestamp"]),
+                "latest_project": str(latest_project.resolve()),
+                "latest_manifest": str(latest_manifest.resolve()),
+                **archive_result,
+            }
+        _write_json(manifest_path, manifest)
+        if database_paths is not None:
+            latest_manifest = cast(Path, database_paths["latest_manifest"])
+            _write_json(latest_manifest, manifest)
+        print(json.dumps(manifest, ensure_ascii=False))
+        return 0
+    except _AutomationRecipeError as exc:
+        print(f"[automation-recipe] {exc}")
+        return 2
+    except Exception as exc:
+        print(f"[automation-recipe] {type(exc).__name__}: {exc}")
+        return 1
+
+
 def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationRequest:
     recipe = _load_json_object(recipe_path, label="Automation recipe")
     base_dir = recipe_path.parent
 
     kind = recipe.get("kind")
     if kind != "pyplot":
-        if kind == "builder":
-            raise _AutomationRecipeError(
-                "Automation recipe kind 'builder' is reserved for future work and is not implemented yet."
-            )
         raise _AutomationRecipeError(
             f"Unsupported automation recipe kind {kind!r}. Only 'pyplot' is supported in v1."
         )
@@ -703,8 +1418,8 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     )
     parser.add_argument(
         "--visual-plugin",
-        default="shape-memory",
-        help="Plugin visual-check target. Currently supported: shape-memory.",
+        default="manual-stress-strain",
+        help="Plugin visual-check target. Currently supported: manual-stress-strain.",
     )
     parser.add_argument(
         "--visual-input",
@@ -716,7 +1431,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         "--visual-layout",
         choices=("dual", "separate"),
         default="dual",
-        help="Shape-memory graph layout for visual-check mode.",
+        help="Manual stress/strain graph layout for visual-check mode.",
     )
     parser.add_argument(
         "--visual-output-dir",
@@ -1388,10 +2103,10 @@ _WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "shape_memory_stress_strain": (
         "_word_shape_memory_stress_strain_sources",
-        "Shape memory stress/strain graphs",
-        "Shape memory stress/strain graphs (Origin)",
-        "Shape Memory Stress/Strain",
-        "Shape memory stress/strain Origin graph",
+        "Manual stress/strain graphs",
+        "Manual stress/strain graphs (Origin)",
+        "Manual Stress/Strain",
+        "Manual stress/strain Origin graph",
     ),
     "fmr": (
         "_word_fmr_sources",
@@ -1435,9 +2150,14 @@ _WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[st
         ("Mini DMA graphs", "Mini DMA graphs (Origin)"),
     ),
     (
-        "Shape memory stress/strain",
+        "Manual stress/strain",
         ("_word_shape_memory_stress_strain_sources",),
-        ("Shape memory stress/strain graphs", "Shape memory stress/strain graphs (Origin)"),
+        (
+            "Manual stress/strain graphs",
+            "Manual stress/strain graphs (Origin)",
+            "Shape memory stress/strain graphs",
+            "Shape memory stress/strain graphs (Origin)",
+        ),
     ),
     (
         "FMR",
@@ -2335,8 +3055,12 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:
-    plugin_token = str(getattr(args, "visual_plugin", "shape-memory")).strip().lower()
+    plugin_token = str(getattr(args, "visual_plugin", "manual-stress-strain")).strip().lower()
     supported_tokens = {
+        "manual",
+        "manual-stress-strain",
+        "manual_stress_strain",
+        "manual stress/strain",
         "shape-memory",
         "shape_memory",
         "shape-memory-stress-strain",
@@ -2346,7 +3070,7 @@ def _run_visual_check(args: argparse.Namespace) -> int:
     if plugin_token not in supported_tokens:
         print(
             f"Unsupported --visual-plugin '{plugin_token}'. "
-            "Only shape-memory visual-check is currently implemented."
+            "Only manual stress/strain visual-check is currently implemented."
         )
         return 2
 
@@ -3212,6 +3936,9 @@ def _run_automation_recipe(args: argparse.Namespace, qt_args: list[str]) -> int:
         return 2
     try:
         recipe_path = Path(recipe_value).expanduser()
+        recipe = _load_json_object(recipe_path, label="Automation recipe")
+        if recipe.get("kind") == "builder":
+            return _run_builder_automation_recipe(recipe_path)
         request = _load_automation_recipe_request(recipe_path)
     except _AutomationRecipeError as exc:
         print(f"[automation-recipe] {exc}")
@@ -3415,6 +4142,11 @@ LOGGERS: Dict[str, LauncherFactory] = {
         "Current Annealing Logger",
         "data_logging.current_annealing_logger.current_annealing_logger",
         "current_annealing",
+    ),
+    "AC Susceptibility Logger": _experiment_process_launcher(
+        "AC Susceptibility Logger",
+        "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+        "ac_susceptibility",
     ),
     "Mini DMA Logger": _experiment_process_launcher(
         "Mini DMA Logger",

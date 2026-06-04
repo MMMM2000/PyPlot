@@ -4797,12 +4797,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         label = str(text or "").strip()
         if not label:
             return "", ""
+        if UNIT_SUFFIX_BRACKET_RE.search(label) is None and re.search(r"\[[^\[\]]+\]", label):
+            return label, ""
         for pattern in (UNIT_SUFFIX_BRACKET_RE, UNIT_SUFFIX_PAREN_RE):
             match = pattern.match(label)
             if not match:
                 continue
             prefix = str(match.group("prefix") or "").strip()
             unit = str(match.group("unit") or "").strip()
+            if pattern is UNIT_SUFFIX_PAREN_RE and re.search(r"\[[^\[\]]+\]", prefix):
+                return label, ""
             return prefix or label, unit
         return label, ""
 
@@ -6312,7 +6316,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 except Exception:
                     continue
 
-    @staticmethod
     @staticmethod
     def _origin_marker_active(marker: str | None, markersize: float | None) -> bool:
         marker_text = str(marker or "").strip().lower()
@@ -20364,7 +20367,10 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
                 and self._owner is not None
                 and not self._owner._syncing_state  # noqa: SLF001
             ):
-                old_state = event.oldState()
+                old_state_getter = getattr(event, "oldState", None)
+                if not callable(old_state_getter):
+                    return
+                old_state = old_state_getter()
                 was_maximized = bool(
                     old_state
                     & (
@@ -20377,7 +20383,7 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
                     self.isMaximized() or self.isFullScreen(),
                     source=self,
                 )
-                if event.oldState() & QtCore.Qt.WindowState.WindowMinimized:
+                if old_state & QtCore.Qt.WindowState.WindowMinimized:
                     normalizer = getattr(self._owner, "_normalize_docks_initial", None)  # noqa: SLF001
                     if callable(normalizer):
                         QtCore.QTimer.singleShot(30, normalizer)
