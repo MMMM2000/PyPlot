@@ -2113,6 +2113,14 @@ def test_ac_logger_shared_broker_ignores_legacy_unconfirmed_channel_and_shows_pi
     assert window._selected_ac_broker_channel() == 1
     assert settings.value("psu_profiles/shared_hmp_broker/broker_channel_confirmed", False, type=bool) is True
     assert "CH1" in window.label_ac_hardware_status.text()
+
+    window.spinBox_ac_broker_channel.setValue(3)
+    window._handle_ac_broker_channel_changed(3)
+
+    assert window._selected_ac_broker_channel() == 3
+    assert settings.value("psu_profiles/shared_hmp_broker/broker_channel", 0, type=int) == 3
+    assert settings.value("psu_profiles/shared_hmp_broker/broker_channel_confirmed", False, type=bool) is True
+    assert "CH3" in window.label_ac_hardware_status.text()
     app.processEvents()
 
 
