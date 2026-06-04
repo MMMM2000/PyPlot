@@ -917,6 +917,16 @@ def test_shared_broker_current_source_leases_turns_off_and_releases_only_channel
     assert measurement.current_actual_a == pytest.approx(0.0198)
     client = clients[0]
     assert ("lease", (2, "ac_susceptibility_logger", "ac_susceptibility")) in client.events
+    assert (
+        "configure",
+        {
+            "channel": 2,
+            "lease_id": "lease-ac-2",
+            "voltage_v": 30.0,
+            "current_a": 0.02,
+            "output_on": True,
+        },
+    ) in client.events
     assert client.events[-2:] == [
         ("output", {"channel": 2, "lease_id": "lease-ac-2", "output_on": False}),
         ("release", {"channel": 2, "lease_id": "lease-ac-2"}),
@@ -2008,6 +2018,42 @@ def test_ac_logger_defaults_to_lcr_current_excitation(monkeypatch: pytest.Monkey
         app.processEvents()
 
 
+def test_ac_logger_lcr_chips_drive_scan_lists_and_keep_panel_compact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "lcr_chip_scan_lists")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        frequency_chips = window.frame_lcr_frequency_chips.findChildren(ac_logger.AcValueChip)
+        level_chips = window.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
+        assert len(frequency_chips) == len(ac_logger.DEFAULT_FREQUENCY_PRESETS_HZ)
+        assert len(level_chips) == len(ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
+        assert all(chip.isChecked() for chip in frequency_chips)
+        assert all(chip.isChecked() for chip in level_chips)
+
+        frequency_chips[-1].setChecked(False)
+        assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(
+            ac_logger.DEFAULT_FREQUENCY_PRESETS_HZ[:-1]
+        )
+
+        window._set_combo_data(window.comboBox_lcr_level_mode, "voltage")
+        window._handle_lcr_level_mode_changed()
+        voltage_chips = window.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
+        assert [chip.text() for chip in voltage_chips] == ["0.01 V", "0.1 V", "0.3 V", "0.5 V", "1 V", "1.5 V", "2 V"]
+        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(
+            ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V
+        )
+        assert window.ui.left_scroll.maximumWidth() <= 720
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_can_switch_lcr_excitation_between_current_and_voltage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2129,14 +2175,14 @@ def test_ac_logger_shared_broker_requires_manual_channel_selection_for_sweep_con
     with pytest.raises(ValueError, match="shared HMP broker channel"):
         window._build_ac_sweep_config()
 
-    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(3))
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(1))
     window._handle_ac_broker_channel_changed()
     config = window._build_ac_sweep_config()
 
     assert config.psu_backend == "shared_hmp_broker"
-    assert config.psu_resource == "127.0.0.1:8765/CH3"
-    assert config.shared_broker_channel == 3
-    assert window._selected_ac_broker_channel() == 3
+    assert config.psu_resource == "127.0.0.1:8765/CH1"
+    assert config.shared_broker_channel == 1
+    assert window._selected_ac_broker_channel() == 1
     app.processEvents()
 
 

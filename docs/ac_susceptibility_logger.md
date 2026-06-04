@@ -175,6 +175,11 @@ The official LCR-6000 manual gives these ranges for the lab LCR-6200:
 - Front-panel current increment presets: `100 uA`, `500 uA`, `1.00 mA`,
   `5.00 mA`, `10.00 mA`, `20.00 mA`.
 
+The UI shows the standard frequency and excitation presets as checkable chips
+so common scan matrices can be edited without retyping comma-separated lists.
+Use **Custom lists** when an odd frequency or excitation value is needed; the
+custom text fields remain the source of truth saved into run metadata.
+
 The UI includes one-click preset selectors:
 
 - **Default full scan**: the full practical frequency scan and all presets for
@@ -310,8 +315,10 @@ that leased channel when the sweep stops or fails. The detached serial watchdog
 is not armed in broker mode because it cannot safely address a broker lease;
 the worker shutdown path performs the broker channel shutdown/release instead.
 The broker channel starts as **Select channel...** on first use, and a sweep will
-not start until the operator explicitly chooses the wired HMP channel. Channels
-saved by older development builds before this confirmation marker are treated as
+not start until the operator explicitly chooses the wired HMP channel. On the
+current shared bench, choose `CH1` for AC susceptibility; Mini DMA uses `CH3`
+for its motor rail and `CH4` for its current-sweep channel. Channels saved by
+older development builds before this confirmation marker are treated as
 unconfirmed and must be selected again.
 
 Shared-broker bench setup still has to be confirmed outside the AC logger with

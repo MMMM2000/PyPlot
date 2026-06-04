@@ -1845,10 +1845,12 @@ class SharedBrokerCurrentSource:
     def set_current(self, current_a: float) -> None:
         resolution = max(1e-6, float(self.profile.get("current_resolution_a", 0.001)))
         current = max(0.0, round(float(current_a) / resolution) * resolution)
-        self._require_client().set_current(
+        self._require_client().configure_channel(
             channel=self.channel,
             lease_id=self._ensure_lease(),
-            current_mA=current * 1000.0,
+            voltage_v=self.voltage_limit_v,
+            current_a=current,
+            output_on=True,
         )
 
     def set_voltage_limit(self, voltage_v: float) -> None:

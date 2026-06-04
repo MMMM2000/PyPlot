@@ -143,6 +143,21 @@ class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
             return float(self.value())
 
 
+class AcValueChip(QtWidgets.QPushButton):
+    """Small checkable value button used for common LCR scan presets."""
+
+    def __init__(self, label: str, value: float, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(label, parent)
+        self.value = float(value)
+        self.setCheckable(True)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(
+            "QPushButton { padding: 3px 7px; border-radius: 4px; }"
+            "QPushButton:checked { background: #265f72; border: 1px solid #39a9c4; }"
+        )
+
+
 @dataclass
 class AcPlotPoint:
     elapsed_s: float
@@ -670,6 +685,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_shared_broker_port = AC_DEFAULT_BROKER_PORT
         self._ac_shared_broker_channel = AC_DEFAULT_BROKER_CHANNEL
         self._ac_shared_broker_channel_confirmed = False
+        self._ac_lcr_chip_syncing = False
         self._ac_progress_units = "count"
         self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
@@ -1910,6 +1926,9 @@ class MainWindow(CurrentAnnealingWindow):
         self.comboBox_ac_broker_channel.addItem("Select channel...", 0)
         for channel in range(1, 5):
             self.comboBox_ac_broker_channel.addItem(f"CH{channel}", channel)
+        self.comboBox_ac_broker_channel.setToolTip(
+            "Select the wired HMP channel explicitly. On the current shared bench, AC susceptibility uses CH1."
+        )
         details_grid.addWidget(self.label_ac_broker_host, 2, 0)
         details_grid.addWidget(self.lineEdit_ac_broker_host, 2, 1)
         broker_row = QtWidgets.QHBoxLayout()
@@ -2035,34 +2054,69 @@ class MainWindow(CurrentAnnealingWindow):
 
         self.lineEdit_lcr_frequencies.setPlaceholderText("10, 20, 50, 100, 200, 500, 1k, 2k, 5k, 10k, 20k, 50k, 100k, 200k")
         self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.5, 1, 5, 10, 20 mA")
+        self.lineEdit_lcr_frequencies.setVisible(False)
+        self.lineEdit_lcr_levels.setVisible(False)
+        self.frame_lcr_frequency_chips = self._build_lcr_chip_grid(
+            group,
+            DEFAULT_FREQUENCY_PRESETS_HZ,
+            formatter=self._format_lcr_frequency_chip,
+            columns=7,
+            changed=self._sync_lcr_frequencies_from_chips,
+        )
+        self.frame_lcr_level_chips = self._build_lcr_chip_grid(
+            group,
+            LCR_FRONT_PANEL_CURRENT_PRESETS_MA,
+            formatter=self._format_lcr_level_chip,
+            columns=6,
+            changed=self._sync_lcr_levels_from_chips,
+        )
+        self.toolButton_lcr_custom_lists = QtWidgets.QToolButton(group)
+        self.toolButton_lcr_custom_lists.setText("Custom lists")
+        self.toolButton_lcr_custom_lists.setCheckable(True)
+        self.toolButton_lcr_custom_lists.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.toolButton_lcr_custom_lists.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.frame_lcr_custom_lists = QtWidgets.QFrame(group)
+        custom_grid = QtWidgets.QGridLayout(self.frame_lcr_custom_lists)
+        custom_grid.setContentsMargins(0, 0, 0, 0)
+        custom_grid.setColumnStretch(1, 1)
+        custom_grid.addWidget(QtWidgets.QLabel("Frequency list:", self.frame_lcr_custom_lists), 0, 0)
+        custom_grid.addWidget(self.lineEdit_lcr_frequencies, 0, 1)
+        custom_grid.addWidget(self.pushButton_lcr_all_frequencies, 0, 2)
+        self.label_lcr_custom_levels = QtWidgets.QLabel("Excitation list:", self.frame_lcr_custom_lists)
+        custom_grid.addWidget(self.label_lcr_custom_levels, 1, 0)
+        custom_grid.addWidget(self.lineEdit_lcr_levels, 1, 1)
+        custom_grid.addWidget(self.pushButton_lcr_all_levels, 1, 2)
+        self.frame_lcr_custom_lists.hide()
+        self.lineEdit_lcr_frequencies.setVisible(True)
+        self.lineEdit_lcr_levels.setVisible(True)
 
         grid.addWidget(QtWidgets.QLabel("Frequencies:", group), 0, 0)
-        grid.addWidget(self.lineEdit_lcr_frequencies, 0, 1, 1, 3)
+        grid.addWidget(self.frame_lcr_frequency_chips, 0, 1, 1, 3)
         preset_row = QtWidgets.QHBoxLayout()
         preset_row.addWidget(self.pushButton_lcr_default_presets)
-        preset_row.addWidget(self.pushButton_lcr_all_frequencies)
-        preset_row.addWidget(self.pushButton_lcr_all_levels)
+        preset_row.addWidget(self.toolButton_lcr_custom_lists)
         preset_row.addStretch(1)
         grid.addLayout(preset_row, 1, 1, 1, 3)
         self.label_lcr_levels = QtWidgets.QLabel("LCR excitation current:", group)
         grid.addWidget(self.label_lcr_levels, 2, 0)
-        grid.addWidget(self.lineEdit_lcr_levels, 2, 1, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Model:", group), 3, 0)
+        grid.addWidget(self.frame_lcr_level_chips, 2, 1, 1, 3)
+        grid.addWidget(self.frame_lcr_custom_lists, 3, 1, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Model:", group), 4, 0)
         model_label = QtWidgets.QLabel("Ls-Rs", group)
         model_label.setToolTip("Recommended default for the overnight AC susceptibility workflow.")
-        grid.addWidget(model_label, 3, 1)
-        grid.addWidget(self.checkBox_lcr_model_lprp, 3, 2, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("LCR speed:", group), 4, 0)
-        grid.addWidget(self.comboBox_lcr_aperture, 4, 1)
-        grid.addWidget(QtWidgets.QLabel("Monitor 1:", group), 4, 2)
-        grid.addWidget(self.comboBox_lcr_monitor1, 4, 3)
+        grid.addWidget(model_label, 4, 1)
+        grid.addWidget(self.checkBox_lcr_model_lprp, 4, 2, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("LCR speed:", group), 5, 0)
+        grid.addWidget(self.comboBox_lcr_aperture, 5, 1)
+        grid.addWidget(QtWidgets.QLabel("Monitor 1:", group), 5, 2)
+        grid.addWidget(self.comboBox_lcr_monitor1, 5, 3)
         self.comboBox_lcr_monitor2.hide()
-        grid.addWidget(QtWidgets.QLabel("Excitation mode:", group), 5, 0)
-        grid.addWidget(self.comboBox_lcr_level_mode, 5, 1)
-        grid.addWidget(self.comboBox_lcr_function, 5, 2)
-        grid.addWidget(self.checkBox_lcr_model_lsrs, 5, 3)
-        grid.addWidget(self.checkBox_ac_plan_loops, 6, 0)
-        grid.addWidget(self.pushButton_apply_lcr_setting, 6, 3)
+        grid.addWidget(QtWidgets.QLabel("Excitation mode:", group), 6, 0)
+        grid.addWidget(self.comboBox_lcr_level_mode, 6, 1)
+        grid.addWidget(self.comboBox_lcr_function, 6, 2)
+        grid.addWidget(self.checkBox_lcr_model_lsrs, 6, 3)
+        grid.addWidget(self.checkBox_ac_plan_loops, 7, 0)
+        grid.addWidget(self.pushButton_apply_lcr_setting, 7, 3)
         outer.addLayout(grid)
 
         plan_group = QtWidgets.QGroupBox("Experiment plan", group)
@@ -2114,6 +2168,7 @@ class MainWindow(CurrentAnnealingWindow):
 
         cast(QtWidgets.QVBoxLayout, layout).addWidget(group)
         self.groupBox_lcr_settings = group
+        self._make_ac_settings_panel_width_friendly()
 
         self.pushButton_refresh_lcr_ports.clicked.connect(self.populate_lcr_ports)
         self.pushButton_connect_lcr.clicked.connect(self.handle_connect_lcr_clicked)
@@ -2128,6 +2183,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_lcr_default_presets.clicked.connect(self.apply_default_lcr_presets)
         self.pushButton_lcr_all_frequencies.clicked.connect(self.apply_all_lcr_frequencies)
         self.pushButton_lcr_all_levels.clicked.connect(self.apply_all_lcr_levels)
+        self.toolButton_lcr_custom_lists.toggled.connect(self._set_lcr_custom_lists_visible)
         self.comboBox_lcr_level_mode.currentIndexChanged.connect(lambda *_args: self._handle_lcr_level_mode_changed())
         for shared in (
             getattr(self.ui, "comboBox_supply", None),
@@ -2145,6 +2201,7 @@ class MainWindow(CurrentAnnealingWindow):
         for edit in (self.lineEdit_lcr_frequencies, self.lineEdit_lcr_levels):
             edit.editingFinished.connect(self._store_lcr_settings)
             edit.editingFinished.connect(self._update_ac_sweep_estimate)
+            edit.editingFinished.connect(self._sync_lcr_chips_from_text)
         for combo in (
             self.comboBox_lcr_level_mode,
             self.comboBox_lcr_function,
@@ -2179,6 +2236,174 @@ class MainWindow(CurrentAnnealingWindow):
                 signal.connect(lambda *_args: self._store_lcr_settings())
                 signal.connect(lambda *_args: self._update_ac_sweep_estimate())
         self._install_ac_wheel_guard(group)
+
+    def _make_ac_settings_panel_width_friendly(self) -> None:
+        scroll = getattr(getattr(self, "ui", None), "left_scroll", None)
+        if isinstance(scroll, QtWidgets.QScrollArea):
+            scroll.setMinimumWidth(500)
+            scroll.setMaximumWidth(720)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            viewport = scroll.widget()
+            if isinstance(viewport, QtWidgets.QWidget):
+                viewport.setMinimumWidth(0)
+                viewport.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Ignored,
+                    QtWidgets.QSizePolicy.Policy.Preferred,
+                )
+            parent = scroll.parentWidget()
+            if isinstance(parent, QtWidgets.QWidget):
+                parent.setMinimumWidth(500)
+                parent.setMaximumWidth(720)
+        for widget in self.groupBox_lcr_settings.findChildren(
+            (
+                QtWidgets.QComboBox,
+                QtWidgets.QLineEdit,
+                QtWidgets.QAbstractSpinBox,
+                QtWidgets.QPushButton,
+                QtWidgets.QToolButton,
+            )
+        ):
+            widget.setMinimumWidth(0)
+            policy = widget.sizePolicy()
+            if isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QComboBox, QtWidgets.QAbstractSpinBox)):
+                widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, policy.verticalPolicy())
+            if isinstance(widget, QtWidgets.QComboBox):
+                widget.setMinimumContentsLength(0)
+                widget.setSizeAdjustPolicy(
+                    QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+                )
+
+    def _build_lcr_chip_grid(
+        self,
+        parent: QtWidgets.QWidget,
+        values: Sequence[float],
+        *,
+        formatter: Callable[[float], str],
+        columns: int,
+        changed: Callable[[], None],
+    ) -> QtWidgets.QFrame:
+        frame = QtWidgets.QFrame(parent)
+        layout = QtWidgets.QGridLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(4)
+        layout.setVerticalSpacing(4)
+        buttons: list[AcValueChip] = []
+        for index, value in enumerate(values):
+            button = AcValueChip(formatter(float(value)), float(value), frame)
+            button.toggled.connect(lambda _checked=False, callback=changed: callback())
+            row, column = divmod(index, max(1, int(columns)))
+            layout.addWidget(button, row, column)
+            buttons.append(button)
+        for column in range(max(1, int(columns))):
+            layout.setColumnStretch(column, 1)
+        frame.setProperty("_ac_lcr_chip_buttons", buttons)
+        return frame
+
+    @staticmethod
+    def _format_lcr_frequency_chip(value_hz: float) -> str:
+        if value_hz >= 1000.0 and math.isclose(value_hz % 1000.0, 0.0, abs_tol=1e-9):
+            return f"{value_hz / 1000.0:g} kHz"
+        return f"{value_hz:g} Hz"
+
+    def _format_lcr_level_chip(self, value: float) -> str:
+        mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+        unit = "mA" if mode == "current" else "V"
+        return f"{value:g} {unit}"
+
+    def _lcr_chip_buttons(self, frame: QtWidgets.QFrame) -> list[AcValueChip]:
+        buttons = frame.property("_ac_lcr_chip_buttons")
+        if isinstance(buttons, list):
+            return [button for button in buttons if isinstance(button, AcValueChip)]
+        return []
+
+    def _set_lcr_custom_lists_visible(self, visible: bool) -> None:
+        self.frame_lcr_custom_lists.setVisible(bool(visible))
+        self.toolButton_lcr_custom_lists.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if visible else QtCore.Qt.ArrowType.RightArrow
+        )
+
+    def _sync_lcr_frequencies_from_chips(self) -> None:
+        if bool(getattr(self, "_ac_lcr_chip_syncing", False)):
+            return
+        values = [button.value for button in self._lcr_chip_buttons(self.frame_lcr_frequency_chips) if button.isChecked()]
+        self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(values))
+        self._store_lcr_settings()
+        self._update_ac_sweep_estimate()
+
+    def _sync_lcr_levels_from_chips(self) -> None:
+        if bool(getattr(self, "_ac_lcr_chip_syncing", False)):
+            return
+        values = [button.value for button in self._lcr_chip_buttons(self.frame_lcr_level_chips) if button.isChecked()]
+        self.lineEdit_lcr_levels.setText(self._format_numeric_list(values))
+        self._store_lcr_settings()
+        self._update_ac_sweep_estimate()
+
+    def _sync_lcr_chips_from_text(self) -> None:
+        if not hasattr(self, "frame_lcr_frequency_chips") or not hasattr(self, "frame_lcr_level_chips"):
+            return
+        self._ac_lcr_chip_syncing = True
+        try:
+            self._sync_lcr_chip_frame_from_text(
+                self.frame_lcr_frequency_chips,
+                self.lineEdit_lcr_frequencies.text(),
+                parser=lambda text: parse_numeric_list(text, quantity="frequency"),
+            )
+            level_mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+            if level_mode == "current":
+                level_parser = lambda text: [value * 1000.0 for value in self._parse_lcr_levels(text, level_mode=level_mode)]
+            else:
+                level_parser = lambda text: self._parse_lcr_levels(text, level_mode=level_mode)
+            self._sync_lcr_chip_frame_from_text(
+                self.frame_lcr_level_chips,
+                self.lineEdit_lcr_levels.text(),
+                parser=level_parser,
+            )
+        finally:
+            self._ac_lcr_chip_syncing = False
+
+    def _sync_lcr_chip_frame_from_text(
+        self,
+        frame: QtWidgets.QFrame,
+        text: str,
+        *,
+        parser: Callable[[str], list[float]],
+    ) -> None:
+        try:
+            selected_values = parser(text)
+        except Exception:
+            selected_values = []
+        for button in self._lcr_chip_buttons(frame):
+            button.setChecked(
+                any(math.isclose(float(button.value), float(value), rel_tol=1e-9, abs_tol=1e-9) for value in selected_values)
+            )
+
+    def _rebuild_lcr_level_chips(self) -> None:
+        mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+        values = LCR_FRONT_PANEL_CURRENT_PRESETS_MA if mode == "current" else LCR_FRONT_PANEL_VOLTAGE_PRESETS_V
+        layout = self.frame_lcr_level_chips.layout()
+        if layout is not None:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+        rebuilt = self._build_lcr_chip_grid(
+            self.frame_lcr_level_chips.parentWidget() or self,
+            values,
+            formatter=self._format_lcr_level_chip,
+            columns=6,
+            changed=self._sync_lcr_levels_from_chips,
+        )
+        new_buttons = self._lcr_chip_buttons(rebuilt)
+        if layout is not None:
+            for index, button in enumerate(new_buttons):
+                button.setParent(self.frame_lcr_level_chips)
+                row, column = divmod(index, 6)
+                layout.addWidget(button, row, column)
+            self.frame_lcr_level_chips.setProperty("_ac_lcr_chip_buttons", new_buttons)
+            rebuilt.deleteLater()
+        self._sync_lcr_chips_from_text()
 
     def _simplify_inherited_ac_workflow(self) -> None:
         settings_menu_action = self._find_menu_action("&Settings")
@@ -2307,6 +2532,7 @@ class MainWindow(CurrentAnnealingWindow):
             include_zero = self.ac_settings.value("include_zero_current", 0)
             self.checkBox_ac_include_zero_current.setChecked(str(include_zero).lower() in {"1", "true", "yes"})
             self._refresh_lcr_level_mode_ui(reset_levels=False)
+            self._sync_lcr_chips_from_text()
         finally:
             self._ac_loading_settings = False
 
@@ -2386,18 +2612,22 @@ class MainWindow(CurrentAnnealingWindow):
         mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
         if mode == "current":
             self.label_lcr_levels.setText("LCR excitation current:")
+            self.label_lcr_custom_levels.setText("Excitation list:")
             self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.5, 1, 5, 10, 20 mA")
             self.pushButton_lcr_all_levels.setText("All currents")
             self.comboBox_lcr_monitor1.setCurrentText("IAC")
             self.comboBox_lcr_monitor2.setCurrentText("VAC")
         else:
             self.label_lcr_levels.setText("LCR excitation voltage:")
+            self.label_lcr_custom_levels.setText("Excitation list:")
             self.lineEdit_lcr_levels.setPlaceholderText("0.01, 0.1, 0.3, 0.5, 1, 1.5, 2 V")
             self.pushButton_lcr_all_levels.setText("All voltages")
             self.comboBox_lcr_monitor1.setCurrentText("VAC")
             self.comboBox_lcr_monitor2.setCurrentText("IAC")
         if reset_levels:
             self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
+        if hasattr(self, "frame_lcr_level_chips"):
+            self._rebuild_lcr_level_chips()
 
     def populate_lcr_ports(self) -> None:
         self.comboBox_lcr_port.clear()
@@ -3353,17 +3583,20 @@ class MainWindow(CurrentAnnealingWindow):
     def apply_default_lcr_presets(self, *, store: bool = True) -> None:
         self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(DEFAULT_FREQUENCY_PRESETS_HZ))
         self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
+        self._sync_lcr_chips_from_text()
         if store:
             self._store_lcr_settings()
             self._update_ac_sweep_estimate()
 
     def apply_all_lcr_frequencies(self) -> None:
         self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(PRACTICAL_FREQUENCY_PRESETS_HZ))
+        self._sync_lcr_chips_from_text()
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
 
     def apply_all_lcr_levels(self) -> None:
         self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
+        self._sync_lcr_chips_from_text()
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
 
@@ -3602,7 +3835,7 @@ class MainWindow(CurrentAnnealingWindow):
         except RuntimeError:
             confirmed = False
         if channel <= 0 or not confirmed:
-            raise ValueError("Select a shared HMP broker channel first.")
+            raise ValueError("Select a shared HMP broker channel first; use CH1 on the current shared bench.")
         return channel
 
     def _selected_ac_broker_resource(self) -> str:
