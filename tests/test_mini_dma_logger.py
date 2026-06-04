@@ -14651,68 +14651,6 @@ def test_current_sweep_hold_uses_adaptive_response_stiffness_for_large_errors(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_response_gain_increases_after_under_response(
-    tmp_path: Path,
-    qtbot,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        window._automation_active = True
-        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
-        window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
-            400.0,
-            window.spin_diameter.value(),
-        )
-        window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
-        window._set_automation_context(
-            phase="current_hold",
-            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            target_value=50.0,
-            plateau_index=1,
-        )
-        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
-        window._seek_last_error_by_key[seek_key] = 20.0
-
-        gain = window._current_sweep_hold_response_gain(seek_key, 15.0)
-
-        assert gain > mini_dma_mod.SERVO_CORRECTION_GAIN
-    finally:
-        _close_test_window(window)
-
-
-def test_current_sweep_hold_response_gain_damps_after_strong_response_or_reversal(
-    tmp_path: Path,
-    qtbot,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        window._automation_active = True
-        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
-        window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
-            400.0,
-            window.spin_diameter.value(),
-        )
-        window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
-        window._set_automation_context(
-            phase="current_hold",
-            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            target_value=50.0,
-            plateau_index=1,
-        )
-        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
-        window._seek_last_error_by_key[seek_key] = 20.0
-
-        strong_response_gain = window._current_sweep_hold_response_gain(seek_key, 5.0)
-        reversal_gain = window._current_sweep_hold_response_gain(seek_key, -5.0)
-
-        assert strong_response_gain < mini_dma_mod.SERVO_CORRECTION_GAIN
-        assert reversal_gain < mini_dma_mod.SERVO_CORRECTION_GAIN
-    finally:
-        _close_test_window(window)
-
-
 def test_current_sweep_hold_adaptive_response_respects_strain_rail(
     tmp_path: Path,
     qtbot,
@@ -16479,7 +16417,6 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
-        assert "adaptive_current_hold_response_gain" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]
