@@ -78,6 +78,14 @@ The run is not automatically better because it is slower. A `0.2 mA/s` ramp may 
 
 Dynamic current-ramp control should be judged by the same standard: it should approach the precision of slower fixed ramps while keeping measurement time closer to faster fixed ramps.
 
+Before wiring a new dynamic controller into live hardware, run the advisory predictive replay:
+
+```powershell
+uv run python scripts/mini_dma_predictive_replay.py <run-folder> --out artifacts/predictive_controller_evidence
+```
+
+The predictive replay classifies saved current-sweep rows as stable elastic, transformation, recovery, or current-limited, then reports candidate ramp scaling, hold triggers, high-risk coverage, and phase-split stress-error metrics. Treat this as a design gate only: it proves that the proposed controller reacts sensibly to saved traces, but it does not prove that the closed-loop hardware outcome will improve until a campaign-authorized live run confirms it.
+
 ## Generalization Rule
 
 Do not optimize permanent control logic only for one sample, one length, or one composition. Different microwires can have different diameter, gauge length, stiffness, resistance, transformation behavior, and current compliance. Control changes should therefore be based on measured or declared quantities such as:
