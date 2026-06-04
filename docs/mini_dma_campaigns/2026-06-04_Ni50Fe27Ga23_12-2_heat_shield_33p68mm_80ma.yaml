@@ -1,12 +1,12 @@
 schema_version: 1
 kind: mini_dma_optimization_campaign
 campaign:
-  id: 2026-06-04_Ni50Fe27Ga23_12-2_48mm_80ma_future_mount
-  title: Ni50Fe27Ga23 12/2 48 mm 80 mA Mini DMA future mounted-wire run
-  root: G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-04_Ni50Fe27Ga23_12-2_48mm_80ma_future_mount
+  id: 2026-06-04_Ni50Fe27Ga23_12-2_heat_shield_33p68mm_80ma
+  title: Ni50Fe27Ga23 12/2 heat shield 33.68 mm 80 mA Mini DMA optimization
+  root: G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-04_Ni50Fe27Ga23_12-2_heat_shield_33p68mm_80ma
   owner_thread: codex/mini-dma-live-opt-12-2-12e8
 objective:
-  primary: prepare a repeatable Mini DMA iso-stress current-sweep run for the next operator-confirmed mounted 12/2 wire without driving hardware now
+  primary: safely straighten/preload the mounted 12/2 heat-shield wire, then run a repeatable Mini DMA iso-stress current sweep only after CH3/Tic VIN and full preflight are clean
   optimize_for_generalization: true
   success_metrics:
     - stress_error_rms_mpa
@@ -21,14 +21,15 @@ objective:
 sample:
   composition: Ni50Fe27Ga23
   microwire: 12/2
-  length_mm: 47.964
+  condition: heat shield
+  length_mm: 33.68
   diameter_mm: 0.0191
-  diameter_source: previous 12/2 bench-plan/run metadata; operator must reconfirm after mounting
-  mounted_wire_status: not_mounted_as_of_2026-06-04
+  diameter_source: app shows 19.1 um unless a more specific source is verified before run
+  mounted_wire_status: mounted_as_of_2026-06-04_not_straight
   operator_confirmation_required:
     - wire is mounted and mechanically intact
-    - sample identity is Ni50Fe27Ga23 12/2 or this manifest is updated before use
-    - unloaded gauge length is measured and length_mm is updated if it differs
+    - sample identity is Ni50Fe27Ga23 12/2 heat shield or this manifest is updated before use
+    - unloaded gauge length remains 33.68 mm after straightening or length_mm is updated
     - diameter source is still appropriate for the mounted specimen
 control_source:
   required_base_ref: origin/codex/integration-mini-dma-ready-review
@@ -83,11 +84,11 @@ run_plan:
     next_adjustment_rule: if the first run is bad, adjust only the smallest justified campaign parameter before rerun
 reporting:
   required: true
-  report_path: reports/mini_dma_12_2_future_mount_report.pdf
-  image_dir: reports/images/future_mount_12_2
-  summary_path: analysis/mini_dma_12_2_future_mount_summary.json
+  report_path: reports/mini_dma_12_2_heat_shield_33p68mm_report.pdf
+  image_dir: reports/images/heat_shield_12_2_33p68mm
+  summary_path: analysis/mini_dma_12_2_heat_shield_33p68mm_summary.json
   run_quality_cache: run_quality.json
-  per_run_core_plot_pattern: reports/images/future_mount_12_2/{run_name}_core.png
+  per_run_core_plot_pattern: reports/images/heat_shield_12_2_33p68mm/{run_name}_core.png
   send_per_run_core_plot_to_master: true
   require_core_plots: true
   core_plots:
