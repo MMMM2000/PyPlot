@@ -78,7 +78,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-04.3"
+CONTROL_LOGIC_VERSION = "2026-05-29.2"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -102,7 +102,6 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_moving_away_bypasses_persistence",
     "current_hold_moving_away_preserves_predictive_step",
     "current_hold_large_error_not_masked_by_noise",
-    "current_hold_slope_lookahead_step_sizing",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -465,8 +464,6 @@ SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR = 10.0
 SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR = 2.0
 SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
-SERVO_CURRENT_SWEEP_HOLD_SLOPE_LOOKAHEAD_S = 0.7
-SERVO_CURRENT_SWEEP_HOLD_SLOPE_LOOKAHEAD_MAX_FACTOR = 1.6
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
@@ -12278,44 +12275,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return latest_s - float(last_s) >= self._current_sweep_hold_filter_window_s()
 
-    def _current_hold_slope_lookahead_error(
-        self,
-        basis: str,
-        error_value: float,
-        effective_tolerance: float,
-        filtered_signal: ScaleControlSignal | None,
-    ) -> float:
-        if (
-            self._automation_phase != "current_hold"
-            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-            or filtered_signal is None
-        ):
-            return float(error_value)
-        slope = float(filtered_signal.slope_per_s)
-        if not math.isfinite(slope):
-            return float(error_value)
-        if basis == HSW_BASIS_LOAD_G:
-            min_slope = self._current_sweep_hold_min_slope_for_basis(basis)
-        else:
-            min_slope = SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
-        # error is target - current. If error*slope < 0, the filtered signal is
-        # drifting away from target during the feedback/motor latency window.
-        if float(error_value) * slope >= 0.0 or abs(slope) < min_slope:
-            return float(error_value)
-        lookahead_s = max(0.0, SERVO_CURRENT_SWEEP_HOLD_SLOPE_LOOKAHEAD_S)
-        if lookahead_s <= 0.0:
-            return float(error_value)
-        projected = float(error_value) - slope * lookahead_s
-        if projected * float(error_value) <= 0.0:
-            return float(error_value)
-        max_abs = max(
-            abs(float(error_value)),
-            abs(float(effective_tolerance)),
-            1e-12,
-        ) * max(1.0, SERVO_CURRENT_SWEEP_HOLD_SLOPE_LOOKAHEAD_MAX_FACTOR)
-        projected_abs = min(abs(projected), max_abs)
-        return math.copysign(projected_abs, float(error_value))
-
     def _current_hold_error_is_persistent(
         self,
         seek_key: tuple[str, int, float],
@@ -13504,15 +13463,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if slack_cap_mm is not None:
                 nudge_mm = min(nudge_mm, slack_cap_mm)
         else:
-            step_error_value = self._current_hold_slope_lookahead_error(
-                basis,
-                delta_value,
-                effective_tolerance,
-                filtered_signal,
-            )
             nudge_mm = self._predictive_seek_step_mm(
                 basis,
-                step_error_value,
+                delta_value,
                 effective_tolerance,
                 seek_key=seek_key,
             )
@@ -15519,10 +15472,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_entry_confirm_s": SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S,
                 "current_hold_min_away_slope_mpa_s": (
                     SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
-                ),
-                "current_hold_slope_lookahead_s": SERVO_CURRENT_SWEEP_HOLD_SLOPE_LOOKAHEAD_S,
-                "current_hold_slope_lookahead_max_factor": (
-                    SERVO_CURRENT_SWEEP_HOLD_SLOPE_LOOKAHEAD_MAX_FACTOR
                 ),
             },
             "settings": {

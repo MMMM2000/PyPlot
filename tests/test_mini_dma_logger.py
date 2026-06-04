@@ -14688,93 +14688,6 @@ def test_current_sweep_hold_adaptive_response_respects_strain_rail(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_slope_lookahead_projects_moving_away_error(
-    tmp_path: Path,
-    qtbot,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        window._automation_phase = "current_hold"
-        signal = mini_dma_mod.ScaleControlSignal(
-            value=40.0,
-            latest_value=40.0,
-            noise=0.1,
-            slope_per_s=-5.0,
-            sample_count=5,
-            timestamp_s=12.0,
-        )
-
-        projected = window._current_hold_slope_lookahead_error(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            error_value=10.0,
-            effective_tolerance=1.0,
-            filtered_signal=signal,
-        )
-
-        assert projected == pytest.approx(13.5)
-    finally:
-        _close_test_window(window)
-
-
-def test_current_sweep_hold_slope_lookahead_ignores_recovering_error(
-    tmp_path: Path,
-    qtbot,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        window._automation_phase = "current_hold"
-        signal = mini_dma_mod.ScaleControlSignal(
-            value=40.0,
-            latest_value=40.0,
-            noise=0.1,
-            slope_per_s=5.0,
-            sample_count=5,
-            timestamp_s=12.0,
-        )
-
-        projected = window._current_hold_slope_lookahead_error(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            error_value=10.0,
-            effective_tolerance=1.0,
-            filtered_signal=signal,
-        )
-
-        assert projected == pytest.approx(10.0)
-    finally:
-        _close_test_window(window)
-
-
-def test_current_sweep_hold_slope_lookahead_is_bounded(
-    tmp_path: Path,
-    qtbot,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    try:
-        window._automation_phase = "current_hold"
-        signal = mini_dma_mod.ScaleControlSignal(
-            value=40.0,
-            latest_value=40.0,
-            noise=0.1,
-            slope_per_s=-100.0,
-            sample_count=5,
-            timestamp_s=12.0,
-        )
-
-        projected = window._current_hold_slope_lookahead_error(
-            mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            error_value=10.0,
-            effective_tolerance=1.0,
-            filtered_signal=signal,
-        )
-
-        assert projected == pytest.approx(16.0)
-    finally:
-        _close_test_window(window)
-
-
 def test_very_near_current_sweep_waits_for_two_fresh_samples_after_move(
     tmp_path: Path,
     qtbot,
@@ -16504,7 +16417,6 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
-        assert "current_hold_slope_lookahead_step_sizing" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]
