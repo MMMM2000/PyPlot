@@ -2576,6 +2576,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("lcr_debug_enabled", int(self.checkBox_ac_lcr_debug_log.isChecked()))
         self.ac_settings.setValue("lcr_debug_cadence_s", float(self.spinBox_ac_lcr_debug_cadence.value()))
         self.ac_settings.setValue("lcr_debug_max_rows_per_point", int(self.spinBox_ac_lcr_debug_max_rows.value()))
+        self.ac_settings.sync()
 
     def _handle_lcr_level_mode_changed(self) -> None:
         if not bool(getattr(self, "_ac_loading_settings", False)):

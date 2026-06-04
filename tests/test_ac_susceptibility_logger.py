@@ -21,19 +21,29 @@ ac_logger = pytest.importorskip(
 )
 
 
-def _isolate_ac_qsettings(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+def _isolate_ac_qsettings(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    clear_each_time: bool = True,
+) -> None:
     original = QtCore.QSettings
     ini_format = original.Format.IniFormat
     user_scope = original.Scope.UserScope
+    cleared = False
 
     def factory(_organization: str, _application: str) -> QtCore.QSettings:
+        nonlocal cleared
         settings = original(
             ini_format,
             user_scope,
             "microwire_tests",
             name,
         )
-        settings.clear()
+        if clear_each_time or not cleared:
+            settings.clear()
+            settings.sync()
+            cleared = True
         return settings
 
     monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
@@ -2022,7 +2032,7 @@ def test_ac_logger_lcr_chips_drive_scan_lists_and_keep_panel_compact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    _isolate_ac_qsettings(monkeypatch, "lcr_chip_scan_lists")
+    _isolate_ac_qsettings(monkeypatch, "lcr_chip_scan_lists", clear_each_time=False)
     monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
     monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
     monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
@@ -2040,17 +2050,49 @@ def test_ac_logger_lcr_chips_drive_scan_lists_and_keep_panel_compact(
         assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(
             ac_logger.DEFAULT_FREQUENCY_PRESETS_HZ[:-1]
         )
+        for chip in level_chips:
+            if chip.text() == "20 mA":
+                chip.setChecked(False)
+        assert window.lineEdit_lcr_levels.text() == "0.1, 0.5, 1, 5, 10"
 
-        window._set_combo_data(window.comboBox_lcr_level_mode, "voltage")
-        window._handle_lcr_level_mode_changed()
-        voltage_chips = window.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
-        assert [chip.text() for chip in voltage_chips] == ["0.01 V", "0.1 V", "0.3 V", "0.5 V", "1 V", "1.5 V", "2 V"]
-        assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(
-            ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V
-        )
         assert window.ui.left_scroll.maximumWidth() <= 720
     finally:
         window.close()
+        app.processEvents()
+
+    reopened = ac_logger.MainWindow()
+    try:
+        reopened_frequency_chips = reopened.frame_lcr_frequency_chips.findChildren(ac_logger.AcValueChip)
+        assert [chip.isChecked() for chip in reopened_frequency_chips] == [
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            False,
+        ]
+        reopened_level_chips = reopened.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
+        assert [chip.isChecked() for chip in reopened_level_chips] == [True, True, True, True, True, False]
+        assert reopened.comboBox_lcr_level_mode.currentData() == "current"
+        assert reopened.lineEdit_lcr_levels.text() == "0.1, 0.5, 1, 5, 10"
+
+        reopened._set_combo_data(reopened.comboBox_lcr_level_mode, "voltage")
+        reopened._handle_lcr_level_mode_changed()
+        voltage_chips = reopened.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
+        assert [chip.text() for chip in voltage_chips] == ["0.01 V", "0.1 V", "0.3 V", "0.5 V", "1 V", "1.5 V", "2 V"]
+        assert reopened.lineEdit_lcr_levels.text() == ac_logger.MainWindow._format_numeric_list(
+            ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V
+        )
+    finally:
+        reopened.close()
         app.processEvents()
 
 
