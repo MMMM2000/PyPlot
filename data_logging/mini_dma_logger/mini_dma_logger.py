@@ -121,6 +121,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_waits_for_target_recovery",
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
+    "current_sweep_no_conduction_readback_guard",
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "single_prompt_length_setup",
@@ -490,6 +491,10 @@ CALIBRATION_MAX_AUTO_ACCEPTANCE_LOAD_G = 0.05
 WIRE_BREAK_MIN_SETPOINT_MA = 5.0
 WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
+CURRENT_SWEEP_NO_CONDUCTION_MIN_SETPOINT_MA = 2.0
+CURRENT_SWEEP_NO_CONDUCTION_MAX_MEASURED_MA = 0.5
+CURRENT_SWEEP_NO_CONDUCTION_MAX_VOLTAGE_V = 0.05
+CURRENT_SWEEP_NO_CONDUCTION_CONFIRM_COUNT = 2
 CONTINUITY_CURRENT_DEFAULT_MA = 1.0
 MIN_RECIPE_CURRENT_MA = 1.0
 RAW_SCALE_DISPLAY_LIMIT_DEFAULT_G = 30.0
@@ -3745,6 +3750,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_predictive_trace_s = 0.0
         self._active_current_sweep_last_predictive_phase = ""
         self._active_current_sweep_last_predictive_scale = 1.0
+        self._current_sweep_no_conduction_count = 0
         self._current_sweep_post_hold_throttle_until_s = 0.0
         self._active_current_sweep_last_setpoint_mA: float | None = None
         self._active_current_sweep_display_target_mA: float | None = None
@@ -7962,9 +7968,69 @@ class MainWindow(QtWidgets.QMainWindow):
             self._heating_program_current_mA = current_mA
             if measure_after:
                 self._refresh_supply_snapshot(force=True)
+            if not self._verify_current_sweep_supply_conducting(current_mA):
+                return False
         except Exception as exc:
             self._log(f"Recipe current update failed: {exc}")
             return False
+        return True
+
+    def _verify_current_sweep_supply_conducting(self, setpoint_mA: float) -> bool:
+        if (
+            self._active_current_sweep_step_index is None
+            or not self._automation_active
+            or not self._is_current_sweep_mode(self._automation_name)
+        ):
+            self._current_sweep_no_conduction_count = 0
+            return True
+        if float(setpoint_mA) < CURRENT_SWEEP_NO_CONDUCTION_MIN_SETPOINT_MA:
+            self._current_sweep_no_conduction_count = 0
+            return True
+        channel = self._current_sweep_supply_channel()
+        if channel is not None:
+            output_state = self._supply_channel_output_state(channel)
+            if output_state is False:
+                self._log(
+                    f"Recipe stopped because current-sweep CH{channel} output reported OFF "
+                    f"after commanding {setpoint_mA:.3f} mA."
+                )
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return False
+        snapshot = self._refresh_supply_snapshot(force=True)
+        measured_current_mA = snapshot.get("current_mA")
+        measured_voltage_v = snapshot.get("voltage_V")
+        if measured_current_mA is None or measured_voltage_v is None:
+            return True
+        near_zero_current = abs(float(measured_current_mA)) <= CURRENT_SWEEP_NO_CONDUCTION_MAX_MEASURED_MA
+        near_zero_voltage = abs(float(measured_voltage_v)) <= CURRENT_SWEEP_NO_CONDUCTION_MAX_VOLTAGE_V
+        if near_zero_current and near_zero_voltage:
+            self._current_sweep_no_conduction_count += 1
+            if self._current_sweep_no_conduction_count >= CURRENT_SWEEP_NO_CONDUCTION_CONFIRM_COUNT:
+                self._write_control_trace(
+                    decision="supply_no_conduction",
+                    basis=self._automation_basis,
+                    target_value=self._automation_target_value,
+                    current_value=self._current_distribution_value(
+                        self._automation_basis,
+                        require_after_last_move=False,
+                    ),
+                    tolerance=None,
+                    result="stopped",
+                    reason=(
+                        f"setpoint={setpoint_mA:.3f}mA measured={float(measured_current_mA):.3f}mA "
+                        f"voltage={float(measured_voltage_v):.3f}V"
+                    ),
+                )
+                self._log(
+                    "Recipe stopped because the current-sweep output is not conducting: "
+                    f"commanded {setpoint_mA:.3f} mA but measured "
+                    f"{float(measured_current_mA):.3f} mA at {float(measured_voltage_v):.3f} V."
+                )
+                self._disable_supply_output()
+                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return False
+            return True
+        self._current_sweep_no_conduction_count = 0
         return True
 
     def _continuity_monitor_enabled(self) -> bool:
@@ -18263,6 +18329,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_schedule_update_s = 0.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
+        self._current_sweep_no_conduction_count = 0
         self._active_current_sweep_last_setpoint_mA = None
         self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
@@ -18373,6 +18440,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_schedule_update_s = 0.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
+        self._current_sweep_no_conduction_count = 0
         self._active_current_sweep_last_setpoint_mA = None
         self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
@@ -19303,6 +19371,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_schedule_update_s = 0.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
+        self._current_sweep_no_conduction_count = 0
         self._active_current_sweep_last_setpoint_mA = None
         self._current_sweep_voltage_limited_return_steps.clear()
         self._clear_current_sweep_ramp_hold()
@@ -20801,6 +20870,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_schedule_update_s = now_s
             self._current_sweep_post_hold_throttle_until_s = 0.0
             self._reset_current_sweep_predictive_clock_trace()
+            self._current_sweep_no_conduction_count = 0
             self._active_current_sweep_last_setpoint_mA = None
             self._clear_current_sweep_ramp_hold()
             if not self._set_recipe_current_mA(start_mA, measure_after=False):
@@ -20880,6 +20950,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_current_sweep_last_schedule_update_s = 0.0
             self._current_sweep_post_hold_throttle_until_s = 0.0
             self._reset_current_sweep_predictive_clock_trace()
+            self._current_sweep_no_conduction_count = 0
             self._active_current_sweep_last_setpoint_mA = None
             self._active_current_sweep_display_target_mA = None
             self._active_current_sweep_display_direction = 0.0
