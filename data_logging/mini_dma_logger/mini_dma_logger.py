@@ -78,7 +78,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-29.2"
+CONTROL_LOGIC_VERSION = "2026-06-04.2"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -96,6 +96,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_bounded_saved_cap",
     "current_hold_noise_band_resume",
     "adaptive_current_hold_response_stiffness",
+    "adaptive_current_hold_response_gain",
     "current_hold_waits_for_natural_target_return",
     "current_hold_response_requires_directional_motor_response",
     "current_hold_large_error_bypasses_persistence",
@@ -453,6 +454,10 @@ SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
+SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_MIN = 0.55
+SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_MAX = 0.95
+SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_UNDER_RESPONSE_RATIO = 0.65
+SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_STRONG_RESPONSE_RATIO = 0.35
 SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S = 1.0
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
@@ -10899,6 +10904,40 @@ class MainWindow(QtWidgets.QMainWindow):
             return stress_mpa_from_load_g(float(load_stiffness), diameter_mm)
         return None
 
+    def _current_sweep_hold_response_gain(
+        self,
+        seek_key: tuple[str, int, float],
+        error_value: float,
+    ) -> float:
+        base_gain = SERVO_CORRECTION_GAIN
+        if self._automation_phase != "current_hold":
+            return base_gain
+        previous_error = self._seek_last_error_by_key.get(seek_key)
+        if previous_error is None:
+            return base_gain
+        previous = float(previous_error)
+        current = float(error_value)
+        if not (math.isfinite(previous) and math.isfinite(current)):
+            return base_gain
+        previous_abs = abs(previous)
+        current_abs = abs(current)
+        if previous_abs <= 1e-9 or current_abs <= 1e-9:
+            return base_gain
+        if previous * current <= 0.0:
+            return SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_MIN
+        ratio = current_abs / previous_abs
+        under_response = SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_UNDER_RESPONSE_RATIO
+        strong_response = SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_STRONG_RESPONSE_RATIO
+        if ratio >= under_response:
+            span = max(1e-9, 1.0 - under_response)
+            fraction = min(1.0, (ratio - under_response) / span)
+            return base_gain + (SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_MAX - base_gain) * fraction
+        if ratio <= strong_response:
+            span = max(1e-9, strong_response)
+            fraction = min(1.0, (strong_response - ratio) / span)
+            return base_gain - (base_gain - SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_MIN) * fraction
+        return base_gain
+
     def _current_sweep_basis_value_from_stress_cap(self, basis: str, stress_mpa: float) -> float | None:
         if basis == HSW_BASIS_STRESS_MPA:
             return abs(float(stress_mpa))
@@ -12065,7 +12104,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._motion_speed_for_current_context(manual_jog=False),
                 )
             return self._seek_step_mm(error_value, tolerance, basis=basis)
-        predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
+        correction_gain = SERVO_CORRECTION_GAIN
+        if self._automation_phase == "current_hold" and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            correction_gain = self._current_sweep_hold_response_gain(seek_key, error_value)
+        predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * correction_gain
         max_step_mm = self._seek_nudge_mm()
         if self._automation_step_note == "setup_preload" and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             correction_caps = [
@@ -15458,6 +15500,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
                 ),
                 "current_hold_adaptive_min_samples": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES,
+                "current_hold_response_gain_min": SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_MIN,
+                "current_hold_response_gain_max": SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_MAX,
+                "current_hold_response_gain_under_response_ratio": (
+                    SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_UNDER_RESPONSE_RATIO
+                ),
+                "current_hold_response_gain_strong_response_ratio": (
+                    SERVO_CURRENT_SWEEP_HOLD_RESPONSE_GAIN_STRONG_RESPONSE_RATIO
+                ),
                 "current_hold_correction_confirm_s": SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S,
                 "current_hold_noise_cap_tolerance_factor": (
                     SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR
