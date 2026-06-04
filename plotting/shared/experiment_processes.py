@@ -24,7 +24,7 @@ def experiment_process_cwd() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _gui_python_executable(path: Path) -> Path:
+def gui_python_executable(path: Path) -> Path:
     if sys.platform != "win32":
         return path
     if path.name.lower() != "python.exe":
@@ -40,7 +40,7 @@ def build_experiment_process_command(
     *,
     executable: Path | None = None,
 ) -> list[str]:
-    python_exe = _gui_python_executable(
+    python_exe = gui_python_executable(
         Path(sys.executable) if executable is None else executable
     )
     if getattr(sys, "frozen", False):
@@ -65,6 +65,15 @@ def build_experiment_process_env(
     return env
 
 
+def hidden_process_creationflags() -> int:
+    if sys.platform != "win32":
+        return 0
+    return (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+
+
 def launch_experiment_process(
     spec: ExperimentProcessSpec,
     *,
@@ -79,7 +88,7 @@ def launch_experiment_process(
         "close_fds": True,
     }
     if sys.platform == "win32":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        kwargs["creationflags"] = hidden_process_creationflags()
     else:
         kwargs["start_new_session"] = True
     return popen_factory(build_experiment_process_command(spec), **kwargs)
