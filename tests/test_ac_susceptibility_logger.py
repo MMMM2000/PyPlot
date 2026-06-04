@@ -2036,12 +2036,83 @@ def test_ac_logger_shared_broker_requires_manual_channel_selection_for_sweep_con
         window._build_ac_sweep_config()
 
     window.spinBox_ac_broker_channel.setValue(3)
+    window._handle_ac_broker_channel_changed(3)
     config = window._build_ac_sweep_config()
 
     assert config.psu_backend == "shared_hmp_broker"
     assert config.psu_resource == "127.0.0.1:8765/CH3"
     assert config.shared_broker_channel == 3
     assert window._selected_ac_broker_channel() == 3
+    app.processEvents()
+
+
+def test_ac_logger_shared_broker_ignores_legacy_unconfirmed_channel_and_shows_picker() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    settings = QtCore.QSettings(
+        QtCore.QSettings.Format.IniFormat,
+        QtCore.QSettings.Scope.UserScope,
+        "microwire_tests",
+        "ac_legacy_unconfirmed_broker_channel",
+    )
+    settings.clear()
+    settings.setValue("psu_profiles/shared_hmp_broker/broker_host", "127.0.0.1")
+    settings.setValue("psu_profiles/shared_hmp_broker/broker_port", 8765)
+    settings.setValue("psu_profiles/shared_hmp_broker/broker_channel", 1)
+
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.ac_settings = settings
+    window._ac_loading_settings = False
+    window._ac_psu_backend = "shared_hmp_broker"
+    window._ac_psu_resource = ""
+    window._ac_psu_baudrate = 115200
+    window._ac_shared_broker_host = "127.0.0.1"
+    window._ac_shared_broker_port = 8765
+    window._ac_shared_broker_channel = 0
+    window._ac_shared_broker_channel_confirmed = False
+    window.ui = type("Ui", (), {})()
+    window.ui.comboBox_supply = QtWidgets.QComboBox()
+    window.ui.comboBox_supply.addItem("Shared HMP broker", "shared_hmp_broker")
+    window.ui.comboBox_port = QtWidgets.QComboBox()
+    window.ui.comboBox_port.addItem("COM3", "COM3")
+    window.ui.comboBox_baudrate = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate.addItem("115200")
+    window.label_ac_psu_port = QtWidgets.QLabel()
+    window.label_ac_psu_baud = QtWidgets.QLabel()
+    window.label_ac_broker_host = QtWidgets.QLabel()
+    window.label_ac_broker_port = QtWidgets.QLabel()
+    window.label_ac_broker_channel = QtWidgets.QLabel()
+    window.label_ac_psu_status = QtWidgets.QLabel()
+    window.label_ac_hardware_status = QtWidgets.QLabel()
+    window.lineEdit_ac_broker_host = QtWidgets.QLineEdit()
+    window.spinBox_ac_broker_port = QtWidgets.QSpinBox()
+    window.spinBox_ac_broker_port.setRange(1, 65535)
+    window.spinBox_ac_broker_channel = QtWidgets.QSpinBox()
+    window.spinBox_ac_broker_channel.setRange(0, 4)
+    window.spinBox_ac_broker_channel.setSpecialValueText("Select channel...")
+    window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
+    window.spinBox_ac_voltage_limit.setValue(30.0)
+
+    window._load_ac_psu_profile_settings("shared_hmp_broker")
+    window._sync_ac_psu_from_shared_controls()
+
+    assert window.spinBox_ac_broker_channel.value() == 0
+    assert window._ac_shared_broker_channel_confirmed is False
+    assert "Select channel" in window.label_ac_psu_status.text()
+    assert "Select channel" in window.label_ac_hardware_status.text()
+    assert window.ui.comboBox_port.isHidden()
+    assert window.ui.comboBox_baudrate.isHidden()
+    assert window.lineEdit_ac_broker_host.isVisible()
+    assert window.spinBox_ac_broker_channel.isVisible()
+    with pytest.raises(ValueError, match="shared HMP broker channel"):
+        window._selected_ac_broker_channel()
+
+    window.spinBox_ac_broker_channel.setValue(1)
+    window._handle_ac_broker_channel_changed(1)
+
+    assert window._selected_ac_broker_channel() == 1
+    assert settings.value("psu_profiles/shared_hmp_broker/broker_channel_confirmed", False, type=bool) is True
+    assert "CH1" in window.label_ac_hardware_status.text()
     app.processEvents()
 
 

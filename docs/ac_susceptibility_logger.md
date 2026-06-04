@@ -306,7 +306,9 @@ that leased channel when the sweep stops or fails. The detached serial watchdog
 is not armed in broker mode because it cannot safely address a broker lease;
 the worker shutdown path performs the broker channel shutdown/release instead.
 The broker channel starts as **Select channel...** on first use, and a sweep will
-not start until the operator explicitly chooses the wired HMP channel.
+not start until the operator explicitly chooses the wired HMP channel. Channels
+saved by older development builds before this confirmation marker are treated as
+unconfirmed and must be selected again.
 
 Shared-broker bench setup still has to be confirmed outside the AC logger with
 the shared HMP setup/guard tools before a live sweep. The AC logger does not
