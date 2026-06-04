@@ -78,10 +78,26 @@ run_plan:
       current_ramp_rate_mA_s: 0.8
       repeat: 1
       run_condition: repeat only if the first run has intact current path and acceptable stress-control behavior
+    - id: baseline_0p6_time_precision_comparison
+      recipe_path: docs/recipes/iso-stress-50mpa-1-to-80-to-1ma-0p6.recipe.json
+      current_ramp_rate_mA_s: 0.6
+      repeat: 1
+      run_condition: run after reverting the unsuccessful fast-recovery experiment to compare precision against measurement time
   comparison_policy:
     baseline_stage: future_baseline_0p8
     slower_ramps_must_justify_time_cost: true
     next_adjustment_rule: if the first run is bad, adjust only the smallest justified campaign parameter before rerun
+runs:
+  - id: run29_baseline_0p8
+    path: G:/My Drive/1 Projects/Praha/mini DMA/automated_control_tests/Ni50Fe27Ga23 12_2 heat shield iso-stress_run29
+    stage: future_baseline_0p8
+  - id: run30_fast_recovery_experiment_0p8
+    path: G:/My Drive/1 Projects/Praha/mini DMA/automated_control_tests/Ni50Fe27Ga23 12_2 heat shield iso-stress_run30
+    stage: experimental_fast_recovery_0p8
+    disposition: rejected_worse_stress_error
+  - id: run31_baseline_0p6
+    path: G:/My Drive/1 Projects/Praha/mini DMA/automated_control_tests/Ni50Fe27Ga23 12_2 heat shield iso-stress_run31
+    stage: baseline_0p6_time_precision_comparison
 reporting:
   required: true
   report_path: reports/mini_dma_12_2_heat_shield_33p68mm_report.pdf
