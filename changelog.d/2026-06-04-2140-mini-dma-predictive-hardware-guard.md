@@ -5,3 +5,4 @@
 - Added a no-setup 0.4 mA/s hold0.5 diagnostic recipe for hardware runs where the length setup zero-return latch prevents current-sweep evidence.
 - Fixed setup-disabled current-sweep recipes so measurement logging starts before current is applied.
 - Added an experimental no-hold/no-setup 0.4 mA/s current-sweep recipe to test whether current-hold dwell is worsening transformation stress excursions.
+- Added an experimental current-hold severe-error recovery bypass so large hold errors can correct immediately instead of waiting on persistence and filtered-feedback gates.

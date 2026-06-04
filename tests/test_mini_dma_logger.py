@@ -4859,6 +4859,32 @@ def test_current_sweep_setup_disabled_starts_session_before_current(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_current_hold_severe_error_uses_derived_recovery_threshold(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+        window.spin_current_sweep_hold_min_pause_stress_mpa.setValue(2.0)
+
+        assert window._current_sweep_hold_severe_error_recovery_needed(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            5.9,
+        ) is False
+        assert window._current_sweep_hold_severe_error_recovery_needed(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            6.0,
+        ) is True
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_recipe_file_controls_are_hidden_until_enabled_and_track_status(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "recipe.recipe.json"

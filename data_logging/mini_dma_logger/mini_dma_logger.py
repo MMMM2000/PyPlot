@@ -85,8 +85,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-04.baseline-guard.1"
-CONTROL_LOGIC_PROFILE = "experimental-baseline-current-ramp-with-readback-guard"
+CONTROL_LOGIC_VERSION = "2026-06-04.severe-hold-bypass.1"
+CONTROL_LOGIC_PROFILE = "experimental-current-hold-severe-error-feedback-bypass"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -109,6 +109,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_moving_away_bypasses_persistence",
     "current_hold_moving_away_preserves_predictive_step",
     "current_hold_large_error_not_masked_by_noise",
+    "current_hold_severe_error_bypasses_feedback_gates",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -10999,6 +11000,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return fast_recovery_threshold is not None and abs(float(error_value)) >= fast_recovery_threshold
 
+    def _current_sweep_hold_severe_error_recovery_needed(self, basis: str | None, error_value: float) -> bool:
+        if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        cap_mpa = self._current_sweep_hold_correction_stress_mpa()
+        severe_mpa = max(
+            self._current_sweep_hold_min_pause_stress_mpa() * 3.0,
+            cap_mpa * 0.2,
+        )
+        severe_threshold = self._current_sweep_basis_value_from_stress_cap(basis, severe_mpa)
+        return severe_threshold is not None and abs(float(error_value)) >= severe_threshold
+
     def _current_sweep_stage_speed_cap_mm_s(self) -> float:
         config = self._control_config()
         speed_mm_s = (
@@ -13447,7 +13459,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="new_scale_sample",
             )
             return False
-        if not self._current_hold_error_is_persistent(
+        severe_hold_error = self._current_sweep_hold_severe_error_recovery_needed(basis, delta_value)
+        if not severe_hold_error and not self._current_hold_error_is_persistent(
             seek_key,
             basis,
             delta_value,
@@ -13476,10 +13489,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             if (
                 not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
+                and not severe_hold_error
                 and not self._filtered_signal_changed_after_last_correction(
-                seek_key,
-                filtered_signal,
-                acceptance_tolerance,
+                    seek_key,
+                    filtered_signal,
+                    acceptance_tolerance,
                 )
             ):
                 self._log_waiting_for_feedback(
