@@ -814,6 +814,184 @@ def test_sweep_metadata_snapshot_includes_full_settings(tmp_path: Path) -> None:
     assert snapshot["lcr_settings"][1]["function"] == "Lp-Rp"
 
 
+def test_sweep_metadata_snapshot_includes_shared_broker_and_debug_settings(tmp_path: Path) -> None:
+    path = tmp_path / "shared-broker.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.3, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=10.0,
+        repeats=1,
+        dwell_s=1.0,
+        psu_backend="shared_hmp_broker",
+        psu_resource="127.0.0.1:8765/CH2",
+        voltage_limit_v=30.0,
+        shared_broker_host="127.0.0.1",
+        shared_broker_port=8765,
+        shared_broker_channel=2,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(tmp_path / "shared-broker_lcr_debug.jsonl"),
+        lcr_continuous_log_cadence_s=1.5,
+        lcr_continuous_log_max_rows_per_point=42,
+    )
+
+    writer = sweep.AcSweepTsvWriter(path, config)
+    writer.write_metadata()
+    writer.close()
+
+    line = next(line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("# config_json="))
+    snapshot = json.loads(line.removeprefix("# config_json="))
+    assert snapshot["psu"]["backend"] == "shared_hmp_broker"
+    assert snapshot["psu"]["shared_broker"] == {
+        "enabled": True,
+        "host": "127.0.0.1",
+        "port": 8765,
+        "channel": 2,
+    }
+    assert snapshot["lcr_continuous_log"]["enabled"] is True
+    assert snapshot["lcr_continuous_log"]["cadence_s"] == 1.5
+    assert snapshot["lcr_continuous_log"]["max_rows_per_point"] == 42
+
+
+def test_shared_broker_current_source_leases_turns_off_and_releases_only_channel() -> None:
+    class FakeBrokerClient:
+        def __init__(self, *, host: str, port: int, timeout_s: float) -> None:
+            self.host = host
+            self.port = port
+            self.timeout_s = timeout_s
+            self.events: list[tuple[str, object]] = []
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            self.events.append(("request", action))
+            return {"snapshot": {}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.events.append(("lease", (channel, owner, role)))
+            return {"lease_id": "lease-ac-2"}
+
+        def configure_channel(self, **payload: object) -> None:
+            self.events.append(("configure", payload))
+
+        def set_current(self, **payload: object) -> None:
+            self.events.append(("current", payload))
+
+        def measure_channel(self, *, channel: int) -> dict[str, float]:
+            self.events.append(("measure", channel))
+            return {"current_mA": 19.8, "voltage_V": 1.23}
+
+        def set_output(self, **payload: object) -> None:
+            self.events.append(("output", payload))
+
+        def release(self, **payload: object) -> None:
+            self.events.append(("release", payload))
+
+    clients: list[FakeBrokerClient] = []
+
+    def factory(**kwargs: object) -> FakeBrokerClient:
+        client = FakeBrokerClient(**kwargs)  # type: ignore[arg-type]
+        clients.append(client)
+        return client
+
+    source = sweep.SharedBrokerCurrentSource(
+        host="127.0.0.1",
+        port=8765,
+        channel=2,
+        voltage_limit_v=30.0,
+        client_factory=factory,
+    )
+
+    source.connect()
+    source.initialize(voltage_limit_v=30.0)
+    source.set_current(0.02)
+    measurement = source.measure()
+    source.output_off()
+    source.close()
+
+    assert measurement.current_actual_a == pytest.approx(0.0198)
+    client = clients[0]
+    assert ("lease", (2, "ac_susceptibility_logger", "ac_susceptibility")) in client.events
+    assert client.events[-2:] == [
+        ("output", {"channel": 2, "lease_id": "lease-ac-2", "output_on": False}),
+        ("release", {"channel": 2, "lease_id": "lease-ac-2"}),
+    ]
+
+
+def test_run_ac_sweep_writes_bounded_lcr_debug_sidecar(tmp_path: Path) -> None:
+    class FakeLcr:
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-06-04T00:00:0{self.fetch_count}.000+00:00",
+                raw=f"+{self.fetch_count}.0,+2.0,+0.0,+0.0,OK",
+                primary=float(self.fetch_count),
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    debug_path = tmp_path / "sweep_lcr_debug.jsonl"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=5,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(debug_path),
+        lcr_continuous_log_cadence_s=0.1,
+        lcr_continuous_log_max_rows_per_point=2,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakePsu(),
+        output_path=tmp_path / "sweep.tsv",
+        sleep=lambda _seconds: None,
+    )
+
+    records = [json.loads(line) for line in debug_path.read_text(encoding="utf-8").splitlines()]
+    sample_records = [record for record in records if record["event"] == "lcr_sample"]
+    assert records[0]["event"] == "metadata"
+    assert records[-1]["event"] == "closed"
+    assert len(sample_records) <= 2
+    assert {record["phase"] for record in sample_records} == {"measure"}
+
+
 def test_run_ac_sweep_aborts_when_psu_actual_current_is_missing(tmp_path: Path) -> None:
     class FakeLcr:
         def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:

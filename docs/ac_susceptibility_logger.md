@@ -236,8 +236,8 @@ failure unless the raw LCR reply is empty or cannot be parsed.
 
 ## Power Supply Backends
 
-The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
-SPE6102-style backend. The AC logger keeps its own supply profile, serial port,
+The AC sweep can use the existing HMP4030-style SCPI path, an OWON
+SPE6102-style backend, or the opt-in shared HMP broker profile. The AC logger keeps its own supply profile, serial port,
 baud rate, and voltage-limit settings, separate from the Current Annealing
 Logger. It also remembers hardware settings per AC supply profile, so switching
 between OWON and HMP restores that profile's last port, baud rate, and voltage
@@ -297,6 +297,42 @@ zero-current, zero-voltage, output-off sequence. During active microwire current
 sweeps on Windows, the worker also requests that the system stay awake so USB
 serial connections are not suspended mid-run. Baseline measurement does not
 create or command a power-supply backend.
+
+When **Shared HMP broker** is selected, the serial port is replaced by broker
+host, TCP port, and confirmed HMP channel settings. The logger leases that
+channel with the `ac_susceptibility` role, sends voltage/current/output commands
+through the broker, reads back only that channel, and turns off/releases only
+that leased channel when the sweep stops or fails. The detached serial watchdog
+is not armed in broker mode because it cannot safely address a broker lease;
+the worker shutdown path performs the broker channel shutdown/release instead.
+
+Shared-broker bench setup still has to be confirmed outside the AC logger with
+the shared HMP setup/guard tools before a live sweep. The AC logger does not
+auto-start hardware or infer channel wiring.
+
+## Bounded LCR Debug Stream
+
+Enable **Write LCR debug stream** only when debugging transitions or LCR cadence
+around a current step. The logger writes a sidecar
+`<sweep>_lcr_debug.jsonl` next to the main sweep TSV. The stream is bounded by
+cadence and a maximum row count per setting/current/phase, and is flushed after
+each row. It records cadence-sampled settle-window and measurement-window rows
+with the LCR setting, current setpoint, PSU readback, broker metadata when used,
+aggregation metadata, and a close record with the stop reason.
+
+The default debug cadence is `1 s` and the default cap is `120` rows per
+setting/current/phase. Debug logging is off by default so ordinary overnight
+sweeps keep their existing TSV output and plot behavior.
+
+MED/SLOW aperture and LCR AVG choices should be tuned on live hardware. A safe
+bench comparison plan is:
+
+1. Run the same current transition with FAST, MED, and SLOW at the same
+   frequency/excitation/current loop while the debug stream is enabled.
+2. Repeat the most promising aperture with candidate AVG counts if the front
+   panel/SCPI setup supports averaging without hiding the transition.
+3. Compare debug-stream cadence, point-to-point scatter, and transition shape
+   against the extra measurement time before changing defaults.
 
 ## Live Plots
 

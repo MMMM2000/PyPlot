@@ -5,9 +5,11 @@ import socket
 import pytest
 
 from data_logging.shared_power_supply.broker import (
+    ROLE_AC_SUSCEPTIBILITY,
     ROLE_CURRENT_ANNEALING,
     ROLE_MINI_DMA_CURRENT,
     SharedPowerSupplyBroker,
+    VALID_ROLES,
 )
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, detect_hmp_profile
@@ -75,6 +77,10 @@ def test_hmp_idn_detection_maps_supported_models() -> None:
     assert detect_hmp_profile("HAMEG,HMP4030,serial,fw") == HMP4030_PROFILE
     assert detect_hmp_profile("Rohde&Schwarz,HMP4040,serial,fw") == HMP4040_PROFILE
     assert detect_hmp_profile("OWON,SPE6102,serial,fw") is None
+
+
+def test_broker_accepts_ac_susceptibility_role() -> None:
+    assert ROLE_AC_SUSCEPTIBILITY in VALID_ROLES
 
 
 def test_broker_rejects_channel_four_for_hmp4030() -> None:

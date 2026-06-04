@@ -12,6 +12,9 @@ import sys
 import time
 from typing import Any, Callable, Protocol, Sequence
 
+from data_logging.shared_power_supply.broker import ROLE_AC_SUSCEPTIBILITY
+from data_logging.shared_power_supply.protocol import BrokerJsonClient
+
 from .lcr6000 import (
     Lcr6000Reading,
     Lcr6000Settings,
@@ -63,6 +66,14 @@ POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "voltage_first": True,
         "current_resolution_a": 0.0001,
         "max_voltage_v": 61.0,
+    },
+    "shared_hmp_broker": {
+        "label": "Shared HMP broker",
+        "channel_select": 1,
+        "reset_on_start": False,
+        "voltage_first": False,
+        "current_resolution_a": 0.001,
+        "shared_broker": True,
     },
 }
 
@@ -152,6 +163,18 @@ class AcSweepConfig:
     psu_current_feedback_resistance_ohm: float = 390.0
     psu_measure_attempts: int = 3
     psu_missing_readback_warn: bool = True
+    shared_broker_host: str = "127.0.0.1"
+    shared_broker_port: int = 8765
+    shared_broker_channel: int | None = None
+    lcr_continuous_log_enabled: bool = False
+    lcr_continuous_log_path: str | None = None
+    lcr_continuous_log_cadence_s: float = 1.0
+    lcr_continuous_log_aggregate_s: float = 1.0
+    lcr_continuous_log_max_rows_per_point: int = 120
+
+    @property
+    def uses_shared_broker(self) -> bool:
+        return self.psu_backend == "shared_hmp_broker"
 
 
 @dataclass(frozen=True)
@@ -463,6 +486,8 @@ class AcSweepTsvWriter:
             f"psu_backend={self.config.psu_backend} "
             f"psu_resource={self.config.psu_resource} "
             f"voltage_limit_v={self.config.voltage_limit_v:g} "
+            f"shared_broker_used={self.config.uses_shared_broker} "
+            f"shared_broker_channel={self.config.shared_broker_channel or ''} "
             f"dwell_s={self.config.dwell_s:g} "
             f"point_duration_s={self.config.point_duration_s:g} "
             f"repeats={max(1, int(self.config.repeats))} "
@@ -471,7 +496,9 @@ class AcSweepTsvWriter:
             f"psu_current_feedback_resistance_ohm={self.config.psu_current_feedback_resistance_ohm:g} "
             f"lcr_slow_retry_enabled={self.config.lcr_slow_retry_enabled} "
             f"lcr_slow_retry_min_frequency_hz={self.config.lcr_slow_retry_min_frequency_hz:g} "
-            f"lcr_slow_retry_min_rate_hz={self.config.lcr_slow_retry_min_rate_hz:g}"
+            f"lcr_slow_retry_min_rate_hz={self.config.lcr_slow_retry_min_rate_hz:g} "
+            f"lcr_continuous_log_enabled={self.config.lcr_continuous_log_enabled} "
+            f"lcr_continuous_log_path={self.config.lcr_continuous_log_path or ''}"
         )
         for index, setting in enumerate(self.config.lcr_settings, start=1):
             self._write(
@@ -492,6 +519,12 @@ class AcSweepTsvWriter:
                 "backend": self.config.psu_backend,
                 "resource": self.config.psu_resource,
                 "voltage_limit_v": float(self.config.voltage_limit_v),
+                "shared_broker": {
+                    "enabled": self.config.uses_shared_broker,
+                    "host": str(self.config.shared_broker_host or "127.0.0.1"),
+                    "port": int(self.config.shared_broker_port),
+                    "channel": self.config.shared_broker_channel,
+                },
             },
             "acquisition": {
                 "dwell_s": float(self.config.dwell_s),
@@ -505,6 +538,13 @@ class AcSweepTsvWriter:
                 "psu_current_feedback_enabled": bool(self.config.psu_current_feedback_enabled),
                 "psu_current_feedback_resistance_ohm": float(self.config.psu_current_feedback_resistance_ohm),
                 "psu_missing_readback_warn": bool(self.config.psu_missing_readback_warn),
+            },
+            "lcr_continuous_log": {
+                "enabled": bool(self.config.lcr_continuous_log_enabled),
+                "path": self.config.lcr_continuous_log_path,
+                "cadence_s": float(self.config.lcr_continuous_log_cadence_s),
+                "aggregate_s": float(self.config.lcr_continuous_log_aggregate_s),
+                "max_rows_per_point": int(self.config.lcr_continuous_log_max_rows_per_point),
             },
             "lcr_slow_retry": {
                 "enabled": bool(self.config.lcr_slow_retry_enabled),
@@ -578,6 +618,156 @@ class AcSweepTsvWriter:
             self._fh = None
 
 
+class LcrContinuousJsonlWriter:
+    """Bounded sidecar stream for transition-oriented LCR diagnostics."""
+
+    def __init__(self, path: str | Path, config: AcSweepConfig) -> None:
+        self.path = Path(path)
+        self.config = config
+        self._fh: Any | None = None
+        self._rows_written = 0
+        self._point_counts: dict[tuple[object, ...], int] = {}
+        self._point_last_elapsed: dict[tuple[object, ...], float] = {}
+
+    def open(self) -> None:
+        if self._fh is not None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = self.path.open("w", encoding="utf-8")
+        self._write(
+            {
+                "event": "metadata",
+                "created_utc": _timestamp_utc(),
+                "main_output_path": None,
+                "cadence_s": max(0.1, float(self.config.lcr_continuous_log_cadence_s)),
+                "aggregate_s": max(0.1, float(self.config.lcr_continuous_log_aggregate_s)),
+                "max_rows_per_point": max(1, int(self.config.lcr_continuous_log_max_rows_per_point)),
+                "psu": {
+                    "backend": self.config.psu_backend,
+                    "resource": self.config.psu_resource,
+                    "shared_broker": {
+                        "enabled": self.config.uses_shared_broker,
+                        "host": str(self.config.shared_broker_host or "127.0.0.1"),
+                        "port": int(self.config.shared_broker_port),
+                        "channel": self.config.shared_broker_channel,
+                    },
+                },
+            }
+        )
+
+    def write_sample(
+        self,
+        *,
+        phase: str,
+        started: float,
+        point_started: float,
+        setting_index: int,
+        total_settings: int,
+        setting: Lcr6000Settings,
+        current_point: CurrentLoopPoint,
+        current_point_index: int,
+        total_current_points: int,
+        repeat_index: int,
+        reading: Lcr6000Reading,
+        psu_measurement: PowerSupplyMeasurement | None = None,
+    ) -> None:
+        if self._fh is None:
+            self.open()
+        read_monotonic = time.monotonic()
+        point_key = (
+            phase,
+            setting_index,
+            current_point_index,
+            current_point.direction,
+            round(float(current_point.current_a), 12),
+        )
+        point_elapsed_s = read_monotonic - point_started
+        if not self._sample_allowed(point_key, point_elapsed_s):
+            return
+        payload: dict[str, object] = {
+            "event": "lcr_sample",
+            "timestamp_utc": reading.timestamp_utc or _timestamp_utc(),
+            "elapsed_s": read_monotonic - started,
+            "point_elapsed_s": point_elapsed_s,
+            "phase": phase,
+            "setting_index": setting_index,
+            "total_settings": total_settings,
+            "current_point_index": current_point_index,
+            "total_current_points": total_current_points,
+            "repeat_index": repeat_index,
+            "lcr": {
+                "function": setting.function,
+                "frequency_hz": float(setting.frequency_hz),
+                "level_mode": setting.level_mode,
+                "level_value": float(setting.level_value),
+                "primary": reading.primary,
+                "secondary": reading.secondary,
+                "monitor1": reading.monitor1,
+                "monitor2": reading.monitor2,
+                "comparator": reading.comparator,
+                "raw": reading.raw,
+            },
+            "current_loop": {
+                "current_set_a": float(current_point.current_a),
+                "direction": current_point.direction,
+            },
+            "aggregation": {
+                "mode": "cadence_sample",
+                "window_s": max(0.1, float(self.config.lcr_continuous_log_aggregate_s)),
+                "sample_count": 1,
+            },
+        }
+        if psu_measurement is not None:
+            payload["psu_readback"] = {
+                "current_actual_a": psu_measurement.current_actual_a,
+                "voltage_actual_v": psu_measurement.voltage_actual_v,
+                "resistance_ohm": psu_measurement.resistance_ohm,
+                "power_w": psu_measurement.power_w,
+                "status": psu_measurement.status,
+                "error": psu_measurement.error,
+            }
+        self._write(payload)
+
+    def _sample_allowed(self, point_key: tuple[object, ...], point_elapsed_s: float) -> bool:
+        max_rows = max(1, int(self.config.lcr_continuous_log_max_rows_per_point))
+        count = int(self._point_counts.get(point_key, 0))
+        if count >= max_rows:
+            return False
+        last = self._point_last_elapsed.get(point_key)
+        cadence = max(0.1, float(self.config.lcr_continuous_log_cadence_s))
+        if last is not None and point_elapsed_s - last < cadence:
+            return False
+        self._point_counts[point_key] = count + 1
+        self._point_last_elapsed[point_key] = point_elapsed_s
+        return True
+
+    def _write(self, payload: dict[str, object]) -> None:
+        if self._fh is None:
+            raise RuntimeError("continuous LCR writer is not open")
+        self._fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        self._fh.flush()
+        if payload.get("event") == "lcr_sample":
+            self._rows_written += 1
+
+    def close(self, *, stop_reason: str = "") -> None:
+        if self._fh is None:
+            return
+        try:
+            self._write({"event": "closed", "timestamp_utc": _timestamp_utc(), "rows_written": self._rows_written, "stop_reason": stop_reason})
+        finally:
+            self._fh.close()
+            self._fh = None
+
+
+def _continuous_writer_for_config(config: AcSweepConfig) -> LcrContinuousJsonlWriter | None:
+    if not bool(config.lcr_continuous_log_enabled):
+        return None
+    path_text = str(config.lcr_continuous_log_path or "").strip()
+    if not path_text:
+        return None
+    return LcrContinuousJsonlWriter(path_text, config)
+
+
 def run_ac_sweep(
     *,
     config: AcSweepConfig,
@@ -593,9 +783,13 @@ def run_ac_sweep(
     if not config.current_points:
         raise ValueError("sweep has no current points")
     writer = AcSweepTsvWriter(output_path, config)
+    continuous_writer = _continuous_writer_for_config(config)
     started = time.monotonic()
+    stop_reason = ""
     try:
         writer.write_metadata()
+        if continuous_writer is not None:
+            continuous_writer.open()
         psu.connect()
         psu.initialize(voltage_limit_v=config.voltage_limit_v)
         resistance_estimate_ohm = max(1.0, float(config.psu_current_feedback_resistance_ohm))
@@ -659,12 +853,28 @@ def run_ac_sweep(
                     )
                 dwell = max(0.0, float(config.dwell_s))
                 if dwell:
-                    sleep(dwell)
+                    _log_lcr_continuous_window(
+                        config=config,
+                        lcr=lcr,
+                        psu=psu,
+                        writer=continuous_writer,
+                        started=started,
+                        setting_index=setting_index,
+                        setting=setting,
+                        current_point=current_point,
+                        current_point_index=current_point_index,
+                        total_current_points=total_current_points,
+                        phase="settle",
+                        duration_s=dwell,
+                        sleep=sleep,
+                        stop_requested=stop_requested,
+                    )
                 _measure_sweep_point_with_retries(
                     config=config,
                     lcr=lcr,
                     psu=psu,
                     writer=writer,
+                    continuous_writer=continuous_writer,
                     started=started,
                     setting_index=setting_index,
                     setting=setting,
@@ -674,8 +884,11 @@ def run_ac_sweep(
                     progress=progress,
                     stop_requested=stop_requested,
                 )
+        stop_reason = "completed"
     finally:
         active_error = sys.exc_info()[1]
+        if active_error is not None:
+            stop_reason = str(active_error)
         shutdown_error: Exception | None = None
         try:
             psu.output_off()
@@ -685,6 +898,8 @@ def run_ac_sweep(
             try:
                 psu.close()
             finally:
+                if continuous_writer is not None:
+                    continuous_writer.close(stop_reason=stop_reason or "closed")
                 writer.close()
         if shutdown_error is not None and active_error is None:
             raise shutdown_error
@@ -704,12 +919,106 @@ def _fetch_lcr_reading(lcr: LcrDevice, *, attempts: int) -> Lcr6000Reading:
     raise RuntimeError("LCR did not return a measurement")
 
 
+def _write_continuous_sample_if_due(
+    *,
+    config: AcSweepConfig,
+    writer: LcrContinuousJsonlWriter | None,
+    started: float,
+    point_started: float,
+    setting_index: int,
+    total_settings: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
+    repeat_index: int,
+    reading: Lcr6000Reading,
+    psu_measurement: PowerSupplyMeasurement | None,
+    phase: str,
+) -> None:
+    if writer is None or not bool(config.lcr_continuous_log_enabled):
+        return
+    writer.write_sample(
+        phase=phase,
+        started=started,
+        point_started=point_started,
+        setting_index=setting_index,
+        total_settings=total_settings,
+        setting=setting,
+        current_point=current_point,
+        current_point_index=current_point_index,
+        total_current_points=total_current_points,
+        repeat_index=repeat_index,
+        reading=reading,
+        psu_measurement=psu_measurement,
+    )
+
+
+def _log_lcr_continuous_window(
+    *,
+    config: AcSweepConfig,
+    lcr: LcrDevice,
+    psu: CurrentSource,
+    writer: LcrContinuousJsonlWriter | None,
+    started: float,
+    setting_index: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
+    phase: str,
+    duration_s: float,
+    sleep: Callable[[float], None],
+    stop_requested: Callable[[], bool] | None,
+) -> None:
+    duration = max(0.0, float(duration_s))
+    if duration <= 0.0:
+        return
+    if writer is None or not bool(config.lcr_continuous_log_enabled):
+        sleep(duration)
+        return
+    point_started = time.monotonic()
+    deadline = point_started + duration
+    repeat_index = 0
+    cadence_s = max(0.1, float(config.lcr_continuous_log_cadence_s))
+    while True:
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("AC sweep stopped by user")
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        repeat_index += 1
+        reading = _fetch_lcr_reading(lcr, attempts=config.lcr_read_attempts)
+        measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
+        _write_continuous_sample_if_due(
+            config=config,
+            writer=writer,
+            started=started,
+            point_started=point_started,
+            setting_index=setting_index,
+            total_settings=len(config.lcr_settings),
+            setting=setting,
+            current_point=current_point,
+            current_point_index=current_point_index,
+            total_current_points=total_current_points,
+            repeat_index=repeat_index,
+            reading=reading,
+            psu_measurement=measurement,
+            phase=phase,
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        sleep(min(cadence_s, remaining))
+
+
 def _measure_sweep_point_with_retries(
     *,
     config: AcSweepConfig,
     lcr: LcrDevice,
     psu: CurrentSource,
     writer: AcSweepTsvWriter,
+    continuous_writer: LcrContinuousJsonlWriter | None,
     started: float,
     setting_index: int,
     setting: Lcr6000Settings,
@@ -730,6 +1039,7 @@ def _measure_sweep_point_with_retries(
                 lcr=lcr,
                 psu=psu,
                 writer=writer,
+                continuous_writer=continuous_writer,
                 started=started,
                 setting_index=setting_index,
                 setting=setting,
@@ -766,6 +1076,7 @@ def _measure_sweep_point_with_retries(
                     lcr=lcr,
                     psu=psu,
                     writer=writer,
+                    continuous_writer=continuous_writer,
                     started=started,
                     setting_index=setting_index,
                     setting=setting,
@@ -809,6 +1120,7 @@ def _measure_sweep_point_once(
     lcr: LcrDevice,
     psu: CurrentSource,
     writer: AcSweepTsvWriter,
+    continuous_writer: LcrContinuousJsonlWriter | None,
     started: float,
     setting_index: int,
     setting: Lcr6000Settings,
@@ -836,6 +1148,22 @@ def _measure_sweep_point_once(
             first_read_monotonic = read_monotonic
         point_elapsed_s = max(0.0, read_monotonic - point_started)
         psu_measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
+        _write_continuous_sample_if_due(
+            config=config,
+            writer=continuous_writer,
+            started=started,
+            point_started=point_started,
+            setting_index=setting_index,
+            total_settings=len(config.lcr_settings),
+            setting=setting,
+            current_point=current_point,
+            current_point_index=current_point_index,
+            total_current_points=total_current_points,
+            repeat_index=repeat_index,
+            reading=reading,
+            psu_measurement=psu_measurement,
+            phase="measure",
+        )
         error = f"retry_attempt={attempt}" if attempt > 1 else ""
         current_set = max(0.0, float(current_point.current_a))
         if (
@@ -1439,6 +1767,123 @@ class SerialScpiCurrentSource:
         if self._serial is None or not bool(getattr(self._serial, "is_open", False)):
             raise RuntimeError("power supply is not connected")
         return self._serial
+
+
+class SharedBrokerCurrentSource:
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        channel: int,
+        voltage_limit_v: float,
+        owner: str = "ac_susceptibility_logger",
+        timeout_s: float = 8.0,
+        client_factory: Any = BrokerJsonClient,
+    ) -> None:
+        self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        self.port = int(port)
+        self.channel = int(channel)
+        self.voltage_limit_v = float(voltage_limit_v)
+        self.owner = str(owner or "ac_susceptibility_logger")
+        self.timeout_s = float(timeout_s)
+        self.backend_id = "shared_hmp_broker"
+        self.resource = f"{self.host}:{self.port}/CH{self.channel}"
+        self.profile = dict(POWER_SUPPLY_PROFILES[self.backend_id])
+        self._client_factory = client_factory
+        self._client: Any | None = None
+        self._lease_id: str | None = None
+
+    @property
+    def lease_id(self) -> str | None:
+        return self._lease_id
+
+    def connect(self) -> None:
+        if self.channel <= 0:
+            raise RuntimeError("select a shared HMP broker channel")
+        if self._client is None:
+            self._client = self._client_factory(host=self.host, port=self.port, timeout_s=self.timeout_s)
+        self._client.request("snapshot")
+
+    def _require_client(self) -> Any:
+        if self._client is None:
+            raise RuntimeError("shared HMP broker is not connected")
+        return self._client
+
+    def _ensure_lease(self) -> str:
+        if self._lease_id:
+            return self._lease_id
+        lease = self._require_client().lease(
+            channel=self.channel,
+            owner=self.owner,
+            role=ROLE_AC_SUSCEPTIBILITY,
+        )
+        lease_id = str(lease.get("lease_id") or "")
+        if not lease_id:
+            raise RuntimeError("Shared HMP broker did not return a lease id.")
+        self._lease_id = lease_id
+        return lease_id
+
+    def initialize(self, *, voltage_limit_v: float) -> None:
+        self.voltage_limit_v = effective_power_supply_voltage_limit(self.backend_id, voltage_limit_v)
+        self._require_client().configure_channel(
+            channel=self.channel,
+            lease_id=self._ensure_lease(),
+            voltage_v=self.voltage_limit_v,
+            current_a=0.0,
+            output_on=True,
+        )
+
+    def set_current(self, current_a: float) -> None:
+        resolution = max(1e-6, float(self.profile.get("current_resolution_a", 0.001)))
+        current = max(0.0, round(float(current_a) / resolution) * resolution)
+        self._require_client().set_current(
+            channel=self.channel,
+            lease_id=self._ensure_lease(),
+            current_mA=current * 1000.0,
+        )
+
+    def set_voltage_limit(self, voltage_v: float) -> None:
+        self.voltage_limit_v = effective_power_supply_voltage_limit(self.backend_id, voltage_v)
+        measurement = self.measure()
+        current_a = 0.0 if measurement.current_actual_a is None else max(0.0, float(measurement.current_actual_a))
+        self._require_client().configure_channel(
+            channel=self.channel,
+            lease_id=self._ensure_lease(),
+            voltage_v=self.voltage_limit_v,
+            current_a=current_a,
+            output_on=True,
+        )
+
+    def measure(self) -> PowerSupplyMeasurement:
+        readback = self._require_client().measure_channel(channel=self.channel)
+        current_mA = readback.get("current_mA")
+        voltage_v = readback.get("voltage_V")
+        return PowerSupplyMeasurement(
+            current_actual_a=None if current_mA is None else float(current_mA) / 1000.0,
+            voltage_actual_v=None if voltage_v is None else float(voltage_v),
+            status="OK",
+        )
+
+    def output_off(self) -> None:
+        if not self._lease_id:
+            return
+        self._require_client().set_output(
+            channel=self.channel,
+            lease_id=self._lease_id,
+            output_on=False,
+        )
+
+    def close(self) -> None:
+        client = self._client
+        lease_id = self._lease_id
+        self._lease_id = None
+        self._client = None
+        if client is not None and lease_id:
+            try:
+                client.release(channel=self.channel, lease_id=lease_id)
+            except Exception:
+                pass
 
 
 def available_power_supply_ports() -> list[tuple[str, str]]:

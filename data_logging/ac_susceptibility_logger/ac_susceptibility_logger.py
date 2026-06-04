@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import json
 import math
@@ -89,6 +89,11 @@ OWON_DEFAULT_VOLTAGE_LIMIT_V = 61.0
 HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
 AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
+AC_DEFAULT_BROKER_HOST = "127.0.0.1"
+AC_DEFAULT_BROKER_PORT = 8765
+AC_DEFAULT_BROKER_CHANNEL = 1
+AC_DEFAULT_LCR_DEBUG_CADENCE_S = 1.0
+AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT = 120
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_PLOT_RECENT_POINTS = 800
@@ -661,6 +666,9 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_psu_backend = "hmp4030"
         self._ac_psu_resource = ""
         self._ac_psu_baudrate = 115200
+        self._ac_shared_broker_host = AC_DEFAULT_BROKER_HOST
+        self._ac_shared_broker_port = AC_DEFAULT_BROKER_PORT
+        self._ac_shared_broker_channel = AC_DEFAULT_BROKER_CHANNEL
         self._ac_progress_units = "count"
         self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
@@ -1889,6 +1897,24 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(baud_combo, QtWidgets.QComboBox):
             details_grid.addWidget(QtWidgets.QLabel("Baud:", self.frame_ac_hardware_details), 1, 0)
             details_grid.addWidget(baud_combo, 1, 1)
+        self.label_ac_broker_host = QtWidgets.QLabel("Broker host:", self.frame_ac_hardware_details)
+        self.lineEdit_ac_broker_host = QtWidgets.QLineEdit(self.frame_ac_hardware_details)
+        self.lineEdit_ac_broker_host.setText(AC_DEFAULT_BROKER_HOST)
+        self.spinBox_ac_broker_port = QtWidgets.QSpinBox(self.frame_ac_hardware_details)
+        self.spinBox_ac_broker_port.setRange(1, 65535)
+        self.spinBox_ac_broker_port.setValue(AC_DEFAULT_BROKER_PORT)
+        self.spinBox_ac_broker_channel = QtWidgets.QSpinBox(self.frame_ac_hardware_details)
+        self.spinBox_ac_broker_channel.setRange(1, 4)
+        self.spinBox_ac_broker_channel.setValue(AC_DEFAULT_BROKER_CHANNEL)
+        details_grid.addWidget(self.label_ac_broker_host, 2, 0)
+        details_grid.addWidget(self.lineEdit_ac_broker_host, 2, 1)
+        broker_row = QtWidgets.QHBoxLayout()
+        broker_row.setContentsMargins(0, 0, 0, 0)
+        broker_row.addWidget(QtWidgets.QLabel("Port:", self.frame_ac_hardware_details))
+        broker_row.addWidget(self.spinBox_ac_broker_port)
+        broker_row.addWidget(QtWidgets.QLabel("CH:", self.frame_ac_hardware_details))
+        broker_row.addWidget(self.spinBox_ac_broker_channel)
+        details_grid.addLayout(broker_row, 2, 2, 1, 2)
         connect_port_button = getattr(self.ui, "pushButton_connect_port", None)
         if isinstance(connect_port_button, QtWidgets.QPushButton):
             connect_port_button.hide()
@@ -1903,7 +1929,7 @@ class MainWindow(CurrentAnnealingWindow):
         lcr_button_row.addWidget(self.pushButton_refresh_lcr_ports)
         lcr_button_row.addWidget(self.pushButton_connect_lcr)
         lcr_button_row.addWidget(self.pushButton_identify_lcr)
-        details_grid.addLayout(lcr_button_row, 2, 2, 1, 2)
+        details_grid.addLayout(lcr_button_row, 3, 2, 1, 2)
         self.pushButton_identify_lcr.hide()
         self.frame_ac_hardware_details.hide()
         hardware_layout.addWidget(self.frame_ac_hardware_details)
@@ -1972,6 +1998,18 @@ class MainWindow(CurrentAnnealingWindow):
         self.checkBox_ac_include_zero_current.setToolTip(
             "Add one no-current point before the PSU current loop. Useful because the OWON cannot regulate below about 10 mA."
         )
+        self.checkBox_ac_lcr_debug_log = QtWidgets.QCheckBox("Write LCR debug stream", group)
+        self.checkBox_ac_lcr_debug_log.setToolTip(
+            "Write a bounded JSONL sidecar during settle and measurement windows for transition debugging."
+        )
+        self.spinBox_ac_lcr_debug_cadence = CompactDoubleSpinBox(group)
+        self.spinBox_ac_lcr_debug_cadence.setRange(0.1, 60.0)
+        self.spinBox_ac_lcr_debug_cadence.setDecimals(3)
+        self.spinBox_ac_lcr_debug_cadence.setSuffix(" s")
+        self.spinBox_ac_lcr_debug_cadence.setValue(AC_DEFAULT_LCR_DEBUG_CADENCE_S)
+        self.spinBox_ac_lcr_debug_max_rows = QtWidgets.QSpinBox(group)
+        self.spinBox_ac_lcr_debug_max_rows.setRange(1, 10000)
+        self.spinBox_ac_lcr_debug_max_rows.setValue(AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT)
         self.spinBox_ac_dwell = CompactDoubleSpinBox(group)
         self.spinBox_ac_dwell.setRange(0.0, 3600.0)
         self.spinBox_ac_dwell.setDecimals(3)
@@ -2047,7 +2085,11 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.addWidget(self.label_ac_settle_time, 3, 0)
         plan_grid.addWidget(self.spinBox_ac_dwell, 3, 1)
         plan_grid.addWidget(self.checkBox_ac_include_zero_current, 3, 2, 1, 2)
-        plan_grid.addWidget(self.label_ac_sweep_estimate, 4, 0, 1, 4)
+        plan_grid.addWidget(self.checkBox_ac_lcr_debug_log, 4, 0)
+        plan_grid.addWidget(QtWidgets.QLabel("Debug cadence:", plan_group), 4, 1)
+        plan_grid.addWidget(self.spinBox_ac_lcr_debug_cadence, 4, 2)
+        plan_grid.addWidget(self.spinBox_ac_lcr_debug_max_rows, 4, 3)
+        plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
         action_row = QtWidgets.QHBoxLayout()
         action_row.addWidget(self.pushButton_measure_lcr_baseline)
         action_row.addWidget(self.pushButton_run_ac_sweep)
@@ -2056,7 +2098,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.frame_ac_plan_actions = QtWidgets.QFrame(plan_group)
         self.frame_ac_plan_actions.setLayout(action_row)
         self.frame_ac_plan_actions.hide()
-        plan_grid.addWidget(self.frame_ac_plan_actions, 5, 0, 1, 4)
+        plan_grid.addWidget(self.frame_ac_plan_actions, 6, 0, 1, 4)
         outer.addWidget(plan_group)
         self.groupBox_ac_plan = plan_group
 
@@ -2085,9 +2127,13 @@ class MainWindow(CurrentAnnealingWindow):
             getattr(self.ui, "comboBox_supply", None),
             getattr(self.ui, "comboBox_port", None),
             getattr(self.ui, "comboBox_baudrate", None),
+            self.lineEdit_ac_broker_host,
+            self.spinBox_ac_broker_port,
+            self.spinBox_ac_broker_channel,
         ):
-            if isinstance(shared, QtWidgets.QComboBox):
-                shared.currentIndexChanged.connect(lambda *_args: self._sync_ac_psu_from_shared_controls())
+            signal = getattr(shared, "currentIndexChanged", None) or getattr(shared, "valueChanged", None) or getattr(shared, "textChanged", None)
+            if signal is not None:
+                signal.connect(lambda *_args: self._sync_ac_psu_from_shared_controls())
         for edit in (self.lineEdit_lcr_frequencies, self.lineEdit_lcr_levels):
             edit.editingFinished.connect(self._store_lcr_settings)
             edit.editingFinished.connect(self._update_ac_sweep_estimate)
@@ -2115,8 +2161,12 @@ class MainWindow(CurrentAnnealingWindow):
             self.comboBox_ac_direction,
             self.spinBox_ac_dwell,
             self.spinBox_ac_point_duration,
+            self.checkBox_ac_lcr_debug_log,
+            self.spinBox_ac_lcr_debug_cadence,
+            self.spinBox_ac_lcr_debug_max_rows,
         ):
             signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
+            signal = signal or getattr(widget, "toggled", None)
             if signal is not None:
                 signal.connect(lambda *_args: self._store_lcr_settings())
                 signal.connect(lambda *_args: self._update_ac_sweep_estimate())
@@ -2234,6 +2284,15 @@ class MainWindow(CurrentAnnealingWindow):
                 legacy_repeats = float(self.ac_settings.value("sweep_repeats", 10))
                 point_duration = max(1.0, legacy_repeats)
             self.spinBox_ac_point_duration.setValue(float(point_duration))
+            self.checkBox_ac_lcr_debug_log.setChecked(
+                str(self.ac_settings.value("lcr_debug_enabled", 0)).lower() in {"1", "true", "yes"}
+            )
+            self.spinBox_ac_lcr_debug_cadence.setValue(
+                float(self.ac_settings.value("lcr_debug_cadence_s", AC_DEFAULT_LCR_DEBUG_CADENCE_S))
+            )
+            self.spinBox_ac_lcr_debug_max_rows.setValue(
+                int(self.ac_settings.value("lcr_debug_max_rows_per_point", AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT))
+            )
             self._load_ac_psu_settings()
             self._apply_ac_psu_controls()
             self._refresh_ac_psu_status()
@@ -2280,6 +2339,9 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
         self.ac_settings.setValue("point_duration_s", float(self.spinBox_ac_point_duration.value()))
         self.ac_settings.setValue("include_zero_current", int(self.checkBox_ac_include_zero_current.isChecked()))
+        self.ac_settings.setValue("lcr_debug_enabled", int(self.checkBox_ac_lcr_debug_log.isChecked()))
+        self.ac_settings.setValue("lcr_debug_cadence_s", float(self.spinBox_ac_lcr_debug_cadence.value()))
+        self.ac_settings.setValue("lcr_debug_max_rows_per_point", int(self.spinBox_ac_lcr_debug_max_rows.value()))
 
     def _handle_lcr_level_mode_changed(self) -> None:
         if not bool(getattr(self, "_ac_loading_settings", False)):
@@ -2569,35 +2631,50 @@ class MainWindow(CurrentAnnealingWindow):
         if meter is None or not meter.is_open:
             QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
             return
-        self._release_inherited_psu_port_for_ac(config.psu_resource)
-        psu = sweep.SerialScpiCurrentSource(
-            backend_id=config.psu_backend,
-            resource=config.psu_resource,
-            baudrate=self._selected_ac_psu_baudrate(),
-            voltage_limit_v=config.voltage_limit_v,
-        )
         output_path = self._sweep_output_path()
+        if config.lcr_continuous_log_enabled and not config.lcr_continuous_log_path:
+            config = replace(
+                config,
+                lcr_continuous_log_path=str(output_path.with_name(f"{output_path.stem}_lcr_debug.jsonl")),
+            )
+        if config.uses_shared_broker:
+            psu = sweep.SharedBrokerCurrentSource(
+                host=config.shared_broker_host,
+                port=config.shared_broker_port,
+                channel=int(config.shared_broker_channel or 0),
+                voltage_limit_v=config.voltage_limit_v,
+            )
+        else:
+            self._release_inherited_psu_port_for_ac(config.psu_resource)
+            psu = sweep.SerialScpiCurrentSource(
+                backend_id=config.psu_backend,
+                resource=config.psu_resource,
+                baudrate=self._selected_ac_psu_baudrate(),
+                voltage_limit_v=config.voltage_limit_v,
+            )
         self._reset_ac_live_plots(reset_reason)
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = config
-        watchdog = AcPsuWatchdogGuard(
-            config=config,
-            output_path=output_path,
-            baudrate=self._selected_ac_psu_baudrate(),
-        )
-        try:
-            watchdog.start()
-        except Exception as exc:
-            self._ac_sweep_running = False
-            self._ac_active_sweep_config = None
-            QtWidgets.QMessageBox.warning(
-                self,
-                "AC sweep watchdog failed",
-                f"Could not arm the PSU watchdog, so the sweep was not started:\n{exc}",
+        watchdog = None
+        if not config.uses_shared_broker:
+            watchdog = AcPsuWatchdogGuard(
+                config=config,
+                output_path=output_path,
+                baudrate=self._selected_ac_psu_baudrate(),
             )
-            return
-        self._ac_psu_watchdog = watchdog
+            try:
+                watchdog.start()
+            except Exception as exc:
+                self._ac_sweep_running = False
+                self._ac_active_sweep_config = None
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "AC sweep watchdog failed",
+                    f"Could not arm the PSU watchdog, so the sweep was not started:\n{exc}",
+                )
+                return
+            self._ac_psu_watchdog = watchdog
         self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config), units="time")
         self._set_ac_current_task("Current task: preparing microwire current sweep")
         self.pushButton_run_ac_sweep.setEnabled(False)
@@ -2631,7 +2708,8 @@ class MainWindow(CurrentAnnealingWindow):
             thread.start()
             return
         except Exception as exc:
-            watchdog.stop()
+            if watchdog is not None:
+                watchdog.stop()
             self._ac_psu_watchdog = None
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"AC sweep failed: {exc}")
@@ -3001,10 +3079,15 @@ class MainWindow(CurrentAnnealingWindow):
             include_zero=self._include_zero_current_selected(),
         )
         self._sync_ac_psu_from_shared_controls()
-        psu_resource = self._selected_ac_psu_resource()
-        if not psu_resource:
-            raise ValueError("Select the power-supply serial port first.")
         backend = self._selected_ac_psu_backend()
+        if backend == "shared_hmp_broker":
+            psu_resource = self._selected_ac_broker_resource()
+            shared_channel = self._selected_ac_broker_channel()
+        else:
+            psu_resource = self._selected_ac_psu_resource()
+            shared_channel = None
+            if not psu_resource:
+                raise ValueError("Select the power-supply serial port first.")
         voltage_limit_v = sweep.effective_power_supply_voltage_limit(
             backend,
             float(self.spinBox_ac_voltage_limit.value()),
@@ -3019,7 +3102,39 @@ class MainWindow(CurrentAnnealingWindow):
             psu_resource=psu_resource,
             voltage_limit_v=voltage_limit_v,
             point_duration_s=max(0.1, float(self.spinBox_ac_point_duration.value())),
+            shared_broker_host=self._selected_ac_broker_host(),
+            shared_broker_port=self._selected_ac_broker_port(),
+            shared_broker_channel=shared_channel,
+            lcr_continuous_log_enabled=self._lcr_debug_log_enabled(),
+            lcr_continuous_log_cadence_s=self._lcr_debug_log_cadence_s(),
+            lcr_continuous_log_aggregate_s=self._lcr_debug_log_cadence_s(),
+            lcr_continuous_log_max_rows_per_point=self._lcr_debug_log_max_rows_per_point(),
         )
+
+    def _lcr_debug_log_enabled(self) -> bool:
+        try:
+            widget = getattr(self, "checkBox_ac_lcr_debug_log", None)
+        except RuntimeError:
+            widget = None
+        return bool(isinstance(widget, QtWidgets.QCheckBox) and widget.isChecked())
+
+    def _lcr_debug_log_cadence_s(self) -> float:
+        try:
+            widget = getattr(self, "spinBox_ac_lcr_debug_cadence", None)
+        except RuntimeError:
+            widget = None
+        if isinstance(widget, QtWidgets.QDoubleSpinBox):
+            return max(0.1, float(widget.value()))
+        return AC_DEFAULT_LCR_DEBUG_CADENCE_S
+
+    def _lcr_debug_log_max_rows_per_point(self) -> int:
+        try:
+            widget = getattr(self, "spinBox_ac_lcr_debug_max_rows", None)
+        except RuntimeError:
+            widget = None
+        if isinstance(widget, QtWidgets.QSpinBox):
+            return max(1, int(widget.value()))
+        return AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT
 
     def _update_ac_sweep_estimate(self) -> None:
         try:
@@ -3281,6 +3396,24 @@ class MainWindow(CurrentAnnealingWindow):
                 self.baudrate = self._ac_psu_baudrate
             except ValueError:
                 pass
+        try:
+            host_edit = getattr(self, "lineEdit_ac_broker_host", None)
+        except RuntimeError:
+            host_edit = None
+        if isinstance(host_edit, QtWidgets.QLineEdit):
+            self._ac_shared_broker_host = host_edit.text().strip() or AC_DEFAULT_BROKER_HOST
+        try:
+            port_spin = getattr(self, "spinBox_ac_broker_port", None)
+        except RuntimeError:
+            port_spin = None
+        if isinstance(port_spin, QtWidgets.QSpinBox):
+            self._ac_shared_broker_port = int(port_spin.value())
+        try:
+            channel_spin = getattr(self, "spinBox_ac_broker_channel", None)
+        except RuntimeError:
+            channel_spin = None
+        if isinstance(channel_spin, QtWidgets.QSpinBox):
+            self._ac_shared_broker_channel = int(channel_spin.value())
 
     def _backend_from_ac_supply_combo(self) -> str:
         combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
@@ -3318,6 +3451,19 @@ class MainWindow(CurrentAnnealingWindow):
         )
         port = self.ac_settings.value(self._psu_profile_key(backend, "port"), legacy_port, type=str)
         baud_text = self.ac_settings.value(self._psu_profile_key(backend, "baud"), legacy_baud, type=str)
+        broker_host = self.ac_settings.value(
+            self._psu_profile_key(backend, "broker_host"),
+            self.ac_settings.value("shared_broker_host", AC_DEFAULT_BROKER_HOST, type=str),
+            type=str,
+        )
+        broker_port = self.ac_settings.value(
+            self._psu_profile_key(backend, "broker_port"),
+            self.ac_settings.value("shared_broker_port", AC_DEFAULT_BROKER_PORT, type=int),
+        )
+        broker_channel = self.ac_settings.value(
+            self._psu_profile_key(backend, "broker_channel"),
+            self.ac_settings.value("shared_broker_channel", AC_DEFAULT_BROKER_CHANNEL, type=int),
+        )
         voltage = self.ac_settings.value(
             self._psu_profile_key(backend, "voltage_limit_v"),
             self.ac_settings.value("voltage_limit_v", default_voltage) if legacy_matches_backend else default_voltage,
@@ -3327,11 +3473,29 @@ class MainWindow(CurrentAnnealingWindow):
             self._ac_psu_baudrate = int(str(baud_text))
         except ValueError:
             self._ac_psu_baudrate = 115200
+        self._ac_shared_broker_host = str(broker_host or AC_DEFAULT_BROKER_HOST).strip() or AC_DEFAULT_BROKER_HOST
+        try:
+            self._ac_shared_broker_port = int(broker_port)
+        except (TypeError, ValueError):
+            self._ac_shared_broker_port = AC_DEFAULT_BROKER_PORT
+        try:
+            self._ac_shared_broker_channel = int(broker_channel)
+        except (TypeError, ValueError):
+            self._ac_shared_broker_channel = AC_DEFAULT_BROKER_CHANNEL
         with QtCore.QSignalBlocker(self.spinBox_ac_voltage_limit):
             try:
                 self.spinBox_ac_voltage_limit.setValue(float(voltage))
             except (TypeError, ValueError):
                 self.spinBox_ac_voltage_limit.setValue(default_voltage)
+        if hasattr(self, "lineEdit_ac_broker_host"):
+            with QtCore.QSignalBlocker(self.lineEdit_ac_broker_host):
+                self.lineEdit_ac_broker_host.setText(self._ac_shared_broker_host)
+        if hasattr(self, "spinBox_ac_broker_port"):
+            with QtCore.QSignalBlocker(self.spinBox_ac_broker_port):
+                self.spinBox_ac_broker_port.setValue(self._ac_shared_broker_port)
+        if hasattr(self, "spinBox_ac_broker_channel"):
+            with QtCore.QSignalBlocker(self.spinBox_ac_broker_channel):
+                self.spinBox_ac_broker_channel.setValue(self._ac_shared_broker_channel)
 
     def _store_ac_psu_profile_settings(self, backend: str | None = None) -> None:
         backend = backend or self._ac_psu_backend
@@ -3339,6 +3503,9 @@ class MainWindow(CurrentAnnealingWindow):
             return
         self.ac_settings.setValue(self._psu_profile_key(backend, "port"), self._ac_psu_resource)
         self.ac_settings.setValue(self._psu_profile_key(backend, "baud"), str(self._ac_psu_baudrate))
+        self.ac_settings.setValue(self._psu_profile_key(backend, "broker_host"), self._ac_shared_broker_host)
+        self.ac_settings.setValue(self._psu_profile_key(backend, "broker_port"), int(self._ac_shared_broker_port))
+        self.ac_settings.setValue(self._psu_profile_key(backend, "broker_channel"), int(self._ac_shared_broker_channel))
         self.ac_settings.setValue(
             self._psu_profile_key(backend, "voltage_limit_v"),
             float(self.spinBox_ac_voltage_limit.value()),
@@ -3364,6 +3531,36 @@ class MainWindow(CurrentAnnealingWindow):
         self._capture_ac_psu_controls()
         return self._ac_psu_baudrate
 
+    def _selected_ac_broker_host(self) -> str:
+        self._capture_ac_psu_controls()
+        try:
+            host = self._ac_shared_broker_host
+        except RuntimeError:
+            host = AC_DEFAULT_BROKER_HOST
+        return host or AC_DEFAULT_BROKER_HOST
+
+    def _selected_ac_broker_port(self) -> int:
+        self._capture_ac_psu_controls()
+        try:
+            port = self._ac_shared_broker_port
+        except RuntimeError:
+            port = AC_DEFAULT_BROKER_PORT
+        return int(port or AC_DEFAULT_BROKER_PORT)
+
+    def _selected_ac_broker_channel(self) -> int:
+        self._capture_ac_psu_controls()
+        try:
+            raw_channel = self._ac_shared_broker_channel
+        except RuntimeError:
+            raw_channel = AC_DEFAULT_BROKER_CHANNEL
+        channel = int(raw_channel or 0)
+        if channel <= 0:
+            raise ValueError("Select a shared HMP broker channel first.")
+        return channel
+
+    def _selected_ac_broker_resource(self) -> str:
+        return f"{self._selected_ac_broker_host()}:{self._selected_ac_broker_port()}/CH{self._selected_ac_broker_channel()}"
+
     def _sync_ac_psu_from_shared_controls(self) -> None:
         if self._is_ac_refreshing_psu_ports():
             return
@@ -3388,7 +3585,22 @@ class MainWindow(CurrentAnnealingWindow):
             or (backend != "owon_spe6102" and math.isclose(current_limit, OWON_DEFAULT_VOLTAGE_LIMIT_V))
         ):
             self.spinBox_ac_voltage_limit.setValue(default_limit)
+        self._set_ac_broker_controls_visible(backend == "shared_hmp_broker")
         self._refresh_ac_psu_status()
+
+    def _set_ac_broker_controls_visible(self, visible: bool) -> None:
+        for name in (
+            "label_ac_broker_host",
+            "lineEdit_ac_broker_host",
+            "spinBox_ac_broker_port",
+            "spinBox_ac_broker_channel",
+        ):
+            try:
+                widget = getattr(self, name, None)
+            except RuntimeError:
+                widget = None
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setVisible(bool(visible))
 
     def _is_ac_refreshing_psu_ports(self) -> bool:
         try:
@@ -3445,6 +3657,11 @@ class MainWindow(CurrentAnnealingWindow):
             backend = "owon_spe6102"
         profile = sweep.POWER_SUPPLY_PROFILES.get(backend, {})
         backend_label = str(profile.get("label", backend))
+        if backend == "shared_hmp_broker":
+            resource = self._selected_ac_broker_resource()
+            label.setText(f"AC current supply: {backend_label}, {resource}")
+            self._refresh_ac_hardware_status()
+            return
         resource = str(getattr(self, "_ac_psu_resource", "") or "") or "no port selected"
         baudrate = int(getattr(self, "_ac_psu_baudrate", 115200) or 115200)
         label.setText(f"AC current supply: {backend_label}, {resource}, {baudrate} baud")
@@ -3473,7 +3690,7 @@ class MainWindow(CurrentAnnealingWindow):
             backend = "owon_spe6102"
         profile = sweep.POWER_SUPPLY_PROFILES.get(backend, {})
         backend_label = str(profile.get("label", backend))
-        resource = str(getattr(self, "_ac_psu_resource", "") or "")
+        resource = self._selected_ac_broker_resource() if backend == "shared_hmp_broker" else str(getattr(self, "_ac_psu_resource", "") or "")
         psu_text = f"{backend_label} on {resource}" if resource else f"{backend_label}, no port selected"
         lcr_text = "LCR connected" if lcr_connected else "LCR not connected"
         label.setText(f"{lcr_text}; PSU {psu_text}")
