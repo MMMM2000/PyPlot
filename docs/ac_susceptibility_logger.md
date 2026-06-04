@@ -269,14 +269,18 @@ the operator explicitly asks for auto-detection.
 The sweep engine treats the supply generically: connect, identify the selected
 SCPI backend, initialize with the selected voltage limit, set current, and wait
 briefly for actual-current readback before starting LCR reads at each current
-point. For supplies that expose voltage control, especially the OWON SPE6102,
-the voltage limit is treated as an automatic compliance value rather than a
-fixed experiment setting. Before each current point the logger estimates a
-reasonable voltage from the last measured wire resistance, then trims the
-voltage from PSU readback until the measured current is close to the requested
-current. If the requested current cannot be reached before the short ready
-timeout, the run logs a `WARN` row and continues with the measured current
-rather than stopping the overnight sweep.
+point. HMP4030/HMP4040-style direct serial and shared-broker runs keep the
+configured voltage limit available for the whole sweep and change only the
+current setpoint at each current point, matching the Current Annealing and Mini
+DMA logger HMP pattern. For supplies that expose voltage control but are not
+HMP-style current sources, especially the OWON SPE6102, the voltage limit is
+treated as an automatic compliance value rather than a fixed experiment
+setting. Before each current point the logger estimates a reasonable voltage
+from the last measured wire resistance, then trims the voltage from PSU readback
+until the measured current is close to the requested current. If the requested
+current cannot be reached before the short ready timeout, the run logs a `WARN`
+row and continues with the measured current rather than stopping the overnight
+sweep.
 
 The logged `current_actual_a`, `voltage_actual_v`, PSU resistance, and PSU power
 columns are the source of truth for later analysis; the requested current is

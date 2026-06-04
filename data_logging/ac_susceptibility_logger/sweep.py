@@ -1364,6 +1364,8 @@ def _set_initial_psu_voltage_for_current(
         return
     if not _supports_voltage_control(psu):
         return
+    if _uses_fixed_hmp_voltage_limit(config):
+        return
     current_a = max(0.0, float(current_point.current_a))
     if current_a <= 1e-9:
         _set_psu_voltage_limit(psu, 0.0)
@@ -1458,10 +1460,16 @@ def _can_adjust_psu_voltage(
 ) -> bool:
     if not bool(config.psu_current_feedback_enabled):
         return False
+    if _uses_fixed_hmp_voltage_limit(config):
+        return False
     if not _supports_voltage_control(psu):
         return False
     actual = measurement.current_actual_a
     return actual is not None and math.isfinite(float(actual))
+
+
+def _uses_fixed_hmp_voltage_limit(config: AcSweepConfig) -> bool:
+    return str(config.psu_backend or "").strip().lower() in {"hmp4030", "shared_hmp_broker"}
 
 
 def _adjust_psu_voltage_toward_current(
