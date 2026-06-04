@@ -106,7 +106,6 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_waits_for_natural_target_return",
     "current_hold_response_requires_directional_motor_response",
     "current_hold_large_error_bypasses_persistence",
-    "current_hold_transformation_escape_resume",
     "current_hold_moving_away_bypasses_persistence",
     "current_hold_moving_away_preserves_predictive_step",
     "current_hold_large_error_not_masked_by_noise",
@@ -474,9 +473,6 @@ SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR = 10.0
 SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR = 2.0
 SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
-SERVO_CURRENT_SWEEP_HOLD_ESCAPE_CONFIRM_S = 2.0
-SERVO_CURRENT_SWEEP_HOLD_ESCAPE_STRESS_MPA = 20.0
-SERVO_CURRENT_SWEEP_HOLD_ESCAPE_HARD_STRESS_MPA = 35.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
@@ -20320,47 +20316,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0.0 if load_slope is None else abs(float(load_slope))
         return 0.0
 
-    def _current_sweep_hold_escape_needed(
-        self,
-        basis: str,
-        signed_error: float,
-        error_value: float,
-        tolerance: float,
-        held_s: float,
-        filtered_signal: ScaleControlSignal | None,
-    ) -> tuple[bool, str]:
-        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
-            return False, ""
-        if held_s < SERVO_CURRENT_SWEEP_HOLD_ESCAPE_CONFIRM_S:
-            return False, ""
-        escape_band = max(
-            abs(float(tolerance)) * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR,
-            self._current_sweep_hold_min_band_for_basis(
-                basis,
-                SERVO_CURRENT_SWEEP_HOLD_ESCAPE_STRESS_MPA,
-            ),
-        )
-        hard_band = self._current_sweep_hold_min_band_for_basis(
-            basis,
-            SERVO_CURRENT_SWEEP_HOLD_ESCAPE_HARD_STRESS_MPA,
-        )
-        if hard_band > 0.0 and abs(float(error_value)) >= hard_band:
-            return True, f"held-current error {_format_compact_number(error_value)} exceeded escape band"
-        if filtered_signal is None or abs(float(error_value)) < escape_band:
-            return False, ""
-        slope = float(filtered_signal.slope_per_s)
-        moving_away = float(signed_error) * slope > 0.0
-        if not moving_away:
-            return False, ""
-        min_slope = self._current_sweep_hold_min_slope_for_basis(basis)
-        if abs(slope) < min_slope:
-            return False, ""
-        return (
-            True,
-            "held current is still driving the target away "
-            f"(error {_format_compact_number(error_value)}, slope {_format_compact_number(slope)}/s)",
-        )
-
     def _reset_current_sweep_ramp_hold_candidate(self) -> None:
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
@@ -20585,26 +20540,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return False, False
 
         held_s = max(0.0, now_s - self._current_sweep_ramp_hold_started_s)
-        escape_hold, escape_reason = self._current_sweep_hold_escape_needed(
-            step.basis,
-            signed_error,
-            resume_error,
-            tolerance,
-            held_s,
-            filtered_signal,
-        )
-        if escape_hold:
-            self._write_control_trace(
-                decision="current_hold_escape",
-                basis=step.basis,
-                target_value=step.target_value,
-                current_value=signed_error + float(step.target_value),
-                tolerance=tolerance,
-                result="resume",
-                reason=escape_reason,
-            )
-            self._resume_current_sweep_ramp_from_hold(now_s=now_s, reason=escape_reason)
-            return False, False
         if resume_error <= resume_band:
             if self._current_sweep_ramp_hold_in_band_since_s is None:
                 self._current_sweep_ramp_hold_in_band_since_s = now_s
