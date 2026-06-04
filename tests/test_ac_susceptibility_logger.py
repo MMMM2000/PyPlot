@@ -1984,6 +1984,67 @@ def test_ac_logger_uses_ac_specific_owon_supply_defaults_for_sweep_config() -> N
     app.processEvents()
 
 
+def test_ac_logger_shared_broker_requires_manual_channel_selection_for_sweep_config() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.ac_settings = QtCore.QSettings("microwire", "ac_susceptibility_logger_test_shared_broker_channel")
+    window.ac_settings.clear()
+    window._lcr_plan = []
+    window.ui = type("Ui", (), {})()
+    window.ui.comboBox_supply = QtWidgets.QComboBox()
+    window.ui.comboBox_supply.addItem("Shared HMP broker", "shared_hmp_broker")
+    window.ui.comboBox_port = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate.addItem("9600")
+    window._ac_psu_backend = "shared_hmp_broker"
+    window._ac_psu_resource = ""
+    window._ac_psu_baudrate = 9600
+    window._ac_shared_broker_host = "127.0.0.1"
+    window._ac_shared_broker_port = 8765
+    window._ac_shared_broker_channel = 0
+    window.lineEdit_ac_broker_host = QtWidgets.QLineEdit()
+    window.lineEdit_ac_broker_host.setText("127.0.0.1")
+    window.spinBox_ac_broker_port = QtWidgets.QSpinBox()
+    window.spinBox_ac_broker_port.setRange(1, 65535)
+    window.spinBox_ac_broker_port.setValue(8765)
+    window.spinBox_ac_broker_channel = QtWidgets.QSpinBox()
+    window.spinBox_ac_broker_channel.setRange(0, 4)
+    window.spinBox_ac_broker_channel.setSpecialValueText("Select channel...")
+    window.spinBox_ac_broker_channel.setValue(0)
+    window.label_ac_broker_host = QtWidgets.QLabel()
+    window.label_ac_broker_port = QtWidgets.QLabel()
+    window.label_ac_broker_channel = QtWidgets.QLabel()
+    window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
+    window.spinBox_ac_voltage_limit.setValue(32.0)
+    window.spinBox_ac_current_start = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_start.setValue(20.0)
+    window.spinBox_ac_current_stop = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_stop.setValue(20.0)
+    window.spinBox_ac_current_step = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_step.setValue(20.0)
+    window.comboBox_ac_direction = QtWidgets.QComboBox()
+    window.comboBox_ac_direction.addItem("Up only", "up")
+    window.spinBox_ac_dwell = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_dwell.setValue(0.5)
+    window.spinBox_ac_point_duration = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_point_duration.setValue(1.0)
+    window.checkBox_ac_include_zero_current = QtWidgets.QCheckBox()
+    window._prepare_lcr_plan = lambda: [lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")]
+
+    with pytest.raises(ValueError, match="shared HMP broker channel"):
+        window._build_ac_sweep_config()
+
+    window.spinBox_ac_broker_channel.setValue(3)
+    config = window._build_ac_sweep_config()
+
+    assert config.psu_backend == "shared_hmp_broker"
+    assert config.psu_resource == "127.0.0.1:8765/CH3"
+    assert config.shared_broker_channel == 3
+    assert window._selected_ac_broker_channel() == 3
+    app.processEvents()
+
+
 def test_ac_logger_psu_settings_are_separate_from_current_annealing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

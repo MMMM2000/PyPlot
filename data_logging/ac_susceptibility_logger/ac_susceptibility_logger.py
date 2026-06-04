@@ -91,7 +91,7 @@ AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
 AC_DEFAULT_BROKER_HOST = "127.0.0.1"
 AC_DEFAULT_BROKER_PORT = 8765
-AC_DEFAULT_BROKER_CHANNEL = 1
+AC_DEFAULT_BROKER_CHANNEL = 0
 AC_DEFAULT_LCR_DEBUG_CADENCE_S = 1.0
 AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT = 120
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
@@ -1904,15 +1904,18 @@ class MainWindow(CurrentAnnealingWindow):
         self.spinBox_ac_broker_port.setRange(1, 65535)
         self.spinBox_ac_broker_port.setValue(AC_DEFAULT_BROKER_PORT)
         self.spinBox_ac_broker_channel = QtWidgets.QSpinBox(self.frame_ac_hardware_details)
-        self.spinBox_ac_broker_channel.setRange(1, 4)
+        self.spinBox_ac_broker_channel.setRange(0, 4)
+        self.spinBox_ac_broker_channel.setSpecialValueText("Select channel...")
         self.spinBox_ac_broker_channel.setValue(AC_DEFAULT_BROKER_CHANNEL)
         details_grid.addWidget(self.label_ac_broker_host, 2, 0)
         details_grid.addWidget(self.lineEdit_ac_broker_host, 2, 1)
         broker_row = QtWidgets.QHBoxLayout()
         broker_row.setContentsMargins(0, 0, 0, 0)
-        broker_row.addWidget(QtWidgets.QLabel("Port:", self.frame_ac_hardware_details))
+        self.label_ac_broker_port = QtWidgets.QLabel("Port:", self.frame_ac_hardware_details)
+        broker_row.addWidget(self.label_ac_broker_port)
         broker_row.addWidget(self.spinBox_ac_broker_port)
-        broker_row.addWidget(QtWidgets.QLabel("CH:", self.frame_ac_hardware_details))
+        self.label_ac_broker_channel = QtWidgets.QLabel("CH:", self.frame_ac_hardware_details)
+        broker_row.addWidget(self.label_ac_broker_channel)
         broker_row.addWidget(self.spinBox_ac_broker_channel)
         details_grid.addLayout(broker_row, 2, 2, 1, 2)
         connect_port_button = getattr(self.ui, "pushButton_connect_port", None)
@@ -3592,7 +3595,9 @@ class MainWindow(CurrentAnnealingWindow):
         for name in (
             "label_ac_broker_host",
             "lineEdit_ac_broker_host",
+            "label_ac_broker_port",
             "spinBox_ac_broker_port",
+            "label_ac_broker_channel",
             "spinBox_ac_broker_channel",
         ):
             try:
