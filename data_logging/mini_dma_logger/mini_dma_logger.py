@@ -78,7 +78,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-04.1"
+CONTROL_LOGIC_VERSION = "2026-05-29.2"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -97,7 +97,6 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_noise_band_resume",
     "adaptive_current_hold_response_stiffness",
     "current_hold_waits_for_natural_target_return",
-    "current_hold_fast_recovery_bypasses_persistence",
     "current_hold_response_requires_directional_motor_response",
     "current_hold_large_error_bypasses_persistence",
     "current_hold_moving_away_bypasses_persistence",
@@ -12300,17 +12299,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_out_of_band_since_by_key.pop(seek_key, None)
             self._seek_out_of_band_sign_by_key.pop(seek_key, None)
             return True
-        large_error_band = max(
-            out_of_band_floor,
-            self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
-        ) * SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR
-        if (
-            self._current_sweep_hold_fast_recovery_needed(basis, error_value)
-            or abs(float(error_value)) > large_error_band
-        ):
-            self._seek_out_of_band_since_by_key.pop(seek_key, None)
-            self._seek_out_of_band_sign_by_key.pop(seek_key, None)
-            return True
         slope = float(filtered_signal.slope_per_s)
         recovery_band = max(
             abs(float(effective_tolerance)),
@@ -12336,6 +12324,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._seek_out_of_band_since_by_key.pop(seek_key, None)
                 self._seek_out_of_band_sign_by_key.pop(seek_key, None)
                 return True
+        large_error_band = max(
+            out_of_band_floor,
+            self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
+        ) * SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR
+        if abs(float(error_value)) > large_error_band:
+            self._seek_out_of_band_since_by_key.pop(seek_key, None)
+            self._seek_out_of_band_sign_by_key.pop(seek_key, None)
+            return True
         sign = math.copysign(1.0, float(error_value))
         previous_sign = self._seek_out_of_band_sign_by_key.get(seek_key)
         timestamp_s = float(filtered_signal.timestamp_s)
