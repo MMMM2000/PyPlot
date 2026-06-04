@@ -1,0 +1,48 @@
+# Copy this file into a master-thread artifact folder, campaign folder, or
+# integration workspace notes when several PyPlot workers are active.
+
+ledger:
+  updated_utc: "YYYY-MM-DD HH:MM"
+  integration_branch: "codex/integration-mini-dma-ready-review"
+  notes: ""
+
+tasks:
+  - id: "mini-dma-example"
+    title: "Short task title"
+    status: "planned"  # planned | active | ready | integrating | integrated | blocked | deferred | superseded
+    priority: "normal"  # low | normal | high | urgent
+    owner:
+      thread_id: ""
+      thread_title: ""
+      role: "worker"  # worker | subagent | monitor
+    git:
+      base_branch: "origin/main"
+      branch: ""
+      upstream: ""
+      commit: ""
+      worktree: ""
+      clean_status_reported: false
+    scope:
+      summary: ""
+      touched_files: []
+      conflict_areas: []
+    readiness:
+      handoff_received: false
+      branch_and_commit: false
+      clean_git_status: false
+      behavioral_guarantees: []
+      tests: []
+      screenshots_or_artifacts: []
+      changelog_status: ""
+      risks: []
+    integration:
+      decision: "pending"  # pending | merge | defer | reject | supersede
+      merged_commit: ""
+      combined_checks: []
+      regression_guarantees_to_recheck: []
+      final_status: ""
+    links:
+      handoff: ""
+      pr: ""
+      artifacts: []
+

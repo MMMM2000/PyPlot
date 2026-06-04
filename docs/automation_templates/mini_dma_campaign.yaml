@@ -1,0 +1,92 @@
+schema_version: 1
+kind: mini_dma_optimization_campaign
+campaign:
+  id: 2026-06-02_Ni50Fe27Ga23_12-2_52mm_temperature-speed
+  title: Ni50Fe27Ga23 12/2 52 mm temperature and ramp-speed optimization
+  root: G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-02_Ni50Fe27Ga23_12-2_52mm_temperature-speed
+  owner_thread: PyPlot master coordination
+objective:
+  primary: minimize stress error and fluctuation during current sweeps while recovering quickly after transformation-driven stress changes
+  optimize_for_generalization: true
+  success_metrics:
+    - stress_error_rms_mpa
+    - stress_error_p95_abs_mpa
+    - stress_error_max_abs_mpa
+    - recovery_time_s
+    - current_hold_elapsed_s
+    - total_measurement_time_s
+    - strain_current_curve_quality
+  tradeoff_question: determine when extra measurement time stops buying meaningful precision improvement
+  avoid_sample_specific_magic_values: true
+  hard_values_policy: use hard caps only for safety or physically derived geometry/control limits; do not tune permanent control logic to one sample/run
+sample:
+  composition: Ni50Fe27Ga23
+  microwire: 12/2
+  length_mm: 52.0
+  diameter_mm: 0.0191
+  diameter_source: fabrication metadata
+control_source:
+  required_base_ref: origin/main
+  required_branch_prefix: codex/
+  require_clean_git: true
+  require_up_to_date_with_base: true
+  approved_control_logic_version: latest-known-good
+hardware:
+  require_shared_hmp: true
+  hmp_resource: COM3
+  motor_channel: CH3
+  current_channel: CH4
+  preserve_channels:
+    - CH3
+  current_voltage_limit_v: 32.05
+  current_max_setpoint_mA: 100.0
+safety:
+  max_stress_mpa: 300.0
+  recovery_stress_mpa: 50.0
+  wire_break_stops_plan: true
+  allow_mechanical_slack_takeup: true
+  max_correction_travel_fraction: 0.15
+run_plan:
+  target_basis: stress_mpa
+  target_mpa: 50.0
+  first_overheating:
+    enabled: true
+    target_mpa: 20.0
+    current_end_mA: 100.0
+  stages:
+    - id: baseline_0p8
+      recipe_path: plans/recipes/iso-stress-50mpa-1-to-100-to-1ma-0p8ma-s.recipe.json
+      current_ramp_rate_mA_s: 0.8
+      repeat: 1
+    - id: speed_1p0
+      recipe_path: plans/recipes/iso-stress-50mpa-1-to-100-to-1ma-1p0ma-s.recipe.json
+      current_ramp_rate_mA_s: 1.0
+      repeat: 1
+    - id: speed_0p6
+      recipe_path: plans/recipes/iso-stress-50mpa-1-to-100-to-1ma-0p6ma-s.recipe.json
+      current_ramp_rate_mA_s: 0.6
+      repeat: 1
+    - id: dynamic_ramp_candidate
+      recipe_path: plans/recipes/iso-stress-50mpa-dynamic-current-ramp.recipe.json
+      current_ramp_policy: dynamic
+      repeat: 1
+  comparison_policy:
+    baseline_stage: baseline_0p8
+    slower_ramps_must_justify_time_cost: true
+    example_threshold_question: check whether 0.2 mA/s improves precision enough to justify the much longer run time
+    dynamic_ramp_goal: match or improve slower-ramp precision while keeping measurement time closer to faster fixed ramps
+reporting:
+  required: true
+  report_path: reports/mini_dma_optimization_report.pdf
+  image_dir: reports/images
+  summary_path: analysis/summary.json
+  run_quality_cache: run_quality.json
+  per_run_core_plot_pattern: reports/images/{run_name}_core.png
+  send_per_run_core_plot_to_master: true
+  require_core_plots: true
+  core_plots:
+    - stress_vs_time
+    - strain_vs_current
+  highlight_current_hold: true
+  include_trace_replay: true
+  include_ramp_speed_comparison: true
