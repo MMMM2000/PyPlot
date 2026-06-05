@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import sys
+import types
 
 import pytest
 
@@ -466,6 +468,72 @@ def test_current_annealing_imports_project_diameter_and_autocomplete(tmp_path, q
     assert window._metadata_composition_model.stringList() == ["Ni50Fe27Ga23"]
     assert window._metadata_microwire_model.stringList() == ["12/2"]
     assert not window.label_live_set_density.isHidden()
+
+
+def test_current_annealing_fabrication_load_keeps_ui_responsive(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    for index in range(40):
+        (root / f"fabrication_{index:03d}.xlsx").write_text("placeholder", encoding="utf-8")
+
+    class _FabricationIndex:
+        piece_level = {("Ni50Fe27Ga23", 12, 2): {"d (um)": 19.1}}
+
+    worker_thread: list[object] = []
+
+    def _slow_build_fabrication_index(files: list[object]) -> _FabricationIndex:
+        assert len(files) == 40
+        worker_thread.append(logger_mod.QtCore.QThread.currentThread())
+        logger_mod.time.sleep(0.25)
+        return _FabricationIndex()
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _slow_build_fabrication_index
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+
+    ticks: list[float] = []
+    timer = logger_mod.QtCore.QTimer()
+    timer.setInterval(20)
+    timer.timeout.connect(lambda: ticks.append(logger_mod.time.perf_counter()))
+    timer.start()
+    window.ui.lineEdit_composition.setText("Ni50Fe27Ga23")
+    window.ui.lineEdit_microwire.setText("12_2")
+    window.ui.lineEdit_fabrication_folder.setText(str(root))
+
+    assert window._load_fabrication_folder_from_ui() is True
+    assert window.ui.pushButton_load_fabrication.text() == "Cancel"
+
+    qtbot.waitUntil(lambda: len(ticks) >= 3, timeout=1000)
+    assert window._fabrication_load_active()
+
+    qtbot.waitUntil(lambda: not window._fabrication_load_active(), timeout=5000)
+    timer.stop()
+
+    assert worker_thread
+    assert worker_thread[0] is not window.thread()
+    assert window.ui.pushButton_load_fabrication.text() == "Load"
+    assert window.ui.doubleSpinBox_wire_diameter_um.value() == pytest.approx(19.1)
+    assert "Loaded 1 microwire suggestion(s) from 40 fabrication workbook(s)." in (
+        window.ui.label_microwire_metadata_status.text()
+    )
+
+
+def test_current_annealing_microwire_field_displays_slashes(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._handle_metadata_microwire_activated("12_2")
+
+    assert window.ui.lineEdit_microwire.text() == "12/2"
 
 
 def test_current_annealing_top_axis_shows_density_when_diameter_known(qtbot) -> None:

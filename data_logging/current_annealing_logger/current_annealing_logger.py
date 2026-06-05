@@ -254,6 +254,87 @@ class AnnealingSampleRecord:
     source: str
 
 
+def _records_from_fabrication_index_payload(index: Any, *, source: str) -> list[AnnealingSampleRecord]:
+    records: list[AnnealingSampleRecord] = []
+    piece_level = getattr(index, "piece_level", {})
+    if not isinstance(piece_level, Mapping):
+        return records
+    for key, data in piece_level.items():
+        if not isinstance(key, tuple) or len(key) != 3 or not isinstance(data, Mapping):
+            continue
+        composition, draw, piece = key
+        try:
+            draw_int = int(draw)
+            piece_int = int(piece)
+        except Exception:
+            continue
+        diameter_um = _safe_float(_project_row_value(data, PROJECT_ROW_DIAMETER_KEYS))
+        records.append(
+            AnnealingSampleRecord(
+                composition=str(composition).strip(),
+                microwire=f"{draw_int}/{piece_int}",
+                diameter_um=None if diameter_um is None or diameter_um <= 0.0 else diameter_um,
+                source=source,
+            )
+        )
+    return records
+
+
+class FabricationFolderLoadWorker(QtCore.QObject):
+    progress_changed = QtCore.pyqtSignal(str)
+    succeeded = QtCore.pyqtSignal(object, object, int)
+    failed = QtCore.pyqtSignal(object, str)
+    cancelled = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = Path(root)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            if self._cancelled:
+                self.cancelled.emit(self.root)
+                return
+            if not self.root.exists() or not self.root.is_dir():
+                self.failed.emit(self.root, "Fabrication folder was not found.")
+                return
+
+            self.progress_changed.emit(f"Scanning fabrication folder: {self.root}")
+            files: list[Path] = []
+            for path in self.root.rglob("*.xlsx"):
+                if self._cancelled:
+                    self.cancelled.emit(self.root)
+                    return
+                if path.is_file() and not path.name.startswith("~$"):
+                    files.append(path)
+                    if len(files) % 100 == 0:
+                        self.progress_changed.emit(f"Found {len(files)} fabrication workbook(s)...")
+
+            if not files:
+                self.failed.emit(self.root, "No fabrication Excel workbooks were found.")
+                return
+
+            self.progress_changed.emit(f"Reading {len(files)} fabrication workbook(s)...")
+            from microwire_data_builder import core as builder_core
+
+            index = builder_core.build_fabrication_index(files)
+            if self._cancelled:
+                self.cancelled.emit(self.root)
+                return
+            records = _records_from_fabrication_index_payload(index, source=self.root.name)
+            self.succeeded.emit(self.root, records, len(files))
+        except Exception as exc:
+            self.failed.emit(self.root, f"Failed to load fabrication spreadsheets: {exc}")
+        finally:
+            self.finished.emit()
+
+
 class MeasurementHistoryDialog(QtWidgets.QDialog):
     """Display recently recorded resistance-current traces."""
 
@@ -378,6 +459,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._metadata_completer_compositions: tuple[str, ...] = ()
         self._metadata_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
         self._metadata_diameter_imported = False
+        self._fabrication_thread: QtCore.QThread | None = None
+        self._fabrication_worker: FabricationFolderLoadWorker | None = None
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         self.supply_profile_id = "hmp4030"
         self.min_start_current_mA = 1
@@ -593,6 +676,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_composition.textChanged.connect(self._sync_microwire_metadata_fields)
         if hasattr(self.ui, 'lineEdit_microwire'):
             self.ui.lineEdit_microwire.textChanged.connect(self._sync_microwire_metadata_fields)
+            self.ui.lineEdit_microwire.editingFinished.connect(self._normalize_microwire_field_separator)
         if hasattr(self.ui, 'pushButton_browse_builder_project'):
             self.ui.pushButton_browse_builder_project.clicked.connect(self._choose_builder_project)
         if hasattr(self.ui, 'pushButton_import_builder_project'):
@@ -600,7 +684,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_browse_fabrication_folder'):
             self.ui.pushButton_browse_fabrication_folder.clicked.connect(self._choose_fabrication_folder)
         if hasattr(self.ui, 'pushButton_load_fabrication'):
-            self.ui.pushButton_load_fabrication.clicked.connect(self._load_fabrication_folder_from_ui)
+            self.ui.pushButton_load_fabrication.clicked.connect(self._handle_fabrication_load_button)
         if hasattr(self.ui, 'lineEdit_builder_project'):
             self.ui.lineEdit_builder_project.textChanged.connect(self._store_microwire_metadata_settings)
         if hasattr(self.ui, 'lineEdit_fabrication_folder'):
@@ -1157,6 +1241,71 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_fabrication_folder.setText(folder)
             self._load_fabrication_folder_from_ui()
 
+    def _fabrication_load_active(self) -> bool:
+        thread = self._fabrication_thread
+        return thread is not None and thread.isRunning()
+
+    def _set_fabrication_loading_ui(self, loading: bool) -> None:
+        button = getattr(self.ui, "pushButton_load_fabrication", None)
+        if isinstance(button, QtWidgets.QPushButton):
+            button.setText("Cancel" if loading else "Load")
+        for attr in ("pushButton_browse_fabrication_folder", "lineEdit_fabrication_folder"):
+            widget = getattr(self.ui, attr, None)
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(not loading)
+
+    def _handle_fabrication_load_button(self) -> None:
+        if self._fabrication_load_active():
+            self._cancel_fabrication_folder_load()
+            self._set_metadata_status("Cancelling fabrication folder load...")
+            return
+        self._load_fabrication_folder_from_ui()
+
+    def _cancel_fabrication_folder_load(self) -> None:
+        worker = self._fabrication_worker
+        if worker is not None:
+            worker.cancel()
+
+    def _finish_fabrication_thread(
+        self,
+        thread: QtCore.QThread,
+        worker: FabricationFolderLoadWorker,
+    ) -> None:
+        if self._fabrication_thread is thread:
+            self._fabrication_thread = None
+            self._fabrication_worker = None
+            self._set_fabrication_loading_ui(False)
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
+
+    def _handle_fabrication_load_success(self, root_obj: object, records_obj: object, file_count: int) -> None:
+        root = Path(str(root_obj))
+        current_text = self.ui.lineEdit_fabrication_folder.text().strip()
+        if current_text and Path(current_text) != root:
+            return
+        records = records_obj if isinstance(records_obj, list) else []
+        self._merge_metadata_records(cast(list[AnnealingSampleRecord], records))
+        self._store_microwire_metadata_settings()
+        self._set_metadata_status(
+            f"Loaded {len(records)} microwire suggestion(s) from {file_count} fabrication workbook(s)."
+        )
+
+    def _handle_fabrication_load_failure(self, root_obj: object, message: str) -> None:
+        root = Path(str(root_obj))
+        current_text = self.ui.lineEdit_fabrication_folder.text().strip()
+        if current_text and Path(current_text) != root:
+            return
+        self._set_metadata_status(message)
+
+    def _handle_fabrication_load_cancelled(self, root_obj: object) -> None:
+        root = Path(str(root_obj))
+        current_text = self.ui.lineEdit_fabrication_folder.text().strip()
+        if current_text and Path(current_text) != root:
+            return
+        self._set_metadata_status("Fabrication folder load cancelled.")
+
     def _set_metadata_status(self, text: str) -> None:
         label = getattr(self.ui, "label_microwire_metadata_status", None)
         if isinstance(label, QtWidgets.QLabel):
@@ -1213,29 +1362,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _records_from_fabrication_index(index: Any, *, source: str) -> list[AnnealingSampleRecord]:
-        records: list[AnnealingSampleRecord] = []
-        piece_level = getattr(index, "piece_level", {})
-        if not isinstance(piece_level, Mapping):
-            return records
-        for key, data in piece_level.items():
-            if not isinstance(key, tuple) or len(key) != 3 or not isinstance(data, Mapping):
-                continue
-            composition, draw, piece = key
-            try:
-                draw_int = int(draw)
-                piece_int = int(piece)
-            except Exception:
-                continue
-            diameter_um = _safe_float(_project_row_value(data, PROJECT_ROW_DIAMETER_KEYS))
-            records.append(
-                AnnealingSampleRecord(
-                    composition=str(composition).strip(),
-                    microwire=f"{draw_int}/{piece_int}",
-                    diameter_um=None if diameter_um is None or diameter_um <= 0.0 else diameter_um,
-                    source=source,
-                )
-            )
-        return records
+        return _records_from_fabrication_index_payload(index, source=source)
 
     def _merge_metadata_records(self, records: list[AnnealingSampleRecord]) -> None:
         by_composition = dict(self._metadata_records_by_composition)
@@ -1279,6 +1406,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _load_fabrication_folder_from_ui(self) -> bool:
+        if self._fabrication_load_active():
+            self._set_metadata_status("Fabrication folder load is already running.")
+            return False
         folder_text = self.ui.lineEdit_fabrication_folder.text().strip()
         if not folder_text:
             self._set_metadata_status("Select a fabrication folder first.")
@@ -1287,23 +1417,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if not root.exists() or not root.is_dir():
             self._set_metadata_status("Fabrication folder was not found.")
             return False
-        try:
-            files = [path for path in root.rglob("*.xlsx") if path.is_file() and not path.name.startswith("~$")]
-            if not files:
-                self._set_metadata_status("No fabrication Excel workbooks were found.")
-                return False
-            from microwire_data_builder import core as builder_core
-
-            index = builder_core.build_fabrication_index(files)
-            records = self._records_from_fabrication_index(index, source=root.name)
-        except Exception as exc:
-            self._set_metadata_status(f"Failed to load fabrication spreadsheets: {exc}")
-            return False
-        self._merge_metadata_records(records)
-        self._store_microwire_metadata_settings()
-        self._set_metadata_status(
-            f"Loaded {len(records)} microwire suggestion(s) from {len(files)} fabrication workbook(s)."
-        )
+        thread = QtCore.QThread(self)
+        worker = FabricationFolderLoadWorker(root)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress_changed.connect(self._set_metadata_status)
+        worker.succeeded.connect(self._handle_fabrication_load_success)
+        worker.failed.connect(self._handle_fabrication_load_failure)
+        worker.cancelled.connect(self._handle_fabrication_load_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda thread=thread, worker=worker: self._finish_fabrication_thread(thread, worker))
+        self._fabrication_thread = thread
+        self._fabrication_worker = worker
+        self._set_fabrication_loading_ui(True)
+        self._set_metadata_status(f"Scanning fabrication folder: {root}")
+        thread.start()
         return True
 
     def _refresh_metadata_completers(self) -> None:
@@ -1373,9 +1502,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if not text:
             return
         with QtCore.QSignalBlocker(self.ui.lineEdit_microwire):
-            self.ui.lineEdit_microwire.setText(text.replace("/", "_"))
+            self.ui.lineEdit_microwire.setText(text)
         self._sync_microwire_metadata_fields()
         self.update_file_name_from_preset()
+
+    def _normalize_microwire_field_separator(self) -> None:
+        edit = getattr(self.ui, "lineEdit_microwire", None)
+        if not isinstance(edit, QtWidgets.QLineEdit):
+            return
+        current = edit.text()
+        normalized = _display_microwire(current)
+        if normalized and normalized != current:
+            with QtCore.QSignalBlocker(edit):
+                edit.setText(normalized)
+            self._sync_microwire_metadata_fields()
+            self.update_file_name_from_preset()
 
     def _matching_metadata_composition(self) -> str | None:
         key = _normalized_token(self.ui.lineEdit_composition.text())
@@ -3557,6 +3698,7 @@ class MainWindow(QtWidgets.QMainWindow):
             notes = getattr(self.ui, 'lineEdit_notes', None)
             comp_s = comp.text().strip() if comp is not None else ''
             wire_s = wire.text().strip() if wire is not None else ''
+            wire_s = wire_s.replace("\\", "_").replace("/", "_")
             sample_s = sample.text().strip() if sample is not None else ''
             load_s = " ".join(load.text().split()) if load is not None else ''
             notes_s = " ".join(notes.text().split()) if notes is not None else ''
@@ -3643,7 +3785,7 @@ class MainWindow(QtWidgets.QMainWindow):
         s = self.settings
         self.ui.comboBox_name_preset.setCurrentIndex(int(s.value("preset", DEFAULT_PRESET["preset"])))
         self.ui.lineEdit_composition.setText(s.value("composition", DEFAULT_PRESET["composition"]))
-        self.ui.lineEdit_microwire.setText(s.value("microwire", DEFAULT_PRESET["microwire"]))
+        self.ui.lineEdit_microwire.setText(_display_microwire(s.value("microwire", DEFAULT_PRESET["microwire"])))
         self.ui.lineEdit_sample.setText(s.value("sample", DEFAULT_PRESET["sample"]))
         if hasattr(self.ui, 'lineEdit_load'):
             self.ui.lineEdit_load.setText(s.value("load", DEFAULT_PRESET["load"]))
@@ -5160,6 +5302,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.port_name = self.ui.comboBox_port.currentData()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._cancel_fabrication_folder_load()
         self._release_experiment_sleep_guard()
         self._stop_owned_shared_broker()
         if self.ser_mcu.isOpen():
