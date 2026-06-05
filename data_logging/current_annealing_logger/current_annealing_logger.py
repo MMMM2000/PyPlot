@@ -1425,7 +1425,11 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as exc:
                 last_error = exc
         if snapshot is None or client is None:
-            self._auto_detect_hmp_port(show_errors=False)
+            if not self._auto_detect_hmp_port(show_errors=False):
+                raise RuntimeError(
+                    "No existing shared HMP broker answered, and automatic HMP discovery did not "
+                    "find a supported HMP4030/HMP4040 power supply."
+                )
             self._start_owned_shared_broker()
             connected_port = configured_port
             client = BrokerJsonClient(host=host, port=connected_port)
@@ -1567,44 +1571,63 @@ class MainWindow(QtWidgets.QMainWindow):
     def _auto_detect_hmp_port(self, *, show_errors: bool = True) -> bool:
         errors: list[str] = []
         candidates = self._candidate_hmp_ports_for_broker(include_all=True)
-        if not candidates:
+
+        def _refresh_candidate_ports() -> list[str]:
+            before = list(candidates)
             try:
                 self.populate_ports()
             except Exception:
                 pass
-            candidates = self._candidate_hmp_ports_for_broker(include_all=True)
-        for port_name in candidates:
-            match = self._probe_hmp_candidate(port_name)
-            if match is None:
-                errors.append(port_name)
-                continue
-            profile = match.get("profile")
-            preferred_baud = int(profile.baudrate) if isinstance(profile, SupplyProfile) else 115200
-            if int(match.get("baudrate") or 0) != preferred_baud:
-                self._set_current_hmp_port(str(match.get("port") or ""))
-                baud_combo = getattr(self.ui, "comboBox_baudrate", None)
-                if isinstance(baud_combo, QtWidgets.QComboBox):
-                    baud_text = str(match.get("baudrate") or "")
-                    if baud_combo.findText(baud_text) >= 0:
-                        baud_combo.setCurrentText(baud_text)
-                        self.baudrate = int(baud_text)
-                message = self._nonpreferred_hmp_baud_message(match)
-                self._show_status_message(message, timeout_ms=20000)
-                if show_errors:
-                    try:
-                        QtWidgets.QMessageBox.warning(self, "HMP baud rate", message)
-                    except Exception:
-                        pass
-                return False
-            self._apply_detected_hmp_match(match)
-            label = profile.label if isinstance(profile, SupplyProfile) else "HMP"
-            self._show_status_message(
-                f"Auto-detected {label} on {match['port']} at {match['baudrate']} baud.",
-                timeout_ms=10000,
-            )
-            return True
+            refreshed = self._candidate_hmp_ports_for_broker(include_all=True)
+            for port_name in before:
+                if port_name and port_name not in refreshed:
+                    refreshed.insert(0, port_name)
+            return refreshed
+
+        if not candidates:
+            candidates = _refresh_candidate_ports()
+        refreshed_once = not bool(candidates)
+
+        while True:
+            for port_name in candidates:
+                match = self._probe_hmp_candidate(port_name)
+                if match is None:
+                    if port_name not in errors:
+                        errors.append(port_name)
+                    continue
+                profile = match.get("profile")
+                preferred_baud = int(profile.baudrate) if isinstance(profile, SupplyProfile) else 115200
+                if int(match.get("baudrate") or 0) != preferred_baud:
+                    self._set_current_hmp_port(str(match.get("port") or ""))
+                    baud_combo = getattr(self.ui, "comboBox_baudrate", None)
+                    if isinstance(baud_combo, QtWidgets.QComboBox):
+                        baud_text = str(match.get("baudrate") or "")
+                        if baud_combo.findText(baud_text) >= 0:
+                            baud_combo.setCurrentText(baud_text)
+                            self.baudrate = int(baud_text)
+                    message = self._nonpreferred_hmp_baud_message(match)
+                    self._show_status_message(message, timeout_ms=20000)
+                    if show_errors:
+                        try:
+                            QtWidgets.QMessageBox.warning(self, "HMP baud rate", message)
+                        except Exception:
+                            pass
+                    return False
+                self._apply_detected_hmp_match(match)
+                label = profile.label if isinstance(profile, SupplyProfile) else "HMP"
+                self._show_status_message(
+                    f"Auto-detected {label} on {match['port']} at {match['baudrate']} baud.",
+                    timeout_ms=10000,
+                )
+                return True
+            if refreshed_once:
+                break
+            candidates = _refresh_candidate_ports()
+            refreshed_once = True
+            if not candidates or all(port_name in errors for port_name in candidates):
+                break
         message = "Automatic HMP detection did not find a supported HMP4030/HMP4040 power supply."
-        if errors:
+        if show_errors and errors:
             message += " Checked: " + ", ".join(errors)
         self._show_status_message(message, timeout_ms=12000)
         if show_errors:

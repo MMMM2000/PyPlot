@@ -129,6 +129,9 @@ class BrokerJsonClient:
             raise RuntimeError(str(response.get("error") or "Shared HMP broker request failed."))
         return response
 
+    def snapshot(self) -> dict[str, Any]:
+        return dict(self.request("snapshot")["snapshot"])
+
     def lease(self, *, channel: int, owner: str, role: str) -> dict[str, Any]:
         return dict(self.request("lease", channel=channel, owner=owner, role=role)["lease"])
 
