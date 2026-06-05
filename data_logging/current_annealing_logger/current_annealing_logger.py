@@ -767,15 +767,49 @@ class MainWindow(QtWidgets.QMainWindow):
             canvas.draw()
 
     def _refresh_pyqtgraph_ranges(self) -> None:
-        for plot in (self.pg_plot_resistance_vs_current, self.pg_plot_resistance_vs_sample):
-            if plot is not None:
-                plot.enableAutoRange(axis='xy', enable=True)
+        currents = list(self._samples_current)
+        resistances = list(self._samples_resistance)
+        if not currents or not resistances:
+            for plot in (self.pg_plot_resistance_vs_current, self.pg_plot_resistance_vs_sample):
+                if plot is not None:
+                    plot.enableAutoRange(axis='xy', enable=True)
+            return
+        self._set_pyqtgraph_range_from_values(self.pg_plot_resistance_vs_current, currents, resistances)
+        sample_numbers = [float(index) for index in range(1, len(resistances) + 1)]
+        self._set_pyqtgraph_range_from_values(self.pg_plot_resistance_vs_sample, sample_numbers, resistances)
+
+    def _set_pyqtgraph_range_from_values(
+        self,
+        plot: Any,
+        x_values: list[float],
+        y_values: list[float],
+    ) -> None:
+        if plot is None:
+            return
+        finite_x = [float(value) for value in x_values if math.isfinite(float(value))]
+        finite_y = [float(value) for value in y_values if math.isfinite(float(value))]
+        if not finite_x or not finite_y:
+            plot.enableAutoRange(axis='xy', enable=True)
+            return
+
+        def _padded_bounds(values: list[float], *, minimum_padding: float) -> tuple[float, float]:
+            low = min(values)
+            high = max(values)
+            if math.isclose(low, high):
+                padding = max(abs(low) * 0.05, minimum_padding)
+            else:
+                padding = max((high - low) * 0.06, minimum_padding)
+            return low - padding, high + padding
+
+        x_low, x_high = _padded_bounds(finite_x, minimum_padding=1.0)
+        y_low, y_high = _padded_bounds(finite_y, minimum_padding=1.0)
+        plot.setXRange(x_low, x_high, padding=0.0)
+        plot.setYRange(y_low, y_high, padding=0.0)
 
     def _add_live_plot_item(self, plot: Any, x_values: list[float], y_values: list[float], color: str) -> Any:
         if plot is None or pg is None:
             return None
         item = plot.plot(x_values, y_values, **self._pyqtgraph_plot_kwargs(color))
-        plot.enableAutoRange(axis='xy', enable=True)
         return item
 
     def _remove_live_plot_item(self, item: Any) -> None:
@@ -981,6 +1015,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _append_measurement_sample(self, current_mA: float, resistance: float) -> None:
         if not math.isfinite(current_mA) or not math.isfinite(resistance):
             return
+        if current_mA <= 0.0:
+            return
         self._remove_placeholder_text()
         self._samples_current.append(float(current_mA))
         self._samples_resistance.append(float(resistance))
@@ -1096,6 +1132,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._segment_lines_ax1.append(item1)
             if item2 is not None:
                 self._segment_lines_ax2.append(item2)
+            self._refresh_pyqtgraph_ranges()
             return
 
         series_current: dict[str, tuple[list[float], list[float]]] = {}
@@ -1134,6 +1171,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if item2 is not None:
                 self._segment_lines_ax2.append(item2)
+        self._refresh_pyqtgraph_ranges()
 
     def _finalize_measurement_history(self) -> None:
         if len(self._samples_current) < 2 or len(self._samples_current) != len(self._samples_resistance):
@@ -3549,7 +3587,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_nonzero_current_time = None
         self._clear_zero_placeholders()
         self._finalize_measurement_history()
-        self._reset_sample_buffers()
         try:
             self.timer_command.stop()
         except Exception:
@@ -4198,6 +4235,12 @@ class MainWindow(QtWidgets.QMainWindow):
         grid = palette.color(QtGui.QPalette.ColorRole.Mid)
         plot_item = plot.getPlotItem()
         plot.setBackground(base)
+        try:
+            plot_item.setClipToView(True)
+            plot_item.vb.setDefaultPadding(0.06)
+            plot_item.layout.setContentsMargins(6, 6, 16, 6)
+        except Exception:
+            pass
         plot.showGrid(x=False, y=False)
         plot_item.showGrid(x=False, y=False)
         plot_item.setLabel("bottom", bottom_label, units=bottom_units)

@@ -1002,6 +1002,24 @@ def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
     assert window.pg_plot_resistance_vs_sample is not None
 
 
+def test_stopping_measurement_keeps_last_graph_data(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._reset_sample_buffers()
+    window._append_measurement_sample(5.0, 100.0)
+    window._append_measurement_sample(6.0, 101.0)
+    line_count = len(window._segment_lines_ax1)
+    window.process_running = True
+    monkeypatch.setattr(window, "send_safe_end_commands", lambda: None)
+
+    window.stop_annealing("Stopped by user.", show_dialog=False)
+
+    assert window._samples_current == [5.0, 6.0]
+    assert window._samples_resistance == [100.0, 101.0]
+    assert len(window._segment_lines_ax1) == line_count
+    assert window.process_running is False
+
+
 def test_live_dashboard_pyqtgraph_axes_are_visible_without_gridlines(qtbot) -> None:
     pytest.importorskip("pyqtgraph")
     window = logger_mod.MainWindow()
@@ -1030,6 +1048,20 @@ def test_live_dashboard_pyqtgraph_axes_are_visible_without_gridlines(qtbot) -> N
         assert right_axis.style["showValues"] is False
         assert top_axis.style["tickLength"] == 0
         assert right_axis.style["tickLength"] == 0
+
+
+def test_live_dashboard_pyqtgraph_ranges_leave_right_padding(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._append_measurement_sample(10.0, 100.0)
+    window._append_measurement_sample(20.0, 110.0)
+
+    current_range = window.pg_plot_resistance_vs_current.getPlotItem().viewRange()[0]
+    sample_range = window.pg_plot_resistance_vs_sample.getPlotItem().viewRange()[0]
+    assert current_range[1] > 20.0
+    assert sample_range[1] > 2.0
 
 
 def test_live_dashboard_draws_pyqtgraph_segments(qtbot) -> None:
@@ -1335,6 +1367,7 @@ def test_zero_current_sample_does_not_add_plot_point(qtbot) -> None:
     window.ax2 = logger_mod.Figure().add_subplot(111)
 
     window._record_zero_placeholder()
+    window._append_measurement_sample(0.0, 123.0)
 
     assert window._samples_current == []
     assert window._samples_resistance == []
