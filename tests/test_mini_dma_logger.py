@@ -4924,6 +4924,44 @@ def test_current_sweep_unknown_stiffness_uses_bootstrap_step_cap(tmp_path: Path,
         _close_test_window(window)
 
 
+def test_scale_startup_stability_gate_blocks_unstable_load_window(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        now_s = time.time()
+        window._scale_connected_at_s = now_s - 0.5
+        for index, load_g in enumerate((21.16, 21.15, 0.01)):
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=now_s - 0.4 + index * 0.1,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=str(load_g),
+            )
+
+        assert window._scale_startup_stable_for_load_seek(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
+    finally:
+        _close_test_window(window)
+
+
+def test_scale_startup_stability_gate_accepts_stable_load_window(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        now_s = time.time()
+        window._scale_connected_at_s = now_s - 0.5
+        for index, load_g in enumerate((0.010, 0.012, 0.011)):
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=now_s - 0.4 + index * 0.1,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=str(load_g),
+            )
+
+        assert window._scale_startup_stable_for_load_seek(mini_dma_mod.HSW_BASIS_STRESS_MPA) is True
+    finally:
+        _close_test_window(window)
+
+
 def test_current_hold_severe_error_uses_derived_recovery_threshold(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

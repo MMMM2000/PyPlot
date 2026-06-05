@@ -113,6 +113,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_direction_confidence_limits_severe_steps",
     "current_sweep_target_ramp_learns_bootstrap_stiffness",
     "current_sweep_unknown_stiffness_uses_bootstrap_step_cap",
+    "scale_startup_stability_gate_before_load_seek",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -481,6 +482,11 @@ SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_COMMAND_STRAIN_PCT = 0.03
 SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_MOTOR_STEPS = 8
+SCALE_CONTROL_STARTUP_STABLE_AFTER_CONNECT_S = 2.5
+SCALE_CONTROL_STARTUP_STABLE_WINDOW_S = 1.0
+SCALE_CONTROL_STARTUP_MIN_STABLE_SAMPLES = 3
+SCALE_CONTROL_STARTUP_MAX_STD_G = 0.05
+SCALE_CONTROL_STARTUP_MAX_SPAN_G = 0.15
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -9343,6 +9349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_worker = worker
         self._scale_thread = thread
         self._scale_connected_at_s = time.time()
+        self._scale_signal_buffer.clear()
         self._scale_no_data_hint_emitted = False
         thread.start()
         self.button_scale_connect.setText("Disconnect scale")
@@ -13271,6 +13278,19 @@ class MainWindow(QtWidgets.QMainWindow):
             raise RuntimeError(
                 "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
             )
+        if not self._scale_startup_stable_for_load_seek(basis):
+            self._log_waiting_for_feedback(
+                "Waiting for the scale stream to stabilize before the next load/stress correction."
+            )
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="scale_startup_stabilizing",
+            )
+            return False
         seek_key = self._seek_error_key(basis, target_value)
         if self._setup_zero_fallback_is_pending():
             return self._handle_pending_setup_zero_fallback()
@@ -15599,6 +15619,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_COMMAND_STRAIN_PCT
                 ),
                 "current_sweep_bootstrap_max_motor_steps": SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_MOTOR_STEPS,
+                "scale_control_startup_stable_after_connect_s": SCALE_CONTROL_STARTUP_STABLE_AFTER_CONNECT_S,
+                "scale_control_startup_stable_window_s": SCALE_CONTROL_STARTUP_STABLE_WINDOW_S,
+                "scale_control_startup_min_stable_samples": SCALE_CONTROL_STARTUP_MIN_STABLE_SAMPLES,
+                "scale_control_startup_max_std_g": SCALE_CONTROL_STARTUP_MAX_STD_G,
+                "scale_control_startup_max_span_g": SCALE_CONTROL_STARTUP_MAX_SPAN_G,
             },
             "settings": {
                 "control_interval_ms": self._control_interval_ms(),
@@ -16358,6 +16383,27 @@ class MainWindow(QtWidgets.QMainWindow):
             if timestamp_s is None or timestamp_s < after_s:
                 return False
         return True
+
+    def _scale_startup_stable_for_load_seek(self, basis: str) -> bool:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return True
+        connected_at_s = self._scale_connected_at_s
+        if connected_at_s is None:
+            return True
+        now_s = time.time()
+        if now_s - float(connected_at_s) >= SCALE_CONTROL_STARTUP_STABLE_AFTER_CONNECT_S:
+            return True
+        summary = self._scale_signal_buffer.recent_summary(
+            now_s=now_s,
+            window_s=SCALE_CONTROL_STARTUP_STABLE_WINDOW_S,
+        )
+        if summary.sample_count < SCALE_CONTROL_STARTUP_MIN_STABLE_SAMPLES:
+            return False
+        load_std = 0.0 if summary.load_std_g is None else abs(float(summary.load_std_g))
+        load_min = summary.load_min_g
+        load_max = summary.load_max_g
+        load_span = 0.0 if load_min is None or load_max is None else abs(float(load_max) - float(load_min))
+        return load_std <= SCALE_CONTROL_STARTUP_MAX_STD_G and load_span <= SCALE_CONTROL_STARTUP_MAX_SPAN_G
 
     def _load_sign(self) -> float:
         config = self._control_config()
