@@ -23,6 +23,52 @@ ac_logger = pytest.importorskip(
 )
 
 
+class _FailingBrokerClient:
+    def snapshot(self) -> dict[str, object]:
+        raise RuntimeError("connection refused")
+
+
+class _FakeBrokerClient:
+    def snapshot(self) -> dict[str, object]:
+        return {"profile": {"profile_id": "hmp4040", "channel_count": 4}}
+
+
+class _FakeHmpDriver:
+    instances: list["_FakeHmpDriver"] = []
+
+    def __init__(self, *, port_name: str, baudrate: int, timeout_s: float) -> None:
+        self.port_name = port_name
+        self.baudrate = baudrate
+        self.timeout_s = timeout_s
+        self.profile = ac_logger.HMP4040_PROFILE
+        self.closed = False
+        _FakeHmpDriver.instances.append(self)
+
+    def connect(self) -> None:
+        pass
+
+    def identify(self) -> str:
+        return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeOwnedBroker:
+    def __init__(self, driver: object, profile: object) -> None:
+        self.driver = driver
+        self.profile = profile
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def assign_role(self, **payload: object) -> object:
+        self.calls.append(("assign_role", payload))
+        return object()
+
+    def confirm_profile(self, **payload: object) -> object:
+        self.calls.append(("confirm_profile", payload))
+        return object()
+
+
 def _isolate_ac_qsettings(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
@@ -2366,6 +2412,70 @@ def test_ac_logger_shared_broker_ignores_legacy_unconfirmed_channel_and_shows_pi
     assert settings.value("psu_profiles/shared_hmp_broker/broker_channel_confirmed", False, type=bool) is True
     assert "CH3" in window.label_ac_hardware_status.text()
     app.processEvents()
+
+
+def test_ac_logger_shared_broker_auto_starts_owned_ac_broker(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolate_ac_qsettings(monkeypatch, "shared_broker_auto_starts_owned_ac")
+    window = ac_logger.MainWindow()
+    qtbot.addWidget(window)
+    window._set_combo_data(window.ui.comboBox_supply, "shared_hmp_broker")
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(1))
+    window._handle_ac_broker_channel_changed()
+    window.spinBox_ac_current_stop.setValue(60.0)
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM6 - scale", "COM6")
+    window.ui.comboBox_baudrate.setCurrentText("9600")
+    started: list[tuple[object, str, int]] = []
+
+    def _detect() -> bool:
+        window.ui.comboBox_port.clear()
+        window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+        window.ui.comboBox_baudrate.setCurrentText("115200")
+        window.port_name = "COM3"
+        window.baudrate = 115200
+        return True
+
+    def _client_factory(*, host: str, port: int) -> object:
+        if not started:
+            return _FailingBrokerClient()
+        return _FakeBrokerClient()
+
+    def _start_server(broker: object, *, host: str, port: int) -> tuple[object, object]:
+        started.append((broker, host, port))
+        return object(), object()
+
+    _FakeHmpDriver.instances = []
+    monkeypatch.setattr(window, "_auto_detect_hmp_port", lambda *, show_errors=False: _detect())
+    monkeypatch.setattr(ac_logger, "BrokerJsonClient", _client_factory)
+    monkeypatch.setattr(ac_logger, "HmpSerialDriver", _FakeHmpDriver)
+    monkeypatch.setattr(ac_logger, "SharedPowerSupplyBroker", _FakeOwnedBroker)
+    monkeypatch.setattr(ac_logger, "start_broker_server", _start_server)
+
+    window._ensure_ac_shared_broker_running()
+
+    assert len(started) == 1
+    assert _FakeHmpDriver.instances[0].port_name == "COM3"
+    owned_broker = started[0][0]
+    assert isinstance(owned_broker, _FakeOwnedBroker)
+    assert owned_broker.calls == [
+        (
+            "assign_role",
+            {
+                "channel": 1,
+                "role": "ac_susceptibility",
+                "confirmed": True,
+                "voltage_limit_v": pytest.approx(30.0),
+                "current_limit_a": pytest.approx(0.06),
+            },
+        ),
+        ("confirm_profile", {"name": "AC Susceptibility auto-started shared HMP broker"}),
+    ]
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        app.processEvents()
 
 
 def test_ac_logger_psu_settings_are_separate_from_current_annealing(

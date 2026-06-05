@@ -26,10 +26,14 @@ except Exception:  # pragma: no cover - optional runtime fallback
 
 from data_logging.current_annealing_logger.current_annealing_logger import (
     DEFAULT_LOG_DIR,
+    HMP4040_PROFILE,
     MainWindow as CurrentAnnealingWindow,
     SUPPLY_PROFILES,
     _apply_app_font_to_matplotlib,
 )
+from data_logging.shared_power_supply.broker import ROLE_AC_SUSCEPTIBILITY, SharedPowerSupplyBroker
+from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 from plotting.shared.experiment_processes import gui_python_executable, hidden_process_creationflags
 from plotting.shared.utils import ensure_app_theme
 
@@ -2725,9 +2729,13 @@ class MainWindow(CurrentAnnealingWindow):
         backend = self._selected_ac_psu_backend()
         if backend == "shared_hmp_broker":
             self._sync_ac_psu_from_shared_controls()
-            self.label_lcr_status.setText(
-                "Kept Shared HMP broker selection; skipped serial PSU auto-detect."
-            )
+            try:
+                self._ensure_ac_shared_broker_running()
+                self.label_lcr_status.setText(
+                    f"Shared HMP broker ready for AC susceptibility on {self._ac_broker_resource_display()}."
+                )
+            except Exception as exc:
+                self.label_lcr_status.setText(f"Shared HMP broker connection failed: {exc}")
             self._store_lcr_settings()
             return []
         resource = self._selected_ac_psu_resource()
@@ -2794,9 +2802,10 @@ class MainWindow(CurrentAnnealingWindow):
             resource = self._selected_ac_psu_resource()
             if backend == "shared_hmp_broker":
                 self._sync_ac_psu_from_shared_controls()
-                self.label_lcr_status.setText(
-                    "Kept Shared HMP broker selection; choose the broker channel manually."
-                )
+                if "Shared HMP broker" not in self.label_lcr_status.text():
+                    self.label_lcr_status.setText(
+                        "Kept Shared HMP broker selection; choose the broker channel manually."
+                    )
             elif bool(getattr(self, "_auto_detect_used_connected_psu", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
                 self.label_lcr_status.setText(
                     f"Using connected AC {sweep.POWER_SUPPLY_PROFILES[backend]['label']} on {resource}; "
@@ -3116,6 +3125,17 @@ class MainWindow(CurrentAnnealingWindow):
                 lcr_continuous_log_path=str(output_path.with_name(f"{output_path.stem}_lcr_debug.jsonl")),
             )
         if config.uses_shared_broker:
+            try:
+                self._ensure_ac_shared_broker_running(config)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Shared HMP broker unavailable",
+                    f"Could not connect or start the shared HMP broker for the AC sweep:\n{exc}",
+                )
+                self.label_lcr_status.setText(f"Shared HMP broker connection failed: {exc}")
+                self._refresh_ac_hardware_status()
+                return
             psu = sweep.SharedBrokerCurrentSource(
                 host=config.shared_broker_host,
                 port=config.shared_broker_port,
@@ -4111,6 +4131,116 @@ class MainWindow(CurrentAnnealingWindow):
         else:
             channel_text = "Select channel..."
         return f"{self._selected_ac_broker_host()}:{self._selected_ac_broker_port()}/{channel_text}"
+
+    def _ensure_ac_shared_broker_running(self, config: sweep.AcSweepConfig | None = None) -> None:
+        host = config.shared_broker_host if config is not None else self._selected_ac_broker_host()
+        port = int(config.shared_broker_port if config is not None else self._selected_ac_broker_port())
+        channel = int(
+            (config.shared_broker_channel if config is not None else self._selected_ac_broker_channel()) or 0
+        )
+        if channel <= 0:
+            raise ValueError("Select a shared HMP broker channel first; use CH1 on the current shared bench.")
+
+        if self._owned_shared_broker_server is not None:
+            try:
+                BrokerJsonClient(host=host, port=port).snapshot()
+                return
+            except Exception:
+                self._stop_owned_shared_broker()
+
+        try:
+            BrokerJsonClient(host=host, port=port).snapshot()
+            return
+        except Exception as first_exc:
+            if not self._auto_detect_hmp_port(show_errors=False):
+                raise RuntimeError(
+                    "No existing shared HMP broker answered, and automatic HMP discovery did not "
+                    "find a supported HMP4030/HMP4040 power supply."
+                ) from first_exc
+
+        self._start_owned_ac_shared_broker(host=host, port=port, channel=channel, config=config)
+        BrokerJsonClient(host=host, port=port).snapshot()
+
+    def _start_owned_ac_shared_broker(
+        self,
+        *,
+        host: str,
+        port: int,
+        channel: int,
+        config: sweep.AcSweepConfig | None = None,
+    ) -> None:
+        if self._owned_shared_broker_server is not None:
+            return
+        baudrate = int(getattr(self, "baudrate", 115200) or 115200)
+        baud_combo = getattr(self.ui, "comboBox_baudrate", None)
+        if isinstance(baud_combo, QtWidgets.QComboBox):
+            try:
+                baudrate = int(baud_combo.currentText())
+            except Exception:
+                pass
+        voltage_limit_v = float(config.voltage_limit_v) if config is not None else HMP4040_PROFILE.max_voltage_v
+        widget = getattr(self, "spinBox_ac_voltage_limit", None)
+        if config is None and isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+            voltage_limit_v = float(widget.value())
+        current_limit_a = self._ac_shared_broker_current_limit_a(config)
+        candidates = self._candidate_hmp_ports_for_broker()
+        if not candidates:
+            raise RuntimeError(
+                "No shared HMP broker is running. Auto-detect the HMP COM port, then connect the broker."
+            )
+
+        errors: list[str] = []
+        for port_name in candidates:
+            driver = HmpSerialDriver(port_name=port_name, baudrate=baudrate, timeout_s=0.7)
+            try:
+                driver.connect()
+                idn_text = driver.identify()
+                if driver.profile is None:
+                    raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
+                broker = SharedPowerSupplyBroker(driver, driver.profile)
+                broker.assign_role(
+                    channel=channel,
+                    role=ROLE_AC_SUSCEPTIBILITY,
+                    confirmed=True,
+                    voltage_limit_v=voltage_limit_v,
+                    current_limit_a=current_limit_a,
+                )
+                broker.confirm_profile(name="AC Susceptibility auto-started shared HMP broker")
+                server, thread = start_broker_server(broker, host=host, port=port)
+            except Exception as exc:
+                errors.append(self._format_shared_broker_start_error(port_name, exc))
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+                continue
+
+            self._owned_shared_broker_server = server
+            self._owned_shared_broker_thread = thread
+            self._owned_shared_broker_driver = driver
+            self.port_name = port_name
+            self._show_status_message(
+                f"Started shared HMP broker on {host}:{port} for AC susceptibility.",
+                timeout_ms=10000,
+            )
+            return
+
+        detail = "; ".join(errors) if errors else "no HMP ports found"
+        raise RuntimeError(
+            "No existing broker answered, and the detected HMP port could not start an AC broker "
+            f"({detail})."
+        )
+
+    def _ac_shared_broker_current_limit_a(self, config: sweep.AcSweepConfig | None = None) -> float:
+        values: list[float] = []
+        if config is not None:
+            values.extend(abs(float(point.current_a)) for point in config.current_points)
+        else:
+            for name in ("spinBox_ac_current_start", "spinBox_ac_current_stop"):
+                widget = getattr(self, name, None)
+                if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                    values.append(abs(float(widget.value())) / 1000.0)
+        return max(values or [0.001], default=0.001)
 
     def _handle_ac_broker_channel_changed(self) -> None:
         try:
