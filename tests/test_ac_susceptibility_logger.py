@@ -3114,6 +3114,40 @@ def test_ac_logger_auto_setup_keeps_manual_psu_when_id_probe_fails(monkeypatch: 
         app.processEvents()
 
 
+def test_ac_logger_auto_setup_preserves_selected_lcr_frequency_and_level_chips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "auto_setup_preserves_lcr_chip_subset")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM6 - USB", "COM6")])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window.ui.comboBox_port.clear()
+        window.ui.comboBox_port.addItem("COM6 - USB", "COM6")
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window.lineEdit_lcr_frequencies.setText("1000, 5000")
+        window.lineEdit_lcr_levels.setText("1, 10")
+        window._sync_lcr_chips_from_text()
+
+        window.handle_auto_setup_clicked()
+
+        assert window.lineEdit_lcr_frequencies.text() == "1000, 5000"
+        assert window.lineEdit_lcr_levels.text() == "1, 10"
+        assert [(setting.frequency_hz, setting.level_value) for setting in window._prepare_lcr_plan()] == [
+            (1000.0, 0.001),
+            (1000.0, 0.01),
+            (5000.0, 0.001),
+            (5000.0, 0.01),
+        ]
+        assert "kept the manually selected" in window.label_lcr_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_auto_setup_preserves_shared_broker_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3827,6 +3861,35 @@ def test_ac_logger_lcr_correction_metadata_tracks_status_and_last_result() -> No
         "timestamp_utc": "2026-06-05T12:00:01+00:00",
         "responses": ["LCR open", "pass"],
     }
+
+
+def test_ac_logger_lcr_correction_progress_uses_busy_progress_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "lcr_correction_progress")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window._set_lcr_correction_progress(kind="open", running=True)
+
+        assert window.progress_ac_run.minimum() == 0
+        assert window.progress_ac_run.maximum() == 0
+        assert "LCR open correction: running on meter" in window.progress_ac_run.format()
+        assert window.label_ac_current_task.text() == "Current task: LCR open correction running"
+
+        window._set_lcr_correction_progress(kind="open", running=False)
+
+        assert window.progress_ac_run.minimum() == 0
+        assert window.progress_ac_run.maximum() == 100
+        assert window.progress_ac_run.format() == "AC progress: idle"
+        assert window.label_ac_current_task.text() == "Current task: idle"
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_ac_logger_disable_lcr_correction_does_not_touch_psu(monkeypatch: pytest.MonkeyPatch) -> None:

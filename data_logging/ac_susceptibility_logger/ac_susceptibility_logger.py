@@ -2815,12 +2815,8 @@ class MainWindow(CurrentAnnealingWindow):
                 )
         else:
             self.label_lcr_status.setText(
-                f"Auto-detect selected {candidates[0].label} and LCR-6200-safe sweep defaults."
+                f"Auto-detect selected {candidates[0].label}; kept selected LCR sweep plan."
             )
-        self.apply_all_lcr_frequencies()
-        self.apply_all_lcr_levels()
-        self.checkBox_lcr_model_lsrs.setChecked(True)
-        self.checkBox_lcr_model_lprp.setChecked(False)
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
         self._refresh_ac_psu_status()
@@ -2889,6 +2885,20 @@ class MainWindow(CurrentAnnealingWindow):
         ):
             if isinstance(widget, QtWidgets.QWidget):
                 widget.setEnabled(not busy)
+
+    def _set_lcr_correction_progress(self, *, kind: str, running: bool) -> None:
+        progress = getattr(self, "progress_ac_run", None)
+        if not isinstance(progress, QtWidgets.QProgressBar):
+            return
+        if running:
+            progress.setRange(0, 0)
+            progress.setFormat(f"LCR {kind} correction: running on meter...")
+            self._set_ac_current_task(f"Current task: LCR {kind} correction running")
+            return
+        progress.setRange(0, 100)
+        progress.setValue(0)
+        progress.setFormat("AC progress: idle")
+        self._set_ac_current_task("Current task: idle")
 
     def _update_lcr_correction_status_label(self) -> None:
         status = self._lcr_correction_status
@@ -2972,6 +2982,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_worker = worker
         self._ac_worker_thread = thread
         self._set_lcr_correction_busy(True)
+        self._set_lcr_correction_progress(kind=kind, running=True)
         self.label_lcr_status.setText(f"Running LCR {kind} correction...")
         thread.start()
 
@@ -3005,6 +3016,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._lcr_correction_last_result = result
         self._lcr_correction_status = status
         self._set_lcr_correction_busy(False)
+        self._set_lcr_correction_progress(kind=kind, running=False)
         self._update_lcr_correction_status_label()
         outcome = "finished" if result.passed else "failed"
         self.label_lcr_status.setText(f"LCR {kind} correction {outcome}: {', '.join(result.responses)}")
@@ -3017,6 +3029,7 @@ class MainWindow(CurrentAnnealingWindow):
 
     def _handle_lcr_correction_failed(self, kind: str, message: str) -> None:
         self._set_lcr_correction_busy(False)
+        self._set_lcr_correction_progress(kind=kind, running=False)
         self.label_lcr_status.setText(f"LCR {kind} correction failed: {message}")
         QtWidgets.QMessageBox.warning(self, "LCR correction failed", message)
 

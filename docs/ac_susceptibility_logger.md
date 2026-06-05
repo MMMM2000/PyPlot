@@ -103,9 +103,15 @@ correction is separate from the logger's selected frequency chips. Use
 **Disable** to turn the stored LCR open/short correction state off without
 clearing the logger's empty-coil baseline workflow.
 
+During open/short correction, the app shows an indeterminate AC progress bar
+while the LCR meter performs the correction. The meter owns the detailed percent
+display; the app disables baseline/sweep actions until the correction returns.
+
 The AC Susceptibility Logger keeps its output directory and sweep-base setting
 separate from the Current Annealing Logger. By default, AC files go under
 `Downloads/ac_susceptibility` with the sweep base `ac_susc_current_sweep`.
+**Auto-connect hardware** connects or refreshes instrument state without
+changing the selected frequency chips, excitation chips, or model options.
 
 Point acquisition controls are named for the AC experiment:
 
