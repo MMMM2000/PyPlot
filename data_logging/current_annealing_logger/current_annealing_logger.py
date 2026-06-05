@@ -1058,6 +1058,26 @@ class MainWindow(QtWidgets.QMainWindow):
             colors.append(self._cycle_color(direction, cycle_index))
         return colors
 
+    def _segment_runs(self, currents: List[float]) -> List[tuple[str, int, int]]:
+        if not currents:
+            return []
+        if len(currents) == 1:
+            return [(self._cycle_color(1.0, 1), 0, 0)]
+        colors = self._segment_colors(currents)
+        if not colors:
+            return [(self._cycle_color(1.0, 1), 0, len(currents) - 1)]
+        runs: List[tuple[str, int, int]] = []
+        start_idx = 0
+        current_color = colors[0]
+        for segment_idx, color in enumerate(colors[1:], start=1):
+            if color == current_color:
+                continue
+            runs.append((current_color, start_idx, segment_idx))
+            start_idx = segment_idx
+            current_color = color
+        runs.append((current_color, start_idx, len(currents) - 1))
+        return runs
+
     def _redraw_segments(self) -> None:
         if getattr(self, '_plot_backend', '') == 'pyqtgraph':
             self._redraw_pyqtgraph_segments()
@@ -1072,28 +1092,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if not currents:
             self._draw_live_canvas()
             return
-        if len(currents) == 1:
-            marker_color = self._cycle_color(1.0, 1)
-            marker1 = Line2D([currents[0]], [resistances[0]], color=marker_color, marker='o', linestyle='None')
-            marker2 = Line2D([1], [resistances[0]], color=marker_color, marker='o', linestyle='None')
+        for color, start_idx, end_idx in self._segment_runs(currents):
+            x_current = currents[start_idx : end_idx + 1]
+            y_values = resistances[start_idx : end_idx + 1]
+            x_sample = [float(index + 1) for index in range(start_idx, end_idx + 1)]
+            linestyle = '-' if len(x_current) > 1 else 'None'
+            marker1 = Line2D(x_current, y_values, color=color, marker='o', linestyle=linestyle)
+            marker2 = Line2D(x_sample, y_values, color=color, marker='o', linestyle=linestyle)
             ax1.add_line(marker1)
             ax2.add_line(marker2)
             self._segment_lines_ax1.append(marker1)
             self._segment_lines_ax2.append(marker2)
-        else:
-            colors = self._segment_colors(currents)
-            for idx in range(1, len(currents)):
-                prev_c = currents[idx - 1]
-                curr_c = currents[idx]
-                prev_r = resistances[idx - 1]
-                curr_r = resistances[idx]
-                color = colors[idx - 1]
-                seg1 = Line2D([prev_c, curr_c], [prev_r, curr_r], color=color, marker='o', linestyle='-')
-                seg2 = Line2D([idx, idx + 1], [prev_r, curr_r], color=color, marker='o', linestyle='-')
-                ax1.add_line(seg1)
-                ax2.add_line(seg2)
-                self._segment_lines_ax1.append(seg1)
-                self._segment_lines_ax2.append(seg2)
         for axis in (ax1, ax2):
             axis.relim()
             axis.autoscale_view()
@@ -1106,60 +1115,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if not currents:
             self._refresh_pyqtgraph_ranges()
             return
-        if len(currents) == 1:
+        for color, start_idx, end_idx in self._segment_runs(currents):
+            x_current = currents[start_idx : end_idx + 1]
+            y_values = resistances[start_idx : end_idx + 1]
+            x_sample = [float(index + 1) for index in range(start_idx, end_idx + 1)]
             item1 = self._add_live_plot_item(
                 self.pg_plot_resistance_vs_current,
-                [currents[0]],
-                [resistances[0]],
-                "r",
+                x_current,
+                y_values,
+                color,
             )
             item2 = self._add_live_plot_item(
                 self.pg_plot_resistance_vs_sample,
-                [1.0],
-                [resistances[0]],
-                "r",
-            )
-            if item1 is not None:
-                self._segment_lines_ax1.append(item1)
-            if item2 is not None:
-                self._segment_lines_ax2.append(item2)
-            self._refresh_pyqtgraph_ranges()
-            return
-
-        series_current: dict[str, tuple[list[float], list[float]]] = {}
-        series_sample: dict[str, tuple[list[float], list[float]]] = {}
-        colors = self._segment_colors(currents)
-        for idx in range(1, len(currents)):
-            prev_c = currents[idx - 1]
-            curr_c = currents[idx]
-            prev_r = resistances[idx - 1]
-            curr_r = resistances[idx]
-            color = colors[idx - 1] if idx - 1 < len(colors) else self._cycle_color(1.0, 1)
-
-            x_current, y_current = series_current.setdefault(color, ([], []))
-            x_current.extend([prev_c, curr_c, math.nan])
-            y_current.extend([prev_r, curr_r, math.nan])
-
-            x_sample, y_sample = series_sample.setdefault(color, ([], []))
-            x_sample.extend([float(idx), float(idx + 1), math.nan])
-            y_sample.extend([prev_r, curr_r, math.nan])
-
-        for color, (x_values, y_values) in series_current.items():
-            item1 = self._add_live_plot_item(
-                self.pg_plot_resistance_vs_current,
-                x_values,
+                x_sample,
                 y_values,
                 color,
             )
             if item1 is not None:
                 self._segment_lines_ax1.append(item1)
-        for color, (x_values, y_values) in series_sample.items():
-            item2 = self._add_live_plot_item(
-                self.pg_plot_resistance_vs_sample,
-                x_values,
-                y_values,
-                color,
-            )
             if item2 is not None:
                 self._segment_lines_ax2.append(item2)
         self._refresh_pyqtgraph_ranges()

@@ -1143,6 +1143,35 @@ def test_live_dashboard_draws_pyqtgraph_segments(qtbot) -> None:
     assert all(hasattr(item, "setData") for item in window._segment_lines_ax1)
 
 
+def test_live_dashboard_keeps_turning_point_in_both_direction_runs(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.current_step_mA = 1.0
+    window._reset_sample_buffers()
+
+    for current, resistance in [
+        (1.0, 100.0),
+        (2.0, 102.0),
+        (3.0, 104.0),
+        (2.0, 103.0),
+        (1.0, 101.0),
+    ]:
+        window._append_measurement_sample(current, resistance)
+
+    assert window._segment_runs(window._samples_current) == [
+        ("#dc2626", 0, 2),
+        ("#2563eb", 2, 4),
+    ]
+    red_item, blue_item = window._segment_lines_ax1
+    red_x, red_y = red_item.getData()
+    blue_x, blue_y = blue_item.getData()
+    assert list(red_x) == [1.0, 2.0, 3.0]
+    assert list(red_y) == [100.0, 102.0, 104.0]
+    assert list(blue_x) == [3.0, 2.0, 1.0]
+    assert list(blue_y) == [104.0, 103.0, 101.0]
+
+
 def test_live_dashboard_keeps_real_start_current_point(qtbot) -> None:
     pytest.importorskip("pyqtgraph")
     window = logger_mod.MainWindow()
@@ -1203,8 +1232,12 @@ def test_live_dashboard_groups_pyqtgraph_segments_by_direction(qtbot) -> None:
         window._append_measurement_sample(current, 100.0 + offset)
 
     assert window._plot_backend == "pyqtgraph"
-    assert len(window._segment_lines_ax1) <= len(set(window._segment_colors(window._samples_current)))
-    assert len(window._segment_lines_ax2) <= len(set(window._segment_colors(window._samples_current)))
+    assert len(window._segment_lines_ax1) == len(window._segment_runs(window._samples_current))
+    assert len(window._segment_lines_ax2) == len(window._segment_runs(window._samples_current))
+    for item in window._segment_lines_ax1 + window._segment_lines_ax2:
+        x_values, y_values = item.getData()
+        assert not any(logger_mod.math.isnan(float(value)) for value in x_values)
+        assert not any(logger_mod.math.isnan(float(value)) for value in y_values)
 
 
 def test_live_dashboard_pyqtgraph_uses_cycle_palette(qtbot) -> None:
