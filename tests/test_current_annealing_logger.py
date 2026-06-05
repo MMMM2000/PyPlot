@@ -419,6 +419,70 @@ def test_current_annealing_hides_legacy_command_panel(qtbot) -> None:
     assert hasattr(window.ui, "label_serial_response")
 
 
+def test_current_annealing_hides_current_density_without_diameter(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.doubleSpinBox_wire_diameter_um.setValue(0.0)
+
+    window._refresh_current_density_visibility()
+
+    assert window.label_live_set_density.isHidden()
+    assert window.label_live_current_density.isHidden()
+    assert window.ui.label_max_current_density.isHidden()
+    assert window.ui.label_start_current_density.isHidden()
+    assert window.ui.label_step_density.isHidden()
+
+
+def test_current_annealing_imports_project_diameter_and_autocomplete(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    project = tmp_path / "microwire_project.pydpj"
+    project.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window.ui.lineEdit_composition.setText("Ni50Fe27Ga23")
+    window.ui.lineEdit_microwire.setText("12_2")
+    window.ui.lineEdit_builder_project.setText(str(project))
+
+    assert window._import_builder_project_from_ui() is True
+
+    assert window.ui.doubleSpinBox_wire_diameter_um.value() == pytest.approx(19.1)
+    assert window._current_density_a_mm2(60.0) == pytest.approx(209.43, rel=1e-3)
+    assert window._metadata_composition_model.stringList() == ["Ni50Fe27Ga23"]
+    assert window._metadata_microwire_model.stringList() == ["12/2"]
+    assert not window.label_live_set_density.isHidden()
+
+
+def test_current_annealing_top_axis_shows_density_when_diameter_known(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.doubleSpinBox_wire_diameter_um.setValue(20.0)
+
+    window._append_measurement_sample(10.0, 100.0)
+    window._append_measurement_sample(20.0, 110.0)
+
+    top_axis = window.pg_plot_resistance_vs_current.getPlotItem().getAxis("top")
+    assert top_axis.style["showValues"] is True
+    assert top_axis.labelText == "Current density"
+    assert "A/mm" in top_axis.labelUnits
+
+
 def test_current_annealing_voltage_limit_no_longer_holds_current(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

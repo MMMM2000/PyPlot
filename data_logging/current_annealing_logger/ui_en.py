@@ -393,8 +393,10 @@ class Ui_MainWindow(object):
         self.spinBox_max_current.setRange(1, 10_000)
         self.spinBox_max_current.setValue(10)
         self.spinBox_max_current.setMaximumWidth(90)
+        self.label_max_current_density = QtWidgets.QLabel("")
         ramp.addWidget(self.label_max_current, 0, 0)
         ramp.addWidget(self.spinBox_max_current, 0, 1)
+        ramp.addWidget(self.label_max_current_density, 0, 2)
         self.label_step = QtWidgets.QLabel("Current ramp rate [mA/s]:")
         self.spinBox_step_mA = QtWidgets.QDoubleSpinBox()
         self.spinBox_step_mA.setRange(0.2, 10000.0)
@@ -402,15 +404,19 @@ class Ui_MainWindow(object):
         self.spinBox_step_mA.setSingleStep(0.2)
         self.spinBox_step_mA.setValue(1.0)
         self.spinBox_step_mA.setMaximumWidth(90)
-        ramp.addWidget(self.label_step, 0, 2)
-        ramp.addWidget(self.spinBox_step_mA, 0, 3)
+        self.label_step_density = QtWidgets.QLabel("")
+        ramp.addWidget(self.label_step, 0, 3)
+        ramp.addWidget(self.spinBox_step_mA, 0, 4)
+        ramp.addWidget(self.label_step_density, 0, 5)
         self.label_start_current = QtWidgets.QLabel("Start current [mA]:")
         self.spinBox_start_current = QtWidgets.QSpinBox()
         self.spinBox_start_current.setRange(1, 10000)
         self.spinBox_start_current.setValue(10)
         self.spinBox_start_current.setMaximumWidth(90)
+        self.label_start_current_density = QtWidgets.QLabel("")
         ramp.addWidget(self.label_start_current, 1, 0)
         ramp.addWidget(self.spinBox_start_current, 1, 1)
+        ramp.addWidget(self.label_start_current_density, 1, 2)
         ramp.addItem(
             QtWidgets.QSpacerItem(
                 0,
@@ -419,7 +425,7 @@ class Ui_MainWindow(object):
                 QtWidgets.QSizePolicy.Policy.Minimum,
             ),
             0,
-            4,
+            6,
             2,
             1,
         )
@@ -577,13 +583,54 @@ class Ui_MainWindow(object):
         )
         grid.addWidget(gb_name, 6, 0, 1, 2)
 
+        # Optional microwire project/fabrication metadata
+        self.groupBox_microwire_metadata = QtWidgets.QGroupBox("Microwire metadata")
+        metadata_grid = QtWidgets.QGridLayout(self.groupBox_microwire_metadata)
+
+        self.lineEdit_builder_project = QtWidgets.QLineEdit()
+        self.lineEdit_builder_project.setPlaceholderText("Optional .pydpj project")
+        self.pushButton_browse_builder_project = QtWidgets.QPushButton("Browse")
+        self.pushButton_import_builder_project = QtWidgets.QPushButton("Import")
+        metadata_grid.addWidget(QtWidgets.QLabel("Project:"), 0, 0)
+        metadata_grid.addWidget(self.lineEdit_builder_project, 0, 1)
+        metadata_grid.addWidget(self.pushButton_browse_builder_project, 0, 2)
+        metadata_grid.addWidget(self.pushButton_import_builder_project, 0, 3)
+
+        self.lineEdit_fabrication_folder = QtWidgets.QLineEdit()
+        self.lineEdit_fabrication_folder.setPlaceholderText("Optional fabrication spreadsheet folder")
+        self.pushButton_browse_fabrication_folder = QtWidgets.QPushButton("Browse")
+        self.pushButton_load_fabrication = QtWidgets.QPushButton("Load")
+        metadata_grid.addWidget(QtWidgets.QLabel("Fabrication:"), 1, 0)
+        metadata_grid.addWidget(self.lineEdit_fabrication_folder, 1, 1)
+        metadata_grid.addWidget(self.pushButton_browse_fabrication_folder, 1, 2)
+        metadata_grid.addWidget(self.pushButton_load_fabrication, 1, 3)
+
+        self.doubleSpinBox_wire_diameter_um = QtWidgets.QDoubleSpinBox()
+        self.doubleSpinBox_wire_diameter_um.setDecimals(3)
+        self.doubleSpinBox_wire_diameter_um.setRange(0.0, 1000.0)
+        self.doubleSpinBox_wire_diameter_um.setSingleStep(0.1)
+        self.doubleSpinBox_wire_diameter_um.setSpecialValueText("Unknown")
+        self.doubleSpinBox_wire_diameter_um.setSuffix(" um")
+        self.label_current_density_hint = QtWidgets.QLabel("")
+        self.label_current_density_hint.setWordWrap(True)
+        metadata_grid.addWidget(QtWidgets.QLabel("Diameter:"), 2, 0)
+        metadata_grid.addWidget(self.doubleSpinBox_wire_diameter_um, 2, 1)
+        metadata_grid.addWidget(self.label_current_density_hint, 2, 2, 1, 2)
+
+        self.label_microwire_metadata_status = QtWidgets.QLabel(
+            "Connect a project or fabrication folder to suggest composition, microwire, and diameter."
+        )
+        self.label_microwire_metadata_status.setWordWrap(True)
+        metadata_grid.addWidget(self.label_microwire_metadata_status, 3, 0, 1, 4)
+        grid.addWidget(self.groupBox_microwire_metadata, 7, 0, 1, 2)
+
         # Process progress and time remaining
         self.progressBar_process = QtWidgets.QProgressBar()
-        grid.addWidget(self.progressBar_process, 7, 0, 1, 2)
+        grid.addWidget(self.progressBar_process, 8, 0, 1, 2)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
-        grid.addWidget(self.label_time_remaining, 8, 0, 1, 2)
+        grid.addWidget(self.label_time_remaining, 9, 0, 1, 2)
         self.label_time_to_limit = QtWidgets.QLabel("To limit: N/A")
-        grid.addWidget(self.label_time_to_limit, 9, 0, 1, 2)
+        grid.addWidget(self.label_time_to_limit, 10, 0, 1, 2)
 
         # Live values group
         self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
@@ -610,7 +657,7 @@ class Ui_MainWindow(object):
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_live_values, 10, 0, 1, 2)
+        grid.addWidget(self.groupBox_live_values, 11, 0, 1, 2)
 
         # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")

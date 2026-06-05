@@ -14,11 +14,12 @@ import math
 import re
 import json
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from importlib import import_module
-from typing import Any, Deque, Dict, List, Optional, SupportsBytes, TextIO, Tuple, cast
+from typing import Any, Deque, Dict, List, Mapping, Optional, SupportsBytes, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
@@ -194,6 +195,63 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
 
 INCREASING_CYCLE_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
 DECREASING_CYCLE_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
+PROJECT_EXTENSION = ".pydpj"
+PROJECT_ROW_MICROWIRE_KEYS = ("Microwire", "microwire", "wire", "sample", "Sample")
+PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (μm)", "d (um)", "d_um", "d", "Diameter", "diameter_um", "diameter")
+
+
+def _safe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.strip().replace(",", ".")
+            if not value:
+                return None
+        result = float(value)
+    except Exception:
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _project_row_value(row: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in row:
+            return row[key]
+    lowered = {str(key).strip().lower(): value for key, value in row.items()}
+    for key in keys:
+        value = lowered.get(key.strip().lower())
+        if value is not None:
+            return value
+    return None
+
+
+def _normalized_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _normalized_microwire_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower().replace("_", "/"))
+
+
+def _display_microwire(value: object) -> str:
+    text = str(value or "").strip().replace("\\", "/").replace("_", "/")
+    text = re.sub(r"\s+", "", text)
+    if "/" in text:
+        left, right = text.split("/", 1)
+        return f"{left}/{right}".strip("/")
+    digits = re.findall(r"\d+", text)
+    if len(digits) >= 2:
+        return f"{digits[0]}/{digits[1]}"
+    return text
+
+
+@dataclass
+class AnnealingSampleRecord:
+    composition: str
+    microwire: str
+    diameter_um: float | None
+    source: str
 
 
 class MeasurementHistoryDialog(QtWidgets.QDialog):
@@ -310,6 +368,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._init_mode_menu(menu_bar)
         # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
+        self._metadata_records_by_composition: dict[str, list[AnnealingSampleRecord]] = {}
+        self._metadata_composition_lookup: dict[str, str] = {}
+        self._metadata_record_lookup: dict[tuple[str, str], AnnealingSampleRecord] = {}
+        self._metadata_composition_model: QtCore.QStringListModel | None = None
+        self._metadata_microwire_model: QtCore.QStringListModel | None = None
+        self._metadata_composition_completer: QtWidgets.QCompleter | None = None
+        self._metadata_microwire_completer: QtWidgets.QCompleter | None = None
+        self._metadata_completer_compositions: tuple[str, ...] = ()
+        self._metadata_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
+        self._metadata_diameter_imported = False
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         self.supply_profile_id = "hmp4030"
         self.min_start_current_mA = 1
@@ -323,6 +391,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.settings.value("log_file", "anneal_log", type=str)
             )
         self.restore_name_preset()
+        self._restore_microwire_metadata_settings()
         try:
             last_max = int(self.settings.value("max_current", 10))
             self.ui.spinBox_max_current.setValue(last_max)
@@ -474,6 +543,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.checkBox_reset_on_start.toggled.connect(self.handle_reset_on_start_toggled)
         if hasattr(self.ui, 'spinBox_start_current'):
             self.ui.spinBox_start_current.valueChanged.connect(self.handle_start_current_value_changed)
+            self.ui.spinBox_start_current.valueChanged.connect(self._refresh_config_current_density_labels)
         self.ui.pushButton_start_process.clicked.connect(self.handle_toggle_process_clicked)
         self.ui.lineEdit_log_file_full.textChanged.connect(self.handle_legacy_log_path_changed)
         self.ui.pushButton_select_filename.clicked.connect(self.handle_select_filename_en)
@@ -520,6 +590,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
         if hasattr(self.ui, 'lineEdit_composition'):
             self.ui.lineEdit_composition.textChanged.connect(self._handle_composition_text_changed)
+            self.ui.lineEdit_composition.textChanged.connect(self._sync_microwire_metadata_fields)
+        if hasattr(self.ui, 'lineEdit_microwire'):
+            self.ui.lineEdit_microwire.textChanged.connect(self._sync_microwire_metadata_fields)
+        if hasattr(self.ui, 'pushButton_browse_builder_project'):
+            self.ui.pushButton_browse_builder_project.clicked.connect(self._choose_builder_project)
+        if hasattr(self.ui, 'pushButton_import_builder_project'):
+            self.ui.pushButton_import_builder_project.clicked.connect(self._import_builder_project_from_ui)
+        if hasattr(self.ui, 'pushButton_browse_fabrication_folder'):
+            self.ui.pushButton_browse_fabrication_folder.clicked.connect(self._choose_fabrication_folder)
+        if hasattr(self.ui, 'pushButton_load_fabrication'):
+            self.ui.pushButton_load_fabrication.clicked.connect(self._load_fabrication_folder_from_ui)
+        if hasattr(self.ui, 'lineEdit_builder_project'):
+            self.ui.lineEdit_builder_project.textChanged.connect(self._store_microwire_metadata_settings)
+        if hasattr(self.ui, 'lineEdit_fabrication_folder'):
+            self.ui.lineEdit_fabrication_folder.textChanged.connect(self._store_microwire_metadata_settings)
+        if hasattr(self.ui, 'doubleSpinBox_wire_diameter_um'):
+            self.ui.doubleSpinBox_wire_diameter_um.valueChanged.connect(self._handle_diameter_changed)
         self.name_history.register('composition', getattr(self.ui, 'lineEdit_composition', None))
         self.name_history.register('microwire', getattr(self.ui, 'lineEdit_microwire', None))
         if hasattr(self.ui, 'pushButton_reset_preset'):
@@ -553,8 +640,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.handle_checkBox_infinite_loops_toggled(True)
         if hasattr(self.ui, 'spinBox_step_mA'):
             self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
+            self.ui.spinBox_step_mA.valueChanged.connect(self._refresh_config_current_density_labels)
         self.ui.spinBox_max_current.valueChanged.connect(self.update_file_name_from_preset)
         self.ui.spinBox_max_current.valueChanged.connect(self.update_planned_time_label)
+        self.ui.spinBox_max_current.valueChanged.connect(self._refresh_config_current_density_labels)
         if hasattr(self.ui, 'checkBox_infinite_loops'):
             self.ui.checkBox_infinite_loops.toggled.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'spinBox_step_mA'):
@@ -805,6 +894,37 @@ class MainWindow(QtWidgets.QMainWindow):
         y_low, y_high = _padded_bounds(finite_y, minimum_padding=1.0)
         plot.setXRange(x_low, x_high, padding=0.0)
         plot.setYRange(y_low, y_high, padding=0.0)
+        if plot is self.pg_plot_resistance_vs_current:
+            self._refresh_current_density_axis(x_low=x_low, x_high=x_high)
+
+    def _refresh_current_density_axis(self, *, x_low: float | None = None, x_high: float | None = None) -> None:
+        plot = getattr(self, "pg_plot_resistance_vs_current", None)
+        if pg is None or plot is None:
+            return
+        plot_item = plot.getPlotItem()
+        top_axis = plot_item.getAxis("top")
+        diameter_um = self._diameter_um()
+        if diameter_um is None:
+            top_axis.setLabel("")
+            top_axis.setTicks([])
+            top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
+            return
+        if x_low is None or x_high is None:
+            try:
+                x_low, x_high = plot_item.viewRange()[0]
+            except Exception:
+                return
+        if not (math.isfinite(float(x_low)) and math.isfinite(float(x_high))) or math.isclose(float(x_low), float(x_high)):
+            return
+        ticks: list[tuple[float, str]] = []
+        for idx in range(5):
+            position = float(x_low) + (float(x_high) - float(x_low)) * idx / 4.0
+            if position < 0:
+                continue
+            ticks.append((position, self._format_current_density(position)))
+        top_axis.setLabel("Current density", units="A/mm^2")
+        top_axis.setTicks([ticks])
+        top_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
 
     def _add_live_plot_item(self, plot: Any, x_values: list[float], y_values: list[float], color: str) -> Any:
         if plot is None or pg is None:
@@ -874,6 +994,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if attr == 'label_live_voltage':
             self._set_live_voltage_text(text)
             return
+        if attr == 'lcd_current_mA':
+            self._set_live_current_text(text)
+            return
+        if attr == 'label_set_current':
+            self._set_live_set_current_text(text)
+            return
         widget = getattr(self.ui, attr, None)
         if widget is None:
             return
@@ -885,6 +1011,409 @@ class MainWindow(QtWidgets.QMainWindow):
         setter = getattr(target, 'setText', None)
         if callable(setter):
             setter(text)
+
+    def _diameter_um(self) -> float | None:
+        spin = getattr(self.ui, "doubleSpinBox_wire_diameter_um", None)
+        if not isinstance(spin, QtWidgets.QDoubleSpinBox):
+            return None
+        diameter = float(spin.value())
+        return diameter if math.isfinite(diameter) and diameter > 0.0 else None
+
+    def _current_density_a_mm2(self, current_mA: float) -> float | None:
+        diameter_um = self._diameter_um()
+        if diameter_um is None:
+            return None
+        diameter_mm = diameter_um / 1000.0
+        area_mm2 = math.pi * (diameter_mm / 2.0) ** 2
+        if area_mm2 <= 0.0:
+            return None
+        return (float(current_mA) / 1000.0) / area_mm2
+
+    def _format_current_density(self, current_mA: float) -> str:
+        density = self._current_density_a_mm2(current_mA)
+        if density is None:
+            return ""
+        abs_density = abs(density)
+        decimals = 2 if abs_density < 10.0 else (1 if abs_density < 100.0 else 0)
+        return f"{density:.{decimals}f}"
+
+    def _refresh_current_density_visibility(self) -> None:
+        visible = self._diameter_um() is not None
+        for label in (
+            getattr(self, "label_live_set_density", None),
+            getattr(self, "label_live_current_density", None),
+            getattr(self.ui, "label_max_current_density", None),
+            getattr(self.ui, "label_start_current_density", None),
+            getattr(self.ui, "label_step_density", None),
+        ):
+            if isinstance(label, QtWidgets.QLabel):
+                label.setVisible(visible)
+                layout = label.parentWidget().layout() if label.parentWidget() is not None else None
+                label_for_field = getattr(layout, "labelForField", None)
+                if callable(label_for_field):
+                    field_label = label_for_field(label)
+                    if isinstance(field_label, QtWidgets.QWidget):
+                        field_label.setVisible(visible)
+        hint = getattr(self.ui, "label_current_density_hint", None)
+        if isinstance(hint, QtWidgets.QLabel):
+            diameter_um = self._diameter_um()
+            hint.setText("" if diameter_um is None else f"d = {diameter_um:.3g} um")
+        self._refresh_density_labels()
+        self._refresh_config_current_density_labels()
+        self._refresh_current_density_axis()
+
+    def _refresh_density_labels(self) -> None:
+        try:
+            set_mA = float(getattr(self, "current_current_set", 0.0) or 0.0) * 1000.0
+        except Exception:
+            set_mA = 0.0
+        try:
+            measured_mA = float(getattr(self, "curr_value_x", 0.0) or 0.0)
+        except Exception:
+            measured_mA = 0.0
+        if isinstance(getattr(self, "label_live_set_density", None), QtWidgets.QLabel):
+            self.label_live_set_density.setText(self._format_current_density(set_mA))
+        if isinstance(getattr(self, "label_live_current_density", None), QtWidgets.QLabel):
+            self.label_live_current_density.setText(self._format_current_density(measured_mA))
+
+    def _refresh_config_current_density_labels(self, *_args: object) -> None:
+        visible = self._diameter_um() is not None
+
+        def _set(attr: str, value_mA: float, suffix: str = "") -> None:
+            label = getattr(self.ui, attr, None)
+            if not isinstance(label, QtWidgets.QLabel):
+                return
+            label.setVisible(visible)
+            label.setText("" if not visible else f"{self._format_current_density(value_mA)} A/mm^2{suffix}")
+
+        try:
+            _set("label_max_current_density", float(self.ui.spinBox_max_current.value()))
+        except Exception:
+            pass
+        try:
+            _set("label_start_current_density", float(self.ui.spinBox_start_current.value()))
+        except Exception:
+            pass
+        try:
+            _set("label_step_density", float(self.ui.spinBox_step_mA.value()), "/s")
+        except Exception:
+            pass
+
+    def _set_live_current_text(self, text: str) -> None:
+        if isinstance(getattr(self, "label_live_current", None), QtWidgets.QLabel):
+            self.label_live_current.setText(text)
+        try:
+            self.curr_value_x = float(str(text).replace(",", "."))
+        except Exception:
+            pass
+        self._refresh_density_labels()
+
+    def _set_live_set_current_text(self, text: str) -> None:
+        if isinstance(getattr(self, "label_live_set", None), QtWidgets.QLabel):
+            self.label_live_set.setText(text)
+        self._refresh_density_labels()
+
+    def _store_microwire_metadata_settings(self) -> None:
+        try:
+            self.settings.setValue("builder_project_path", self.ui.lineEdit_builder_project.text())
+            self.settings.setValue("fabrication_folder_path", self.ui.lineEdit_fabrication_folder.text())
+            self.settings.setValue("wire_diameter_um", self.ui.doubleSpinBox_wire_diameter_um.value())
+        except Exception:
+            pass
+
+    def _restore_microwire_metadata_settings(self) -> None:
+        try:
+            self.ui.lineEdit_builder_project.setText(self.settings.value("builder_project_path", "", type=str))
+            self.ui.lineEdit_fabrication_folder.setText(self.settings.value("fabrication_folder_path", "", type=str))
+            diameter = float(self.settings.value("wire_diameter_um", 0.0) or 0.0)
+            self.ui.doubleSpinBox_wire_diameter_um.setValue(max(0.0, diameter))
+        except Exception:
+            pass
+        self._refresh_current_density_visibility()
+
+    def _handle_diameter_changed(self, _value: float) -> None:
+        self._metadata_diameter_imported = False
+        self._store_microwire_metadata_settings()
+        self._refresh_current_density_visibility()
+
+    def _choose_builder_project(self) -> None:
+        current = self.ui.lineEdit_builder_project.text().strip()
+        start_dir = str(Path(current).parent) if current else self.ui.lineEdit_log_dir.text().strip()
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open Microwire Builder project",
+            start_dir,
+            f"Microwire Project (*{PROJECT_EXTENSION} *.pypdj);;All files (*)",
+        )
+        if path_str:
+            self.ui.lineEdit_builder_project.setText(path_str)
+            self._import_builder_project_from_ui()
+
+    def _choose_fabrication_folder(self) -> None:
+        current = self.ui.lineEdit_fabrication_folder.text().strip()
+        start_dir = current or self.ui.lineEdit_log_dir.text().strip()
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select fabrication data folder", start_dir)
+        if folder:
+            self.ui.lineEdit_fabrication_folder.setText(folder)
+            self._load_fabrication_folder_from_ui()
+
+    def _set_metadata_status(self, text: str) -> None:
+        label = getattr(self.ui, "label_microwire_metadata_status", None)
+        if isinstance(label, QtWidgets.QLabel):
+            label.setText(text)
+
+    def _read_builder_project_payload(self, path: Path) -> Any:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def _records_from_project_payload(cls, payload: Any, *, source: str) -> list[AnnealingSampleRecord]:
+        rows_by_section: list[list[Any]] = []
+        if isinstance(payload, Mapping):
+            sections = payload.get("sections", {})
+            if isinstance(sections, Mapping):
+                for section_name in ("microscope", "fabrication", "assemble", "current_density"):
+                    section_payload = sections.get(section_name)
+                    if not isinstance(section_payload, Mapping):
+                        continue
+                    rows = section_payload.get("rows")
+                    if isinstance(rows, list):
+                        rows_by_section.append(rows)
+            rows = payload.get("rows")
+            if isinstance(rows, list):
+                rows_by_section.append(rows)
+        elif isinstance(payload, list):
+            rows_by_section.append(payload)
+        records: list[AnnealingSampleRecord] = []
+        seen: set[tuple[str, str, float | None]] = set()
+        for rows in rows_by_section:
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                composition = str(row.get("Composition") or row.get("composition") or "").strip()
+                microwire = str(_project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS) or "").strip()
+                if not composition or not microwire:
+                    continue
+                diameter_um = _safe_float(_project_row_value(row, PROJECT_ROW_DIAMETER_KEYS))
+                if diameter_um is not None and diameter_um <= 0.0:
+                    diameter_um = None
+                display_wire = _display_microwire(microwire)
+                key = (composition, display_wire, diameter_um)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(
+                    AnnealingSampleRecord(
+                        composition=composition,
+                        microwire=display_wire,
+                        diameter_um=diameter_um,
+                        source=source,
+                    )
+                )
+        return records
+
+    @staticmethod
+    def _records_from_fabrication_index(index: Any, *, source: str) -> list[AnnealingSampleRecord]:
+        records: list[AnnealingSampleRecord] = []
+        piece_level = getattr(index, "piece_level", {})
+        if not isinstance(piece_level, Mapping):
+            return records
+        for key, data in piece_level.items():
+            if not isinstance(key, tuple) or len(key) != 3 or not isinstance(data, Mapping):
+                continue
+            composition, draw, piece = key
+            try:
+                draw_int = int(draw)
+                piece_int = int(piece)
+            except Exception:
+                continue
+            diameter_um = _safe_float(_project_row_value(data, PROJECT_ROW_DIAMETER_KEYS))
+            records.append(
+                AnnealingSampleRecord(
+                    composition=str(composition).strip(),
+                    microwire=f"{draw_int}/{piece_int}",
+                    diameter_um=None if diameter_um is None or diameter_um <= 0.0 else diameter_um,
+                    source=source,
+                )
+            )
+        return records
+
+    def _merge_metadata_records(self, records: list[AnnealingSampleRecord]) -> None:
+        by_composition = dict(self._metadata_records_by_composition)
+        for record in records:
+            if not record.composition or not record.microwire:
+                continue
+            current = by_composition.setdefault(record.composition, [])
+            key = _normalized_microwire_token(record.microwire)
+            replaced = False
+            for idx, existing in enumerate(current):
+                if _normalized_microwire_token(existing.microwire) == key:
+                    if existing.diameter_um is None and record.diameter_um is not None:
+                        current[idx] = record
+                    replaced = True
+                    break
+            if not replaced:
+                current.append(record)
+        for records_for_comp in by_composition.values():
+            records_for_comp.sort(key=lambda item: (_normalized_microwire_token(item.microwire), item.microwire))
+        self._metadata_records_by_composition = dict(sorted(by_composition.items(), key=lambda item: item[0].lower()))
+        self._refresh_metadata_completers()
+        self._apply_metadata_sample_if_possible()
+
+    def _import_builder_project_from_ui(self) -> bool:
+        path_text = self.ui.lineEdit_builder_project.text().strip()
+        if not path_text:
+            self._set_metadata_status("Select a .pydpj project first.")
+            return False
+        path = Path(path_text)
+        if not path.exists():
+            self._set_metadata_status("Project file was not found.")
+            return False
+        try:
+            records = self._records_from_project_payload(self._read_builder_project_payload(path), source=path.name)
+        except Exception as exc:
+            self._set_metadata_status(f"Failed to import project: {exc}")
+            return False
+        self._merge_metadata_records(records)
+        self._store_microwire_metadata_settings()
+        self._set_metadata_status(f"Imported {len(records)} microwire suggestion(s) from {path.name}.")
+        return True
+
+    def _load_fabrication_folder_from_ui(self) -> bool:
+        folder_text = self.ui.lineEdit_fabrication_folder.text().strip()
+        if not folder_text:
+            self._set_metadata_status("Select a fabrication folder first.")
+            return False
+        root = Path(folder_text)
+        if not root.exists() or not root.is_dir():
+            self._set_metadata_status("Fabrication folder was not found.")
+            return False
+        try:
+            files = [path for path in root.rglob("*.xlsx") if path.is_file() and not path.name.startswith("~$")]
+            if not files:
+                self._set_metadata_status("No fabrication Excel workbooks were found.")
+                return False
+            from microwire_data_builder import core as builder_core
+
+            index = builder_core.build_fabrication_index(files)
+            records = self._records_from_fabrication_index(index, source=root.name)
+        except Exception as exc:
+            self._set_metadata_status(f"Failed to load fabrication spreadsheets: {exc}")
+            return False
+        self._merge_metadata_records(records)
+        self._store_microwire_metadata_settings()
+        self._set_metadata_status(
+            f"Loaded {len(records)} microwire suggestion(s) from {len(files)} fabrication workbook(s)."
+        )
+        return True
+
+    def _refresh_metadata_completers(self) -> None:
+        self._metadata_composition_lookup = {
+            _normalized_token(composition): composition
+            for composition in self._metadata_records_by_composition
+            if _normalized_token(composition)
+        }
+        record_lookup: dict[tuple[str, str], AnnealingSampleRecord] = {}
+        for composition, records in self._metadata_records_by_composition.items():
+            comp_key = _normalized_token(composition)
+            for record in records:
+                wire_key = _normalized_microwire_token(record.microwire)
+                if comp_key and wire_key:
+                    record_lookup[(comp_key, wire_key)] = record
+        self._metadata_record_lookup = record_lookup
+        compositions = tuple(self._metadata_records_by_composition)
+        if self._metadata_composition_model is None:
+            self._metadata_composition_model = QtCore.QStringListModel(self.ui.lineEdit_composition)
+        if self._metadata_composition_completer is None:
+            completer = QtWidgets.QCompleter(self._metadata_composition_model, self.ui.lineEdit_composition)
+            completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+            completer.activated.connect(self._handle_metadata_composition_activated)
+            self._metadata_composition_completer = completer
+            self.ui.lineEdit_composition.setCompleter(completer)
+        if compositions != self._metadata_completer_compositions:
+            self._metadata_composition_model.setStringList(list(compositions))
+            self._metadata_completer_compositions = compositions
+            self._metadata_microwire_completer_key = None
+        self._update_metadata_microwire_completer()
+
+    def _update_metadata_microwire_completer(self) -> None:
+        composition = self._matching_metadata_composition()
+        labels = tuple(record.microwire for record in self._metadata_records_by_composition.get(composition or "", []))
+        key = (_normalized_token(composition), labels)
+        if self._metadata_microwire_model is None:
+            self._metadata_microwire_model = QtCore.QStringListModel(self.ui.lineEdit_microwire)
+        if self._metadata_microwire_completer is None:
+            completer = QtWidgets.QCompleter(self._metadata_microwire_model, self.ui.lineEdit_microwire)
+            completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+            completer.activated.connect(self._handle_metadata_microwire_activated)
+            self._metadata_microwire_completer = completer
+            self.ui.lineEdit_microwire.setCompleter(completer)
+        if key != self._metadata_microwire_completer_key:
+            self._metadata_microwire_model.setStringList(list(labels))
+            self._metadata_microwire_completer_key = key
+
+    def _completion_text(self, value: object) -> str:
+        if isinstance(value, QtCore.QModelIndex):
+            data = value.data()
+            return "" if data is None else str(data)
+        return str(value or "")
+
+    def _handle_metadata_composition_activated(self, value: object) -> None:
+        text = self._completion_text(value).strip()
+        if not text:
+            return
+        with QtCore.QSignalBlocker(self.ui.lineEdit_composition):
+            self.ui.lineEdit_composition.setText(text)
+        self._sync_microwire_metadata_fields()
+        self.update_file_name_from_preset()
+
+    def _handle_metadata_microwire_activated(self, value: object) -> None:
+        text = _display_microwire(self._completion_text(value))
+        if not text:
+            return
+        with QtCore.QSignalBlocker(self.ui.lineEdit_microwire):
+            self.ui.lineEdit_microwire.setText(text.replace("/", "_"))
+        self._sync_microwire_metadata_fields()
+        self.update_file_name_from_preset()
+
+    def _matching_metadata_composition(self) -> str | None:
+        key = _normalized_token(self.ui.lineEdit_composition.text())
+        return self._metadata_composition_lookup.get(key) if key else None
+
+    def _matching_metadata_record(self) -> AnnealingSampleRecord | None:
+        composition = self._matching_metadata_composition()
+        if not composition:
+            return None
+        wire_key = _normalized_microwire_token(self.ui.lineEdit_microwire.text())
+        if not wire_key:
+            return None
+        return self._metadata_record_lookup.get((_normalized_token(composition), wire_key))
+
+    def _apply_metadata_sample_if_possible(self) -> bool:
+        record = self._matching_metadata_record()
+        if record is None:
+            return False
+        if record.diameter_um is None:
+            self._set_metadata_status(f"Matched {record.composition} {record.microwire}; no diameter available.")
+            return False
+        try:
+            with QtCore.QSignalBlocker(self.ui.doubleSpinBox_wire_diameter_um):
+                self.ui.doubleSpinBox_wire_diameter_um.setValue(float(record.diameter_um))
+            self._metadata_diameter_imported = True
+            self._store_microwire_metadata_settings()
+            self._refresh_current_density_visibility()
+            self._set_metadata_status(
+                f"Using d = {float(record.diameter_um):.3g} um for {record.composition} {record.microwire}."
+            )
+            return True
+        except Exception as exc:
+            self._set_metadata_status(f"Failed to apply diameter: {exc}")
+            return False
+
+    def _sync_microwire_metadata_fields(self) -> None:
+        self._update_metadata_microwire_completer()
+        self._apply_metadata_sample_if_possible()
 
     def _set_live_voltage_text(self, text: str) -> None:
         label = getattr(self, 'label_live_voltage', None)
@@ -3908,11 +4437,21 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         self.label_live_current = QtWidgets.QLabel("0")
         self.label_live_set = QtWidgets.QLabel("0")
+        self.label_live_current_density = QtWidgets.QLabel("")
+        self.label_live_set_density = QtWidgets.QLabel("")
         self.label_live_voltage = QtWidgets.QLabel("0")
-        for lbl in (self.label_live_current, self.label_live_set, self.label_live_voltage):
+        for lbl in (
+            self.label_live_current,
+            self.label_live_set,
+            self.label_live_current_density,
+            self.label_live_set_density,
+            self.label_live_voltage,
+        ):
             lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         layout.addRow("Set current (mA)", self.label_live_set)
+        layout.addRow("Set current density (A/mm^2)", self.label_live_set_density)
         layout.addRow("Current (mA)", self.label_live_current)
+        layout.addRow("Current density (A/mm^2)", self.label_live_current_density)
         layout.addRow("Voltage (V)", self.label_live_voltage)
         # Alias old names for compatibility
         self.ui.lcd_current_mA = self.label_live_current
@@ -3920,9 +4459,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.label_live_voltage = self.label_live_voltage
         self._voltage_default_style = self.label_live_voltage.styleSheet() or ""
         self._voltage_warning_style = "color: #c0392b;"
-        setattr(self.ui.lcd_current_mA, "display", self.label_live_current.setText)
-        setattr(self.ui.label_set_current, "display", self.label_live_set.setText)
+        setattr(self.ui.lcd_current_mA, "display", self._set_live_current_text)
+        setattr(self.ui.label_set_current, "display", self._set_live_set_current_text)
         setattr(self.ui.label_live_voltage, "display", self._set_live_voltage_text)
+        self._refresh_current_density_visibility()
 
     def handle_max_voltage(self) -> None:
         self._max_voltage_dialog = True
@@ -4482,6 +5022,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._owned_shared_broker_server is not None
             else ("existing" if self._using_shared_broker() else "direct"),
         }
+        diameter_um = self._diameter_um()
         return {
             "schema": "current_annealing_logger_metadata_v1",
             "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -4503,6 +5044,13 @@ class MainWindow(QtWidgets.QMainWindow):
             "supply_display": supply,
             "supply_profile": supply_profile_id,
             "hardware": hardware_payload,
+            "microwire_geometry": {
+                "diameter_um": diameter_um,
+                "diameter_mm": None if diameter_um is None else diameter_um / 1000.0,
+                "diameter_imported": bool(getattr(self, "_metadata_diameter_imported", False)),
+                "builder_project": self._ui_text("lineEdit_builder_project"),
+                "fabrication_folder": self._ui_text("lineEdit_fabrication_folder"),
+            },
             "source_control": self._source_control_metadata(),
             "recipe": {
                 "start_current_mA": float(getattr(self, "start_current_mA", 0.0) or 0.0),
