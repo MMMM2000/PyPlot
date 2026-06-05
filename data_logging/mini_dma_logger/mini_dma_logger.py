@@ -85,8 +85,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-04.severe-hold-bypass.1"
-CONTROL_LOGIC_PROFILE = "experimental-current-hold-severe-error-feedback-bypass"
+CONTROL_LOGIC_VERSION = "2026-06-05.severe-hold-direction.1"
+CONTROL_LOGIC_PROFILE = "experimental-current-hold-severe-error-direction-confidence"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -110,6 +110,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_moving_away_preserves_predictive_step",
     "current_hold_large_error_not_masked_by_noise",
     "current_hold_severe_error_bypasses_feedback_gates",
+    "current_hold_direction_confidence_limits_severe_steps",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -10899,6 +10900,18 @@ class MainWindow(QtWidgets.QMainWindow):
             cap_mpa = self._current_sweep_hold_correction_stress_mpa()
         if error_value is not None and math.isfinite(float(error_value)):
             error_abs = abs(float(error_value))
+            if (
+                self._current_sweep_hold_severe_error_recovery_needed(basis, float(error_value))
+                and seek_key is not None
+            ):
+                previous_error = self._seek_last_error_by_key.get(seek_key)
+                if (
+                    previous_error is not None
+                    and math.isfinite(float(previous_error))
+                    and float(previous_error) * float(error_value) > 0.0
+                    and error_abs > abs(float(previous_error)) * 1.05
+                ):
+                    return self._motor_step_mm()
             near_mpa = self._current_sweep_near_correction_stress_mpa()
             near_cap = _basis_cap_from_stress(near_mpa)
             max_cap = _basis_cap_from_stress(cap_mpa)

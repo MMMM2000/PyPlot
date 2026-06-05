@@ -6,3 +6,4 @@
 - Fixed setup-disabled current-sweep recipes so measurement logging starts before current is applied.
 - Added an experimental no-hold/no-setup 0.4 mA/s current-sweep recipe to test whether current-hold dwell is worsening transformation stress excursions.
 - Added an experimental current-hold severe-error recovery bypass so large hold errors can correct immediately instead of waiting on persistence and filtered-feedback gates.
+- Added an experimental current-hold directional-confidence limiter so severe errors that worsen after a correction fall back to one motor step instead of stacking large moves.

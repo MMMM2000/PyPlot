@@ -4885,6 +4885,35 @@ def test_current_hold_severe_error_uses_derived_recovery_threshold(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_current_hold_severe_error_limits_step_when_error_worsens(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        seek_key = (mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0)
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            plateau_index=1,
+        )
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+        window.spin_current_sweep_hold_min_pause_stress_mpa.setValue(2.0)
+        window._seek_last_error_by_key[seek_key] = -8.0
+
+        correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            400.0,
+            error_value=-10.0,
+            seek_key=seek_key,
+        )
+
+        assert correction_mm == pytest.approx(window._motor_step_mm())
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_recipe_file_controls_are_hidden_until_enabled_and_track_status(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "recipe.recipe.json"
