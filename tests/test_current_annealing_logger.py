@@ -11,6 +11,19 @@ pytest.importorskip("PyQt6.QtWidgets", reason="Qt widgets backend is unavailable
 logger_mod = importlib.import_module("data_logging.current_annealing_logger.current_annealing_logger")
 
 
+def _wheel_event(delta_y: int = -120) -> object:
+    return logger_mod.QtGui.QWheelEvent(
+        logger_mod.QtCore.QPointF(10.0, 10.0),
+        logger_mod.QtCore.QPointF(10.0, 10.0),
+        logger_mod.QtCore.QPoint(0, 0),
+        logger_mod.QtCore.QPoint(0, delta_y),
+        logger_mod.QtCore.Qt.MouseButton.NoButton,
+        logger_mod.QtCore.Qt.KeyboardModifier.NoModifier,
+        logger_mod.QtCore.Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
 class _FakeBrokerClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -243,6 +256,32 @@ def test_current_annealing_direct_hmp_profile_shows_port_options(qtbot) -> None:
     assert not window.ui.comboBox_port.isHidden()
     assert not window.ui.comboBox_baudrate.isHidden()
     assert window.ui.pushButton_connect_port.text() == "Connect to port"
+
+
+def test_current_annealing_settings_wheel_guard_scrolls_without_changing_values(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    scroll = window.ui.left_scroll
+    assert isinstance(scroll, logger_mod.QtWidgets.QScrollArea)
+    scrollbar = scroll.verticalScrollBar()
+    scrollbar.setRange(0, 100)
+    scrollbar.setValue(50)
+
+    spin = window.ui.spinBox_max_current
+    spin.setValue(10)
+    assert window.eventFilter(spin, _wheel_event()) is True
+    assert spin.value() == 10
+    assert scrollbar.value() > 50
+
+    scrollbar.setValue(50)
+    assert window.eventFilter(spin.lineEdit(), _wheel_event()) is True
+    assert spin.value() == 10
+    assert scrollbar.value() > 50
+
+    combo = window.ui.comboBox_supply
+    combo.setCurrentIndex(0)
+    assert window.eventFilter(combo, _wheel_event()) is True
+    assert combo.currentIndex() == 0
 
 
 def test_current_annealing_auto_detect_hmp_port_in_shared_mode(

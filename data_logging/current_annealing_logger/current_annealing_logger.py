@@ -657,6 +657,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.adjustSize()
         except Exception:
             pass
+        self._install_settings_wheel_guard()
 
     # utilities
     def dbg(self, *args):
@@ -665,6 +666,49 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(*args)
             except Exception:
                 pass
+
+    def _install_settings_wheel_guard(self) -> None:
+        scroll = getattr(self.ui, "left_scroll", None)
+        if not isinstance(scroll, QtWidgets.QScrollArea):
+            return
+        control_root = scroll.widget()
+        if not isinstance(control_root, QtWidgets.QWidget):
+            return
+        for widget in control_root.findChildren((QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox)):
+            widget.setProperty("_current_annealing_wheel_guard", True)
+            widget.installEventFilter(self)
+            if isinstance(widget, QtWidgets.QAbstractSpinBox):
+                editor = widget.lineEdit()
+                editor.setProperty("_current_annealing_wheel_guard", True)
+                editor.installEventFilter(self)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if (
+            event.type() == QtCore.QEvent.Type.Wheel
+            and isinstance(watched, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox, QtWidgets.QLineEdit))
+            and watched.property("_current_annealing_wheel_guard")
+        ):
+            if isinstance(watched, QtWidgets.QComboBox) and watched.view().isVisible():
+                return super().eventFilter(watched, event)
+            self._scroll_settings_panel_from_wheel(event)
+            return True
+        return super().eventFilter(watched, event)
+
+    def _scroll_settings_panel_from_wheel(self, event: QtCore.QEvent) -> None:
+        if not isinstance(event, QtGui.QWheelEvent):
+            event.ignore()
+            return
+        scroll = getattr(self.ui, "left_scroll", None)
+        if not isinstance(scroll, QtWidgets.QScrollArea):
+            event.ignore()
+            return
+        scrollbar = scroll.verticalScrollBar()
+        delta = event.pixelDelta().y()
+        if delta == 0:
+            delta = int(event.angleDelta().y() / 120 * scrollbar.singleStep() * 3)
+        if delta != 0:
+            scrollbar.setValue(scrollbar.value() - delta)
+        event.accept()
 
     def _show_pyqtgraph_placeholders(self) -> None:
         if self._pg_placeholder_labels:
