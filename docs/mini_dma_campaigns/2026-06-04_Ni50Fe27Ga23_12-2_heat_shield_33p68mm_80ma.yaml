@@ -51,6 +51,12 @@ hardware:
       rule: respect active broker leases and roles; do not directly probe or control the AC channel
   current_voltage_limit_v: 32.05
   current_max_setpoint_mA: 80.0
+  connected_current_probe:
+    required: true
+    current_mA: 1.0
+    settle_s: 2.0
+    max_voltage_fraction: 0.9
+    min_measured_fraction: 0.7
   operator_confirmation_required:
     - broker profile exposes CH3 for Mini DMA motor rail and CH4 for Mini DMA current sweep
     - CH3 motor rail is preserved according to broker state and Mini DMA preflight

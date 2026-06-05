@@ -40,6 +40,12 @@ hardware:
     - CH3
   current_voltage_limit_v: 32.05
   current_max_setpoint_mA: 100.0
+  connected_current_probe:
+    required: true
+    current_mA: 1.0
+    settle_s: 2.0
+    max_voltage_fraction: 0.9
+    min_measured_fraction: 0.7
 safety:
   max_stress_mpa: 300.0
   recovery_stress_mpa: 50.0

@@ -38,6 +38,13 @@ def _write_manifest(path: Path, root: Path, run_dir: Path | None = None) -> None
         "hardware": {
             "current_channel": "CH4",
             "current_voltage_limit_v": 32.05,
+            "connected_current_probe": {
+                "required": True,
+                "current_mA": 1.0,
+                "settle_s": 2.0,
+                "max_voltage_fraction": 0.9,
+                "min_measured_fraction": 0.7,
+            },
         },
         "safety": {
             "max_stress_mpa": 300.0,
@@ -73,6 +80,8 @@ def test_campaign_check_derives_geometry_travel_limit(tmp_path: Path) -> None:
 
     assert result.ok
     assert result.derived["max_correction_travel_mm"] == 7.8
+    assert result.derived["connected_current_probe"]["required"] is True
+    assert result.derived["connected_current_probe"]["current_mA"] == 1.0
     assert result.derived["report_path"].endswith("reports\\mini_dma_optimization_report.pdf") or result.derived[
         "report_path"
     ].endswith("reports/mini_dma_optimization_report.pdf")
@@ -89,6 +98,24 @@ def test_campaign_check_rejects_missing_control_source(tmp_path: Path) -> None:
 
     assert not result.ok
     assert "missing required field: control_source.approved_control_logic_version" in result.errors
+
+
+def test_campaign_check_rejects_invalid_required_connected_current_probe(tmp_path: Path) -> None:
+    manifest = tmp_path / "campaign.json"
+    _write_manifest(manifest, tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["hardware"]["connected_current_probe"]["current_mA"] = 0.0
+    payload["hardware"]["connected_current_probe"]["max_voltage_fraction"] = 1.2
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = validate_campaign(manifest, skip_git=True)
+
+    assert not result.ok
+    assert "hardware.connected_current_probe.current_mA must be positive when required" in result.errors
+    assert (
+        "hardware.connected_current_probe.max_voltage_fraction must be in (0, 1] when required"
+        in result.errors
+    )
 
 
 def test_yaml_campaign_template_parses() -> None:

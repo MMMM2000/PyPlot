@@ -178,6 +178,40 @@ def validate_campaign(
         travel_limit_mm = length * travel_fraction
         if travel_fraction < 0.01 or travel_fraction > 0.25:
             warnings.append("max_correction_travel_fraction is outside the expected 0.01-0.25 range")
+    probe = nested(manifest, "hardware", "connected_current_probe")
+    probe_summary: dict[str, Any] | None = None
+    if isinstance(probe, Mapping):
+        probe_required = bool(probe.get("required", False))
+        probe_current_mA = _as_float(probe.get("current_mA"))
+        probe_settle_s = _as_float(probe.get("settle_s"))
+        probe_max_voltage_fraction = _as_float(probe.get("max_voltage_fraction"))
+        probe_min_measured_fraction = _as_float(probe.get("min_measured_fraction"))
+        probe_summary = {
+            "required": probe_required,
+            "current_mA": probe_current_mA,
+            "settle_s": probe_settle_s,
+            "max_voltage_fraction": probe_max_voltage_fraction,
+            "min_measured_fraction": probe_min_measured_fraction,
+        }
+        if probe_required:
+            if probe_current_mA is None or probe_current_mA <= 0.0:
+                errors.append("hardware.connected_current_probe.current_mA must be positive when required")
+            if probe_settle_s is None or probe_settle_s < 0.0:
+                errors.append("hardware.connected_current_probe.settle_s must be non-negative when required")
+            if (
+                probe_max_voltage_fraction is None
+                or probe_max_voltage_fraction <= 0.0
+                or probe_max_voltage_fraction > 1.0
+            ):
+                errors.append(
+                    "hardware.connected_current_probe.max_voltage_fraction must be in (0, 1] when required"
+                )
+            if probe_min_measured_fraction is None or probe_min_measured_fraction <= 0.0:
+                errors.append(
+                    "hardware.connected_current_probe.min_measured_fraction must be positive when required"
+                )
+    elif probe is not None:
+        errors.append("hardware.connected_current_probe must be a mapping when present")
     stages = nested(manifest, "run_plan", "stages")
     if not isinstance(stages, list) or not stages:
         errors.append("run_plan.stages must be a non-empty list")
@@ -223,6 +257,7 @@ def validate_campaign(
     derived = {
         "max_correction_travel_mm": travel_limit_mm,
         "report_path": None if report_full is None else str(report_full),
+        "connected_current_probe": probe_summary,
         "git": git_info,
     }
     return CampaignCheckResult(

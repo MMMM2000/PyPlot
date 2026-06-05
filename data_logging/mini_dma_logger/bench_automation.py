@@ -9,6 +9,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 from PyQt6 import QtWidgets
 
+from data_logging.shared_power_supply.broker import ROLE_MINI_DMA_CURRENT
+from data_logging.shared_power_supply.protocol import BrokerJsonClient
 from plotting.shared.utils import ensure_app_theme
 
 from .trace_replay import analyze_control_trace, write_replay_outputs
@@ -19,6 +21,7 @@ PLAN_KIND = "mini_dma_bench_sequence"
 PLAN_SCHEMA_VERSION = 1
 DEFAULT_MAX_RUN_DURATION_S = 3600.0
 DEFAULT_BENCH_LOCK_TIMEOUT_S = 300.0
+DEFAULT_CURRENT_PATH_PROBE_OWNER = "mini_dma_current_path_probe"
 
 
 class MiniDmaBenchAutomationError(RuntimeError):
@@ -80,6 +83,18 @@ class MiniDmaHardwareConfig:
 
 
 @dataclass(frozen=True)
+class MiniDmaCurrentPathProbeConfig:
+    enabled: bool = False
+    current_mA: float = 1.0
+    voltage_limit_v: float | None = None
+    current_limit_a: float = 0.08
+    settle_s: float = 2.0
+    max_voltage_fraction: float = 0.9
+    min_measured_fraction: float = 0.7
+    owner: str = DEFAULT_CURRENT_PATH_PROBE_OWNER
+
+
+@dataclass(frozen=True)
 class MiniDmaBenchPlan:
     path: Path
     execute: bool
@@ -88,6 +103,7 @@ class MiniDmaBenchPlan:
     max_total_duration_s: float | None
     sample_identity: MiniDmaSampleIdentity
     hardware: MiniDmaHardwareConfig
+    current_path_probe: MiniDmaCurrentPathProbeConfig
     guardrails: MiniDmaBenchGuardrails
     bench_lock: MiniDmaBenchLockConfig
     runs: tuple[MiniDmaBenchRun, ...]
@@ -119,6 +135,18 @@ def _optional_float(mapping: Mapping[str, Any], key: str) -> float | None:
     if key not in mapping or mapping[key] is None:
         return None
     return _as_float(mapping[key], field=key)
+
+
+def _float_from_mapping(
+    mapping: Mapping[str, Any],
+    key: str,
+    *,
+    default: float,
+    minimum: float | None = None,
+    field_prefix: str = "",
+) -> float:
+    field = f"{field_prefix}.{key}" if field_prefix else key
+    return _as_float(mapping.get(key, default), field=field, minimum=minimum)
 
 
 def _resolve_plan_path(base: Path, value: object, *, field: str, must_exist: bool = False) -> Path:
@@ -265,6 +293,69 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         supply_voltage_limit_v=_optional_float(raw_hardware, "supply_voltage_limit_v"),
         manual_current_mA=_optional_float(raw_hardware, "manual_current_mA"),
     )
+    raw_probe = payload.get("current_path_probe", {})
+    if raw_probe is None:
+        raw_probe = {}
+    if not isinstance(raw_probe, Mapping):
+        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'current_path_probe' must be an object.")
+    current_path_probe = MiniDmaCurrentPathProbeConfig(
+        enabled=bool(raw_probe.get("enabled", False)),
+        current_mA=_float_from_mapping(
+            raw_probe,
+            "current_mA",
+            default=1.0,
+            minimum=0.1,
+            field_prefix="current_path_probe",
+        ),
+        voltage_limit_v=(
+            None
+            if raw_probe.get("voltage_limit_v") is None
+            else _as_float(raw_probe["voltage_limit_v"], field="current_path_probe.voltage_limit_v", minimum=0.1)
+        ),
+        current_limit_a=_float_from_mapping(
+            raw_probe,
+            "current_limit_a",
+            default=0.08,
+            minimum=0.001,
+            field_prefix="current_path_probe",
+        ),
+        settle_s=_float_from_mapping(
+            raw_probe,
+            "settle_s",
+            default=2.0,
+            minimum=0.0,
+            field_prefix="current_path_probe",
+        ),
+        max_voltage_fraction=_float_from_mapping(
+            raw_probe,
+            "max_voltage_fraction",
+            default=0.9,
+            minimum=0.0,
+            field_prefix="current_path_probe",
+        ),
+        min_measured_fraction=_float_from_mapping(
+            raw_probe,
+            "min_measured_fraction",
+            default=0.7,
+            minimum=0.0,
+            field_prefix="current_path_probe",
+        ),
+        owner=str(raw_probe.get("owner") or DEFAULT_CURRENT_PATH_PROBE_OWNER).strip()
+        or DEFAULT_CURRENT_PATH_PROBE_OWNER,
+    )
+    if current_path_probe.enabled:
+        if hardware.shared_broker_port is None:
+            raise MiniDmaBenchAutomationError(
+                "Mini DMA current_path_probe requires hardware.shared_broker_port."
+            )
+        if hardware.current_sweep_channel is None:
+            raise MiniDmaBenchAutomationError(
+                "Mini DMA current_path_probe requires hardware.current_sweep_channel."
+            )
+        if current_path_probe.voltage_limit_v is None and hardware.supply_voltage_limit_v is None:
+            raise MiniDmaBenchAutomationError(
+                "Mini DMA current_path_probe requires voltage_limit_v or hardware.supply_voltage_limit_v."
+            )
     default_max_run_duration_s = _as_float(
         payload.get("default_max_run_duration_s", DEFAULT_MAX_RUN_DURATION_S),
         field="default_max_run_duration_s",
@@ -342,6 +433,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         max_total_duration_s=max_total_duration_s,
         sample_identity=sample_identity,
         hardware=hardware,
+        current_path_probe=current_path_probe,
         guardrails=guardrails,
         bench_lock=bench_lock,
         runs=tuple(runs),
@@ -657,6 +749,95 @@ def _check_guardrails(
     }
 
 
+def _current_path_probe_summary(probe: MiniDmaCurrentPathProbeConfig) -> dict[str, Any]:
+    return {
+        "enabled": probe.enabled,
+        "current_mA": probe.current_mA,
+        "voltage_limit_v": probe.voltage_limit_v,
+        "current_limit_a": probe.current_limit_a,
+        "settle_s": probe.settle_s,
+        "max_voltage_fraction": probe.max_voltage_fraction,
+        "min_measured_fraction": probe.min_measured_fraction,
+        "owner": probe.owner,
+    }
+
+
+def _run_current_path_probe(
+    hardware: MiniDmaHardwareConfig,
+    probe: MiniDmaCurrentPathProbeConfig,
+    *,
+    sleep_fn: Callable[[float], None],
+    client_factory: Callable[..., BrokerJsonClient] = BrokerJsonClient,
+) -> dict[str, Any]:
+    if not probe.enabled:
+        return {"enabled": False, "status": "not_required"}
+    if hardware.shared_broker_port is None or hardware.current_sweep_channel is None:
+        raise MiniDmaBenchAutomationError("Mini DMA current path probe is missing broker/channel settings.")
+    channel = int(hardware.current_sweep_channel)
+    host = hardware.shared_broker_host or "127.0.0.1"
+    voltage_limit_v = float(
+        probe.voltage_limit_v
+        if probe.voltage_limit_v is not None
+        else hardware.supply_voltage_limit_v
+    )
+    client = client_factory(host=host, port=int(hardware.shared_broker_port), timeout_s=8.0)
+    lease: dict[str, Any] | None = None
+    readback: dict[str, Any] = {}
+    try:
+        lease = client.lease(channel=channel, owner=probe.owner, role=ROLE_MINI_DMA_CURRENT)
+        lease_id = str(lease["lease_id"])
+        client.configure_channel(
+            channel=channel,
+            lease_id=lease_id,
+            voltage_v=voltage_limit_v,
+            current_a=float(probe.current_limit_a),
+            output_on=True,
+        )
+        client.set_current(channel=channel, lease_id=lease_id, current_mA=float(probe.current_mA))
+        if probe.settle_s > 0.0:
+            sleep_fn(probe.settle_s)
+        readback = client.measure_channel(channel=channel)
+        measured_current_mA = readback.get("current_mA")
+        measured_voltage_v = readback.get("voltage_V")
+        if measured_current_mA is None or measured_voltage_v is None:
+            status = "inconclusive"
+            passed = False
+            reason = "missing_readback"
+        else:
+            current_abs_mA = abs(float(measured_current_mA))
+            voltage_abs_v = abs(float(measured_voltage_v))
+            current_threshold_mA = abs(float(probe.current_mA)) * float(probe.min_measured_fraction)
+            voltage_threshold_v = voltage_limit_v * float(probe.max_voltage_fraction)
+            passed = current_abs_mA >= current_threshold_mA and voltage_abs_v < voltage_threshold_v
+            status = "passed" if passed else "failed"
+            reason = (
+                "conducting"
+                if passed
+                else (
+                    f"measured {current_abs_mA:.3f} mA at {voltage_abs_v:.3f} V; "
+                    f"requires >= {current_threshold_mA:.3f} mA and < {voltage_threshold_v:.3f} V"
+                )
+            )
+        return {
+            "enabled": True,
+            "status": status,
+            "passed": passed,
+            "channel": channel,
+            "host": host,
+            "port": int(hardware.shared_broker_port),
+            "readback": readback,
+            "reason": reason,
+            "config": _current_path_probe_summary(probe),
+        }
+    finally:
+        if lease is not None:
+            lease_id = str(lease["lease_id"])
+            try:
+                client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+            finally:
+                client.release(channel=channel, lease_id=lease_id)
+
+
 def _execute_run(
     run: MiniDmaBenchRun,
     *,
@@ -765,6 +946,7 @@ def run_mini_dma_bench_plan(
     app_factory: Callable[[Sequence[str] | None], Any] | None = None,
     window_factory: Callable[..., Any] | None = None,
     bench_lock_factory: Callable[..., AbstractContextManager[Any]] | None = None,
+    broker_client_factory: Callable[..., BrokerJsonClient] = BrokerJsonClient,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     plan = load_mini_dma_bench_plan(path)
@@ -801,6 +983,7 @@ def run_mini_dma_bench_plan(
                 "supply_voltage_limit_v": plan.hardware.supply_voltage_limit_v,
                 "manual_current_mA": plan.hardware.manual_current_mA,
             },
+            "current_path_probe": _current_path_probe_summary(plan.current_path_probe),
             "bench_lock": {
                 "enabled": plan.bench_lock.enabled,
                 "timeout_s": plan.bench_lock.timeout_s,
@@ -849,6 +1032,52 @@ def run_mini_dma_bench_plan(
         bench_lock_context = nullcontext()
 
     with bench_lock_context:
+        current_path_probe_result = _run_current_path_probe(
+            plan.hardware,
+            plan.current_path_probe,
+            sleep_fn=sleep_fn,
+            client_factory=broker_client_factory,
+        )
+        if (
+            plan.current_path_probe.enabled
+            and current_path_probe_result.get("passed") is not True
+        ):
+            bench_lock_summary = {
+                "enabled": plan.bench_lock.enabled,
+                "timeout_s": plan.bench_lock.timeout_s,
+                "owner": plan.bench_lock.owner,
+                "purpose": plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+                "lock_path": None if plan.bench_lock.lock_path is None else str(plan.bench_lock.lock_path),
+            }
+            if hasattr(bench_lock_context, "path"):
+                try:
+                    bench_lock_summary["lock_path"] = str(bench_lock_context.path)
+                except Exception:
+                    pass
+            run_summaries = [
+                {
+                    "name": run.name,
+                    "recipe_path": str(run.recipe_path),
+                    "repeat_index": run.repeat_index,
+                    "status": "skipped_current_path_probe_failed",
+                }
+                for run in plan.runs
+            ]
+            summary = {
+                "kind": PLAN_KIND,
+                "schema_version": PLAN_SCHEMA_VERSION,
+                "mode": "execute",
+                "plan_path": str(plan.path),
+                "log_dir": None if plan.log_dir is None else str(plan.log_dir),
+                "status": "current_path_probe_failed",
+                "current_path_probe": current_path_probe_result,
+                "bench_lock": bench_lock_summary,
+                "run_count": len(run_summaries),
+                "elapsed_s": max(0.0, time.monotonic() - total_start_s),
+                "runs": run_summaries,
+            }
+            _write_summary(plan.summary_path, summary)
+            return summary
         app = app_factory(qt_args) if app_factory is not None else _ensure_qapplication(qt_args)
         factory = window_factory or MainWindow
         restore_warning = _suppress_modal_warnings()
@@ -921,6 +1150,8 @@ def run_mini_dma_bench_plan(
         "mode": "execute",
         "plan_path": str(plan.path),
         "log_dir": None if plan.log_dir is None else str(plan.log_dir),
+        "status": "completed",
+        "current_path_probe": current_path_probe_result,
         "bench_lock": bench_lock_summary,
         "run_count": len(run_summaries),
         "elapsed_s": max(0.0, time.monotonic() - total_start_s),

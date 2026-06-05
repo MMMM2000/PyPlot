@@ -1165,3 +1165,197 @@ def test_mini_dma_bench_plan_wire_break_stops_remaining_runs(
 
     assert summary["runs"][0]["status"] == "wire_break"
     assert summary["runs"][1]["status"] == "skipped_after_wire_break"
+
+
+def test_mini_dma_bench_plan_current_path_probe_skips_open_circuit(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-stress.recipe.json"
+    _write_recipe(recipe_path)
+    summary_path = tmp_path / "summary.json"
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "summary_path": str(summary_path),
+                "hardware": {
+                    "shared_broker_host": "127.0.0.1",
+                    "shared_broker_port": 8765,
+                    "current_sweep_channel": 4,
+                    "supply_voltage_limit_v": 32.05,
+                },
+                "current_path_probe": {
+                    "enabled": True,
+                    "current_mA": 1.0,
+                    "settle_s": 0.0,
+                },
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [
+                    {"name": "trial-a", "recipe_path": str(recipe_path)},
+                    {"name": "trial-b", "recipe_path": str(recipe_path)},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    events: list[tuple[str, object]] = []
+
+    class _OpenCircuitBroker:
+        def __init__(self, *, host: str, port: int, timeout_s: float) -> None:
+            events.append(("connect", (host, port, timeout_s)))
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            events.append(("lease", (channel, owner, role)))
+            return {"lease_id": "lease-4"}
+
+        def configure_channel(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            voltage_v: float,
+            current_a: float,
+            output_on: bool,
+        ) -> None:
+            events.append(("configure", (channel, lease_id, voltage_v, current_a, output_on)))
+
+        def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            events.append(("set_current", (channel, lease_id, current_mA)))
+
+        def measure_channel(self, *, channel: int) -> dict[str, float]:
+            events.append(("measure", channel))
+            return {"voltage_V": 32.0, "current_mA": 0.1}
+
+        def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
+            events.append(("output", (channel, lease_id, output_on)))
+
+        def release(self, *, channel: int, lease_id: str) -> None:
+            events.append(("release", (channel, lease_id)))
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: pytest.fail("open current path must stop before creating the UI"),
+        broker_client_factory=_OpenCircuitBroker,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert summary["status"] == "current_path_probe_failed"
+    assert summary["current_path_probe"]["status"] == "failed"
+    assert summary["current_path_probe"]["readback"] == {"voltage_V": 32.0, "current_mA": 0.1}
+    assert [run["status"] for run in summary["runs"]] == [
+        "skipped_current_path_probe_failed",
+        "skipped_current_path_probe_failed",
+    ]
+    assert ("output", (4, "lease-4", False)) in events
+    assert ("release", (4, "lease-4")) in events
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written["status"] == "current_path_probe_failed"
+
+
+def test_mini_dma_bench_plan_current_path_probe_pass_allows_run(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-stress.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "hardware": {
+                    "shared_broker_host": "127.0.0.1",
+                    "shared_broker_port": 8765,
+                    "current_sweep_channel": 4,
+                    "supply_voltage_limit_v": 32.05,
+                },
+                "current_path_probe": {
+                    "enabled": True,
+                    "current_mA": 1.0,
+                    "settle_s": 0.0,
+                },
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _ConductingBroker:
+        def __init__(self, *, host: str, port: int, timeout_s: float) -> None:
+            return
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            return {"lease_id": "lease-4"}
+
+        def configure_channel(
+            self,
+            *,
+            channel: int,
+            lease_id: str,
+            voltage_v: float,
+            current_a: float,
+            output_on: bool,
+        ) -> None:
+            return
+
+        def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            return
+
+        def measure_channel(self, *, channel: int) -> dict[str, float]:
+            return {"voltage_V": 0.4, "current_mA": 0.95}
+
+        def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
+            return
+
+        def release(self, *, channel: int, lease_id: str) -> None:
+            return
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            return
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            return
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            return
+
+        def _start_auto_ramp(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        broker_client_factory=_ConductingBroker,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert summary["status"] == "completed"
+    assert summary["current_path_probe"]["status"] == "passed"
+    assert summary["runs"][0]["status"] == "completed"
