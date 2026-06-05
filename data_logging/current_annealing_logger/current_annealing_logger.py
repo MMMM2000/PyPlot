@@ -1993,9 +1993,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         channel = self._shared_broker_channel()
         client = self._get_shared_broker_client()
-        client.set_output(channel=channel, lease_id=lease_id, output_on=False)
-        client.release(channel=channel, lease_id=lease_id)
-        self._shared_broker_lease_id = None
+        try:
+            client.configure_channel(
+                channel=channel,
+                lease_id=lease_id,
+                voltage_v=0.0,
+                current_a=0.0,
+                output_on=False,
+            )
+        except Exception:
+            client.set_current(channel=channel, lease_id=lease_id, current_mA=0.0)
+            client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+        finally:
+            client.release(channel=channel, lease_id=lease_id)
+            self._shared_broker_lease_id = None
 
     def _handle_loop_value_changed(self, value: int) -> None:
         try:
@@ -2970,9 +2981,9 @@ class MainWindow(QtWidgets.QMainWindow):
         commands_init.append("OUTP ON\n")
         self.commands_init = commands_init
         safe_end = [
+            "CURR 0.0000\n",
+            "VOLT 0.000\n",
             "OUTP OFF\n",
-            "VOLT 1.0\n",
-            f"CURR {start_a:.4f}\n",
             "SYST:LOC\n",
         ]
         if channel > 0:

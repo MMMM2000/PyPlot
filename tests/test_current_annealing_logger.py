@@ -1280,10 +1280,36 @@ def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> No
 
     assert fake.calls == [
         ("set_current", {"channel": 2, "lease_id": "lease-1", "current_mA": 25.0}),
-        ("set_output", {"channel": 2, "lease_id": "lease-1", "output_on": False}),
+        (
+            "configure_channel",
+            {
+                "channel": 2,
+                "lease_id": "lease-1",
+                "voltage_v": 0.0,
+                "current_a": 0.0,
+                "output_on": False,
+            },
+        ),
         ("release", {"channel": 2, "lease_id": "lease-1"}),
     ]
     assert window._shared_broker_lease_id is None
+
+
+def test_direct_hmp_safe_end_resets_selected_channel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("hmp4040")
+    window.channel_select = 3
+    window.start_current_mA = 20
+    window._refresh_command_profiles()
+
+    assert window.commands_safe_end[:4] == [
+        "INST:NSEL 3\n",
+        "CURR 0.0000\n",
+        "VOLT 0.000\n",
+        "OUTP OFF\n",
+    ]
+    assert f"CURR {window._start_current_A():.4f}\n" not in window.commands_safe_end
 
 
 def test_shared_broker_setpoint_uses_rate_limited_ramp_when_available(qtbot) -> None:
