@@ -85,8 +85,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-05.severe-hold-direction.1"
-CONTROL_LOGIC_PROFILE = "experimental-current-hold-severe-error-direction-confidence"
+CONTROL_LOGIC_VERSION = "2026-06-05.bootstrap-seek.1"
+CONTROL_LOGIC_PROFILE = "experimental-current-sweep-bootstrap-seek"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -111,6 +111,8 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_large_error_not_masked_by_noise",
     "current_hold_severe_error_bypasses_feedback_gates",
     "current_hold_direction_confidence_limits_severe_steps",
+    "current_sweep_target_ramp_learns_bootstrap_stiffness",
+    "current_sweep_unknown_stiffness_uses_bootstrap_step_cap",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -477,6 +479,8 @@ SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
+SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_COMMAND_STRAIN_PCT = 0.03
+SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_MOTOR_STEPS = 8
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -10968,6 +10972,22 @@ class MainWindow(QtWidgets.QMainWindow):
             min(strain_cap_mm, self._current_sweep_max_correction_mm()),
         )
 
+    def _current_sweep_bootstrap_seek_step_mm(self, basis: str) -> float:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return self._motor_step_mm()
+        strain_cap_mm = self._strain_pct_to_stage_mm(
+            SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_COMMAND_STRAIN_PCT
+        )
+        step_cap_mm = self._motor_step_mm() * max(1, SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_MOTOR_STEPS)
+        speed_cap_mm = self._seek_speed_limited_step_mm(
+            basis,
+            self._motion_speed_for_current_context(manual_jog=False),
+        )
+        return max(
+            self._motor_step_mm(),
+            min(strain_cap_mm, step_cap_mm, speed_cap_mm, self._current_sweep_max_correction_mm()),
+        )
+
     def _current_sweep_hold_response_sensitivity_per_mm(
         self,
         basis: str,
@@ -11773,6 +11793,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _current_sweep_freezes_live_stiffness(self) -> bool:
         return (
             self._is_current_sweep_mode(self._automation_name)
+            and self._automation_phase in {"current", "current_hold", "current_limit_unwind"}
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
         )
 
@@ -12162,10 +12183,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or sensitivity <= 0.0:
             if self._is_current_sweep_mode(self._automation_name):
-                return self._seek_speed_limited_step_mm(
-                    basis,
-                    self._motion_speed_for_current_context(manual_jog=False),
-                )
+                return self._current_sweep_bootstrap_seek_step_mm(basis)
             return self._seek_step_mm(error_value, tolerance, basis=basis)
         predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
         max_step_mm = self._seek_nudge_mm()
@@ -15577,6 +15595,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_min_away_slope_mpa_s": (
                     SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
                 ),
+                "current_sweep_bootstrap_max_command_strain_pct": (
+                    SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_COMMAND_STRAIN_PCT
+                ),
+                "current_sweep_bootstrap_max_motor_steps": SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_MOTOR_STEPS,
             },
             "settings": {
                 "control_interval_ms": self._control_interval_ms(),

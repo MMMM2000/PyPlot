@@ -4859,6 +4859,71 @@ def test_current_sweep_setup_disabled_starts_session_before_current(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_current_sweep_target_ramp_can_learn_bootstrap_stiffness(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+
+        assert window._current_sweep_freezes_live_stiffness() is False
+
+        window._set_automation_context(
+            phase="current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        assert window._current_sweep_freezes_live_stiffness() is True
+
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        assert window._current_sweep_freezes_live_stiffness() is True
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_unknown_stiffness_uses_bootstrap_step_cap(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        seek_key = (mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0)
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            plateau_index=1,
+        )
+        window.spin_initial_length.setValue(33.68)
+        window._seek_live_stiffness_g_per_mm = None
+        window._seek_live_stiffness_by_key.clear()
+
+        correction_mm = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+            0.17,
+            seek_key=seek_key,
+        )
+
+        assert correction_mm >= window._motor_step_mm()
+        assert correction_mm <= window._motor_step_mm() * mini_dma_mod.SERVO_CURRENT_SWEEP_BOOTSTRAP_MAX_MOTOR_STEPS
+        assert correction_mm < window._seek_speed_limited_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            window._motion_speed_for_current_context(manual_jog=False),
+        )
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_hold_severe_error_uses_derived_recovery_threshold(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
