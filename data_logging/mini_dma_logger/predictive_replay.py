@@ -43,6 +43,16 @@ class PhaseReplayMetrics:
 
 
 @dataclass(frozen=True)
+class PredictiveLiveTestRecommendation:
+    priority_score: float
+    decision: str
+    reasons: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class PredictiveRunReplay:
     run_dir: str
     run_name: str
@@ -69,6 +79,7 @@ class PredictiveRunReplay:
     mean_candidate_correction_mm: float | None
     max_candidate_correction_mm: float | None
     replay_step_floor_accept_count: int | None
+    live_test_recommendation: PredictiveLiveTestRecommendation
     phase_metrics: list[PhaseReplayMetrics]
 
     def to_dict(self) -> dict[str, Any]:
@@ -256,6 +267,88 @@ def _strain_curve_quality(snapshots: list[PredictiveSnapshot]) -> str:
     return "usable"
 
 
+def _safe_fraction(value: float | None, default: float = 0.0) -> float:
+    if value is None or not math.isfinite(float(value)):
+        return default
+    return max(0.0, min(1.0, float(value)))
+
+
+def recommend_live_predictive_test(
+    *,
+    stress_error_p95_abs_mpa: float | None,
+    stress_error_max_abs_mpa: float | None,
+    current_phase_elapsed_s: float,
+    candidate_hold_sample_fraction: float,
+    candidate_hold_transition_count: int,
+    candidate_mean_ramp_scale: float,
+    candidate_estimated_extra_ramp_time_s: float,
+    high_risk_sample_count: int,
+    high_risk_covered_fraction: float | None,
+    stable_false_slow_fraction: float | None,
+    voltage_compliance_sample_count: int,
+    strain_current_curve_quality: str,
+    max_candidate_correction_mm: float | None,
+) -> PredictiveLiveTestRecommendation:
+    reasons: list[str] = []
+    if high_risk_sample_count <= 0:
+        return PredictiveLiveTestRecommendation(
+            priority_score=0.0,
+            decision="software_only",
+            reasons=["no high-risk transformation/recovery samples to justify live predictive testing"],
+        )
+    high_risk_coverage = _safe_fraction(high_risk_covered_fraction)
+    stable_false_slow = _safe_fraction(stable_false_slow_fraction)
+    hold_fraction = _safe_fraction(candidate_hold_sample_fraction)
+    current_time = max(1e-9, float(current_phase_elapsed_s))
+    extra_time_fraction = max(0.0, float(candidate_estimated_extra_ramp_time_s)) / current_time
+    ramp_efficiency = max(0.0, min(1.0, 1.0 - extra_time_fraction / 0.35))
+    score = 100.0 * high_risk_coverage
+    score -= 25.0 * stable_false_slow
+    score -= 20.0 * hold_fraction
+    score += 15.0 * ramp_efficiency
+    if candidate_mean_ramp_scale < 0.45:
+        score -= 8.0
+        reasons.append("candidate would slow the ramp aggressively")
+    if candidate_hold_transition_count > 12:
+        score -= 8.0
+        reasons.append("candidate hold logic would chatter")
+    if voltage_compliance_sample_count > 0:
+        score -= 30.0
+        reasons.append("saved run includes voltage-compliance/current-limit samples")
+    if strain_current_curve_quality != "usable":
+        score -= 12.0
+        reasons.append(f"strain-current curve quality is {strain_current_curve_quality}")
+    if max_candidate_correction_mm is not None and max_candidate_correction_mm > 0.03:
+        score -= 8.0
+        reasons.append("candidate motor corrections approach large-motion territory")
+    if stress_error_p95_abs_mpa is not None and stress_error_p95_abs_mpa > 20.0:
+        score -= 5.0
+        reasons.append("source run p95 stress error is high")
+    if stress_error_max_abs_mpa is not None and stress_error_max_abs_mpa > 40.0:
+        score -= 10.0
+        reasons.append("source run max stress error is high")
+    score = max(0.0, min(100.0, score))
+    if high_risk_coverage >= 0.8:
+        reasons.append("candidate covers most high-risk samples")
+    if stable_false_slow <= 0.15:
+        reasons.append("candidate rarely slows stable-elastic samples")
+    if extra_time_fraction <= 0.20:
+        reasons.append("estimated extra ramp time is modest")
+    if voltage_compliance_sample_count == 0:
+        reasons.append("no voltage-compliance samples in source run")
+    if score >= 70.0:
+        decision = "live_candidate"
+    elif score >= 45.0:
+        decision = "needs_review"
+    else:
+        decision = "software_only"
+    return PredictiveLiveTestRecommendation(
+        priority_score=score,
+        decision=decision,
+        reasons=reasons,
+    )
+
+
 def _candidate_corrections(
     run_dir: Path,
     tuning: PredictiveControllerTuning,
@@ -350,6 +443,21 @@ def analyze_predictive_run(
     phase_durations = _phase_duration(rows)
     mean_correction, max_correction = _candidate_corrections(path, tuning)
     control_logic = metadata.get("control_logic") if isinstance(metadata.get("control_logic"), dict) else {}
+    live_recommendation = recommend_live_predictive_test(
+        stress_error_p95_abs_mpa=quality.stress_error_p95_abs_mpa,
+        stress_error_max_abs_mpa=quality.stress_error_max_abs_mpa,
+        current_phase_elapsed_s=quality.current_phase_elapsed_s,
+        candidate_hold_sample_fraction=(hold_samples / len(rows) if rows else 0.0),
+        candidate_hold_transition_count=hold_transitions,
+        candidate_mean_ramp_scale=statistics.mean(ramp_scales) if ramp_scales else 1.0,
+        candidate_estimated_extra_ramp_time_s=extra_time,
+        high_risk_sample_count=high_risk,
+        high_risk_covered_fraction=(high_risk_covered / high_risk if high_risk else None),
+        stable_false_slow_fraction=(stable_slow / stable if stable else None),
+        voltage_compliance_sample_count=voltage_compliance,
+        strain_current_curve_quality=_strain_curve_quality(snapshots),
+        max_candidate_correction_mm=max_correction,
+    )
     return PredictiveRunReplay(
         run_dir=str(path),
         run_name=path.name,
@@ -378,6 +486,7 @@ def analyze_predictive_run(
         replay_step_floor_accept_count=(
             None if trace is None else trace.summary.step_floor_only_accept_count
         ),
+        live_test_recommendation=live_recommendation,
         phase_metrics=_phase_metrics(rows),
     )
 
@@ -419,6 +528,8 @@ def write_predictive_replay_outputs(
         "mean_candidate_correction_mm",
         "max_candidate_correction_mm",
         "replay_step_floor_accept_count",
+        "live_test_priority_score",
+        "live_test_decision",
         "run_dir",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
@@ -426,18 +537,22 @@ def write_predictive_replay_outputs(
         writer.writeheader()
         for result in rows:
             row = result.to_dict()
+            recommendation = result.live_test_recommendation.to_dict()
+            row["live_test_priority_score"] = recommendation["priority_score"]
+            row["live_test_decision"] = recommendation["decision"]
             writer.writerow({field: row.get(field) for field in csv_fields})
     lines = [
         "# Mini DMA Predictive Replay Summary",
         "",
         "This is advisory replay output. It classifies saved traces and proposes dynamic ramp or hold decisions; it does not simulate a closed-loop hardware outcome.",
         "",
-        "| Run | Logic | Ramp mA/s | RMS MPa | p95 MPa | Max MPa | Candidate hold % | Mean ramp scale | Extra ramp s | High-risk covered | Stable false slow |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Run | Logic | Ramp mA/s | RMS MPa | p95 MPa | Max MPa | Candidate hold % | Mean ramp scale | Extra ramp s | High-risk covered | Stable false slow | Live decision | Score |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
     ]
     for result in rows:
         high_risk = "-" if result.high_risk_covered_fraction is None else f"{result.high_risk_covered_fraction:.2f}"
         stable_slow = "-" if result.stable_false_slow_fraction is None else f"{result.stable_false_slow_fraction:.2f}"
+        recommendation = result.live_test_recommendation
         lines.append(
             "| "
             f"{result.run_name} | "
@@ -450,8 +565,24 @@ def write_predictive_replay_outputs(
             f"{result.candidate_mean_ramp_scale:.2f} | "
             f"{result.candidate_estimated_extra_ramp_time_s:.1f} | "
             f"{high_risk} | "
-            f"{stable_slow} |"
+            f"{stable_slow} | "
+            f"{recommendation.decision} | "
+            f"{recommendation.priority_score:.1f} |"
         )
+    live_candidates = sorted(
+        rows,
+        key=lambda item: item.live_test_recommendation.priority_score,
+        reverse=True,
+    )
+    if live_candidates:
+        lines.extend(["", "## Live-Test Priority", ""])
+        for index, result in enumerate(live_candidates[:5], start=1):
+            recommendation = result.live_test_recommendation
+            reasons = "; ".join(recommendation.reasons[:4]) or "no reasons recorded"
+            lines.append(
+                f"{index}. {result.run_name}: {recommendation.decision} "
+                f"({recommendation.priority_score:.1f}) - {reasons}"
+            )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"json": json_path, "csv": csv_path, "markdown": md_path}
 

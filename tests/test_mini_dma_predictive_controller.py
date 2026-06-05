@@ -17,6 +17,7 @@ from data_logging.mini_dma_logger.predictive_controller import (
 )
 from data_logging.mini_dma_logger.predictive_replay import (
     analyze_predictive_run,
+    recommend_live_predictive_test,
     write_predictive_replay_outputs,
 )
 
@@ -172,6 +173,54 @@ def test_predictive_replay_summarizes_synthetic_run(tmp_path: Path) -> None:
     assert replay.candidate_mean_ramp_scale < 1.0
     assert replay.transformation_elapsed_s > 0.0
     assert replay.mean_candidate_correction_mm is not None
+    assert replay.live_test_recommendation.decision in {"live_candidate", "needs_review"}
+    assert replay.live_test_recommendation.priority_score > 45.0
     assert outputs["json"].exists()
     assert outputs["csv"].exists()
     assert outputs["markdown"].exists()
+    markdown = outputs["markdown"].read_text(encoding="utf-8")
+    assert "Live-Test Priority" in markdown
+
+
+def test_predictive_live_recommendation_promotes_high_coverage_candidate() -> None:
+    recommendation = recommend_live_predictive_test(
+        stress_error_p95_abs_mpa=12.0,
+        stress_error_max_abs_mpa=24.0,
+        current_phase_elapsed_s=600.0,
+        candidate_hold_sample_fraction=0.05,
+        candidate_hold_transition_count=3,
+        candidate_mean_ramp_scale=0.82,
+        candidate_estimated_extra_ramp_time_s=45.0,
+        high_risk_sample_count=30,
+        high_risk_covered_fraction=0.95,
+        stable_false_slow_fraction=0.04,
+        voltage_compliance_sample_count=0,
+        strain_current_curve_quality="usable",
+        max_candidate_correction_mm=0.012,
+    )
+
+    assert recommendation.decision == "live_candidate"
+    assert recommendation.priority_score >= 70.0
+    assert any("covers most high-risk" in reason for reason in recommendation.reasons)
+
+
+def test_predictive_live_recommendation_demotes_compliance_candidate() -> None:
+    recommendation = recommend_live_predictive_test(
+        stress_error_p95_abs_mpa=12.0,
+        stress_error_max_abs_mpa=24.0,
+        current_phase_elapsed_s=600.0,
+        candidate_hold_sample_fraction=0.05,
+        candidate_hold_transition_count=3,
+        candidate_mean_ramp_scale=0.82,
+        candidate_estimated_extra_ramp_time_s=45.0,
+        high_risk_sample_count=30,
+        high_risk_covered_fraction=0.95,
+        stable_false_slow_fraction=0.04,
+        voltage_compliance_sample_count=8,
+        strain_current_curve_quality="fragmented_current_path",
+        max_candidate_correction_mm=0.012,
+    )
+
+    assert recommendation.decision != "live_candidate"
+    assert recommendation.priority_score < 70.0
+    assert any("voltage-compliance" in reason for reason in recommendation.reasons)
