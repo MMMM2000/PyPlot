@@ -2474,6 +2474,9 @@ class MainWindow(CurrentAnnealingWindow):
         settings_menu_action = self._find_menu_action("&Settings")
         if settings_menu_action is not None:
             settings_menu_action.setVisible(False)
+        inherited_progress = getattr(self.ui, "progressBar_process", None)
+        if isinstance(inherited_progress, QtWidgets.QProgressBar):
+            inherited_progress.hide()
         process_frame = getattr(self.ui, "frame_process_settings", None)
         if isinstance(process_frame, QtWidgets.QWidget):
             process_frame.hide()
@@ -3116,8 +3119,15 @@ class MainWindow(CurrentAnnealingWindow):
     ) -> None:
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
-            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
-            return
+            self.handle_auto_setup_clicked()
+            meter = self.lcr_meter
+            if meter is None or not meter.is_open:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Hardware not connected",
+                    "Auto-connect could not connect the LCR meter. Check the hardware connection and try again.",
+                )
+                return
         output_path = self._sweep_output_path()
         if config.lcr_continuous_log_enabled and not config.lcr_continuous_log_path:
             config = replace(

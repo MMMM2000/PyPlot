@@ -3346,6 +3346,9 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ)
         assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
         assert window.progress_ac_run.format() == "AC progress: idle"
+        inherited_progress = getattr(window.ui, "progressBar_process", None)
+        assert isinstance(inherited_progress, QtWidgets.QProgressBar)
+        assert inherited_progress.isHidden()
         sticky_frame = window.ui.pushButton_start_process.parentWidget()
         sticky_parent_layout = sticky_frame.parentWidget().layout()
         progress_index = sticky_parent_layout.indexOf(window.progress_ac_run)
@@ -3377,6 +3380,67 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         assert "100000/100000" not in window.progress_ac_run.format()
         window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1")
         assert "100 Hz" in window.label_ac_current_task.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_run_attempts_auto_connect_before_missing_hardware_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "run_autoconnect_before_warning")
+    window = ac_logger.MainWindow()
+    try:
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="shared_hmp_broker",
+            psu_resource="127.0.0.1:8765/CH1",
+            voltage_limit_v=32.0,
+            shared_broker_channel=1,
+        )
+        calls = {"auto_connect": 0}
+        info_messages: list[tuple[str, str]] = []
+        warning_messages: list[tuple[str, str]] = []
+
+        class _FakeConnectedLcr:
+            is_open = True
+
+        def _auto_connect() -> None:
+            calls["auto_connect"] += 1
+            window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+
+        def _broker_unavailable(_config: object | None = None) -> None:
+            raise RuntimeError("broker unavailable")
+
+        monkeypatch.setattr(window, "handle_auto_setup_clicked", _auto_connect)
+        monkeypatch.setattr(window, "_ensure_ac_shared_broker_running", _broker_unavailable)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            lambda _parent, title, text: info_messages.append((title, text)),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "warning",
+            lambda _parent, title, text: warning_messages.append((title, text)),
+        )
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert calls["auto_connect"] == 1
+        assert not info_messages
+        assert warning_messages
+        assert warning_messages[-1][0] == "Shared HMP broker unavailable"
     finally:
         window.close()
         app.processEvents()
