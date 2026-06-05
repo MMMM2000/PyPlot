@@ -18,6 +18,10 @@ class _FakeBrokerClient:
             {"voltage_V": 2.5, "current_mA": 10.0},
         ]
 
+    def snapshot(self) -> dict[str, object]:
+        self.calls.append(("snapshot", {}))
+        return {"profile": {"profile_id": "hmp4040", "channel_count": 4}}
+
     def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
         self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
         return {"lease_id": "lease-1", "channel": channel, "owner": owner, "role": role}
@@ -68,8 +72,845 @@ class _FakeBrokerClient:
         return self.readbacks.pop(0)
 
 
+class _FakeScheduledBrokerClient(_FakeBrokerClient):
+    def configure_polling(self, *, channel: int, interval_s: float) -> None:
+        self.calls.append(("configure_polling", {"channel": channel, "interval_s": interval_s}))
+
+    def start_scheduler(self, *, tick_s: float = 0.05) -> None:
+        self.calls.append(("start_scheduler", {"tick_s": tick_s}))
+
+    def latest_readback(
+        self,
+        *,
+        channel: int,
+        max_age_s: float | None = None,
+        fallback_to_measure: bool = True,
+    ) -> dict[str, float]:
+        self.calls.append(
+            (
+                "latest_readback",
+                {
+                    "channel": channel,
+                    "max_age_s": max_age_s,
+                    "fallback_to_measure": fallback_to_measure,
+                },
+            )
+        )
+        return self.readbacks.pop(0)
+
+    def schedule_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+        self.calls.append(
+            (
+                "schedule_current",
+                {"channel": channel, "lease_id": lease_id, "current_mA": current_mA},
+            )
+        )
+
+    def schedule_current_ramp(
+        self,
+        *,
+        channel: int,
+        lease_id: str,
+        target_mA: float,
+        rate_mA_s: float,
+        max_step_mA: float | None = None,
+        resolution_mA: float | None = None,
+    ) -> None:
+        self.calls.append(
+            (
+                "schedule_current_ramp",
+                {
+                    "channel": channel,
+                    "lease_id": lease_id,
+                    "target_mA": target_mA,
+                    "rate_mA_s": rate_mA_s,
+                    "max_step_mA": max_step_mA,
+                    "resolution_mA": resolution_mA,
+                },
+            )
+        )
+
+
+class _FailingBrokerClient:
+    def snapshot(self) -> dict[str, object]:
+        raise RuntimeError("timed out")
+
+
+class _FakeHmpDriver:
+    instances: list["_FakeHmpDriver"] = []
+    responses: dict[tuple[str, int], tuple[object, str] | Exception] = {}
+
+    def __init__(self, *, port_name: str, baudrate: int, timeout_s: float) -> None:
+        self.port_name = port_name
+        self.baudrate = baudrate
+        self.timeout_s = timeout_s
+        self.profile = logger_mod.HMP4040_PROFILE
+        self.closed = False
+        _FakeHmpDriver.instances.append(self)
+
+    def connect(self) -> None:
+        result = self.responses.get((self.port_name, self.baudrate))
+        if self.responses and result is None:
+            raise RuntimeError("not configured")
+        if isinstance(result, Exception):
+            raise result
+        pass
+
+    def identify(self) -> str:
+        result = self.responses.get((self.port_name, self.baudrate))
+        if self.responses and result is None:
+            raise RuntimeError("not configured")
+        if isinstance(result, Exception):
+            raise result
+        if isinstance(result, tuple):
+            self.profile = result[0]
+            return result[1]
+        return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeOwnedBroker:
+    def __init__(self, driver: object, profile: object) -> None:
+        self.driver = driver
+        self.profile = profile
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def assign_role(self, **payload: object) -> object:
+        self.calls.append(("assign_role", payload))
+        return object()
+
+    def confirm_profile(self, **payload: object) -> object:
+        self.calls.append(("confirm_profile", payload))
+        return object()
+
+
 def test_shared_broker_profile_is_available() -> None:
     assert "shared_hmp_broker" in logger_mod.SUPPLY_PROFILES
+
+
+def test_current_annealing_defaults_to_shared_broker_without_channel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+
+    assert window.supply_profile_id == "shared_hmp_broker"
+    assert window.channel_select == 0
+    assert window.ui.comboBox_channel.currentData() is None
+    assert window.ui.comboBox_channel.isEnabled()
+    assert not window.ui.comboBox_channel.isHidden()
+    assert window.max_voltage == pytest.approx(32.05)
+    assert window.ui.spinBox_broker_port.value() == 8765
+
+
+def test_current_annealing_shared_broker_hides_advanced_hmp_port_options(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._apply_supply_profile("shared_hmp_broker")
+
+    assert not window.ui.checkBox_show_hmp_port_options.isHidden()
+    assert not window.ui.checkBox_show_hmp_port_options.isChecked()
+    assert window.ui.frame_hmp_port_options.isHidden()
+    assert not window.ui.label_broker_hint.isHidden()
+    assert window.ui.lineEdit_broker_host.isHidden()
+    assert window.ui.spinBox_broker_port.isHidden()
+    assert window.ui.checkBox_reset_on_start.isHidden()
+    assert window.reset_on_start is False
+    assert window.ui.pushButton_connect_port.text() == "Connect broker"
+
+    window.ui.checkBox_show_hmp_port_options.setChecked(True)
+
+    assert not window.ui.frame_hmp_port_options.isHidden()
+    assert not window.ui.lineEdit_broker_host.isHidden()
+    assert not window.ui.spinBox_broker_port.isHidden()
+    assert not window.ui.comboBox_port.isHidden()
+    assert not window.ui.comboBox_baudrate.isHidden()
+
+
+def test_current_annealing_direct_hmp_profile_shows_port_options(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._apply_supply_profile("hmp4040")
+
+    assert window.ui.checkBox_show_hmp_port_options.isHidden()
+    assert not window.ui.frame_hmp_port_options.isHidden()
+    assert window.ui.lineEdit_broker_host.isHidden()
+    assert window.ui.spinBox_broker_port.isHidden()
+    assert not window.ui.checkBox_reset_on_start.isHidden()
+    assert not window.ui.comboBox_port.isHidden()
+    assert not window.ui.comboBox_baudrate.isHidden()
+    assert window.ui.pushButton_connect_port.text() == "Connect to port"
+
+
+def test_current_annealing_auto_detect_hmp_port_in_shared_mode(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM6 - scale", "COM6")
+    window.ui.comboBox_port.addItem("COM3 - unknown", "COM3")
+    window.ui.comboBox_baudrate.setCurrentText("9600")
+    _FakeHmpDriver.instances = []
+    _FakeHmpDriver.responses = {
+        ("COM6", 115200): RuntimeError("not an HMP"),
+        ("COM6", 9600): RuntimeError("not an HMP"),
+        (
+            "COM3",
+            115200,
+        ): (
+            logger_mod.HMP4040_PROFILE,
+            "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62",
+        ),
+    }
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+
+    assert window._auto_detect_hmp_port(show_errors=False) is True
+
+    assert window.supply_profile_id == "shared_hmp_broker"
+    assert window.ui.comboBox_port.currentData() == "COM3"
+    assert window.ui.comboBox_baudrate.currentText() == "115200"
+    assert window.ui.comboBox_channel.count() == 5
+
+
+def test_current_annealing_auto_detect_blocks_nonpreferred_hmp_baud(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM3 - unknown", "COM3")
+    window.ui.comboBox_baudrate.setCurrentText("9600")
+    _FakeHmpDriver.instances = []
+    _FakeHmpDriver.responses = {
+        (
+            "COM3",
+            9600,
+        ): (
+            logger_mod.HMP4040_PROFILE,
+            "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62",
+        ),
+    }
+    messages: list[str] = []
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+    window._show_status_message = lambda message, timeout_ms=10000: messages.append(message)  # type: ignore[method-assign]
+
+    assert window._auto_detect_hmp_port(show_errors=False) is False
+
+    assert window.ui.comboBox_port.currentData() == "COM3"
+    assert window.ui.comboBox_baudrate.currentText() == "9600"
+    assert any("115200" in message and "power supply settings" in message for message in messages)
+
+
+def test_current_annealing_hides_legacy_hold_controls(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert not hasattr(window.ui, "pushButton_hold_current")
+    assert not hasattr(window.ui, "spinBox_hold_duration")
+    assert not hasattr(window.ui, "label_hold_duration")
+    assert not hasattr(window.ui, "label_resistance_at_hold_current")
+    assert not hasattr(window.ui, "label_resistance_percent_from_hold")
+    assert not hasattr(window.ui, "label_hold_resistance_caption")
+    assert not hasattr(window.ui, "label_percent_from_hold_caption")
+    assert window.ui.comboBox_max_voltage_action.findData("hold") < 0
+    assert not hasattr(window, "hold_timer")
+    assert not hasattr(logger_mod.MainWindow, "_percent_from_hold")
+
+
+def test_current_annealing_voltage_limit_no_longer_holds_current(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.process_running = True
+    window.current_step_A = 0.001
+    window.current_increment = 0.001
+    window.max_voltage = 32.05
+
+    assert "hold" not in logger_mod.MAX_VOLTAGE_ACTION_LABELS
+
+    window._apply_max_voltage_action("hold")
+
+    assert window.current_increment == pytest.approx(-0.001)
+    assert window.direction_ascending is False
+
+
+def test_current_annealing_planned_time_has_no_hidden_hold_duration(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.ui.spinBox_start_current.setValue(1)
+    window.ui.spinBox_max_current.setValue(3)
+    window.ui.spinBox_step_mA.setValue(1.0)
+    window.ui.checkBox_reverse.setChecked(True)
+    window.ui.spinBox_loops.setValue(1)
+
+    assert window.compute_planned_seconds() == 4
+
+
+def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    fake.readbacks = [{"voltage_V": 0.5, "current_mA": 3.0}]
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.operation_mode = 2
+    window.process_running = True
+    window.first_sample = False
+    window.ui.spinBox_max_current.setValue(3)
+    window.ui.spinBox_step_mA.setValue(1.0)
+    window.handle_step_changed()
+    window.max_current_mA = 3
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.current_current_set = 0.003
+    window.current_increment = 0.001
+    window.reverse_enabled = True
+
+    window.handle_send_new_command()
+
+    assert not hasattr(window, "hold_timer_running")
+    assert window.current_increment == pytest.approx(-0.001)
+    assert window.current_current_set == pytest.approx(0.002)
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 2.0,
+            "rate_mA_s": 1.0,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
+
+
+def test_current_annealing_shared_broker_clamps_overshoot_to_max_current(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.max_current_mA = 2
+    window.current_step_mA = 0.2
+    window.current_current_set = 0.0022
+
+    window._send_current_setpoint()
+
+    assert window.current_current_set == pytest.approx(0.002)
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 2.0,
+            "rate_mA_s": 0.2,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
+
+
+def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.max_current_mA = 30
+    window._shared_broker_current_limit_mA = 2.0
+    window.current_step_mA = 0.2
+    window.current_current_set = 0.0022
+
+    window._send_current_setpoint()
+
+    assert window.current_current_set == pytest.approx(0.002)
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 2.0,
+            "rate_mA_s": 0.2,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
+
+
+def test_current_annealing_channel_dropdown_tracks_detected_hmp_model(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._set_detected_hmp_profile(logger_mod.HMP4030_PROFILE)
+    assert [window.ui.comboBox_channel.itemText(i) for i in range(window.ui.comboBox_channel.count())] == [
+        "Select channel...",
+        "CH1",
+        "CH2",
+        "CH3",
+    ]
+    assert window.ui.comboBox_channel.currentData() is None
+
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(2))
+    assert window.channel_select == 2
+
+    window._set_detected_hmp_profile(logger_mod.HMP4040_PROFILE)
+    assert [window.ui.comboBox_channel.itemText(i) for i in range(window.ui.comboBox_channel.count())] == [
+        "Select channel...",
+        "CH1",
+        "CH2",
+        "CH3",
+        "CH4",
+    ]
+    assert window.ui.comboBox_channel.currentData() is None
+    assert window.channel_select == 0
+
+
+def test_current_annealing_ramp_rate_rounds_to_hmp_resolution(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.spinBox_step_mA.setValue(0.3)
+    window.handle_step_changed()
+
+    assert window.current_step_mA == pytest.approx(0.2)
+    assert window.ui.spinBox_step_mA.value() == pytest.approx(0.2)
+
+
+def test_current_annealing_preflight_blocks_shared_broker_without_channel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    errors = window._start_preflight_errors()
+
+    assert any("channel" in error.lower() for error in errors)
+
+
+def test_current_annealing_start_auto_connects_selected_shared_broker(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window.operation_mode = 0
+    calls: list[str] = []
+    errors: list[list[str]] = []
+
+    def _connect() -> None:
+        calls.append("connect")
+        window.is_connected = True
+
+    monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
+    monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: errors.append(payload))
+
+    window.handle_toggle_process_clicked()
+
+    assert calls == ["connect"]
+    assert errors == []
+    assert window.process_running is True
+
+
+def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window.operation_mode = 0
+    progress_seen: list[str] = []
+
+    def _connect() -> None:
+        progress = window._hardware_auto_connect_progress
+        assert progress is not None
+        progress_seen.append(progress.labelText())
+        window.is_connected = True
+
+    monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
+
+    window.handle_toggle_process_clicked()
+
+    assert progress_seen == ["Connecting shared HMP broker..."]
+    assert window._hardware_auto_connect_progress is None
+    assert window.process_running is True
+
+
+def test_shared_broker_connect_verifies_broker_before_marking_connected(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+
+    window._connect_shared_broker_mode()
+
+    assert window.is_connected is True
+    assert fake.calls == [("snapshot", {})]
+
+
+def test_shared_broker_connect_preserves_confirmed_channel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    window._connect_shared_broker_mode()
+
+    assert window.channel_select == 1
+    assert window.ui.comboBox_channel.currentData() == 1
+
+
+def test_shared_broker_connect_falls_back_to_standard_port(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.spinBox_broker_port.setValue(49685)
+    created_ports: list[int] = []
+
+    def _client_factory(*, host: str, port: int) -> object:
+        created_ports.append(port)
+        if port == 49685:
+            return _FailingBrokerClient()
+        return _FakeBrokerClient()
+
+    monkeypatch.setattr(logger_mod, "BrokerJsonClient", _client_factory)
+
+    window._connect_shared_broker_mode()
+
+    assert created_ports == [49685, 8765]
+    assert window.is_connected is True
+    assert window.ui.spinBox_broker_port.value() == 8765
+
+
+def test_shared_broker_connect_starts_owned_broker_when_no_existing_broker(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.spinBox_max_current.setValue(30)
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+    window.ui.comboBox_baudrate.setCurrentText("115200")
+    started: list[tuple[object, str, int]] = []
+
+    def _client_factory(*, host: str, port: int) -> object:
+        if not started:
+            return _FailingBrokerClient()
+        return _FakeBrokerClient()
+
+    def _start_server(broker: object, *, host: str, port: int) -> tuple[object, object]:
+        started.append((broker, host, port))
+        return object(), object()
+
+    _FakeHmpDriver.instances = []
+    monkeypatch.setattr(logger_mod, "BrokerJsonClient", _client_factory)
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+    monkeypatch.setattr(logger_mod, "SharedPowerSupplyBroker", _FakeOwnedBroker)
+    monkeypatch.setattr(logger_mod, "start_broker_server", _start_server)
+
+    window._connect_shared_broker_mode()
+
+    assert window.is_connected is True
+    assert len(started) == 1
+    assert _FakeHmpDriver.instances[0].port_name == "COM3"
+    owned_broker = started[0][0]
+    assert isinstance(owned_broker, _FakeOwnedBroker)
+    assert owned_broker.calls == [
+        (
+            "assign_role",
+            {
+                "channel": 1,
+                "role": "current_annealing",
+                "confirmed": True,
+                "voltage_limit_v": pytest.approx(32.05),
+                "current_limit_a": pytest.approx(0.03),
+            },
+        ),
+        ("confirm_profile", {"name": "Current Annealing auto-started shared HMP broker"}),
+    ]
+
+
+def test_shared_broker_disconnect_clears_connected_state(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.is_connected = True
+    window._shared_broker_client = object()
+    window._shared_broker_lease_id = None
+    monkeypatch.setattr(window, "send_safe_end_commands", lambda: None)
+    monkeypatch.setattr(window, "_stop_owned_shared_broker", lambda: None)
+
+    window._disconnect_shared_broker_mode()
+
+    assert window.is_connected is False
+    assert window._shared_broker_client is None
+    assert window.ui.pushButton_connect_port.text() == "Connect broker"
+
+
+def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("sample_run01")
+    window.ui.spinBox_loops.setValue(1)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    assert window.prepare_output_file() is True
+
+    data_path = logger_mod.Path(window.f_name)
+    assert data_path.exists()
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    assert metadata_path.exists()
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["data_file"] == data_path.name
+    assert payload["supply"]["profile_id"] == "shared_hmp_broker"
+    assert payload["supply"]["channel"] == 1
+    assert "hold_duration_s" not in payload
+
+
+def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("sample_run02")
+    window.ui.checkBox_reverse.setChecked(True)
+    window.ui.spinBox_loops.setValue(2)
+    window._apply_supply_profile("shared_hmp_broker")
+    window._set_detected_hmp_profile(logger_mod.HMP4040_PROFILE)
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+    window.ui.comboBox_port.setCurrentIndex(0)
+    window.ui.comboBox_baudrate.setCurrentText("115200")
+    window._owned_shared_broker_server = object()
+
+    assert window.prepare_output_file() is True
+
+    data_path = logger_mod.Path(window.f_name)
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    supply = payload["supply"]
+    assert supply["detected_model"] == "hmp4040"
+    assert supply["port"] == "COM3"
+    assert supply["baud"] == 115200
+    assert supply["current_resolution_mA"] == pytest.approx(0.2)
+    assert supply["min_positive_current_mA"] == pytest.approx(1.0)
+    assert supply["broker_owned_by_app"] is True
+    assert supply["broker_source"] == "owned"
+    assert payload["recipe"]["reverse_enabled"] is True
+    assert payload["recipe"]["loops"] == 2
+
+
+def test_current_annealing_metadata_preserves_decimal_ramp_rate(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("decimal_ramp")
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.spinBox_step_mA.setValue(0.2)
+    window.handle_step_changed()
+
+    assert window.prepare_output_file() is True
+
+    data_path = logger_mod.Path(window.f_name)
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["step_mA"] == pytest.approx(0.2)
+    assert payload["recipe"]["current_ramp_rate_mA_s"] == pytest.approx(0.2)
+
+
+def test_current_annealing_metadata_records_source_control_snapshot(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("metadata_git")
+
+    replies = {
+        ("branch", "--show-current"): "codex/current-annealing-pyqtgraph\n",
+        ("rev-parse", "HEAD"): "abc123\n",
+        ("status", "--short"): " M data_logging/current_annealing_logger/current_annealing_logger.py\n",
+        ("config", "--get", "remote.origin.url"): "https://example.test/repo.git\n",
+    }
+
+    def _fake_run(args: list[str], **_kwargs: object) -> object:
+        class Result:
+            returncode = 0
+            stdout = replies[tuple(args[3:])]
+
+        return Result()
+
+    monkeypatch.setattr(logger_mod.subprocess, "run", _fake_run)
+
+    assert window.prepare_output_file() is True
+
+    data_path = logger_mod.Path(window.f_name)
+    metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    source_control = payload["source_control"]
+    assert source_control["branch"] == "codex/current-annealing-pyqtgraph"
+    assert source_control["commit"] == "abc123"
+    assert source_control["is_dirty"] is True
+    assert source_control["remote_url"] == "https://example.test/repo.git"
+
+
+def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._plot_backend == "pyqtgraph"
+    assert window.canvas is None
+    assert window.pg_plot_resistance_vs_current is not None
+    assert window.pg_plot_resistance_vs_sample is not None
+
+
+def test_live_dashboard_pyqtgraph_axes_are_visible_without_gridlines(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._plot_backend == "pyqtgraph"
+    for plot in (
+        window.pg_plot_resistance_vs_current,
+        window.pg_plot_resistance_vs_sample,
+    ):
+        plot_item = plot.getPlotItem()
+        bottom_axis = plot_item.getAxis("bottom")
+        left_axis = plot_item.getAxis("left")
+        top_axis = plot_item.getAxis("top")
+        right_axis = plot_item.getAxis("right")
+
+        assert top_axis.isVisible()
+        assert right_axis.isVisible()
+        assert bottom_axis.grid is False
+        assert left_axis.grid is False
+        assert plot_item.ctrl.xGridCheck.isChecked() is False
+        assert plot_item.ctrl.yGridCheck.isChecked() is False
+        assert top_axis.labelText == ""
+        assert right_axis.labelText == ""
+        assert top_axis.style["showValues"] is False
+        assert right_axis.style["showValues"] is False
+        assert top_axis.style["tickLength"] == 0
+        assert right_axis.style["tickLength"] == 0
+
+
+def test_live_dashboard_draws_pyqtgraph_segments(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.current_step_mA = 1.0
+    window._append_measurement_sample(5.0, 100.0)
+    window._append_measurement_sample(6.0, 105.0)
+    window._append_measurement_sample(5.0, 103.0)
+
+    assert window._plot_backend == "pyqtgraph"
+    assert len(window._segment_lines_ax1) == 2
+    assert len(window._segment_lines_ax2) == 2
+    assert all(hasattr(item, "setData") for item in window._segment_lines_ax1)
+
+
+def test_live_dashboard_groups_pyqtgraph_segments_by_direction(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.current_step_mA = 1.0
+    for offset in range(20):
+        current = 5.0 + (offset % 4)
+        window._append_measurement_sample(current, 100.0 + offset)
+
+    assert window._plot_backend == "pyqtgraph"
+    assert len(window._segment_lines_ax1) <= len(set(window._segment_colors(window._samples_current)))
+    assert len(window._segment_lines_ax2) <= len(set(window._segment_colors(window._samples_current)))
+
+
+def test_live_dashboard_pyqtgraph_uses_cycle_palette(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.current_step_mA = 1.0
+    for current, resistance in [
+        (5.0, 100.0),
+        (6.0, 101.0),
+        (7.0, 102.0),
+        (6.0, 103.0),
+        (5.0, 104.0),
+        (6.0, 105.0),
+    ]:
+        window._append_measurement_sample(current, resistance)
+
+    assert window._plot_backend == "pyqtgraph"
+    curve_colors = {
+        item.opts["pen"].color().name()
+        for item in window._segment_lines_ax1
+        if hasattr(item, "opts")
+    }
+    assert {"#dc2626", "#2563eb", "#f97316"}.issubset(curve_colors)
+
+
+def test_live_dashboard_ignores_initial_zero_current_placeholder(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._record_zero_placeholder()
+
+    assert window._samples_current == []
+    assert window._samples_resistance == []
+    assert window._segment_lines_ax1 == []
+    assert window._segment_lines_ax2 == []
+    assert window._zero_placeholder_count == 0
+
+
+def test_record_acquired_sample_writes_each_non_initial_sample_once(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = str(tmp_path / "annealing.tsv")
+    window.first_sample = True
+    window.current_current_read = 0.002
+    window.current_voltage = 0.5
+    window.current_resistance = 250.0
+    window.curr_value_x = 2.0
+    window.curr_value_y = 250.0
+    window._reset_sample_buffers()
+
+    window._record_acquired_sample()
+    window.current_current_read = 0.003
+    window.current_voltage = 0.6
+    window.current_resistance = 200.0
+    window.curr_value_x = 3.0
+    window.curr_value_y = 200.0
+    window._record_acquired_sample()
+
+    assert (tmp_path / "annealing.tsv").read_text(encoding="utf-8").splitlines() == [
+        "3\t0.6\t200"
+    ]
+    assert window._samples_current == [2.0, 3.0]
+    assert window._samples_resistance == [250.0, 200.0]
 
 
 def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbot) -> None:
@@ -100,6 +941,23 @@ def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbo
     ]
 
 
+def test_shared_broker_init_enables_cached_polling_when_available(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window.max_voltage = 30.0
+    window.current_current_set = 0.010
+    window.process_running = True
+
+    window.send_init_commands()
+
+    assert ("configure_polling", {"channel": 1, "interval_s": 1.0}) in fake.calls
+    assert ("start_scheduler", {"tick_s": 0.05}) in fake.calls
+
+
 def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
@@ -117,10 +975,31 @@ def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot)
     assert fake.calls == [("measure_channel", {"channel": 1})]
 
 
+def test_shared_broker_measurement_prefers_cached_scheduler_readback(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+
+    assert window._read_shared_broker_sample() is True
+
+    assert window.current_voltage == pytest.approx(2.5)
+    assert window.current_current_read == pytest.approx(0.010)
+    assert fake.calls == [
+            (
+                "latest_readback",
+                {"channel": 1, "max_age_s": 2.5, "fallback_to_measure": True},
+            )
+        ]
+
+
 def test_shared_broker_measurement_retries_transient_missing_readback(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
-    fake = _FakeBrokerClient()
+    fake = _FakeScheduledBrokerClient()
     fake.readbacks = [
         {"voltage_V": None, "current_mA": 0.0},
         {"voltage_V": 2.0, "current_mA": 8.0},
@@ -134,8 +1013,8 @@ def test_shared_broker_measurement_retries_transient_missing_readback(qtbot) -> 
 
     assert window.current_voltage == pytest.approx(2.0)
     assert window.current_current_read == pytest.approx(0.008)
-    measure_calls = [call for call in fake.calls if call[0] == "measure_channel"]
-    assert len(measure_calls) == 2
+    latest_calls = [call for call in fake.calls if call[0] == "latest_readback"]
+    assert len(latest_calls) == 2
 
 
 def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> None:
@@ -157,6 +1036,34 @@ def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> No
         ("release", {"channel": 2, "lease_id": "lease-1"}),
     ]
     assert window._shared_broker_lease_id is None
+
+
+def test_shared_broker_setpoint_uses_rate_limited_ramp_when_available(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 2
+    window._shared_broker_lease_id = "lease-1"
+    window.current_current_set = 0.025
+    window.current_step_mA = 1.0
+
+    window._send_current_setpoint()
+
+    assert fake.calls == [
+        (
+            "schedule_current_ramp",
+            {
+                "channel": 2,
+                "lease_id": "lease-1",
+                "target_mA": 25.0,
+                "rate_mA_s": 1.0,
+                "max_step_mA": 0.2,
+                "resolution_mA": 0.2,
+            },
+        ),
+    ]
 
 
 def test_shared_broker_run_writes_measurements_to_log(tmp_path, qtbot) -> None:
@@ -286,15 +1193,3 @@ def test_annealing_run_holds_sleep_guard_until_safe_end(qtbot, monkeypatch: pyte
 
     window.send_safe_end_commands()
     assert calls == ["acquire", "release"]
-
-
-def test_percent_from_hold_handles_zero() -> None:
-    assert logger_mod.MainWindow._percent_from_hold(10.0, 0.0) is None
-
-
-def test_percent_from_hold_nominal() -> None:
-    assert logger_mod.MainWindow._percent_from_hold(200.0, 100.0) == pytest.approx(200.0)
-
-
-def test_percent_from_hold_handles_nan() -> None:
-    assert logger_mod.MainWindow._percent_from_hold(float("nan"), 100.0) is None

@@ -13,7 +13,8 @@ import time
 import math
 import re
 import json
-from datetime import datetime
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from importlib import import_module
@@ -27,8 +28,10 @@ from .ui_en import Ui_MainWindow
 from plotting.shared.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
 from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
-from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING
-from data_logging.shared_power_supply.protocol import BrokerJsonClient
+from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING, SharedPowerSupplyBroker
+from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, SupplyProfile
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 from plotting.shared.power_guard import create_experiment_sleep_guard
 
 import numpy as np
@@ -55,6 +58,11 @@ except Exception:
     except Exception:  # pragma: no cover - backend optional
         NavigationToolbar = None  # type: ignore[assignment]
 
+try:
+    import pyqtgraph as pg
+except Exception:  # pragma: no cover - optional realtime backend
+    pg = None  # type: ignore[assignment]
+
 
 fig_size = plt.rcParams["figure.figsize"]
 fig_size[0] = 19 #19
@@ -62,6 +70,19 @@ fig_size[1] = 10 #10
 plt.rcParams["figure.figsize"] = fig_size
 plt.rcParams["font.family"] = ["sans-serif"]
 plt.rcParams["font.size"] = 12
+
+
+def _hidden_subprocess_kwargs() -> dict[str, object]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
 
 def _apply_app_font_to_matplotlib(app: QtWidgets.QApplication | None = None) -> None:
     """Keep Matplotlib fonts aligned with the active Qt application font."""
@@ -112,18 +133,36 @@ DEFAULT_PRESET = {
 MAX_VOLTAGE_DEFAULT_ACTION = "ask"
 MAX_VOLTAGE_ACTION_LABELS = {
     "ask": "Ask every time",
-    "hold": "Hold current (stop increasing)",
     "reverse": "Reverse to zero",
     "stop": "Stop measurement",
 }
 
 SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
     "hmp4030": {
-        "label": "HMP4030 (original)",
+        "label": "HMP4030",
         "start_current_mA": 1,
         "min_start_current_mA": 1,
-        "max_voltage": 30.0,
-        "channel_select": 3,
+        "max_voltage": HMP4030_PROFILE.max_voltage_v,
+        "channel_select": 0,
+        "channel_count": HMP4030_PROFILE.channel_count,
+        "current_resolution_mA": HMP4030_PROFILE.current_resolution_mA,
+        "min_current_mA": HMP4030_PROFILE.min_current_mA,
+        "hmp_profile_id": HMP4030_PROFILE.profile_id,
+        "requires_channel": True,
+        "reset_on_start": True,
+        "voltage_first": False,
+    },
+    "hmp4040": {
+        "label": "HMP4040",
+        "start_current_mA": 1,
+        "min_start_current_mA": 1,
+        "max_voltage": HMP4040_PROFILE.max_voltage_v,
+        "channel_select": 0,
+        "channel_count": HMP4040_PROFILE.channel_count,
+        "current_resolution_mA": HMP4040_PROFILE.current_resolution_mA,
+        "min_current_mA": HMP4040_PROFILE.min_current_mA,
+        "hmp_profile_id": HMP4040_PROFILE.profile_id,
+        "requires_channel": True,
         "reset_on_start": True,
         "voltage_first": False,
     },
@@ -133,6 +172,7 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "min_start_current_mA": 10,
         "max_voltage": 62.0,
         "channel_select": 0,
+        "requires_channel": False,
         "reset_on_start": False,
         "voltage_first": True,
     },
@@ -140,8 +180,12 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
         "label": "Shared HMP broker",
         "start_current_mA": 1,
         "min_start_current_mA": 1,
-        "max_voltage": 30.0,
-        "channel_select": 1,
+        "max_voltage": HMP4040_PROFILE.max_voltage_v,
+        "channel_select": 0,
+        "channel_count": HMP4040_PROFILE.channel_count,
+        "current_resolution_mA": HMP4040_PROFILE.current_resolution_mA,
+        "min_current_mA": HMP4040_PROFILE.min_current_mA,
+        "requires_channel": True,
         "reset_on_start": False,
         "voltage_first": False,
         "shared_broker": True,
@@ -289,13 +333,19 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self.start_current_mA = 1
-        self.max_voltage = 30.0
+        self.max_voltage = HMP4040_PROFILE.max_voltage_v
         self.reset_on_start = True
-        self.channel_select = 3
+        self.channel_select = 0
         self._shared_broker_client: Any = None
         self._shared_broker_lease_id: str | None = None
         self._shared_broker_owner = "current_annealing_logger"
+        self._shared_broker_current_limit_mA: float | None = None
+        self._owned_shared_broker_server: Any = None
+        self._owned_shared_broker_thread: Any = None
+        self._owned_shared_broker_driver: Any = None
+        self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._sleep_guard: Any = None
+        self.is_connected = False
         self._init_supply_profile()
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
@@ -316,13 +366,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.time_timer.timeout.connect(self.update_time_estimate)
         self.time_timer.start(1000)
         
-        # Timer managing the hold-current duration
-        self.elapsed_seconds = 0
-        self.hold_timer_running = False
-        self.hold_timer = QtCore.QTimer()
-        self.hold_timer.stop();
-        self.hold_timer.timeout.connect(self.handle_hold_timer_timeout)
-        
         # Timer that schedules outgoing commands
         self.command_number = 0
         self.timer_command = QtCore.QTimer()
@@ -337,7 +380,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.expecting_voltage = True
 
         self.resistance_drop_percent = 10
-        self.hold_duration_s = 1
         if not hasattr(self, "max_current_mA"):
             self.max_current_mA = 10
         self.operation_mode = 2  # 0 - VCP, 1 - manual, 2 - automatic (default auto)
@@ -386,10 +428,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._applied_limit_current_mA: float | None = None
         self._samples_current: List[float] = []
         self._samples_resistance: List[float] = []
-        self._segment_lines_ax1: list[Line2D] = []
-        self._segment_lines_ax2: list[Line2D] = []
+        self._segment_lines_ax1: list[Any] = []
+        self._segment_lines_ax2: list[Any] = []
         self._placeholder_text_ax1: Any = None
         self._placeholder_text_ax2: Any = None
+        self._plot_backend = "none"
+        self.pg_plot_resistance_vs_current: Any = None
+        self.pg_plot_resistance_vs_sample: Any = None
+        self._pg_placeholder_labels: list[QtWidgets.QLabel] = []
         self._history_settings = QtCore.QSettings("microwire", "current_annealing_history")
         self._measurement_history: List[Dict[str, Any]] = self._load_measurement_history()
 
@@ -410,21 +456,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_connect_port.clicked.connect(self.handle_connect_port_clicked)
         self.ui.spinBox_port_number.valueChanged.connect(self.handle_port_number_value_changed)
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.handle_comboBox_baudrate_currentIndexChanged)
+        if hasattr(self.ui, "pushButton_auto_detect_hmp"):
+            self.ui.pushButton_auto_detect_hmp.clicked.connect(self.handle_auto_detect_hmp_clicked)
+        if hasattr(self.ui, "checkBox_show_hmp_port_options"):
+            self.ui.checkBox_show_hmp_port_options.toggled.connect(self._sync_hardware_connection_controls)
         self.ui.pushButton_send_serial_command.clicked.connect(self.handle_send_serial_command_clicked)
         
         
         self.ui.spinBox_max_current.valueChanged.connect(self.handle_max_current_value_changed)
         if hasattr(self.ui, 'spinBox_max_voltage'):
             self.ui.spinBox_max_voltage.valueChanged.connect(self.handle_max_voltage_value_changed)
+        if hasattr(self.ui, 'comboBox_channel'):
+            self.ui.comboBox_channel.currentIndexChanged.connect(self.handle_channel_select_value_changed)
         if hasattr(self.ui, 'spinBox_channel'):
             self.ui.spinBox_channel.valueChanged.connect(self.handle_channel_select_value_changed)
         if hasattr(self.ui, 'checkBox_reset_on_start'):
             self.ui.checkBox_reset_on_start.toggled.connect(self.handle_reset_on_start_toggled)
         if hasattr(self.ui, 'spinBox_start_current'):
             self.ui.spinBox_start_current.valueChanged.connect(self.handle_start_current_value_changed)
-        self.ui.spinBox_hold_duration.valueChanged.connect(self.handle_hold_duration_value_changed)
-        self.ui.pushButton_hold_current.clicked.connect(self.handle_hold_current_button_clicked)
-        
         self.ui.pushButton_start_process.clicked.connect(self.handle_toggle_process_clicked)
         self.ui.lineEdit_log_file_full.textChanged.connect(self.handle_legacy_log_path_changed)
         self.ui.pushButton_select_filename.clicked.connect(self.handle_select_filename_en)
@@ -506,7 +555,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
         self.ui.spinBox_max_current.valueChanged.connect(self.update_file_name_from_preset)
         self.ui.spinBox_max_current.valueChanged.connect(self.update_planned_time_label)
-        self.ui.spinBox_hold_duration.valueChanged.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'checkBox_infinite_loops'):
             self.ui.checkBox_infinite_loops.toggled.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'spinBox_step_mA'):
@@ -536,9 +584,6 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.max_resistance = 0
         
-        self.resistance_at_hold_current = 0
-        self.resistance_percent_from_hold = 0
-        
         self._refresh_command_profiles()
         
         self.f_out = None
@@ -553,6 +598,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fig = None
         self.ax1 = None
         self.ax2 = None
+        self.canvas = None
                 
         self.line_color="r"
         # Initialize progress UI defaults
@@ -571,34 +617,37 @@ class MainWindow(QtWidgets.QMainWindow):
         # Show initial placeholder plot on the right
         try:
             self.init_graph_window()
-            ax1 = getattr(self, 'ax1', None)
-            if ax1 is not None:
-                self._placeholder_text_ax1 = ax1.text(
-                    0.5,
-                    0.5,
-                    'No data yet',
-                    transform=ax1.transAxes,
-                    ha='center',
-                    va='center',
-                    fontsize=14,
-                    fontweight='bold',
-                    color=self.palette().color(QtGui.QPalette.ColorRole.Text),
-                    bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
-                )
-            ax2 = getattr(self, 'ax2', None)
-            if ax2 is not None:
-                self._placeholder_text_ax2 = ax2.text(
-                    0.5,
-                    0.5,
-                    'No data yet',
-                    transform=ax2.transAxes,
-                    ha='center',
-                    va='center',
-                    fontsize=14,
-                    fontweight='bold',
-                    color=self.palette().color(QtGui.QPalette.ColorRole.Text),
-                    bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
-                )
+            if getattr(self, '_plot_backend', '') == 'pyqtgraph':
+                self._show_pyqtgraph_placeholders()
+            else:
+                ax1 = getattr(self, 'ax1', None)
+                if ax1 is not None:
+                    self._placeholder_text_ax1 = ax1.text(
+                        0.5,
+                        0.5,
+                        'No data yet',
+                        transform=ax1.transAxes,
+                        ha='center',
+                        va='center',
+                        fontsize=14,
+                        fontweight='bold',
+                        color=self.palette().color(QtGui.QPalette.ColorRole.Text),
+                        bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
+                    )
+                ax2 = getattr(self, 'ax2', None)
+                if ax2 is not None:
+                    self._placeholder_text_ax2 = ax2.text(
+                        0.5,
+                        0.5,
+                        'No data yet',
+                        transform=ax2.transAxes,
+                        ha='center',
+                        va='center',
+                        fontsize=14,
+                        fontweight='bold',
+                        color=self.palette().color(QtGui.QPalette.ColorRole.Text),
+                        bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
+                    )
             canvas = getattr(self, 'canvas', None)
             if canvas is not None:
                 canvas.draw()
@@ -617,9 +666,97 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    def _record_zero_placeholder(self) -> None:
-        """Ignore leading zero-current samples without drawing fake points."""
+    def _show_pyqtgraph_placeholders(self) -> None:
+        if self._pg_placeholder_labels:
+            for label in self._pg_placeholder_labels:
+                label.show()
+            return
+        for plot in (self.pg_plot_resistance_vs_current, self.pg_plot_resistance_vs_sample):
+            if plot is None:
+                continue
+            label = QtWidgets.QLabel("No data yet", plot)
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            label.setStyleSheet(
+                "QLabel { color: palette(text); background: rgba(0, 0, 0, 90); "
+                "font-weight: 700; padding: 4px; }"
+            )
+            label.setGeometry(plot.rect())
+            label.show()
+            self._pg_placeholder_labels.append(label)
 
+    def _resize_pyqtgraph_placeholders(self) -> None:
+        for label in self._pg_placeholder_labels:
+            parent = label.parentWidget()
+            if parent is not None:
+                label.setGeometry(parent.rect())
+
+    def _pyqtgraph_color(self, color: str) -> str:
+        if color == "r":
+            return "#d32f2f"
+        if color == "g":
+            return "#27ae60"
+        if color == "b":
+            return "#1976d2"
+        return color
+
+    def _pyqtgraph_plot_kwargs(self, color: str) -> dict[str, Any]:
+        if pg is None:
+            return {}
+        mapped = self._pyqtgraph_color(color)
+        return {
+            "pen": pg.mkPen(mapped, width=2),
+            "symbol": "o",
+            "symbolSize": 6,
+            "symbolBrush": pg.mkBrush(mapped),
+            "symbolPen": pg.mkPen(mapped),
+        }
+
+    def _draw_live_canvas(self) -> None:
+        canvas = getattr(self, 'canvas', None)
+        if canvas is None:
+            return
+        try:
+            canvas.draw_idle()
+            canvas.flush_events()
+        except Exception:
+            canvas.draw()
+
+    def _refresh_pyqtgraph_ranges(self) -> None:
+        for plot in (self.pg_plot_resistance_vs_current, self.pg_plot_resistance_vs_sample):
+            if plot is not None:
+                plot.enableAutoRange(axis='xy', enable=True)
+
+    def _add_live_plot_item(self, plot: Any, x_values: list[float], y_values: list[float], color: str) -> Any:
+        if plot is None or pg is None:
+            return None
+        item = plot.plot(x_values, y_values, **self._pyqtgraph_plot_kwargs(color))
+        plot.enableAutoRange(axis='xy', enable=True)
+        return item
+
+    def _remove_live_plot_item(self, item: Any) -> None:
+        if item is None:
+            return
+        try:
+            parent = item.getViewBox()
+            if parent is not None:
+                parent.removeItem(item)
+                return
+        except Exception:
+            pass
+        for plot in (self.pg_plot_resistance_vs_current, self.pg_plot_resistance_vs_sample):
+            try:
+                if plot is not None:
+                    plot.removeItem(item)
+                    return
+            except Exception:
+                pass
+
+    def _record_zero_placeholder(self) -> None:
+        """Ignore leading zero-current samples without plotting or persisting them."""
+
+        if self._nonzero_current_seen:
+            return
         self._clear_zero_placeholders()
 
     def _clear_zero_placeholders(self) -> None:
@@ -632,7 +769,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if line is None:
                 continue
             try:
-                line.remove()
+                if getattr(self, '_plot_backend', '') == 'pyqtgraph':
+                    self._remove_live_plot_item(line)
+                else:
+                    line.remove()
             except Exception:
                 pass
 
@@ -643,18 +783,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ax1 = getattr(self, 'ax1', None)
         ax2 = getattr(self, 'ax2', None)
-        for axis in (ax1, ax2):
-            if axis is not None:
-                axis.relim()
-                axis.autoscale_view()
-
-        canvas = getattr(self, 'canvas', None)
-        if canvas is not None:
-            try:
-                canvas.draw_idle()
-                canvas.flush_events()
-            except Exception:
-                canvas.draw()
+        if getattr(self, '_plot_backend', '') == 'pyqtgraph':
+            self._refresh_pyqtgraph_ranges()
+        else:
+            for axis in (ax1, ax2):
+                if axis is not None:
+                    axis.relim()
+                    axis.autoscale_view()
+            self._draw_live_canvas()
 
     def _display_ui_value(self, attr: str, text: str) -> None:
         if attr == 'label_live_voltage':
@@ -774,12 +910,17 @@ class MainWindow(QtWidgets.QMainWindow):
         for container in (self._segment_lines_ax1, self._segment_lines_ax2):
             for line in list(container):
                 try:
-                    line.remove()
+                    if getattr(self, '_plot_backend', '') == 'pyqtgraph':
+                        self._remove_live_plot_item(line)
+                    else:
+                        line.remove()
                 except Exception:
                     pass
             container.clear()
 
     def _remove_placeholder_text(self) -> None:
+        for label in self._pg_placeholder_labels:
+            label.hide()
         for attr in ('_placeholder_text_ax1', '_placeholder_text_ax2'):
             text_item = getattr(self, attr, None)
             if text_item is None:
@@ -847,6 +988,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return colors
 
     def _redraw_segments(self) -> None:
+        if getattr(self, '_plot_backend', '') == 'pyqtgraph':
+            self._redraw_pyqtgraph_segments()
+            return
         ax1 = getattr(self, 'ax1', None)
         ax2 = getattr(self, 'ax2', None)
         if ax1 is None or ax2 is None:
@@ -855,12 +999,7 @@ class MainWindow(QtWidgets.QMainWindow):
         currents = list(self._samples_current)
         resistances = list(self._samples_resistance)
         if not currents:
-            canvas = getattr(self, 'canvas', None)
-            if canvas is not None:
-                try:
-                    canvas.draw_idle()
-                except Exception:
-                    canvas.draw()
+            self._draw_live_canvas()
             return
         if len(currents) == 1:
             marker_color = self._cycle_color(1.0, 1)
@@ -887,13 +1026,70 @@ class MainWindow(QtWidgets.QMainWindow):
         for axis in (ax1, ax2):
             axis.relim()
             axis.autoscale_view()
-        canvas = getattr(self, 'canvas', None)
-        if canvas is not None:
-            try:
-                canvas.draw_idle()
-                canvas.flush_events()
-            except Exception:
-                canvas.draw()
+        self._draw_live_canvas()
+
+    def _redraw_pyqtgraph_segments(self) -> None:
+        self._clear_segment_lines()
+        currents = list(self._samples_current)
+        resistances = list(self._samples_resistance)
+        if not currents:
+            self._refresh_pyqtgraph_ranges()
+            return
+        if len(currents) == 1:
+            item1 = self._add_live_plot_item(
+                self.pg_plot_resistance_vs_current,
+                [currents[0]],
+                [resistances[0]],
+                "r",
+            )
+            item2 = self._add_live_plot_item(
+                self.pg_plot_resistance_vs_sample,
+                [1.0],
+                [resistances[0]],
+                "r",
+            )
+            if item1 is not None:
+                self._segment_lines_ax1.append(item1)
+            if item2 is not None:
+                self._segment_lines_ax2.append(item2)
+            return
+
+        series_current: dict[str, tuple[list[float], list[float]]] = {}
+        series_sample: dict[str, tuple[list[float], list[float]]] = {}
+        colors = self._segment_colors(currents)
+        for idx in range(1, len(currents)):
+            prev_c = currents[idx - 1]
+            curr_c = currents[idx]
+            prev_r = resistances[idx - 1]
+            curr_r = resistances[idx]
+            color = colors[idx - 1] if idx - 1 < len(colors) else self._cycle_color(1.0, 1)
+
+            x_current, y_current = series_current.setdefault(color, ([], []))
+            x_current.extend([prev_c, curr_c, math.nan])
+            y_current.extend([prev_r, curr_r, math.nan])
+
+            x_sample, y_sample = series_sample.setdefault(color, ([], []))
+            x_sample.extend([float(idx), float(idx + 1), math.nan])
+            y_sample.extend([prev_r, curr_r, math.nan])
+
+        for color, (x_values, y_values) in series_current.items():
+            item1 = self._add_live_plot_item(
+                self.pg_plot_resistance_vs_current,
+                x_values,
+                y_values,
+                color,
+            )
+            if item1 is not None:
+                self._segment_lines_ax1.append(item1)
+        for color, (x_values, y_values) in series_sample.items():
+            item2 = self._add_live_plot_item(
+                self.pg_plot_resistance_vs_sample,
+                x_values,
+                y_values,
+                color,
+            )
+            if item2 is not None:
+                self._segment_lines_ax2.append(item2)
 
     def _finalize_measurement_history(self) -> None:
         if len(self._samples_current) < 2 or len(self._samples_current) != len(self._samples_resistance):
@@ -1049,16 +1245,65 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.name_history.remember(key, widget.text())
 
     def _set_port_controls_enabled(self, enabled: bool) -> None:
-        for name in ('spinBox_port_number', 'comboBox_baudrate', 'comboBox_port', 'pushButton_refresh_ports'):
+        for name in (
+            'spinBox_port_number',
+            'comboBox_baudrate',
+            'comboBox_port',
+            'pushButton_refresh_ports',
+            'pushButton_auto_detect_hmp',
+            'checkBox_show_hmp_port_options',
+        ):
             w = getattr(self.ui, name, None)
             if w is not None:
                 w.setEnabled(enabled)
 
     def _set_broker_controls_visible(self, visible: bool) -> None:
-        for name in ('label_broker_host', 'lineEdit_broker_host', 'spinBox_broker_port'):
+        for name in ('label_broker_host', 'lineEdit_broker_host', 'spinBox_broker_port', 'label_broker_hint'):
             widget = getattr(self.ui, name, None)
             if widget is not None:
                 widget.setVisible(visible)
+
+    def _sync_hardware_connection_controls(self) -> None:
+        shared = self._using_shared_broker()
+        disclosure = getattr(self.ui, "checkBox_show_hmp_port_options", None)
+        if isinstance(disclosure, QtWidgets.QCheckBox):
+            disclosure.setVisible(shared)
+        show_hmp_port_options = not shared
+        if shared and isinstance(disclosure, QtWidgets.QCheckBox):
+            show_hmp_port_options = bool(disclosure.isChecked())
+        endpoint_visible = shared and show_hmp_port_options
+        for name in ('label_broker_host', 'lineEdit_broker_host', 'spinBox_broker_port'):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setVisible(endpoint_visible)
+        hint = getattr(self.ui, "label_broker_hint", None)
+        if hint is not None:
+            hint.setVisible(shared)
+        frame = getattr(self.ui, "frame_hmp_port_options", None)
+        if isinstance(frame, QtWidgets.QWidget):
+            frame.setVisible(show_hmp_port_options)
+        for name in (
+            'label_port',
+            'comboBox_port',
+            'pushButton_refresh_ports',
+            'pushButton_auto_detect_hmp',
+            'label_baudrate',
+            'comboBox_baudrate',
+        ):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setVisible(True)
+        button = getattr(self.ui, "pushButton_connect_port", None)
+        if isinstance(button, QtWidgets.QPushButton):
+            if self.is_connected:
+                button.setText("Disconnect broker" if shared else "Disconnect")
+            else:
+                button.setText("Connect broker" if shared else "Connect to port")
+
+    def _connect_overlay_message(self) -> str:
+        if self._using_shared_broker():
+            return "Connect shared HMP broker to enable settings"
+        return "Connect COM port to enable settings"
 
     def _using_shared_broker(self) -> bool:
         return str(getattr(self, "supply_profile_id", "")) == "shared_hmp_broker"
@@ -1068,6 +1313,60 @@ class MainWindow(QtWidgets.QMainWindow):
         if channel <= 0:
             raise RuntimeError("Select a confirmed shared HMP broker channel first.")
         return channel
+
+    def _start_preflight_errors(self, *, check_connection: bool = True) -> list[str]:
+        errors: list[str] = []
+        profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
+        if bool(profile.get("requires_channel", False)) and int(getattr(self, "channel_select", 0) or 0) <= 0:
+            errors.append("Select the physically connected PSU channel before starting.")
+        if check_connection and self._using_shared_broker() and not bool(getattr(self, "is_connected", False)):
+            errors.append("Connect or auto-connect the shared HMP broker before starting.")
+        return errors
+
+    def _show_start_preflight_errors(self, errors: list[str]) -> None:
+        if not errors:
+            return
+        message = "Recipe preflight failed:\n\n" + "\n".join(f"- {error}" for error in errors)
+        self._show_status_message(message, timeout_ms=15000)
+        try:
+            QtWidgets.QMessageBox.warning(self, "Recipe preflight failed", message)
+        except Exception:
+            pass
+
+    def _auto_connect_for_start(self) -> bool:
+        if bool(getattr(self, "is_connected", False)):
+            return True
+        dialog: QtWidgets.QProgressDialog | None = None
+        try:
+            text = "Connecting shared HMP broker..." if self._using_shared_broker() else "Connecting hardware..."
+            dialog = QtWidgets.QProgressDialog(text, None, 0, 0, self)
+            dialog.setWindowTitle("Current Annealing hardware")
+            dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+            dialog.setCancelButton(None)
+            dialog.setMinimumDuration(0)
+            self._hardware_auto_connect_progress = dialog
+            dialog.show()
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            self._hardware_auto_connect_progress = None
+            dialog = None
+        try:
+            if self._using_shared_broker():
+                self._connect_shared_broker_mode()
+            else:
+                self.handle_connect_port_clicked()
+            return bool(getattr(self, "is_connected", False))
+        except Exception as exc:
+            message = f"Hardware auto-connect failed: {exc}"
+            self._show_status_message(message, timeout_ms=15000)
+            return False
+        finally:
+            if dialog is not None:
+                try:
+                    dialog.close()
+                except Exception:
+                    pass
+            self._hardware_auto_connect_progress = None
 
     def _shared_broker_port(self) -> int:
         widget = getattr(self.ui, "spinBox_broker_port", None)
@@ -1098,6 +1397,62 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _connect_shared_broker_mode(self) -> None:
+        host = self._shared_broker_host()
+        configured_port = self._shared_broker_port()
+        candidate_ports = [configured_port]
+        if configured_port != 8765:
+            candidate_ports.append(8765)
+        last_error: Exception | None = None
+        snapshot: dict[str, Any] | None = None
+        client: Any = None
+        connected_port = configured_port
+        if self._shared_broker_client is not None:
+            try:
+                client = self._shared_broker_client
+                snapshot = client.snapshot()
+            except Exception as exc:
+                last_error = exc
+                client = None
+                snapshot = None
+        for port in candidate_ports:
+            if snapshot is not None and client is not None:
+                break
+            try:
+                client = BrokerJsonClient(host=host, port=port)
+                snapshot = client.snapshot()
+                connected_port = port
+                break
+            except Exception as exc:
+                last_error = exc
+        if snapshot is None or client is None:
+            self._auto_detect_hmp_port(show_errors=False)
+            self._start_owned_shared_broker()
+            connected_port = configured_port
+            client = BrokerJsonClient(host=host, port=connected_port)
+            snapshot = client.snapshot()
+        self._shared_broker_client = client
+        if connected_port != configured_port:
+            widget = getattr(self.ui, "spinBox_broker_port", None)
+            if isinstance(widget, QtWidgets.QSpinBox):
+                widget.blockSignals(True)
+                widget.setValue(connected_port)
+                widget.blockSignals(False)
+            try:
+                self.settings.setValue("shared_broker_port", connected_port)
+            except Exception:
+                pass
+        profile_payload = snapshot.get("profile") if isinstance(snapshot, dict) else None
+        profile_id = ""
+        if isinstance(profile_payload, dict):
+            profile_id = str(profile_payload.get("profile_id") or "")
+        if not profile_id:
+            profile_id = str(snapshot.get("model") or "")
+        selected_channel = int(getattr(self, "channel_select", 0) or 0)
+        if profile_id == HMP4030_PROFILE.profile_id:
+            self._set_detected_hmp_profile(HMP4030_PROFILE, selected=selected_channel)
+        elif profile_id == HMP4040_PROFILE.profile_id:
+            self._set_detected_hmp_profile(HMP4040_PROFILE, selected=selected_channel)
+        self._remember_shared_broker_channel_limit(snapshot)
         self.is_connected = True
         self.ui.pushButton_connect_port.setText("Disconnect broker")
         self._set_port_controls_enabled(False)
@@ -1106,21 +1461,299 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_connect_overlay(False)
         self.handle_mode_changed(self.operation_mode)
         self._update_mode_action_state()
+        self._sync_hardware_connection_controls()
+
+    def _selected_hmp_port_name(self) -> str:
+        combo = getattr(self.ui, "comboBox_port", None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            data = combo.currentData()
+            if data:
+                return str(data)
+            text = combo.currentText().strip()
+            if text:
+                return text.split(" - ")[0]
+        return str(getattr(self, "port_name", "") or "").strip()
+
+    def _candidate_hmp_ports_for_broker(self) -> list[str]:
+        candidates: list[str] = []
+        selected = self._selected_hmp_port_name()
+        if selected:
+            candidates.append(selected)
+        combo = getattr(self.ui, "comboBox_port", None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            for index in range(combo.count()):
+                data = combo.itemData(index)
+                text = combo.itemText(index).strip()
+                value = str(data or text.split(" - ")[0]).strip()
+                if value and value not in candidates:
+                    candidates.append(value)
+        return candidates
+
+    def _probe_hmp_candidate(self, port_name: str) -> dict[str, Any] | None:
+        baudrates = (115200, 9600, 57600, 38400, 19200)
+        for baudrate in baudrates:
+            driver = HmpSerialDriver(port_name=port_name, baudrate=baudrate, timeout_s=0.5)
+            try:
+                driver.connect()
+                idn_text = driver.identify()
+                profile = driver.profile
+            except Exception:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+                continue
+            try:
+                driver.close()
+            except Exception:
+                pass
+            if profile is None:
+                continue
+            return {
+                "port": port_name,
+                "baudrate": baudrate,
+                "profile": profile,
+                "idn_text": idn_text,
+            }
+        return None
+
+    def _set_current_hmp_port(self, port_name: str) -> None:
+        combo = getattr(self.ui, "comboBox_port", None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            index = combo.findData(port_name)
+            if index < 0:
+                for i in range(combo.count()):
+                    data = str(combo.itemData(i) or "")
+                    text = combo.itemText(i)
+                    if data == port_name or text.startswith(port_name):
+                        index = i
+                        break
+            if index < 0:
+                combo.addItem(port_name, port_name)
+                index = combo.count() - 1
+            combo.setCurrentIndex(index)
+        self.port_name = port_name
+
+    def _apply_detected_hmp_match(self, match: dict[str, Any]) -> None:
+        profile = match.get("profile")
+        if isinstance(profile, SupplyProfile):
+            self._set_detected_hmp_profile(profile, selected=int(getattr(self, "channel_select", 0) or 0))
+            if not self._using_shared_broker():
+                combo = getattr(self.ui, "comboBox_supply", None)
+                if isinstance(combo, QtWidgets.QComboBox):
+                    index = combo.findData(profile.profile_id)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+        self._set_current_hmp_port(str(match.get("port") or ""))
+        baud_combo = getattr(self.ui, "comboBox_baudrate", None)
+        if isinstance(baud_combo, QtWidgets.QComboBox):
+            baud_text = str(match.get("baudrate") or "")
+            if baud_combo.findText(baud_text) >= 0:
+                baud_combo.setCurrentText(baud_text)
+                self.baudrate = int(baud_text)
+
+    def _nonpreferred_hmp_baud_message(self, match: dict[str, Any]) -> str:
+        profile = match.get("profile")
+        label = profile.label if isinstance(profile, SupplyProfile) else "HMP supply"
+        preferred = int(profile.baudrate) if isinstance(profile, SupplyProfile) else 115200
+        return (
+            f"Detected {label} on {match.get('port')} at {match.get('baudrate')} baud, "
+            f"but the preferred baud rate is {preferred}. Change the baud rate in the power supply settings "
+            f"to {preferred}, then retry auto-detect/connect."
+        )
+
+    def _auto_detect_hmp_port(self, *, show_errors: bool = True) -> bool:
+        errors: list[str] = []
+        candidates = self._candidate_hmp_ports_for_broker()
+        if not candidates:
+            try:
+                self.populate_ports()
+            except Exception:
+                pass
+            candidates = self._candidate_hmp_ports_for_broker()
+        for port_name in candidates:
+            match = self._probe_hmp_candidate(port_name)
+            if match is None:
+                errors.append(port_name)
+                continue
+            profile = match.get("profile")
+            preferred_baud = int(profile.baudrate) if isinstance(profile, SupplyProfile) else 115200
+            if int(match.get("baudrate") or 0) != preferred_baud:
+                self._set_current_hmp_port(str(match.get("port") or ""))
+                baud_combo = getattr(self.ui, "comboBox_baudrate", None)
+                if isinstance(baud_combo, QtWidgets.QComboBox):
+                    baud_text = str(match.get("baudrate") or "")
+                    if baud_combo.findText(baud_text) >= 0:
+                        baud_combo.setCurrentText(baud_text)
+                        self.baudrate = int(baud_text)
+                message = self._nonpreferred_hmp_baud_message(match)
+                self._show_status_message(message, timeout_ms=20000)
+                if show_errors:
+                    try:
+                        QtWidgets.QMessageBox.warning(self, "HMP baud rate", message)
+                    except Exception:
+                        pass
+                return False
+            self._apply_detected_hmp_match(match)
+            label = profile.label if isinstance(profile, SupplyProfile) else "HMP"
+            self._show_status_message(
+                f"Auto-detected {label} on {match['port']} at {match['baudrate']} baud.",
+                timeout_ms=10000,
+            )
+            return True
+        message = "Automatic HMP detection did not find a supported HMP4030/HMP4040 power supply."
+        if errors:
+            message += " Checked: " + ", ".join(errors)
+        self._show_status_message(message, timeout_ms=12000)
+        if show_errors:
+            try:
+                QtWidgets.QMessageBox.warning(self, "HMP auto-detect", message)
+            except Exception:
+                pass
+        return False
+
+    def handle_auto_detect_hmp_clicked(self) -> None:
+        self._auto_detect_hmp_port(show_errors=True)
+
+    def _shared_broker_current_limit_a(self) -> float:
+        values: list[float] = []
+        for attr in ("max_current_mA", "start_current_mA"):
+            try:
+                values.append(float(getattr(self, attr)))
+            except Exception:
+                pass
+        for name in ("spinBox_max_current", "spinBox_start_current"):
+            widget = getattr(self.ui, name, None)
+            if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                values.append(float(widget.value()))
+        return max(values or [1.0], default=1.0) / 1000.0
+
+    def _remember_shared_broker_channel_limit(self, snapshot: dict[str, Any] | None) -> None:
+        self._shared_broker_current_limit_mA = None
+        if not isinstance(snapshot, dict):
+            return
+        try:
+            channel = str(self._shared_broker_channel())
+        except Exception:
+            return
+        bench_profile = snapshot.get("bench_profile")
+        if not isinstance(bench_profile, dict):
+            return
+        channels = bench_profile.get("channels")
+        if not isinstance(channels, dict):
+            return
+        payload = channels.get(channel)
+        if not isinstance(payload, dict):
+            return
+        try:
+            limit_a = payload.get("current_limit_a")
+            if limit_a is not None:
+                self._shared_broker_current_limit_mA = max(0.0, float(limit_a) * 1000.0)
+        except Exception:
+            self._shared_broker_current_limit_mA = None
+
+    def _start_owned_shared_broker(self) -> None:
+        if self._owned_shared_broker_server is not None:
+            return
+        channel = self._shared_broker_channel()
+        host = self._shared_broker_host()
+        port = self._shared_broker_port()
+        baudrate = int(getattr(self, "baudrate", 115200) or 115200)
+        baud_combo = getattr(self.ui, "comboBox_baudrate", None)
+        if isinstance(baud_combo, QtWidgets.QComboBox):
+            try:
+                baudrate = int(baud_combo.currentText())
+            except Exception:
+                pass
+        candidates = self._candidate_hmp_ports_for_broker()
+        if not candidates:
+            raise RuntimeError("Select the HMP COM port before starting the shared HMP broker.")
+
+        errors: list[str] = []
+        for port_name in candidates:
+            driver = HmpSerialDriver(port_name=port_name, baudrate=baudrate, timeout_s=0.7)
+            try:
+                driver.connect()
+                idn_text = driver.identify()
+                if driver.profile is None:
+                    raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
+                broker = SharedPowerSupplyBroker(driver, driver.profile)
+                current_limit_a = self._shared_broker_current_limit_a()
+                broker.assign_role(
+                    channel=channel,
+                    role=ROLE_CURRENT_ANNEALING,
+                    confirmed=True,
+                    voltage_limit_v=float(getattr(self, "max_voltage", HMP4040_PROFILE.max_voltage_v)),
+                    current_limit_a=current_limit_a,
+                )
+                broker.confirm_profile(name="Current Annealing auto-started shared HMP broker")
+                server, thread = start_broker_server(broker, host=host, port=port)
+            except Exception as exc:
+                errors.append(f"{port_name}: {exc}")
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+                continue
+
+            self._owned_shared_broker_server = server
+            self._owned_shared_broker_thread = thread
+            self._owned_shared_broker_driver = driver
+            self._shared_broker_current_limit_mA = max(0.0, current_limit_a * 1000.0)
+            self.port_name = port_name
+            self._show_status_message(
+                f"Started shared HMP broker on {host}:{port} for {port_name}.",
+                timeout_ms=10000,
+            )
+            return
+
+        detail = "; ".join(errors) if errors else "no HMP ports found"
+        raise RuntimeError(f"No existing broker answered, and auto-starting a broker failed ({detail}).")
+
+    def _stop_owned_shared_broker(self) -> None:
+        server = self._owned_shared_broker_server
+        thread = self._owned_shared_broker_thread
+        driver = self._owned_shared_broker_driver
+        self._owned_shared_broker_server = None
+        self._owned_shared_broker_thread = None
+        self._owned_shared_broker_driver = None
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+        if thread is not None:
+            try:
+                thread.join(timeout=1.0)
+            except Exception:
+                pass
+        if driver is not None:
+            try:
+                driver.close()
+            except Exception:
+                pass
 
     def _disconnect_shared_broker_mode(self) -> None:
         if self.process_running:
             self.handle_toggle_process_clicked()
         else:
             self.send_safe_end_commands()
-        self.is_connected = False
         self._shared_broker_client = None
         self._shared_broker_lease_id = None
+        self._shared_broker_current_limit_mA = None
+        self._stop_owned_shared_broker()
+        self.is_connected = False
         self.ui.pushButton_connect_port.setText("Connect to broker")
         self._set_port_controls_enabled(True)
         self.ui.frame_command_and_response.setEnabled(False)
         self.ui.frame_process_settings.setEnabled(False)
         self._show_connect_overlay(True)
         self._update_mode_action_state()
+        self._sync_hardware_connection_controls()
 
     def _ensure_shared_broker_lease(self) -> str:
         if self._shared_broker_lease_id:
@@ -1140,13 +1773,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def _initialize_shared_broker_output(self) -> None:
         channel = self._shared_broker_channel()
         lease_id = self._ensure_shared_broker_lease()
-        self._get_shared_broker_client().configure_channel(
+        client = self._get_shared_broker_client()
+        client.configure_channel(
             channel=channel,
             lease_id=lease_id,
             voltage_v=self._voltage_limit_value(),
             current_a=max(0.0, float(self.current_current_set)),
             output_on=True,
         )
+        configure_polling = getattr(client, "configure_polling", None)
+        if callable(configure_polling):
+            configure_polling(channel=channel, interval_s=1.0)
+        start_scheduler = getattr(client, "start_scheduler", None)
+        if callable(start_scheduler):
+            start_scheduler(tick_s=0.05)
 
     def _read_shared_broker_sample(self) -> bool:
         channel = self._shared_broker_channel()
@@ -1194,10 +1834,36 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_shared_broker_current(self) -> None:
         channel = self._shared_broker_channel()
         lease_id = self._ensure_shared_broker_lease()
-        self._get_shared_broker_client().set_current(
+        client = self._get_shared_broker_client()
+        target_mA = max(0.0, float(self.current_current_set) * 1000.0)
+        resolution_mA = self._current_resolution_mA()
+        ramp_rate_mA_s = max(
+            resolution_mA,
+            abs(float(getattr(self, "current_step_mA", resolution_mA) or resolution_mA)),
+        )
+        schedule_current_ramp = getattr(client, "schedule_current_ramp", None)
+        if callable(schedule_current_ramp):
+            schedule_current_ramp(
+                channel=channel,
+                lease_id=lease_id,
+                target_mA=target_mA,
+                rate_mA_s=ramp_rate_mA_s,
+                max_step_mA=resolution_mA,
+                resolution_mA=resolution_mA,
+            )
+            return
+        schedule_current = getattr(client, "schedule_current", None)
+        if callable(schedule_current):
+            schedule_current(
+                channel=channel,
+                lease_id=lease_id,
+                current_mA=target_mA,
+            )
+            return
+        client.set_current(
             channel=channel,
             lease_id=lease_id,
-            current_mA=max(0.0, float(self.current_current_set) * 1000.0),
+            current_mA=target_mA,
         )
 
     def _shutdown_shared_broker_output(self) -> None:
@@ -1334,15 +2000,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.f_out.close()
             self.f_out = None
 
-    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> None:
-        if self._skip_current_sample:
-            return
-        if self.first_sample:
-            self.first_sample = False
-            return
-
-        self._write_sample_to_file(initial_sample=False)
-        self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
+    def _record_sample_progress(self) -> None:
+        """Update progress/rate counters for a persisted non-initial sample."""
 
         now = time.perf_counter()
         if self.last_sample_time is not None:
@@ -1360,8 +2019,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'progressBar_process') and self.total_steps:
             self.ui.progressBar_process.setMaximum(self.total_steps)
             self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+
+    def _record_acquired_sample(self, *, record_voltage_progress: bool = False) -> None:
+        """Write, plot, and account for the latest accepted measurement once."""
+
+        if self._skip_current_sample:
+            return
+        initial_sample = self.first_sample
+        self._write_sample_to_file(initial_sample=initial_sample)
+        if self.first_sample:
+            self.first_sample = False
+        self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
+        if not initial_sample:
+            self._record_sample_progress()
         if record_voltage_progress:
             self._record_voltage_progress()
+
+    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> None:
+        self._record_acquired_sample(record_voltage_progress=record_voltage_progress)
 
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
         spin = getattr(self.ui, 'spinBox_loops', None)
@@ -1389,7 +2064,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_connect_port_clicked(self):
         if self._using_shared_broker():
             if not self.is_connected:
-                self._connect_shared_broker_mode()
+                try:
+                    self._connect_shared_broker_mode()
+                except Exception as exc:
+                    self.is_connected = False
+                    self._shared_broker_client = None
+                    message = f"Shared HMP broker connection failed: {exc}"
+                    self._show_status_message(message, timeout_ms=15000)
+                    try:
+                        QtWidgets.QMessageBox.warning(self, "Shared HMP broker", message)
+                    except Exception:
+                        pass
             else:
                 self._disconnect_shared_broker_mode()
             return
@@ -1668,9 +2353,7 @@ class MainWindow(QtWidgets.QMainWindow):
             planned_max = float(self.ui.spinBox_max_current.value())
         except Exception:
             planned_max = float(getattr(self, 'max_current_mA', 0))
-        step_mA = abs(int(getattr(self, 'current_step_mA', 1) or 1))
-        if step_mA <= 0:
-            step_mA = 1
+        step_mA = abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
         tolerance = step_mA * 0.5
         if limit_mA is None:
             if self._applied_limit_current_mA is not None or force:
@@ -1694,12 +2377,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.update_time_estimate()
             return
         ascend_steps = max(1, int(math.ceil(max(0.0, limit_value - 1.0) / step_mA)))
-        try:
-            hold_steps = int(self.ui.spinBox_hold_duration.value())
-        except Exception:
-            hold_steps = int(getattr(self, 'hold_duration_s', 0))
-        if limit_value < planned_max - tolerance:
-            hold_steps = 0
+        hold_steps = 0
         reverse_steps = ascend_steps if getattr(self, 'reverse_enabled', False) else 0
         projected_loop = max(1, ascend_steps + hold_steps + reverse_steps)
         self._projected_loop_samples = projected_loop
@@ -1788,19 +2466,6 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             return f"{prefix}: {secs}s"
 
-    @staticmethod
-    def _percent_from_hold(current_resistance: float, hold_resistance: float) -> float | None:
-        try:
-            current_resistance = float(current_resistance)
-            hold_resistance = float(hold_resistance)
-        except Exception:
-            return None
-        if not math.isfinite(current_resistance) or not math.isfinite(hold_resistance):
-            return None
-        if hold_resistance == 0.0:
-            return None
-        return (current_resistance / hold_resistance) * 100.0
-
     def _profile_setting_key(self, profile_id: str, name: str) -> str:
         return f"supply_profile/{profile_id}/{name}"
 
@@ -1835,16 +2500,87 @@ class MainWindow(QtWidgets.QMainWindow):
         combo.clear()
         for key, profile in SUPPLY_PROFILES.items():
             combo.addItem(profile["label"], key)
-        stored = self.settings.value("supply_profile", "hmp4030")
+        stored = self.settings.value("supply_profile", "shared_hmp_broker")
         idx = combo.findData(stored)
         if idx < 0:
-            idx = combo.findData("hmp4030")
+            idx = combo.findData("shared_hmp_broker")
         if idx >= 0:
             combo.setCurrentIndex(idx)
         combo.blockSignals(False)
         selected = combo.currentData()
         if isinstance(selected, str):
             self._apply_supply_profile(selected)
+
+    def _hmp_profile_for_supply_profile(self, profile_id: str) -> SupplyProfile | None:
+        profile = SUPPLY_PROFILES.get(profile_id, {})
+        profile_key = str(profile.get("hmp_profile_id") or "")
+        if profile_key == HMP4030_PROFILE.profile_id:
+            return HMP4030_PROFILE
+        if profile_key == HMP4040_PROFILE.profile_id:
+            return HMP4040_PROFILE
+        if bool(profile.get("shared_broker")):
+            return HMP4040_PROFILE
+        return None
+
+    def _current_resolution_mA(self) -> float:
+        profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
+        try:
+            return max(0.2, float(profile.get("current_resolution_mA", 0.2) or 0.2))
+        except Exception:
+            return 0.2
+
+    def _min_positive_current_mA(self) -> float:
+        profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
+        fallback = profile.get("min_start_current_mA", 1.0)
+        try:
+            return max(0.0, float(profile.get("min_current_mA", fallback) or 0.0))
+        except Exception:
+            return 0.0
+
+    def _quantize_current_ramp_mA_s(self, value: float) -> float:
+        resolution = self._current_resolution_mA()
+        try:
+            raw_value = float(value)
+        except Exception:
+            raw_value = resolution
+        steps = max(1, round(raw_value / resolution))
+        return steps * resolution
+
+    def _populate_channel_options(self, channel_count: int, *, selected: int = 0) -> None:
+        combo = getattr(self.ui, 'comboBox_channel', None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Select channel...", None)
+        for channel in range(1, max(0, int(channel_count)) + 1):
+            combo.addItem(f"CH{channel}", channel)
+        index = combo.findData(int(selected)) if int(selected or 0) > 0 else 0
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+        data = combo.currentData()
+        self.channel_select = int(data) if data is not None else 0
+        legacy_spin = getattr(self.ui, 'spinBox_channel', None)
+        if isinstance(legacy_spin, QtWidgets.QSpinBox):
+            legacy_spin.blockSignals(True)
+            legacy_spin.setValue(self.channel_select)
+            legacy_spin.blockSignals(False)
+
+    def _set_detected_hmp_profile(self, profile: SupplyProfile, *, selected: int = 0) -> None:
+        self._detected_hmp_profile = profile
+        volt_spin = getattr(self.ui, 'spinBox_max_voltage', None)
+        if isinstance(volt_spin, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+            volt_spin.blockSignals(True)
+            if isinstance(volt_spin, QtWidgets.QDoubleSpinBox):
+                volt_spin.setValue(float(profile.max_voltage_v))
+            else:
+                volt_spin.setValue(int(round(float(profile.max_voltage_v))))
+            volt_spin.blockSignals(False)
+            self.max_voltage = float(volt_spin.value())
+            self.open_threshold = self.max_voltage
+        if selected < 1 or selected > profile.channel_count:
+            selected = 0
+        self._populate_channel_options(profile.channel_count, selected=selected)
 
     def _apply_supply_profile(self, profile_id: str) -> None:
         profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
@@ -1886,28 +2622,24 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         step_spin = getattr(self.ui, 'spinBox_step_mA', None)
-        if isinstance(step_spin, QtWidgets.QSpinBox):
-            default_step = max(1, int(step_spin.value()))
-            step_value = self._load_profile_int(profile_id, "step_mA", default_step, 1)
+        if isinstance(step_spin, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+            default_step = max(0.2, float(step_spin.value()))
+            step_value = float(self._load_profile_setting(profile_id, "step_mA", default_step, float))
+            step_value = self._quantize_current_ramp_mA_s(step_value)
             step_spin.blockSignals(True)
             step_spin.setValue(step_value)
             step_spin.blockSignals(False)
-            self.current_step_mA = int(step_spin.value())
+            self.current_step_mA = float(step_spin.value())
             self.current_step_A = self.current_step_mA / 1000.0
-        hold_spin = getattr(self.ui, 'spinBox_hold_duration', None)
-        if isinstance(hold_spin, QtWidgets.QSpinBox):
-            default_hold = max(1, int(hold_spin.value()))
-            hold_value = self._load_profile_int(profile_id, "hold_duration", default_hold, 1)
-            hold_spin.blockSignals(True)
-            hold_spin.setValue(hold_value)
-            hold_spin.blockSignals(False)
-            self.hold_duration_s = int(hold_spin.value())
         volt_spin = getattr(self.ui, 'spinBox_max_voltage', None)
-        if isinstance(volt_spin, QtWidgets.QSpinBox):
+        if isinstance(volt_spin, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
             default_voltage = float(profile.get("max_voltage", 30.0))
             voltage_value = self._load_profile_setting(profile_id, "max_voltage", default_voltage, float)
             volt_spin.blockSignals(True)
-            volt_spin.setValue(int(round(float(voltage_value))))
+            if isinstance(volt_spin, QtWidgets.QDoubleSpinBox):
+                volt_spin.setValue(float(voltage_value))
+            else:
+                volt_spin.setValue(int(round(float(voltage_value))))
             volt_spin.blockSignals(False)
             self.max_voltage = float(volt_spin.value())
             self.open_threshold = self.max_voltage
@@ -1919,14 +2651,11 @@ class MainWindow(QtWidgets.QMainWindow):
             reset_box.setChecked(bool(reset_value))
             reset_box.blockSignals(False)
             self.reset_on_start = bool(reset_box.isChecked())
-        channel_spin = getattr(self.ui, 'spinBox_channel', None)
-        if isinstance(channel_spin, QtWidgets.QSpinBox):
-            default_channel = int(profile.get("channel_select", 0))
-            channel_value = int(self._load_profile_setting(profile_id, "channel_select", default_channel, int))
-            channel_spin.blockSignals(True)
-            channel_spin.setValue(int(channel_value))
-            channel_spin.blockSignals(False)
-            self.channel_select = int(channel_spin.value())
+        hmp_profile = self._hmp_profile_for_supply_profile(profile_id)
+        if hmp_profile is not None:
+            self._set_detected_hmp_profile(hmp_profile)
+        else:
+            self._populate_channel_options(0, selected=0)
         try:
             self._apply_profile_max_voltage_action(profile_id)
         except Exception:
@@ -1936,27 +2665,31 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         shared = self._using_shared_broker()
+        if isinstance(reset_box, QtWidgets.QCheckBox):
+            reset_box.setVisible(not shared)
         self._set_broker_controls_visible(shared)
         for name in (
             "lineEdit_serial_command",
             "pushButton_send_serial_command",
-            "comboBox_port",
-            "comboBox_baudrate",
-            "pushButton_refresh_ports",
         ):
             widget = getattr(self.ui, name, None)
             if widget is not None:
                 widget.setEnabled(not shared)
+        for name in ("comboBox_port", "comboBox_baudrate", "pushButton_refresh_ports", "pushButton_auto_detect_hmp"):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setEnabled(True)
         if hasattr(self.ui, "lineEdit_broker_host"):
             self.ui.lineEdit_broker_host.setText(
                 self.settings.value("shared_broker_host", "127.0.0.1", type=str)
             )
         if hasattr(self.ui, "spinBox_broker_port"):
-            self.ui.spinBox_broker_port.setValue(
-                int(self.settings.value("shared_broker_port", 8765, type=int))
-            )
+            self.ui.spinBox_broker_port.blockSignals(True)
+            self.ui.spinBox_broker_port.setValue(8765 if shared else int(self.settings.value("shared_broker_port", 8765, type=int)))
+            self.ui.spinBox_broker_port.blockSignals(False)
         if not shared:
             self._shared_broker_lease_id = None
+        self._sync_hardware_connection_controls()
         self._refresh_command_profiles()
 
     def handle_supply_profile_changed(self) -> None:
@@ -2023,28 +2756,22 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         step_spin = getattr(self.ui, 'spinBox_step_mA', None)
-        if isinstance(step_spin, QtWidgets.QSpinBox):
+        if isinstance(step_spin, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
             try:
                 step_spin.interpretText()
             except Exception:
                 pass
             try:
-                self.current_step_mA = int(step_spin.value())
+                self.current_step_mA = self._quantize_current_ramp_mA_s(float(step_spin.value()))
+                if abs(float(step_spin.value()) - self.current_step_mA) > 1e-9:
+                    step_spin.blockSignals(True)
+                    step_spin.setValue(self.current_step_mA)
+                    step_spin.blockSignals(False)
                 self.current_step_A = self.current_step_mA / 1000.0
             except Exception:
                 pass
-        hold_spin = getattr(self.ui, 'spinBox_hold_duration', None)
-        if isinstance(hold_spin, QtWidgets.QSpinBox):
-            try:
-                hold_spin.interpretText()
-            except Exception:
-                pass
-            try:
-                self.hold_duration_s = int(hold_spin.value())
-            except Exception:
-                pass
         volt_spin = getattr(self.ui, 'spinBox_max_voltage', None)
-        if isinstance(volt_spin, QtWidgets.QSpinBox):
+        if isinstance(volt_spin, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
             try:
                 volt_spin.interpretText()
             except Exception:
@@ -2115,16 +2842,16 @@ class MainWindow(QtWidgets.QMainWindow):
             commands_init.append(f"INST:NSEL {channel}\n")
         if bool(getattr(self, "voltage_first", False)):
             commands_init.append(f"VOLT {limit_v:.1f}\n")
-            commands_init.append(f"CURR {start_a:.3f}\n")
+            commands_init.append(f"CURR {start_a:.4f}\n")
         else:
-            commands_init.append(f"CURR {start_a:.3f}\n")
+            commands_init.append(f"CURR {start_a:.4f}\n")
             commands_init.append(f"VOLT {limit_v:.1f}\n")
         commands_init.append("OUTP ON\n")
         self.commands_init = commands_init
         safe_end = [
             "OUTP OFF\n",
             "VOLT 1.0\n",
-            f"CURR {start_a:.3f}\n",
+            f"CURR {start_a:.4f}\n",
             "SYST:LOC\n",
         ]
         if channel > 0:
@@ -2140,11 +2867,11 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             max_mA = int(self.ui.spinBox_max_current.value())
             start_mA = int(self.ui.spinBox_start_current.value()) if hasattr(self.ui, 'spinBox_start_current') else 1
-            hold_s = int(self.ui.spinBox_hold_duration.value())
+            hold_s = 0
             loops = int(self.ui.spinBox_loops.value()) if hasattr(self.ui, 'spinBox_loops') else 1
             reverse = bool(self.ui.checkBox_reverse.isChecked()) if hasattr(self.ui, 'checkBox_reverse') else False
             infinite = bool(self.ui.checkBox_infinite_loops.isChecked()) if hasattr(self.ui, 'checkBox_infinite_loops') else False
-            step_mA = int(self.ui.spinBox_step_mA.value()) if hasattr(self.ui, 'spinBox_step_mA') else 1
+            step_mA = float(self.ui.spinBox_step_mA.value()) if hasattr(self.ui, 'spinBox_step_mA') else 1.0
         except Exception:
             return None
         if infinite:
@@ -2155,7 +2882,7 @@ class MainWindow(QtWidgets.QMainWindow):
             start_mA = max_mA
         else:
             start_mA = max(min_start, min(start_mA, max_mA))
-        step_mA = max(1, step_mA)
+        step_mA = max(self._current_resolution_mA(), float(step_mA))
         # steps up from start current to max in increments of step_mA
         up_steps = max(0, math.ceil(max(0, max_mA - start_mA) / step_mA))
         down_steps = up_steps if reverse else 0
@@ -2324,9 +3051,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_step_changed(self):
         try:
-            self.current_step_mA = int(self.ui.spinBox_step_mA.value())
+            self.current_step_mA = self._quantize_current_ramp_mA_s(float(self.ui.spinBox_step_mA.value()))
+            if abs(float(self.ui.spinBox_step_mA.value()) - self.current_step_mA) > 1e-9:
+                self.ui.spinBox_step_mA.blockSignals(True)
+                self.ui.spinBox_step_mA.setValue(self.current_step_mA)
+                self.ui.spinBox_step_mA.blockSignals(False)
         except Exception:
-            self.current_step_mA = 1
+            self.current_step_mA = self._current_resolution_mA()
         self.current_step_A = self.current_step_mA/1000.0
         try:
             self.settings.setValue("step_mA", self.current_step_mA)
@@ -2348,6 +3079,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _send_current_setpoint(self) -> None:
         """Apply the next current setpoint, refreshing voltage first when required."""
 
+        current_limits_mA: list[float] = []
+        for value in (
+            getattr(self, "max_current_mA", 0.0),
+            getattr(self, "_shared_broker_current_limit_mA", None),
+        ):
+            try:
+                limit = float(value)
+            except Exception:
+                continue
+            if limit > 0.0:
+                current_limits_mA.append(limit)
+        max_current_mA = min(current_limits_mA) if current_limits_mA else 0.0
+        if max_current_mA > 0.0:
+            requested_mA = float(self.current_current_set) * 1000.0
+            tolerance_mA = max(1e-9, self._current_resolution_mA() * 1e-6)
+            if requested_mA > max_current_mA + tolerance_mA:
+                self.current_current_set = max_current_mA / 1000.0
         if self._using_shared_broker():
             self._set_shared_broker_current()
             self.ui.label_last_command.setText(
@@ -2362,7 +3110,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Owon responds more reliably when voltage is refreshed slightly
             # ahead of each current update.
             self.simple_delay(80)
-        self.serial_command = f"CURR {self.current_current_set:.3f}\n"
+        self.serial_command = f"CURR {self.current_current_set:.4f}\n"
         self.send_serial_command()
         
     def handle_raw_vcp_mode_selected(self):
@@ -2373,15 +3121,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.operation_mode = 1
         self.ui.frame_process_settings.setEnabled(True)
         self.ui.spinBox_max_current.setEnabled(False)
-        self.ui.spinBox_hold_duration.setEnabled(False)
-        self.ui.pushButton_hold_current.setEnabled(True)
 
     def handle_automatic_mode_selected(self):
         self.operation_mode = 2
         self.ui.frame_process_settings.setEnabled(True)
         self.ui.spinBox_max_current.setEnabled(True)
-        self.ui.spinBox_hold_duration.setEnabled(True)
-        self.ui.pushButton_hold_current.setEnabled(False)
 
     def handle_mode_changed(self, index: int) -> None:
         if index == 0:
@@ -2423,7 +3167,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_max_voltage_value_changed(self):
         spin = getattr(self.ui, 'spinBox_max_voltage', None)
-        if not isinstance(spin, QtWidgets.QSpinBox):
+        if not isinstance(spin, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
             return
         try:
             value = float(spin.value())
@@ -2443,18 +3187,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_planned_time_label()
 
     def handle_channel_select_value_changed(self):
-        spin = getattr(self.ui, 'spinBox_channel', None)
-        if not isinstance(spin, QtWidgets.QSpinBox):
-            return
-        try:
-            spin.interpretText()
-        except Exception:
-            pass
-        try:
-            value = int(spin.value())
-        except Exception:
-            value = 0
+        value = 0
+        combo = getattr(self.ui, 'comboBox_channel', None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            data = combo.currentData()
+            if data is not None:
+                try:
+                    value = int(data)
+                except Exception:
+                    value = 0
+        else:
+            spin = getattr(self.ui, 'spinBox_channel', None)
+            if not isinstance(spin, QtWidgets.QSpinBox):
+                return
+            try:
+                spin.interpretText()
+            except Exception:
+                pass
+            try:
+                value = int(spin.value())
+            except Exception:
+                value = 0
         self.channel_select = value
+        spin = getattr(self.ui, 'spinBox_channel', None)
+        if isinstance(spin, QtWidgets.QSpinBox):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
         try:
             self.settings.setValue("channel_select", value)
             self._store_profile_setting("channel_select", value)
@@ -2515,56 +3274,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_command_profiles()
         self.update_planned_time_label()
         
-    def handle_hold_duration_value_changed(self):
-        self.hold_duration_s = self.ui.spinBox_hold_duration.value()
-        try:
-            self.settings.setValue("hold_duration", int(self.hold_duration_s))
-            self._store_profile_setting("hold_duration", int(self.hold_duration_s))
-        except Exception:
-            pass
-        
-    def handle_hold_current_button_clicked(self):
-        if not self.hold_timer_running:
-            self.current_increment = 0.000
-            self.line_color="g"
-            self.elapsed_seconds = 0
-            self.resistance_at_hold_current = self.current_resistance
-            self.ui.label_resistance_at_hold_current.setText("{:.1f}".format(self.resistance_at_hold_current))
-            self.hold_timer.start(1000)
-            self.hold_timer_running = True
-            self.ui.pushButton_hold_current.setText("Stop current now!")
-            self.direction_ascending = False
-            self._reset_voltage_projection()
-        else:
-            self.hold_timer.stop()
-            self.current_increment = -self.current_step_A
-            self.line_color="b"
-            self.hold_timer_running = False
-            self.ui.pushButton_hold_current.setText("Hold current now!")
-            self.direction_ascending = False
-            self._reset_voltage_projection()
-
-    def handle_hold_timer_timeout(self):
-        self.elapsed_seconds += 1
-        percent = self._percent_from_hold(self.current_resistance, self.resistance_at_hold_current)
-        if percent is None:
-            self.resistance_percent_from_hold = 0.0
-            self.ui.label_resistance_percent_from_hold.setText("N/A")
-            return
-        self.resistance_percent_from_hold = percent
-        self.ui.label_resistance_percent_from_hold.setText(f"{self.resistance_percent_from_hold:.1f}")
-
     def handle_show_history_clicked(self) -> None:
         dialog = MeasurementHistoryDialog(self, list(self._measurement_history))
         dialog.exec()
 
     def handle_toggle_process_clicked(self):
         if not self.process_running:
+            preflight_errors = self._start_preflight_errors(check_connection=False)
+            if preflight_errors:
+                self._show_start_preflight_errors(preflight_errors)
+                return
+            if not bool(getattr(self, "is_connected", False)) and not self._auto_connect_for_start():
+                self._show_start_preflight_errors(["Hardware auto-connect did not complete."])
+                return
+            preflight_errors = self._start_preflight_errors()
+            if preflight_errors:
+                self._show_start_preflight_errors(preflight_errors)
+                return
             self.process_running = True
             self._update_mode_action_state()
             self._sync_runtime_settings()
             self._refresh_command_profiles()
-            self.elapsed_seconds = 0
             self._max_voltage_dialog = False
             self._contact_lost = False
             self._zero_current_count = 0
@@ -2616,8 +3346,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.current_resistance = 0
                 self._display_ui_value('lcd_current_mA', "0")
                 self._display_ui_value('label_live_voltage', "0")
-                self.ui.label_resistance_at_hold_current.setText("0")
-                self.ui.label_resistance_percent_from_hold.setText("0")
                 self.line_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
@@ -2664,9 +3392,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     start_mA = max_mA
                 else:
                     start_mA = max(min_start, min(start_mA, max_mA))
-                step_mA = max(1, step_mA)
+                step_mA = max(self._current_resolution_mA(), float(step_mA))
                 up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - start_mA) / step_mA))
-                hold_steps = int(self.ui.spinBox_hold_duration.value())
+                hold_steps = 0
                 down_steps = up_steps if self.reverse_enabled else 0
                 per_loop = max(1, up_steps + hold_steps + down_steps)
                 self._init_loop_tracking(per_loop, int(self.loop_target or 1), self.infinite_loops)
@@ -2678,8 +3406,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.ui.progressBar_process.setMaximum(0)
                 if hasattr(self.ui, 'label_time_to_limit'):
                     self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
-                self.ui.label_resistance_at_hold_current.setText("0")
-                self.ui.label_resistance_percent_from_hold.setText("0")
                 self.line_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
@@ -2696,11 +3422,6 @@ class MainWindow(QtWidgets.QMainWindow):
         """Immediately ramp current down toward zero."""
         if not self.process_running:
             return
-        try:
-            self.hold_timer.stop()
-        except Exception:
-            pass
-        self.hold_timer_running = False
         self.current_increment = -abs(self.current_step_A)
         self.line_color = "b"
         self.force_stop_at_zero = True
@@ -2748,15 +3469,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reset_sample_buffers()
         try:
             self.timer_command.stop()
-            self.hold_timer.stop()
         except Exception:
             pass
-        self.hold_timer_running = False
         if self.f_out:
             self.f_out.close()
             self.f_out = None
-        if self.operation_mode == 1:
-            self.ui.pushButton_hold_current.setText("Hold current now!")
         if not self._using_shared_broker():
             # Immediately ramp the supply to zero before running the shutdown sequence
             try:
@@ -2842,7 +3559,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            self._accept_measurement_sample()
+            self._record_acquired_sample()
 
 
             # Iterate the current set point
@@ -2897,38 +3614,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            skip_sample = bool(self._skip_current_sample)
-            if not skip_sample:
-                self._accept_measurement_sample(record_voltage_progress=True)
+            self._record_acquired_sample(record_voltage_progress=True)
 
-            # Trigger the hold-current routine as if the button were pressed
+            # Reverse or stop immediately at the configured maximum current.
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
-                if not self.hold_timer_running:
-                    self.current_increment = 0.000
-                    self.line_color="g"
-                    self.elapsed_seconds = 0
-                    self.resistance_at_hold_current = self.current_resistance
-                    self.ui.label_resistance_at_hold_current.setText("{:.1f}".format(self.resistance_at_hold_current))
-                    self.hold_timer.start(1000)
-                    self.hold_timer_running = True
-                    self.direction_ascending = False
-                    self._reset_voltage_projection()
-            
-            # Iterate the current set point
-            self.current_current_set += self.current_increment
-            self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
-
-            # end of hold: either reverse (if enabled) or stop
-            if (self.hold_timer_running and (self.elapsed_seconds >= self.hold_duration_s)):
-                self.hold_timer.stop()
-                self.hold_timer_running = False
                 if getattr(self, 'reverse_enabled', False):
                     self.current_increment = -self.current_step_A
                     self.line_color = "b"
                     self.direction_ascending = False
                     self._reset_voltage_projection()
                 else:
-                    self.stop_annealing("Hold complete; stopping measurement.", show_dialog=True)
+                    self.stop_annealing("Max current reached; stopping measurement.", show_dialog=True)
+
+            # Iterate the current set point
+            if not self.process_running:
+                return
+            self.current_current_set += self.current_increment
+            self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             if not self.process_running:
                 return
@@ -2949,7 +3651,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.line_color = "r"
                     self.direction_ascending = True
                     self._reset_voltage_projection()
-                    self.elapsed_seconds = 0
                 else:
                     self.stop_annealing("Run complete; stopping measurement.", show_dialog=True)
 
@@ -3183,9 +3884,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _adjust_progress_for_reverse(self) -> None:
         if not self.total_steps:
             return
-        step_mA = abs(int(getattr(self, 'current_step_mA', 1) or 1))
-        if step_mA <= 0:
-            step_mA = 1
+        step_mA = abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
         current_mA = getattr(self, 'curr_value_x', None)
         if current_mA is None:
             current_mA = self.current_current_set * 1000.0
@@ -3200,8 +3899,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recalculate_total_steps(remaining_steps, self._projected_loop_samples)
 
     def _apply_max_voltage_action(self, action: str) -> None:
-        if action not in MAX_VOLTAGE_ACTION_LABELS:
-            action = MAX_VOLTAGE_DEFAULT_ACTION
+        if action not in {"reverse", "stop"}:
+            action = "reverse"
         limit_label = f"{self._format_voltage_limit()} V"
         if action == "reverse":
             step = abs(getattr(self, "current_step_A", 0.0))
@@ -3228,19 +3927,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_time_estimate()
             if self.process_running:
                 self.stop_annealing(f"{limit_label} reached — stopping measurement.", show_dialog=False)
-        else:  # hold current
-            self.current_increment = 0
-            self.force_stop_at_zero = False
-            self.direction_ascending = False
-            self._note_voltage_limit_reached()
-            self.update_time_estimate()
-            self._show_status_message(f"{limit_label} reached — holding current.")
-
     def _show_max_voltage_prompt(self) -> None:
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Voltage limit reached")
         msg.setText(f"Power supply reached {self._format_voltage_limit()} V. What do you want to do?")
-        _hold_btn = msg.addButton("Hold current", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         reverse_btn = msg.addButton("Reverse to zero", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         stop_btn = msg.addButton("Stop measurement", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         msg.setIcon(QtWidgets.QMessageBox.Icon.Warning)
@@ -3251,7 +3941,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif clicked is stop_btn:
             self._apply_max_voltage_action("stop")
         else:
-            self._apply_max_voltage_action("hold")
+            self._apply_max_voltage_action("reverse")
     
     def init_graph_window(self):
         """
@@ -3264,7 +3954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._segment_lines_ax2 = []
         """
     
-        # Create an embedded Matplotlib figure on the right panel
+        # Create an embedded realtime plot dashboard on the right panel.
         if hasattr(self.ui, 'plot_container'):
             container = self.ui.plot_container
             layout = container.layout()
@@ -3280,7 +3970,50 @@ class MainWindow(QtWidgets.QMainWindow):
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
+            self._pg_placeholder_labels = []
+            self.pg_plot_resistance_vs_current = None
+            self.pg_plot_resistance_vs_sample = None
 
+            if pg is not None:
+                self._plot_backend = "pyqtgraph"
+                self.fig = None
+                self.canvas = None
+                self.ax1 = None
+                self.ax2 = None
+                title_source = self.f_name or ""
+                try:
+                    title = format_annealing_title(Path(title_source).stem if title_source else "")
+                except Exception:
+                    title = format_annealing_title(title_source)
+                title_label = QtWidgets.QLabel(title, container)
+                title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                title_label.setStyleSheet("font-weight: 700; padding: 4px;")
+                layout.addWidget(title_label)
+                self.pg_plot_resistance_vs_current = pg.PlotWidget(container)
+                self.pg_plot_resistance_vs_sample = pg.PlotWidget(container)
+                self._configure_pyqtgraph_plot(
+                    self.pg_plot_resistance_vs_current,
+                    bottom_label="Current",
+                    bottom_units="mA",
+                    left_label="Resistance",
+                    left_units="Ohm",
+                )
+                self._configure_pyqtgraph_plot(
+                    self.pg_plot_resistance_vs_sample,
+                    bottom_label="N",
+                    bottom_units="",
+                    left_label="Resistance",
+                    left_units="Ohm",
+                )
+                layout.addWidget(self.pg_plot_resistance_vs_current, 1)
+                layout.addWidget(self.pg_plot_resistance_vs_sample, 1)
+                self._zero_placeholder_line1 = None
+                self._zero_placeholder_line2 = None
+                self._zero_placeholder_count = 0
+                self._zero_placeholders_active = False
+                return
+
+            self._plot_backend = "matplotlib"
             # Align matplotlib colors with Qt palette for a native look
             scheme = QtCore.Qt.ColorScheme.Light
             win_rgb = (1.0, 1.0, 1.0)
@@ -3320,7 +4053,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax1.set_facecolor(base_rgb)
             self.ax1.set_xlabel("Current [mA]")
             self.ax1.set_ylabel("Resistance [Ohm]")
-            self.ax1.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
+            self.ax1.grid(False)
             for spine in self.ax1.spines.values():
                 spine.set_color(text_rgb)
             self.ax1.tick_params(colors=text_rgb)
@@ -3331,7 +4064,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax2.set_facecolor(base_rgb)
             self.ax2.set_xlabel("N")
             self.ax2.set_ylabel("Resistance [Ohm]")
-            self.ax2.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
+            self.ax2.grid(False)
             for spine in self.ax2.spines.values():
                 spine.set_color(text_rgb)
             self.ax2.tick_params(colors=text_rgb)
@@ -3345,16 +4078,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.canvas is not None:
                 self.canvas.draw()
         else:
+            self._plot_backend = "matplotlib"
             # Fallback to separate window
             self.fig = plt.figure(constrained_layout=True)
             self.ax1 = self.fig.add_subplot(211)
             self.ax1.set_xlabel("Current [mA]")
             self.ax1.set_ylabel("Resistance [Ohm]")
-            self.ax1.grid(True)
+            self.ax1.grid(False)
             self.ax2 = self.fig.add_subplot(212)
             self.ax2.set_xlabel("N")
             self.ax2.set_ylabel("Resistance [Ohm]")
-            self.ax2.grid(True)
+            self.ax2.grid(False)
             self._zero_placeholder_line1 = None
             self._zero_placeholder_line2 = None
             self._zero_placeholder_count = 0
@@ -3363,6 +4097,52 @@ class MainWindow(QtWidgets.QMainWindow):
             show_plots()
         
         
+    def _configure_pyqtgraph_plot(
+        self,
+        plot: Any,
+        *,
+        bottom_label: str,
+        bottom_units: str,
+        left_label: str,
+        left_units: str,
+    ) -> None:
+        if pg is None or plot is None:
+            return
+        app = QtWidgets.QApplication.instance()
+        palette = app.palette() if isinstance(app, QtWidgets.QApplication) else self.palette()
+        base = palette.color(QtGui.QPalette.ColorRole.Base)
+        text = palette.color(QtGui.QPalette.ColorRole.Text)
+        grid = palette.color(QtGui.QPalette.ColorRole.Mid)
+        plot.setBackground(base)
+        plot.showGrid(x=False, y=False)
+        plot.setLabel("bottom", bottom_label, units=bottom_units)
+        plot.setLabel("left", left_label, units=left_units)
+        plot.showAxis("top", True)
+        plot.showAxis("right", True)
+        for axis_name in ("bottom", "left"):
+            axis = plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen(text))
+            axis.setTextPen(pg.mkPen(text))
+            axis.setGrid(False)
+            axis.setStyle(maxTickLevel=0, maxTextLevel=0)
+        for axis_name in ("top", "right"):
+            axis = plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen(text))
+            axis.setTextPen(pg.mkPen(text))
+            axis.setTicks([])
+            axis.setGrid(False)
+            axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
+        plot.getPlotItem().getViewBox().setBackgroundColor(base)
+        plot.getPlotItem().showGrid(x=False, y=False)
+        try:
+            plot.getPlotItem().ctrl.xGridCheck.setChecked(False)
+            plot.getPlotItem().ctrl.yGridCheck.setChecked(False)
+            plot.getPlotItem().getAxis("bottom").setGrid(False)
+            plot.getPlotItem().getAxis("left").setGrid(False)
+        except Exception:
+            _ = grid
+
+
     def handle_pushButton_select_filename_clicked(self):
         self.f_name, _ = QFileDialog.getSaveFileName(
             self,
@@ -3514,9 +4294,45 @@ class MainWindow(QtWidgets.QMainWindow):
                 return ""
         return ""
 
+    def _source_control_metadata(self) -> Dict[str, Any]:
+        repo_root = Path(__file__).resolve().parents[2]
+
+        def _git_text(*args: str) -> str | None:
+            try:
+                completed = subprocess.run(
+                    ["git", "-C", str(repo_root), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
+                    **_hidden_subprocess_kwargs(),
+                )
+            except Exception:
+                return None
+            if completed.returncode != 0:
+                return None
+            text = completed.stdout.strip()
+            return text or None
+
+        status = _git_text("status", "--short")
+        return {
+            "repo_root": str(repo_root),
+            "branch": _git_text("branch", "--show-current"),
+            "commit": _git_text("rev-parse", "HEAD"),
+            "is_dirty": bool(status),
+            "status_short": status or "",
+            "remote_url": _git_text("config", "--get", "remote.origin.url"),
+        }
+
     def _metadata_payload(self, output_path: str) -> Dict[str, Any]:
+        output = Path(output_path)
         loops, infinite = self._current_loop_settings()
-        reverse = bool(getattr(getattr(self, "ui", None), "checkBox_reverse", None).isChecked()) if hasattr(self.ui, "checkBox_reverse") else False
+        reverse_widget = getattr(self.ui, "checkBox_reverse", None)
+        reverse = (
+            bool(reverse_widget.isChecked())
+            if isinstance(reverse_widget, QtWidgets.QCheckBox)
+            else bool(getattr(self, "reverse_enabled", False))
+        )
         supply_widget = getattr(self.ui, "comboBox_supply", None)
         supply = ""
         if supply_widget is not None:
@@ -3524,7 +4340,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 supply = str(supply_widget.currentText())
             except Exception:
                 supply = str(getattr(self, "supply_profile_id", ""))
+        supply_profile_id = str(getattr(self, "supply_profile_id", ""))
+        detected_profile = getattr(self, "_detected_hmp_profile", None)
+        hardware_payload = {
+            "profile_id": supply_profile_id,
+            "label": SUPPLY_PROFILES.get(supply_profile_id, {}).get("label", ""),
+            "detected_model": None if detected_profile is None else getattr(detected_profile, "profile_id", None),
+            "port": self._selected_hmp_port_name(),
+            "baud": int(getattr(self, "baudrate", 0) or 0),
+            "channel": int(getattr(self, "channel_select", 0) or 0),
+            "voltage_limit_v": float(getattr(self, "max_voltage", 0.0) or 0.0),
+            "current_resolution_mA": self._current_resolution_mA(),
+            "min_positive_current_mA": self._min_positive_current_mA(),
+            "shared_broker": bool(self._using_shared_broker()),
+            "broker_host": self._shared_broker_host() if self._using_shared_broker() else None,
+            "broker_port": self._shared_broker_port() if self._using_shared_broker() else None,
+            "broker_owned_by_app": bool(self._owned_shared_broker_server is not None),
+            "broker_source": "owned"
+            if self._owned_shared_broker_server is not None
+            else ("existing" if self._using_shared_broker() else "direct"),
+        }
         return {
+            "schema": "current_annealing_logger_metadata_v1",
+            "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "data_file": output.name,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "output_file": str(output_path),
             "composition": self._ui_text("lineEdit_composition"),
@@ -3534,13 +4373,25 @@ class MainWindow(QtWidgets.QMainWindow):
             "notes": self._ui_text("lineEdit_notes"),
             "start_current_mA": int(getattr(self, "start_current_mA", 1)),
             "max_current_mA": int(getattr(self, "max_current_mA", 10)),
-            "step_mA": int(getattr(self, "current_step_mA", 1)),
-            "hold_duration_s": int(getattr(self, "hold_duration_s", 0)),
+            "step_mA": float(getattr(self, "current_step_mA", 1.0) or 0.0),
             "reverse_enabled": reverse,
             "loops": loops,
             "loops_infinite": infinite,
-            "supply": supply,
-            "supply_profile": str(getattr(self, "supply_profile_id", "")),
+            "supply": hardware_payload,
+            "supply_display": supply,
+            "supply_profile": supply_profile_id,
+            "hardware": hardware_payload,
+            "source_control": self._source_control_metadata(),
+            "recipe": {
+                "start_current_mA": float(getattr(self, "start_current_mA", 0.0) or 0.0),
+                "max_current_mA": float(getattr(self, "max_current_mA", 0.0) or 0.0),
+                "current_ramp_rate_mA_s": float(getattr(self, "current_step_mA", 0.0) or 0.0),
+                "reverse_enabled": reverse,
+                "loops": int(loops),
+                "loops_infinite": bool(infinite),
+                "infinite_loops": bool(infinite),
+                "max_voltage_action": str(getattr(self, "max_voltage_action", MAX_VOLTAGE_DEFAULT_ACTION)),
+            },
         }
 
     def _write_metadata_file(self, output_path: str) -> None:
@@ -3560,6 +4411,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Returns True if ready to proceed, False if the user canceled.
         """
+        self._sync_runtime_settings()
+        self._store_loop_preferences()
         path = self.build_log_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -3638,6 +4491,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._release_experiment_sleep_guard()
+        self._stop_owned_shared_broker()
         if self.ser_mcu.isOpen():
             self.handle_connect_port_clicked()
             # self.ser_mcu.close()
@@ -3655,13 +4509,14 @@ class MainWindow(QtWidgets.QMainWindow):
         ov.setStyleSheet("background: rgba(0,0,0,160);")
         layout = QtWidgets.QVBoxLayout(ov)
         layout.setContentsMargins(0, 0, 0, 0)
-        msg = QtWidgets.QLabel("Connect COM port to enable settings")
+        msg = QtWidgets.QLabel(self._connect_overlay_message())
         msg.setStyleSheet("color: white; font-size: 18px; font-weight: 700;")
         msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
         layout.addWidget(msg)
         layout.addStretch(1)
         self._overlay = ov
+        self._overlay_label = msg
         self._position_connect_overlay()
         ov.hide()
 
@@ -3687,12 +4542,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if overlay is None:
             return
         try:
+            label = getattr(self, "_overlay_label", None)
+            if isinstance(label, QtWidgets.QLabel):
+                label.setText(self._connect_overlay_message())
             overlay.setVisible(bool(show))
         except Exception:
             pass
 
     def resizeEvent(self, ev: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(ev)
+        self._resize_pyqtgraph_placeholders()
         scroll = getattr(self.ui, 'left_scroll', None)
         overlay = getattr(self, '_overlay', None)
         if overlay is not None and scroll is not None:
