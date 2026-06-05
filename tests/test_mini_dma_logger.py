@@ -12499,6 +12499,44 @@ def test_current_sweep_open_circuit_guard_stops_low_current_compliance(tmp_path:
         _close_test_window(window)
 
 
+def test_recipe_stop_disables_motor_supply_output(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.configured: list[tuple[int, float, float, bool]] = []
+            self.selected: list[int | None] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def configure_channel(self, *, channel: int, voltage_v: float, current_a: float, output_on: bool) -> None:
+            self.configured.append((channel, voltage_v, current_a, output_on))
+
+        def select_channel(self, channel: int | None = None) -> None:
+            self.selected.append(channel)
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._automation_active = True
+    window.check_motor_supply_power.setChecked(True)
+    window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(4)
+    )
+
+    try:
+        window._stop_auto_ramp(log_completion=False, offer_recovery=False)
+
+        assert (3, 12.0, pytest.approx(0.5), False) in supply.configured
+        assert 4 in supply.selected
+    finally:
+        _close_test_window(window)
+
+
 def test_tensile_load_seek_uses_motion_direction_independent_of_scale_sign(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)

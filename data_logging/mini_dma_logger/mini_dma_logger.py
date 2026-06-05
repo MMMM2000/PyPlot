@@ -128,6 +128,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_sweep_mechanical_load_loss_guard",
     "current_sweep_no_conduction_readback_guard",
     "current_sweep_low_current_voltage_compliance_guard",
+    "recipe_stop_disables_motor_supply_output",
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "single_prompt_length_setup",
@@ -19549,6 +19550,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_automation_context(phase="idle")
         if self._supply_output_enabled:
             self._disable_supply_output()
+        if self._motor_supply_enabled():
+            self._disable_motor_supply_output()
         if log_completion:
             self._log("Recipe stopped.")
         self._close_length_setup_dialog()
