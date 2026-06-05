@@ -2869,6 +2869,37 @@ def test_manual_auto_connect_enables_motor_supply_before_tic_status(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_shared_broker_manual_auto_connect_applies_ch3_ch4_defaults_before_tic_status(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: called.append("motor") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+
+    try:
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        assert window.combo_current_sweep_supply_channel.currentData() == 0
+        assert window.combo_motor_supply_channel.currentData() == 0
+        assert not window.check_motor_supply_power.isChecked()
+
+        window._run_manual_auto_connect_hardware()
+
+        assert window.combo_current_sweep_supply_channel.currentData() == 4
+        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.check_motor_supply_power.isChecked()
+        assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
+        assert "Shared HMP Mini DMA bench defaults applied for Tic preflight" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
@@ -9589,6 +9620,9 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
         max_voltage_v=1.0,
         current_channel=4,
         motor_channel=3,
+        current_limit_a=0.08,
+        motor_voltage_limit_v=12.0,
+        motor_current_limit_a=0.5,
     )
 
     controller.connect()
@@ -9606,6 +9640,17 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     assert clients[0].port == 8765
     assert clients[0].calls == [
         ("snapshot", {}),
+        ("snapshot", {}),
+        (
+            "assign_role",
+            {
+                "channel": 3,
+                "role": mini_dma_mod.ROLE_MINI_DMA_MOTOR,
+                "confirmed": True,
+                "voltage_limit_v": 12.0,
+                "current_limit_a": 0.5,
+            },
+        ),
         (
             "lease",
             {
@@ -9622,6 +9667,17 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
                 "voltage_v": 12.0,
                 "current_a": 0.5,
                 "output_on": True,
+            },
+        ),
+        ("snapshot", {}),
+        (
+            "assign_role",
+            {
+                "channel": 4,
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                "confirmed": True,
+                "voltage_limit_v": 1.0,
+                "current_limit_a": 0.08,
             },
         ),
         (

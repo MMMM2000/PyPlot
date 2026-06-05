@@ -3324,6 +3324,9 @@ class SharedBrokerSupplyController:
         max_voltage_v: float,
         current_channel: int | None,
         motor_channel: int | None = None,
+        current_limit_a: float | None = None,
+        motor_voltage_limit_v: float | None = None,
+        motor_current_limit_a: float | None = None,
         owner: str = "mini_dma_logger",
     ) -> None:
         self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
@@ -3335,6 +3338,9 @@ class SharedBrokerSupplyController:
         self.max_voltage_v = float(max_voltage_v)
         self.current_channel = None if current_channel is None else int(current_channel)
         self.motor_channel = None if motor_channel is None else int(motor_channel)
+        self.current_limit_a = None if current_limit_a is None else float(current_limit_a)
+        self.motor_voltage_limit_v = None if motor_voltage_limit_v is None else float(motor_voltage_limit_v)
+        self.motor_current_limit_a = None if motor_current_limit_a is None else float(motor_current_limit_a)
         self.owner = owner
         self._client: Any = None
         self._leases: dict[int, str] = {}
@@ -3383,11 +3389,40 @@ class SharedBrokerSupplyController:
             return ROLE_MINI_DMA_MOTOR
         return ROLE_MINI_DMA_CURRENT
 
+    def _limits_for_channel(self, channel: int) -> tuple[float | None, float | None]:
+        if self.motor_channel is not None and int(channel) == self.motor_channel:
+            return self.motor_voltage_limit_v, self.motor_current_limit_a
+        return self.max_voltage_v, self.current_limit_a
+
+    def _ensure_confirmed_role(self, channel: int) -> None:
+        client = self._require_client()
+        role = self._role_for_channel(channel)
+        snapshot = client.request("snapshot").get("snapshot", {})
+        bench_profile = snapshot.get("bench_profile", {}) if isinstance(snapshot, dict) else {}
+        raw_channels = bench_profile.get("channels", {}) if isinstance(bench_profile, dict) else {}
+        raw_config = raw_channels.get(str(channel), {}) if isinstance(raw_channels, dict) else {}
+        configured_role = str(raw_config.get("role") or "unused") if isinstance(raw_config, dict) else "unused"
+        confirmed = bool(raw_config.get("confirmed", False)) if isinstance(raw_config, dict) else False
+        if configured_role == role and confirmed:
+            return
+        if configured_role not in {"unused", role}:
+            raise RuntimeError(f"Shared HMP broker CH{channel} is assigned to {configured_role}, not {role}.")
+        voltage_limit_v, current_limit_a = self._limits_for_channel(channel)
+        client.request(
+            "assign_role",
+            channel=channel,
+            role=role,
+            confirmed=True,
+            voltage_limit_v=voltage_limit_v,
+            current_limit_a=current_limit_a,
+        )
+
     def _lease_channel(self, channel: int) -> str:
         channel = int(channel)
         lease_id = self._leases.get(channel)
         if lease_id:
             return lease_id
+        self._ensure_confirmed_role(channel)
         lease = self._require_client().lease(
             channel=channel,
             owner=self.owner,
@@ -7401,12 +7436,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_supply_controller(self) -> PowerSupplyController:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         if self._using_shared_broker_supply():
+            current_limit_mA = max(
+                float(self.spin_supply_manual_current.value()),
+                float(self.spin_current_sweep_start_mA.value()),
+                float(self.spin_current_sweep_end_mA.value()),
+                float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
+                1.0,
+            )
             return SharedBrokerSupplyController(  # type: ignore[return-value]
                 host=self.edit_shared_broker_host.text().strip(),
                 port=int(self.spin_shared_broker_port.value()),
                 max_voltage_v=float(self.spin_supply_voltage_limit.value()),
                 current_channel=self._current_sweep_supply_channel(),
                 motor_channel=self._motor_supply_channel(),
+                current_limit_a=current_limit_mA / 1000.0,
+                motor_voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
+                motor_current_limit_a=float(self.spin_motor_supply_current_limit.value()),
             )
         return PowerSupplyController(
             port_name=str(self.combo_supply_port.currentData() or "").strip(),
@@ -7597,6 +7642,34 @@ class MainWindow(QtWidgets.QMainWindow):
         if configured > 0:
             return configured
         return None
+
+    def _select_combo_data(self, combo: QtWidgets.QComboBox, value: int) -> bool:
+        index = combo.findData(int(value))
+        if index < 0:
+            return False
+        combo.setCurrentIndex(index)
+        return True
+
+    def _apply_shared_broker_bench_defaults_for_tic_preflight(self) -> None:
+        if not self._using_shared_broker_supply():
+            return
+        changed: list[str] = []
+        if self._current_sweep_supply_channel() is None and self._select_combo_data(
+            self.combo_current_sweep_supply_channel,
+            4,
+        ):
+            changed.append("current-sweep CH4")
+        if self._motor_supply_channel() is None and self._select_combo_data(self.combo_motor_supply_channel, 3):
+            changed.append("motor-supply CH3")
+        if not self.check_motor_supply_power.isChecked():
+            self.check_motor_supply_power.setChecked(True)
+            changed.append("motor supply enabled")
+        if changed:
+            self._log(
+                "Shared HMP Mini DMA bench defaults applied for Tic preflight: "
+                + ", ".join(changed)
+                + "."
+            )
 
     def _enable_motor_supply_output(self) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
@@ -14600,6 +14673,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _run_manual_auto_connect_hardware(self) -> None:
+        self._apply_shared_broker_bench_defaults_for_tic_preflight()
         connected = True
         steps = 3 + (1 if self._motor_supply_enabled() else 0)
         completed_steps = 0
@@ -16650,6 +16724,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep], *, show_progress: bool = False) -> bool:
+        if self._recipe_requires_tic(steps):
+            self._apply_shared_broker_bench_defaults_for_tic_preflight()
         started_progress = False
         preflight_steps = 4
         if show_progress and self._recipe_preflight_needs_progress(steps):
