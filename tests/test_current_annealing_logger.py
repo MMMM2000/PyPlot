@@ -1171,6 +1171,27 @@ def test_live_dashboard_skips_sub_start_current_points(qtbot) -> None:
     assert window._samples_resistance == [98.0]
 
 
+def test_live_dashboard_skips_zero_resistance_points_at_start_current(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.start_current_mA = 1
+    window._reset_sample_buffers()
+
+    window._append_measurement_sample(1.0, 0.0)
+    window._append_measurement_sample(1.0, 98.0)
+    window._append_measurement_sample(2.0, 100.0)
+
+    assert window._samples_current == [1.0, 2.0]
+    assert window._samples_resistance == [98.0, 100.0]
+    curve_colors = [
+        item.opts["pen"].color().name()
+        for item in window._segment_lines_ax1
+        if hasattr(item, "opts")
+    ]
+    assert curve_colors == ["#dc2626"]
+
+
 def test_live_dashboard_groups_pyqtgraph_segments_by_direction(qtbot) -> None:
     pytest.importorskip("pyqtgraph")
     window = logger_mod.MainWindow()
@@ -1250,6 +1271,34 @@ def test_record_acquired_sample_writes_each_non_initial_sample_once(tmp_path, qt
     ]
     assert window._samples_current == [2.0, 3.0]
     assert window._samples_resistance == [250.0, 200.0]
+
+
+def test_invalid_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = str(tmp_path / "annealing.tsv")
+    window.first_sample = True
+    window.start_current_mA = 1
+    window._reset_sample_buffers()
+
+    window.curr_value_x = 1.0
+    window.curr_value_y = 0.0
+    window.current_current_read = 0.001
+    window.current_voltage = 0.0
+    window.current_resistance = 0.0
+    window._record_acquired_sample()
+
+    window.curr_value_x = 1.0
+    window.curr_value_y = 98.0
+    window.current_current_read = 0.001
+    window.current_voltage = 0.098
+    window.current_resistance = 98.0
+    window._record_acquired_sample()
+
+    assert window.first_sample is False
+    assert window._samples_current == [1.0]
+    assert window._samples_resistance == [98.0]
+    assert not (tmp_path / "annealing.tsv").exists()
 
 
 def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbot) -> None:
@@ -1504,6 +1553,7 @@ def test_zero_current_sample_does_not_add_plot_point(qtbot) -> None:
 
     window._record_zero_placeholder()
     window._append_measurement_sample(0.0, 123.0)
+    window._append_measurement_sample(1.0, 0.0)
 
     assert window._samples_current == []
     assert window._samples_resistance == []
@@ -1518,6 +1568,11 @@ def test_logger_segments_use_current_annealing_cycle_palette(qtbot) -> None:
 
     colors = window._segment_colors([1.0, 2.0, 3.0, 2.0, 1.0, 2.0])
 
+    assert colors[0] in logger_mod.INCREASING_CYCLE_COLORS
+    assert colors[1] in logger_mod.INCREASING_CYCLE_COLORS
+    assert colors[2] in logger_mod.DECREASING_CYCLE_COLORS
+    assert colors[3] in logger_mod.DECREASING_CYCLE_COLORS
+    assert colors[4] in logger_mod.INCREASING_CYCLE_COLORS
     assert colors == [
         "#dc2626",
         "#dc2626",

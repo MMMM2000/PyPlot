@@ -1012,10 +1012,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     pass
             setattr(self, attr, None)
 
-    def _append_measurement_sample(self, current_mA: float, resistance: float) -> None:
+    def _measurement_sample_is_plottable(self, current_mA: float, resistance: float) -> bool:
         if not math.isfinite(current_mA) or not math.isfinite(resistance):
-            return
+            return False
         if current_mA < self._minimum_plottable_current_mA():
+            return False
+        return resistance > 0.0
+
+    def _append_measurement_sample(self, current_mA: float, resistance: float) -> None:
+        if not self._measurement_sample_is_plottable(current_mA, resistance):
             return
         self._remove_placeholder_text()
         self._samples_current.append(float(current_mA))
@@ -2095,9 +2100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_mA = float(self.current_current_read) * 1000.0
         voltage = float(self.current_voltage)
         resistance = float(self.current_resistance)
-        if not math.isfinite(current_mA) or not math.isfinite(resistance):
-            return
-        if current_mA < self._minimum_plottable_current_mA():
+        if not self._measurement_sample_is_plottable(current_mA, resistance):
             return
         if not self.f_out:
             try:
@@ -2145,11 +2148,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._skip_current_sample:
             return
+        try:
+            current_mA = float(self.curr_value_x)
+            resistance = float(self.curr_value_y)
+        except Exception:
+            return
+        if not self._measurement_sample_is_plottable(current_mA, resistance):
+            return
         initial_sample = self.first_sample
         self._write_sample_to_file(initial_sample=initial_sample)
         if self.first_sample:
             self.first_sample = False
-        self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
+        self._append_measurement_sample(current_mA, resistance)
         if not initial_sample:
             self._record_sample_progress()
         if record_voltage_progress:
