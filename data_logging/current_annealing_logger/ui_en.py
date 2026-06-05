@@ -168,16 +168,24 @@ class Ui_MainWindow(object):
         self.left_scroll = left_scroll
         left_container_layout.addWidget(left_scroll, stretch=1)
 
-        sticky_buttons_frame = QtWidgets.QFrame(left_container)
-        sticky_buttons_frame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        sticky_buttons_frame.setSizePolicy(
+        sticky_controls_frame = QtWidgets.QFrame(left_container)
+        sticky_controls_frame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        sticky_controls_frame.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        sticky_buttons_layout = QtWidgets.QHBoxLayout(sticky_buttons_frame)
-        sticky_buttons_layout.setContentsMargins(8, 0, 8, 0)
+        sticky_controls_layout = QtWidgets.QVBoxLayout(sticky_controls_frame)
+        sticky_controls_layout.setContentsMargins(8, 0, 8, 0)
+        sticky_controls_layout.setSpacing(6)
+        sticky_status_layout = QtWidgets.QVBoxLayout()
+        sticky_status_layout.setContentsMargins(0, 0, 0, 0)
+        sticky_status_layout.setSpacing(4)
+        sticky_buttons_layout = QtWidgets.QHBoxLayout()
+        sticky_buttons_layout.setContentsMargins(0, 0, 0, 0)
         sticky_buttons_layout.setSpacing(8)
-        left_container_layout.addWidget(sticky_buttons_frame)
+        sticky_controls_layout.addLayout(sticky_status_layout)
+        sticky_controls_layout.addLayout(sticky_buttons_layout)
+        left_container_layout.addWidget(sticky_controls_frame)
 
         root.addWidget(left_container, stretch=0)
 
@@ -383,17 +391,25 @@ class Ui_MainWindow(object):
         self.pushButton_select_filename = QtWidgets.QPushButton("...")
         self.pushButton_select_filename.hide()
 
-        # Ramp configuration compacted into two rows
+        # Ramp/current configuration. Keep each value on its own row so
+        # density labels never compete with neighbouring control labels.
         ramp = QtWidgets.QGridLayout()
         ramp.setContentsMargins(0, 0, 0, 0)
-        ramp.setHorizontalSpacing(12)
-        ramp.setVerticalSpacing(6)
+        ramp.setHorizontalSpacing(10)
+        ramp.setVerticalSpacing(8)
+        ramp.setColumnStretch(0, 0)
+        ramp.setColumnStretch(1, 0)
+        ramp.setColumnStretch(2, 1)
         self.label_max_current = QtWidgets.QLabel("Max current [mA]:")
         self.spinBox_max_current = QtWidgets.QSpinBox()
         self.spinBox_max_current.setRange(1, 10_000)
         self.spinBox_max_current.setValue(10)
-        self.spinBox_max_current.setMaximumWidth(90)
+        self.spinBox_max_current.setFixedWidth(82)
         self.label_max_current_density = QtWidgets.QLabel("")
+        self.label_max_current_density.setMinimumWidth(115)
+        self.label_max_current_density.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         ramp.addWidget(self.label_max_current, 0, 0)
         ramp.addWidget(self.spinBox_max_current, 0, 1)
         ramp.addWidget(self.label_max_current_density, 0, 2)
@@ -403,32 +419,28 @@ class Ui_MainWindow(object):
         self.spinBox_step_mA.setDecimals(1)
         self.spinBox_step_mA.setSingleStep(0.2)
         self.spinBox_step_mA.setValue(1.0)
-        self.spinBox_step_mA.setMaximumWidth(90)
+        self.spinBox_step_mA.setFixedWidth(82)
         self.label_step_density = QtWidgets.QLabel("")
-        ramp.addWidget(self.label_step, 0, 3)
-        ramp.addWidget(self.spinBox_step_mA, 0, 4)
-        ramp.addWidget(self.label_step_density, 0, 5)
+        self.label_step_density.setMinimumWidth(115)
+        self.label_step_density.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        ramp.addWidget(self.label_step, 1, 0)
+        ramp.addWidget(self.spinBox_step_mA, 1, 1)
+        ramp.addWidget(self.label_step_density, 1, 2)
         self.label_start_current = QtWidgets.QLabel("Start current [mA]:")
         self.spinBox_start_current = QtWidgets.QSpinBox()
         self.spinBox_start_current.setRange(1, 10000)
         self.spinBox_start_current.setValue(10)
-        self.spinBox_start_current.setMaximumWidth(90)
+        self.spinBox_start_current.setFixedWidth(82)
         self.label_start_current_density = QtWidgets.QLabel("")
-        ramp.addWidget(self.label_start_current, 1, 0)
-        ramp.addWidget(self.spinBox_start_current, 1, 1)
-        ramp.addWidget(self.label_start_current_density, 1, 2)
-        ramp.addItem(
-            QtWidgets.QSpacerItem(
-                0,
-                0,
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Minimum,
-            ),
-            0,
-            6,
-            2,
-            1,
+        self.label_start_current_density.setMinimumWidth(115)
+        self.label_start_current_density.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
+        ramp.addWidget(self.label_start_current, 2, 0)
+        ramp.addWidget(self.spinBox_start_current, 2, 1)
+        ramp.addWidget(self.label_start_current_density, 2, 2)
         grid.addLayout(ramp, 2, 0, 1, 2)
 
         # Reverse sweep and loops controls
@@ -502,12 +514,15 @@ class Ui_MainWindow(object):
             pass
         self.lineEdit_composition.setText("Ni51Fe26Ga21")
         self.lineEdit_composition.setMinimumWidth(300)
-        self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1_2")
+        self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1/2")
         try:
-            self.lineEdit_microwire.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")  # type: ignore[attr-defined]
+            self.lineEdit_microwire.set_validation(
+                r"^[A-Za-z0-9_/]+$",
+                "Use only letters, numbers, '_' or '/'",
+            )  # type: ignore[attr-defined]
         except Exception:
             pass
-        self.lineEdit_microwire.setText("1_2")
+        self.lineEdit_microwire.setText("1/2")
         self.lineEdit_microwire.setMinimumWidth(300)
         self.lineEdit_sample = SampleSpinBox()
         self.lineEdit_sample.setMinimumWidth(300)
@@ -586,11 +601,16 @@ class Ui_MainWindow(object):
         # Optional microwire project/fabrication metadata
         self.groupBox_microwire_metadata = QtWidgets.QGroupBox("Microwire metadata")
         metadata_grid = QtWidgets.QGridLayout(self.groupBox_microwire_metadata)
+        metadata_grid.setHorizontalSpacing(8)
+        metadata_grid.setVerticalSpacing(6)
+        metadata_grid.setColumnStretch(1, 1)
 
         self.lineEdit_builder_project = QtWidgets.QLineEdit()
         self.lineEdit_builder_project.setPlaceholderText("Optional .pydpj project")
         self.pushButton_browse_builder_project = QtWidgets.QPushButton("Browse")
         self.pushButton_import_builder_project = QtWidgets.QPushButton("Import")
+        self.pushButton_browse_builder_project.setMinimumWidth(78)
+        self.pushButton_import_builder_project.setMinimumWidth(78)
         metadata_grid.addWidget(QtWidgets.QLabel("Project:"), 0, 0)
         metadata_grid.addWidget(self.lineEdit_builder_project, 0, 1)
         metadata_grid.addWidget(self.pushButton_browse_builder_project, 0, 2)
@@ -600,6 +620,8 @@ class Ui_MainWindow(object):
         self.lineEdit_fabrication_folder.setPlaceholderText("Optional fabrication spreadsheet folder")
         self.pushButton_browse_fabrication_folder = QtWidgets.QPushButton("Browse")
         self.pushButton_load_fabrication = QtWidgets.QPushButton("Load")
+        self.pushButton_browse_fabrication_folder.setMinimumWidth(78)
+        self.pushButton_load_fabrication.setMinimumWidth(78)
         metadata_grid.addWidget(QtWidgets.QLabel("Fabrication:"), 1, 0)
         metadata_grid.addWidget(self.lineEdit_fabrication_folder, 1, 1)
         metadata_grid.addWidget(self.pushButton_browse_fabrication_folder, 1, 2)
@@ -626,11 +648,11 @@ class Ui_MainWindow(object):
 
         # Process progress and time remaining
         self.progressBar_process = QtWidgets.QProgressBar()
-        grid.addWidget(self.progressBar_process, 8, 0, 1, 2)
+        sticky_status_layout.addWidget(self.progressBar_process)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
-        grid.addWidget(self.label_time_remaining, 9, 0, 1, 2)
+        sticky_status_layout.addWidget(self.label_time_remaining)
         self.label_time_to_limit = QtWidgets.QLabel("To limit: N/A")
-        grid.addWidget(self.label_time_to_limit, 10, 0, 1, 2)
+        sticky_status_layout.addWidget(self.label_time_to_limit)
 
         # Live values group
         self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
@@ -657,7 +679,7 @@ class Ui_MainWindow(object):
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_live_values, 11, 0, 1, 2)
+        grid.addWidget(self.groupBox_live_values, 8, 0, 1, 2)
 
         # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")

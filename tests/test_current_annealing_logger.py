@@ -435,6 +435,49 @@ def test_current_annealing_hides_current_density_without_diameter(qtbot) -> None
     assert window.ui.label_step_density.isHidden()
 
 
+def test_current_annealing_process_settings_layout_has_room_for_density(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1180, 760)
+    window.ui.doubleSpinBox_wire_diameter_um.setValue(19.1)
+    window.ui.spinBox_max_current.setValue(600)
+    window.ui.spinBox_start_current.setValue(100)
+    window.ui.spinBox_step_mA.setValue(10.0)
+    window._refresh_config_current_density_labels()
+    window.show()
+    qtbot.wait(50)
+
+    def _window_rect(widget: object) -> object:
+        top_left = widget.mapTo(window, logger_mod.QtCore.QPoint(0, 0))
+        return logger_mod.QtCore.QRect(top_left, widget.size())
+
+    rows = [
+        (window.ui.label_max_current, window.ui.spinBox_max_current, window.ui.label_max_current_density),
+        (window.ui.label_step, window.ui.spinBox_step_mA, window.ui.label_step_density),
+        (window.ui.label_start_current, window.ui.spinBox_start_current, window.ui.label_start_current_density),
+    ]
+    for label, spin, density in rows:
+        rects = [_window_rect(widget) for widget in (label, spin, density)]
+        assert rects[0].right() < rects[1].left()
+        assert rects[1].right() < rects[2].left()
+        assert not rects[0].intersects(rects[1])
+        assert not rects[1].intersects(rects[2])
+        assert density.width() >= density.sizeHint().width()
+
+
+def test_current_annealing_progress_is_pinned_above_run_buttons(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1180, 760)
+    window.show()
+    qtbot.wait(50)
+
+    assert not window.ui.groupBox_process_settings.isAncestorOf(window.ui.progressBar_process)
+    progress_top = window.ui.progressBar_process.mapTo(window, logger_mod.QtCore.QPoint(0, 0)).y()
+    button_top = window.ui.pushButton_start_process.mapTo(window, logger_mod.QtCore.QPoint(0, 0)).y()
+    assert progress_top < button_top
+
+
 def test_current_annealing_imports_project_diameter_and_autocomplete(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
