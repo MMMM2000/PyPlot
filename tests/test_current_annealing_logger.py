@@ -408,6 +408,17 @@ def test_current_annealing_hides_legacy_hold_controls(qtbot) -> None:
     assert not hasattr(logger_mod.MainWindow, "_percent_from_hold")
 
 
+def test_current_annealing_hides_legacy_command_panel(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window.ui.frame_command_and_response.isHidden()
+    assert hasattr(window.ui, "lineEdit_serial_command")
+    assert hasattr(window.ui, "pushButton_send_serial_command")
+    assert hasattr(window.ui, "label_last_command")
+    assert hasattr(window.ui, "label_serial_response")
+
+
 def test_current_annealing_voltage_limit_no_longer_holds_current(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

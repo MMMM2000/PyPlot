@@ -690,6 +690,7 @@ class Ui_MainWindow(object):
             header.setArrowType(QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow)
 
         header.toggled.connect(_toggle_cmds)
+        self.frame_command_and_response.setVisible(False)
 
         # Status bar
         self.statusBar = QtWidgets.QStatusBar(MainWindow)
