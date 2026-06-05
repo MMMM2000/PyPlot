@@ -24,6 +24,26 @@ def _wheel_event(delta_y: int = -120) -> object:
     )
 
 
+class _MemorySettings:
+    def __init__(self, store: dict[str, object]) -> None:
+        self._store = store
+
+    def value(self, key: str, default: object = None, type: type | None = None) -> object:
+        value = self._store.get(key, default)
+        if type is not None and value is not None:
+            return type(value)
+        return value
+
+    def setValue(self, key: str, value: object) -> None:
+        self._store[key] = value
+
+    def contains(self, key: str) -> bool:
+        return key in self._store
+
+    def sync(self) -> None:
+        pass
+
+
 class _FakeBrokerClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -203,7 +223,11 @@ def test_shared_broker_profile_is_available() -> None:
     assert "shared_hmp_broker" in logger_mod.SUPPLY_PROFILES
 
 
-def test_current_annealing_defaults_to_shared_broker_without_channel(qtbot) -> None:
+def test_current_annealing_defaults_to_shared_broker_without_channel(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(logger_mod.QtCore, "QSettings", lambda *_args: _MemorySettings({}))
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     window._apply_supply_profile("shared_hmp_broker")
@@ -215,6 +239,26 @@ def test_current_annealing_defaults_to_shared_broker_without_channel(qtbot) -> N
     assert not window.ui.comboBox_channel.isHidden()
     assert window.max_voltage == pytest.approx(32.05)
     assert window.ui.spinBox_broker_port.value() == 8765
+
+
+def test_current_annealing_shared_broker_restores_saved_channel(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: dict[str, object] = {}
+
+    monkeypatch.setattr(logger_mod.QtCore, "QSettings", lambda *_args: _MemorySettings(saved))
+
+    first = logger_mod.MainWindow()
+    qtbot.addWidget(first)
+    first._apply_supply_profile("shared_hmp_broker")
+    assert first.channel_select == 0
+    first.ui.comboBox_channel.setCurrentIndex(first.ui.comboBox_channel.findData(1))
+    assert saved["supply_profile/shared_hmp_broker/channel_select"] == 1
+
+    second = logger_mod.MainWindow()
+    qtbot.addWidget(second)
+    second._apply_supply_profile("shared_hmp_broker")
+
+    assert second.channel_select == 1
+    assert second.ui.comboBox_channel.currentData() == 1
 
 
 def test_current_annealing_shared_broker_hides_advanced_hmp_port_options(qtbot) -> None:
@@ -494,7 +538,7 @@ def test_current_annealing_channel_dropdown_tracks_detected_hmp_model(qtbot) -> 
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
 
-    window._set_detected_hmp_profile(logger_mod.HMP4030_PROFILE)
+    window._set_detected_hmp_profile(logger_mod.HMP4030_PROFILE, selected=0)
     assert [window.ui.comboBox_channel.itemText(i) for i in range(window.ui.comboBox_channel.count())] == [
         "Select channel...",
         "CH1",
@@ -514,6 +558,10 @@ def test_current_annealing_channel_dropdown_tracks_detected_hmp_model(qtbot) -> 
         "CH3",
         "CH4",
     ]
+    assert window.ui.comboBox_channel.currentData() == 2
+    assert window.channel_select == 2
+
+    window._set_detected_hmp_profile(logger_mod.HMP4030_PROFILE, selected=4)
     assert window.ui.comboBox_channel.currentData() is None
     assert window.channel_select == 0
 
@@ -530,7 +578,11 @@ def test_current_annealing_ramp_rate_rounds_to_hmp_resolution(qtbot) -> None:
     assert window.ui.spinBox_step_mA.value() == pytest.approx(0.2)
 
 
-def test_current_annealing_preflight_blocks_shared_broker_without_channel(qtbot) -> None:
+def test_current_annealing_preflight_blocks_shared_broker_without_channel(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(logger_mod.QtCore, "QSettings", lambda *_args: _MemorySettings({}))
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
 

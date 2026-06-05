@@ -2698,7 +2698,7 @@ class MainWindow(QtWidgets.QMainWindow):
             legacy_spin.setValue(self.channel_select)
             legacy_spin.blockSignals(False)
 
-    def _set_detected_hmp_profile(self, profile: SupplyProfile, *, selected: int = 0) -> None:
+    def _set_detected_hmp_profile(self, profile: SupplyProfile, *, selected: int | None = None) -> None:
         self._detected_hmp_profile = profile
         volt_spin = getattr(self.ui, 'spinBox_max_voltage', None)
         if isinstance(volt_spin, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
@@ -2710,7 +2710,9 @@ class MainWindow(QtWidgets.QMainWindow):
             volt_spin.blockSignals(False)
             self.max_voltage = float(volt_spin.value())
             self.open_threshold = self.max_voltage
-        if selected < 1 or selected > profile.channel_count:
+        if selected is None:
+            selected = int(getattr(self, "channel_select", 0) or 0)
+        if int(selected or 0) < 1 or int(selected or 0) > profile.channel_count:
             selected = 0
         self._populate_channel_options(profile.channel_count, selected=selected)
 
@@ -2785,7 +2787,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.reset_on_start = bool(reset_box.isChecked())
         hmp_profile = self._hmp_profile_for_supply_profile(profile_id)
         if hmp_profile is not None:
-            self._set_detected_hmp_profile(hmp_profile)
+            default_channel = int(profile.get("channel_select", 0) or 0)
+            selected_channel = self._load_profile_int(profile_id, "channel_select", default_channel, 0)
+            self._set_detected_hmp_profile(hmp_profile, selected=selected_channel)
         else:
             self._populate_channel_options(0, selected=0)
         try:
