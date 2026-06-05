@@ -1132,6 +1132,34 @@ def test_live_dashboard_draws_pyqtgraph_segments(qtbot) -> None:
     assert all(hasattr(item, "setData") for item in window._segment_lines_ax1)
 
 
+def test_live_dashboard_keeps_real_start_current_point(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.start_current_mA = 1
+    window._reset_sample_buffers()
+
+    window._append_measurement_sample(1.0, 98.0)
+    window._append_measurement_sample(2.0, 100.0)
+
+    assert window._samples_current == [1.0, 2.0]
+    assert window._samples_resistance == [98.0, 100.0]
+
+
+def test_live_dashboard_skips_sub_start_current_points(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.start_current_mA = 1
+    window._reset_sample_buffers()
+
+    window._append_measurement_sample(0.2, 0.0)
+    window._append_measurement_sample(1.0, 98.0)
+
+    assert window._samples_current == [1.0]
+    assert window._samples_resistance == [98.0]
+
+
 def test_live_dashboard_groups_pyqtgraph_segments_by_direction(qtbot) -> None:
     pytest.importorskip("pyqtgraph")
     window = logger_mod.MainWindow()
@@ -1315,6 +1343,25 @@ def test_shared_broker_measurement_retries_transient_missing_readback(qtbot) -> 
     assert window.current_current_read == pytest.approx(0.008)
     latest_calls = [call for call in fake.calls if call[0] == "latest_readback"]
     assert len(latest_calls) == 2
+
+
+def test_shared_broker_measurement_skips_sub_start_current_readback(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    fake.readbacks = [{"voltage_V": 0.05, "current_mA": 0.2}]
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.start_current_mA = 1
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.current_resistance = 0.0
+
+    assert window._read_shared_broker_sample() is True
+
+    assert window._skip_current_sample is True
+    assert window.current_current_read == pytest.approx(0.0002)
+    assert window.current_resistance == pytest.approx(0.0)
 
 
 def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> None:

@@ -1015,25 +1015,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _append_measurement_sample(self, current_mA: float, resistance: float) -> None:
         if not math.isfinite(current_mA) or not math.isfinite(resistance):
             return
-        if current_mA <= 0.0:
+        if current_mA < self._minimum_plottable_current_mA():
             return
         self._remove_placeholder_text()
         self._samples_current.append(float(current_mA))
         self._samples_resistance.append(float(resistance))
-        if len(self._samples_current) > 1:
-            step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
-            tolerance = max(0.5, step_value * 0.6)
-            trimmed_currents: List[float] = []
-            trimmed_resistances: List[float] = []
-            total = len(self._samples_current)
-            for idx, (curr, res) in enumerate(zip(self._samples_current, self._samples_resistance)):
-                if abs(curr - 1.0) <= tolerance and idx < total - 1:
-                    continue
-                trimmed_currents.append(curr)
-                trimmed_resistances.append(res)
-            if len(trimmed_currents) != len(self._samples_current):
-                self._samples_current = trimmed_currents
-                self._samples_resistance = trimmed_resistances
         self.sample_index = len(self._samples_current)
         self._redraw_segments()
 
@@ -1936,7 +1922,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self.current_voltage = float(voltage)
         self.current_current_read = float(current_mA) / 1000.0
-        if abs(self.current_current_read) < 1e-12:
+        if float(current_mA) < self._minimum_plottable_current_mA():
             self._skip_current_sample = True
             self.sample_ready = True
             return True
@@ -2110,6 +2096,8 @@ class MainWindow(QtWidgets.QMainWindow):
         voltage = float(self.current_voltage)
         resistance = float(self.current_resistance)
         if not math.isfinite(current_mA) or not math.isfinite(resistance):
+            return
+        if current_mA < self._minimum_plottable_current_mA():
             return
         if not self.f_out:
             try:
@@ -2320,7 +2308,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     except ValueError:
                         self.lock.unlock()
                         return
-                    if abs(self.current_current_read) < 1e-12:
+                    if self.current_current_read * 1000.0 < self._minimum_plottable_current_mA():
                         self._skip_current_sample = True
                         try:
                             now = time.monotonic()
@@ -2668,6 +2656,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return max(0.0, float(profile.get("min_current_mA", fallback) or 0.0))
         except Exception:
             return 0.0
+
+    def _minimum_plottable_current_mA(self) -> float:
+        try:
+            start_current = float(getattr(self, "start_current_mA", self._min_positive_current_mA()) or 0.0)
+        except Exception:
+            start_current = self._min_positive_current_mA()
+        return max(self._min_positive_current_mA(), start_current)
 
     def _quantize_current_ramp_mA_s(self, value: float) -> float:
         resolution = self._current_resolution_mA()
