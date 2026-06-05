@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import csv
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -11,6 +12,7 @@ import pytest
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from data_logging.ac_susceptibility_logger import lcr6000
+from data_logging.ac_susceptibility_logger import offline_baseline
 from data_logging.ac_susceptibility_logger import psu_watchdog
 from data_logging.ac_susceptibility_logger import sweep
 
@@ -878,6 +880,57 @@ def test_sweep_metadata_snapshot_includes_shared_broker_and_debug_settings(tmp_p
     assert snapshot["lcr_correction"]["open_enabled"] is True
     assert snapshot["lcr_correction"]["short_enabled"] is False
     assert snapshot["lcr_correction"]["source"] == "queried_meter"
+
+
+def test_offline_empty_coil_baseline_subtraction_preserves_raw_columns(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.tsv"
+    sweep_path = tmp_path / "sweep.tsv"
+    output = tmp_path / "sweep_empty_coil_subtracted.tsv"
+    baseline.write_text(
+        "\n".join(
+            [
+                "# baseline",
+                "# Timestamp UTC\tBaseline setting index\tBaseline repeat index\tLCR frequency (Hz)\tLCR level mode\tLCR level\tLCR function\tLCR primary\tLCR secondary\tLCR monitor1\tLCR monitor2\tLCR comparator\tLCR raw",
+                "2026-06-05T10:00:00Z\t1\t1\t1000\tcurrent\t0.01\tLs-Rs\t20\t2\t\t\t\t",
+                "2026-06-05T10:00:01Z\t1\t2\t1000\tcurrent\t0.01\tLs-Rs\t22\t4\t\t\t\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    sweep_path.write_text(
+        "\n".join(
+            [
+                "# sweep",
+                sweep.SWEEP_HEADER_LINE,
+                "2026-06-05T11:00:00Z\t0\t1\t1\tLs-Rs\t1000\tcurrent\t0.01\t0.02\t0.021\t1\t47.6\t0.021\tup\t1\t25\t7\t\t\t\tshared_hmp_broker\t127.0.0.1:8765/CH1\tok\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = offline_baseline.subtract_file(
+        sweep_path=sweep_path,
+        baseline_path=baseline,
+        output_path=output,
+    )
+
+    assert summary.total_rows == 1
+    assert summary.subtracted_rows == 1
+    text = output.read_text(encoding="utf-8")
+    assert "# baseline_subtraction_json=" in text
+    lines = text.splitlines()
+    header = [line.removeprefix("# ").split("\t") for line in lines if line.startswith("# Timestamp UTC")][-1]
+    data_lines = [line for line in lines if line and not line.startswith("#")]
+    row = next(csv.DictReader(data_lines, fieldnames=header, delimiter="\t"))
+    assert row["LCR primary"] == "25"
+    assert row["LCR secondary"] == "7"
+    assert row["LCR primary empty-coil baseline"] == "21"
+    assert row["LCR secondary empty-coil baseline"] == "3"
+    assert row["LCR primary baseline subtracted"] == "4"
+    assert row["LCR secondary baseline subtracted"] == "4"
+    assert row["Empty-coil baseline status"] == "subtracted"
 
 
 def test_shared_broker_current_source_leases_turns_off_and_releases_only_channel() -> None:

@@ -141,6 +141,23 @@ Point acquisition controls are named for the AC experiment:
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.
 
+To subtract an empty-coil baseline offline without modifying the measured sweep,
+use:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\ac_lcr_subtract_empty_coil.py `
+  path\to\microwire_sweep.tsv `
+  --baseline path\to\ac_susc_empty_coil_baseline.tsv
+```
+
+The command writes a derived `<sweep>_empty_coil_subtracted.tsv` file. Original
+`LCR primary` and `LCR secondary` columns are preserved, and new columns contain
+the matched empty-coil mean and baseline-subtracted values. Matching is by LCR
+function, frequency, excitation mode, and excitation level. Use a baseline
+measured with the same LCR open/short correction state as the sweep; for an
+overnight uncorrected sweep, pair it with the uncorrected empty-coil baseline
+from that run rather than a newly corrected baseline.
+
 Each generated TSV begins with commented metadata lines. Both empty-coil
 baseline and microwire sweep files include a compact `config_json` snapshot with
 the selected LCR settings, acquisition timing, current-loop points and
