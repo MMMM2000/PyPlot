@@ -35,6 +35,8 @@ from plotting.shared.utils import ensure_app_theme
 
 from .lcr6000 import (
     DEFAULT_BAUDRATE,
+    LcrCorrectionResult,
+    LcrCorrectionStatus,
     Lcr6000Reading,
     Lcr6000Serial,
     Lcr6000Settings,
@@ -308,6 +310,7 @@ class AcBaselineWorker(QtCore.QObject):
         point_duration_s: float,
         settle_s: float,
         total_planned_s: float,
+        lcr_correction: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.meter = meter
@@ -316,6 +319,7 @@ class AcBaselineWorker(QtCore.QObject):
         self.point_duration_s = max(0.0, float(point_duration_s))
         self.settle_s = max(0.0, float(settle_s))
         self.total_planned_s = max(0.001, float(total_planned_s))
+        self.lcr_correction = lcr_correction
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -341,6 +345,7 @@ class AcBaselineWorker(QtCore.QObject):
                     self.plan,
                     point_duration_s=self.point_duration_s,
                     settle_s=self.settle_s,
+                    lcr_correction=self.lcr_correction,
                 )
                 for setting_index, setting in enumerate(self.plan, start=1):
                     if self._stop_requested:
@@ -491,6 +496,31 @@ class AcBaselineWorker(QtCore.QObject):
             f"{message}\n"
         )
         fh.flush()
+
+
+class LcrCorrectionWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(str, object, object)
+    failed = QtCore.pyqtSignal(str, str)
+
+    def __init__(self, *, meter: Any, kind: str, timeout_s: float = 120.0) -> None:
+        super().__init__()
+        self.meter = meter
+        self.kind = kind
+        self.timeout_s = max(1.0, float(timeout_s))
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            if self.kind == "open":
+                result = self.meter.run_open_lcr_correction(timeout_s=self.timeout_s)
+            elif self.kind == "short":
+                result = self.meter.run_short_lcr_correction(timeout_s=self.timeout_s)
+            else:
+                raise ValueError(f"unsupported LCR correction kind: {self.kind}")
+            status = self.meter.correction_status()
+            self.finished.emit(self.kind, result, status)
+        except Exception as exc:
+            self.failed.emit(self.kind, str(exc))
 
 
 class AcSweepWorker(QtCore.QObject):
@@ -686,6 +716,14 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_shared_broker_channel = AC_DEFAULT_BROKER_CHANNEL
         self._ac_shared_broker_channel_confirmed = False
         self._ac_lcr_chip_syncing = False
+        self._lcr_correction_status = LcrCorrectionStatus(
+            open_enabled=None,
+            short_enabled=None,
+            checked_utc="",
+            raw_open_state="",
+            raw_short_state="",
+        )
+        self._lcr_correction_last_result: LcrCorrectionResult | None = None
         self._ac_progress_units = "count"
         self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
@@ -1993,6 +2031,18 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_lcr_all_frequencies = QtWidgets.QPushButton("All practical frequencies", group)
         self.pushButton_lcr_all_levels = QtWidgets.QPushButton("All currents", group)
         self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure empty-coil baseline", group)
+        self.pushButton_lcr_open_correction = QtWidgets.QPushButton("Open", group)
+        self.pushButton_lcr_open_correction.setToolTip(
+            "Run AC open correction on the LCR meter with the fixture open and no DUT connected."
+        )
+        self.pushButton_lcr_short_correction = QtWidgets.QPushButton("Short", group)
+        self.pushButton_lcr_short_correction.setToolTip(
+            "Run AC short correction on the LCR meter with the fixture terminals shorted."
+        )
+        self.pushButton_lcr_disable_correction = QtWidgets.QPushButton("Disable", group)
+        self.pushButton_lcr_disable_correction.setToolTip("Disable stored LCR open and short correction.")
+        self.label_lcr_correction_status = QtWidgets.QLabel("Not checked", group)
+        self.label_lcr_correction_status.setWordWrap(True)
         self.label_ac_psu_status = QtWidgets.QLabel("", group)
         self.label_ac_psu_status.setWordWrap(True)
         self.spinBox_ac_voltage_limit = CompactDoubleSpinBox(group)
@@ -2115,8 +2165,16 @@ class MainWindow(CurrentAnnealingWindow):
         grid.addWidget(self.comboBox_lcr_level_mode, 6, 1)
         grid.addWidget(self.comboBox_lcr_function, 6, 2)
         grid.addWidget(self.checkBox_lcr_model_lsrs, 6, 3)
-        grid.addWidget(self.checkBox_ac_plan_loops, 7, 0)
-        grid.addWidget(self.pushButton_apply_lcr_setting, 7, 3)
+        grid.addWidget(QtWidgets.QLabel("Fixture correction:", group), 7, 0)
+        correction_row = QtWidgets.QHBoxLayout()
+        correction_row.setContentsMargins(0, 0, 0, 0)
+        correction_row.addWidget(self.pushButton_lcr_open_correction)
+        correction_row.addWidget(self.pushButton_lcr_short_correction)
+        correction_row.addWidget(self.pushButton_lcr_disable_correction)
+        grid.addLayout(correction_row, 7, 1)
+        grid.addWidget(self.label_lcr_correction_status, 7, 2, 1, 2)
+        grid.addWidget(self.checkBox_ac_plan_loops, 8, 0)
+        grid.addWidget(self.pushButton_apply_lcr_setting, 8, 3)
         outer.addLayout(grid)
 
         plan_group = QtWidgets.QGroupBox("Experiment plan", group)
@@ -2176,6 +2234,9 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_auto_setup.clicked.connect(self.handle_auto_setup_clicked)
         self.pushButton_ac_hardware_details.toggled.connect(self._set_ac_hardware_details_visible)
         self.pushButton_apply_lcr_setting.clicked.connect(self.handle_apply_lcr_setting_clicked)
+        self.pushButton_lcr_open_correction.clicked.connect(lambda: self.handle_lcr_correction_clicked("open"))
+        self.pushButton_lcr_short_correction.clicked.connect(lambda: self.handle_lcr_correction_clicked("short"))
+        self.pushButton_lcr_disable_correction.clicked.connect(self.handle_disable_lcr_correction_clicked)
         self.pushButton_measure_lcr_baseline.clicked.connect(self.handle_measure_lcr_baseline_clicked)
         self.pushButton_run_ac_sweep.clicked.connect(self.handle_run_ac_sweep_clicked)
         self.pushButton_continue_ac_sweep.clicked.connect(self.handle_continue_ac_sweep_clicked)
@@ -2721,6 +2782,7 @@ class MainWindow(CurrentAnnealingWindow):
                     self.pushButton_connect_lcr.setText("Disconnect LCR")
                     self.label_lcr_status.setText(f"Connected: {idn or port}")
                     self._configure_lcr_for_current_index()
+                    self._refresh_lcr_correction_status()
                     lcr_connected = True
                 except Exception as exc:
                     self.lcr_meter = None
@@ -2770,6 +2832,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.lcr_meter = None
             self.pushButton_connect_lcr.setText("Connect LCR")
             self.label_lcr_status.setText("LCR disconnected")
+            self._refresh_lcr_correction_status()
             self._refresh_ac_hardware_status()
             return
         port = str(self.comboBox_lcr_port.currentData() or "").strip()
@@ -2787,6 +2850,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_connect_lcr.setText("Disconnect LCR")
         self.label_lcr_status.setText(f"Connected: {idn or port}")
         self._configure_lcr_for_current_index()
+        self._refresh_lcr_correction_status()
         self._refresh_ac_hardware_status()
 
     def handle_identify_lcr_clicked(self) -> None:
@@ -2800,11 +2864,161 @@ class MainWindow(CurrentAnnealingWindow):
             self.label_lcr_status.setText(f"Identify failed: {exc}")
             return
         self.label_lcr_status.setText(f"Connected: {idn}")
+        self._refresh_lcr_correction_status()
 
     def handle_apply_lcr_setting_clicked(self) -> None:
         self._prepare_lcr_plan()
         self._lcr_plan_index = 0
         self._configure_lcr_for_current_index(show_errors=True)
+
+    def _set_lcr_correction_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            getattr(self, "pushButton_lcr_open_correction", None),
+            getattr(self, "pushButton_lcr_short_correction", None),
+            getattr(self, "pushButton_lcr_disable_correction", None),
+        ):
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(enabled)
+
+    def _set_lcr_correction_busy(self, busy: bool) -> None:
+        self._set_lcr_correction_controls_enabled(not busy)
+        for widget in (
+            getattr(self, "pushButton_measure_lcr_baseline", None),
+            getattr(self, "pushButton_run_ac_sweep", None),
+            getattr(self, "pushButton_continue_ac_sweep", None),
+        ):
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(not busy)
+
+    def _update_lcr_correction_status_label(self) -> None:
+        status = self._lcr_correction_status
+
+        def fmt(value: bool | None) -> str:
+            if value is True:
+                return "on"
+            if value is False:
+                return "off"
+            return "unknown"
+
+        label = getattr(self, "label_lcr_correction_status", None)
+        if isinstance(label, QtWidgets.QLabel):
+            if status.checked_utc:
+                label.setText(f"Open {fmt(status.open_enabled)}, short {fmt(status.short_enabled)}")
+            else:
+                label.setText("Not checked")
+
+    def _refresh_lcr_correction_status(self) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            self._lcr_correction_status = LcrCorrectionStatus(
+                open_enabled=None,
+                short_enabled=None,
+                checked_utc="",
+                raw_open_state="",
+                raw_short_state="",
+            )
+            self._update_lcr_correction_status_label()
+            return
+        try:
+            self._lcr_correction_status = meter.correction_status()
+        except Exception as exc:
+            self.label_lcr_status.setText(f"LCR correction status failed: {exc}")
+        self._update_lcr_correction_status_label()
+
+    def handle_lcr_correction_clicked(self, kind: str) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
+            return
+        if self._ac_sweep_running or self._ac_worker is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "AC run active",
+                "Wait until the current AC LCR operation finishes before running fixture correction.",
+            )
+            return
+        if kind == "open":
+            message = (
+                "Open-circuit the LCR fixture terminals with no DUT connected, then start AC open correction. "
+                "This talks only to the LCR meter and does not touch the PSU."
+            )
+        elif kind == "short":
+            message = (
+                "Short-circuit the LCR fixture terminals at the measurement contacts, then start AC short correction. "
+                "This talks only to the LCR meter and does not touch the PSU."
+            )
+        else:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            f"Run LCR {kind} correction",
+            message,
+            QtWidgets.QMessageBox.StandardButton.Ok | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Ok:
+            return
+        worker = LcrCorrectionWorker(meter=meter, kind=kind, timeout_s=180.0)
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        worker.finished.connect(self._handle_lcr_correction_finished)
+        worker.failed.connect(self._handle_lcr_correction_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_ac_worker_refs)
+        self._ac_worker = worker
+        self._ac_worker_thread = thread
+        self._set_lcr_correction_busy(True)
+        self.label_lcr_status.setText(f"Running LCR {kind} correction...")
+        thread.start()
+
+    def handle_disable_lcr_correction_clicked(self) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
+            return
+        if self._ac_sweep_running or self._ac_worker is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "AC run active",
+                "Wait until the current AC LCR operation finishes before changing fixture correction.",
+            )
+            return
+        try:
+            self._lcr_correction_status = meter.set_correction_state(open_enabled=False, short_enabled=False)
+            self._lcr_correction_last_result = None
+            self._update_lcr_correction_status_label()
+            self.label_lcr_status.setText("LCR open/short correction disabled")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "LCR correction failed", str(exc))
+            self.label_lcr_status.setText(f"LCR correction disable failed: {exc}")
+
+    def _handle_lcr_correction_finished(
+        self,
+        kind: str,
+        result: LcrCorrectionResult,
+        status: LcrCorrectionStatus,
+    ) -> None:
+        self._lcr_correction_last_result = result
+        self._lcr_correction_status = status
+        self._set_lcr_correction_busy(False)
+        self._update_lcr_correction_status_label()
+        outcome = "finished" if result.passed else "failed"
+        self.label_lcr_status.setText(f"LCR {kind} correction {outcome}: {', '.join(result.responses)}")
+        if not result.passed:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "LCR correction failed",
+                f"LCR {kind} correction returned: {', '.join(result.responses)}",
+            )
+
+    def _handle_lcr_correction_failed(self, kind: str, message: str) -> None:
+        self._set_lcr_correction_busy(False)
+        self.label_lcr_status.setText(f"LCR {kind} correction failed: {message}")
+        QtWidgets.QMessageBox.warning(self, "LCR correction failed", message)
 
     def handle_run_ac_sweep_clicked(self) -> None:
         if self._ac_sweep_running:
@@ -3030,6 +3244,7 @@ class MainWindow(CurrentAnnealingWindow):
                 point_duration_s=point_duration,
                 settle_s=dwell,
                 total_planned_s=baseline_seconds,
+                lcr_correction=self._lcr_correction_metadata(),
             )
             thread = QtCore.QThread(self)
             worker.moveToThread(thread)
@@ -3360,7 +3575,41 @@ class MainWindow(CurrentAnnealingWindow):
             lcr_continuous_log_cadence_s=self._lcr_debug_log_cadence_s(),
             lcr_continuous_log_aggregate_s=self._lcr_debug_log_cadence_s(),
             lcr_continuous_log_max_rows_per_point=self._lcr_debug_log_max_rows_per_point(),
+            lcr_correction=self._lcr_correction_metadata(),
         )
+
+    def _lcr_correction_metadata(self) -> dict[str, Any]:
+        try:
+            status = self._lcr_correction_status
+        except RuntimeError:
+            status = LcrCorrectionStatus(
+                open_enabled=None,
+                short_enabled=None,
+                checked_utc="",
+                raw_open_state="",
+                raw_short_state="",
+            )
+        try:
+            result = self._lcr_correction_last_result
+        except RuntimeError:
+            result = None
+        payload: dict[str, Any] = {
+            "open_enabled": status.open_enabled,
+            "short_enabled": status.short_enabled,
+            "checked_utc": status.checked_utc,
+            "source": "queried_meter" if status.checked_utc else "not_checked",
+            "raw_open_state": status.raw_open_state,
+            "raw_short_state": status.raw_short_state,
+            "mode": "full_range_lcr_open_short",
+        }
+        if result is not None:
+            payload["last_result"] = {
+                "kind": result.kind,
+                "passed": bool(result.passed),
+                "timestamp_utc": result.timestamp_utc,
+                "responses": list(result.responses),
+            }
+        return payload
 
     def _lcr_debug_log_enabled(self) -> bool:
         try:
@@ -4283,6 +4532,7 @@ class MainWindow(CurrentAnnealingWindow):
         *,
         point_duration_s: float | None = None,
         settle_s: float | None = None,
+        lcr_correction: dict[str, Any] | None = None,
     ) -> None:
         fh.write("# AC susceptibility baseline generated from LCR-6200 settings\n")
         fh.write(
@@ -4291,6 +4541,7 @@ class MainWindow(CurrentAnnealingWindow):
                 plan,
                 point_duration_s=point_duration_s,
                 settle_s=settle_s,
+                lcr_correction=lcr_correction,
             )
             + "\n"
         )
@@ -4306,6 +4557,7 @@ class MainWindow(CurrentAnnealingWindow):
         *,
         point_duration_s: float | None = None,
         settle_s: float | None = None,
+        lcr_correction: dict[str, Any] | None = None,
     ) -> str:
         snapshot = {
             "run_type": "empty_coil_baseline",
@@ -4314,6 +4566,12 @@ class MainWindow(CurrentAnnealingWindow):
             "acquisition": {
                 "point_duration_s": None if point_duration_s is None else float(point_duration_s),
                 "settle_s": None if settle_s is None else float(settle_s),
+            },
+            "lcr_correction": lcr_correction or {
+                "open_enabled": None,
+                "short_enabled": None,
+                "checked_utc": "",
+                "source": "not_checked",
             },
             "lcr_settings": [
                 {

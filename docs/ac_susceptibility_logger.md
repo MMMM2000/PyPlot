@@ -91,6 +91,18 @@ recorded are skipped. Any partially recorded AC setting is measured again from
 its first current point, then the missing settings continue into a new
 timestamped TSV file.
 
+Use **Open** and **Short** under **Fixture correction** when the LCR fixture,
+clips, coil wiring, or cable routing changes. These actions run the LCR-6000
+series full-range AC open/short correction commands only; they do not lease,
+enable, disable, or otherwise command the PSU or shared HMP broker. Open
+correction is done with the fixture connected but no DUT attached. Short
+correction is done with the measurement terminals shorted at the fixture
+contacts. The LCR-6000 manual describes full open/short correction as measuring
+the meter's preset trimming points and interpolating other frequencies, so the
+correction is separate from the logger's selected frequency chips. Use
+**Disable** to turn the stored LCR open/short correction state off without
+clearing the logger's empty-coil baseline workflow.
+
 The AC Susceptibility Logger keeps its output directory and sweep-base setting
 separate from the Current Annealing Logger. By default, AC files go under
 `Downloads/ac_susceptibility` with the sweep base `ac_susc_current_sweep`.
@@ -132,9 +144,10 @@ be done later from the raw TSV files.
 Each generated TSV begins with commented metadata lines. Both empty-coil
 baseline and microwire sweep files include a compact `config_json` snapshot with
 the selected LCR settings, acquisition timing, current-loop points and
-directions, and, for current sweeps, the selected PSU backend/resource/voltage
-limit and retry settings. This makes partial or overnight files self-describing
-for debugging even if UI settings are changed later.
+directions, the last queried LCR open/short correction state, and, for current
+sweeps, the selected PSU backend/resource/voltage limit and retry settings. This
+makes partial or overnight files self-describing for debugging even if UI
+settings are changed later.
 
 Suggested precision-baseline settings for the 1 cm, roughly 1 mm coil around a
 Ni50Fe27Ga23 microwire:
