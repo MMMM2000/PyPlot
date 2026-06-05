@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import csv
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -11,6 +12,7 @@ import pytest
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from data_logging.ac_susceptibility_logger import lcr6000
+from data_logging.ac_susceptibility_logger import offline_baseline
 from data_logging.ac_susceptibility_logger import psu_watchdog
 from data_logging.ac_susceptibility_logger import sweep
 
@@ -830,6 +832,7 @@ def test_sweep_metadata_snapshot_includes_full_settings(tmp_path: Path) -> None:
     assert snapshot["acquisition"]["point_duration_s"] == 10.0
     assert snapshot["current_loop"]["points_mA"] == [0.0, 20.0, 40.0]
     assert snapshot["lcr_settings"][1]["function"] == "Lp-Rp"
+    assert snapshot["lcr_correction"]["source"] == "not_checked"
 
 
 def test_sweep_metadata_snapshot_includes_shared_broker_and_debug_settings(tmp_path: Path) -> None:
@@ -850,6 +853,12 @@ def test_sweep_metadata_snapshot_includes_shared_broker_and_debug_settings(tmp_p
         lcr_continuous_log_path=str(tmp_path / "shared-broker_lcr_debug.jsonl"),
         lcr_continuous_log_cadence_s=1.5,
         lcr_continuous_log_max_rows_per_point=42,
+        lcr_correction={
+            "open_enabled": True,
+            "short_enabled": False,
+            "checked_utc": "2026-06-05T12:00:00+00:00",
+            "source": "queried_meter",
+        },
     )
 
     writer = sweep.AcSweepTsvWriter(path, config)
@@ -868,6 +877,60 @@ def test_sweep_metadata_snapshot_includes_shared_broker_and_debug_settings(tmp_p
     assert snapshot["lcr_continuous_log"]["enabled"] is True
     assert snapshot["lcr_continuous_log"]["cadence_s"] == 1.5
     assert snapshot["lcr_continuous_log"]["max_rows_per_point"] == 42
+    assert snapshot["lcr_correction"]["open_enabled"] is True
+    assert snapshot["lcr_correction"]["short_enabled"] is False
+    assert snapshot["lcr_correction"]["source"] == "queried_meter"
+
+
+def test_offline_empty_coil_baseline_subtraction_preserves_raw_columns(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.tsv"
+    sweep_path = tmp_path / "sweep.tsv"
+    output = tmp_path / "sweep_empty_coil_subtracted.tsv"
+    baseline.write_text(
+        "\n".join(
+            [
+                "# baseline",
+                "# Timestamp UTC\tBaseline setting index\tBaseline repeat index\tLCR frequency (Hz)\tLCR level mode\tLCR level\tLCR function\tLCR primary\tLCR secondary\tLCR monitor1\tLCR monitor2\tLCR comparator\tLCR raw",
+                "2026-06-05T10:00:00Z\t1\t1\t1000\tcurrent\t0.01\tLs-Rs\t20\t2\t\t\t\t",
+                "2026-06-05T10:00:01Z\t1\t2\t1000\tcurrent\t0.01\tLs-Rs\t22\t4\t\t\t\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    sweep_path.write_text(
+        "\n".join(
+            [
+                "# sweep",
+                sweep.SWEEP_HEADER_LINE,
+                "2026-06-05T11:00:00Z\t0\t1\t1\tLs-Rs\t1000\tcurrent\t0.01\t0.02\t0.021\t1\t47.6\t0.021\tup\t1\t25\t7\t\t\t\tshared_hmp_broker\t127.0.0.1:8765/CH1\tok\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = offline_baseline.subtract_file(
+        sweep_path=sweep_path,
+        baseline_path=baseline,
+        output_path=output,
+    )
+
+    assert summary.total_rows == 1
+    assert summary.subtracted_rows == 1
+    text = output.read_text(encoding="utf-8")
+    assert "# baseline_subtraction_json=" in text
+    lines = text.splitlines()
+    header = [line.removeprefix("# ").split("\t") for line in lines if line.startswith("# Timestamp UTC")][-1]
+    data_lines = [line for line in lines if line and not line.startswith("#")]
+    row = next(csv.DictReader(data_lines, fieldnames=header, delimiter="\t"))
+    assert row["LCR primary"] == "25"
+    assert row["LCR secondary"] == "7"
+    assert row["LCR primary empty-coil baseline"] == "21"
+    assert row["LCR secondary empty-coil baseline"] == "3"
+    assert row["LCR primary baseline subtracted"] == "4"
+    assert row["LCR secondary baseline subtracted"] == "4"
+    assert row["Empty-coil baseline status"] == "subtracted"
 
 
 def test_shared_broker_current_source_leases_turns_off_and_releases_only_channel() -> None:
@@ -3051,6 +3114,40 @@ def test_ac_logger_auto_setup_keeps_manual_psu_when_id_probe_fails(monkeypatch: 
         app.processEvents()
 
 
+def test_ac_logger_auto_setup_preserves_selected_lcr_frequency_and_level_chips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "auto_setup_preserves_lcr_chip_subset")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM6 - USB", "COM6")])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window.ui.comboBox_port.clear()
+        window.ui.comboBox_port.addItem("COM6 - USB", "COM6")
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window.lineEdit_lcr_frequencies.setText("1000, 5000")
+        window.lineEdit_lcr_levels.setText("1, 10")
+        window._sync_lcr_chips_from_text()
+
+        window.handle_auto_setup_clicked()
+
+        assert window.lineEdit_lcr_frequencies.text() == "1000, 5000"
+        assert window.lineEdit_lcr_levels.text() == "1, 10"
+        assert [(setting.frequency_hz, setting.level_value) for setting in window._prepare_lcr_plan()] == [
+            (1000.0, 0.001),
+            (1000.0, 0.01),
+            (5000.0, 0.001),
+            (5000.0, 0.01),
+        ]
+        assert "kept the manually selected" in window.label_lcr_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_auto_setup_preserves_shared_broker_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3498,6 +3595,84 @@ def test_commands_for_settings_can_drive_lcr_current_level() -> None:
     assert "COMP:STAT OFF\n" in commands
 
 
+def test_lcr_correction_state_helpers_use_lcr6000_scpi_spellings() -> None:
+    assert lcr6000.parse_correction_state("on") is True
+    assert lcr6000.parse_correction_state("OFF") is False
+    assert lcr6000.parse_correction_state("unexpected") is None
+    assert lcr6000.correction_state_commands(open_enabled=True, short_enabled=False) == [
+        "CORR:OPEN:STAT ON\n",
+        "CORR:SHOR:STAT OFF\n",
+    ]
+
+
+def test_lcr_serial_runs_open_short_lcr_correction(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSerialPort:
+        def __init__(self, **_kwargs: object) -> None:
+            self.written: list[bytes] = []
+            self.responses = [
+                b"LCR open\n",
+                b"pass\n",
+                b"on\n",
+                b"off\n",
+                b"LCR short\n",
+                b"pass\n",
+                b"on\n",
+                b"on\n",
+            ]
+            self.is_open = True
+            self.timeout = 1.5
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            pass
+
+        def readline(self) -> bytes:
+            if self.responses:
+                return self.responses.pop(0)
+            return b""
+
+        def reset_input_buffer(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.is_open = False
+
+    fake_serial = FakeSerialPort()
+
+    class FakeSerialModule:
+        EIGHTBITS = 8
+        PARITY_NONE = "N"
+        STOPBITS_ONE = 1
+
+        @staticmethod
+        def Serial(**kwargs: object) -> FakeSerialPort:
+            return fake_serial
+
+    monkeypatch.setattr(lcr6000, "serial", FakeSerialModule)
+
+    meter = lcr6000.Lcr6000Serial("COM9")
+    open_result = meter.run_open_lcr_correction(timeout_s=2.0)
+    open_status = meter.correction_status()
+    short_result = meter.run_short_lcr_correction(timeout_s=2.0)
+    short_status = meter.correction_status()
+
+    assert open_result.kind == "open"
+    assert open_result.passed is True
+    assert open_result.responses == ("LCR open", "pass")
+    assert open_status.open_enabled is True
+    assert open_status.short_enabled is False
+    assert short_result.kind == "short"
+    assert short_result.passed is True
+    assert short_status.open_enabled is True
+    assert short_status.short_enabled is True
+    assert b"CORR:OPEN:LCR\n" in fake_serial.written
+    assert b"CORR:SHOR:LCR\n" in fake_serial.written
+    assert b"CORR:OPEN:STAT?\n" in fake_serial.written
+    assert b"CORR:SHOR:STAT?\n" in fake_serial.written
+
+
 def test_lcr_configure_waits_for_measurement_page(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeSerialPort:
         written: list[bytes]
@@ -3657,6 +3832,119 @@ def test_ac_logger_configure_reports_meter_failure() -> None:
     assert window._configure_lcr_for_current_index() is False
     assert window._lcr_last_error == "meter did not accept setting"
     assert window.label_lcr_status.text == "LCR configure failed: meter did not accept setting"
+
+
+def test_ac_logger_lcr_correction_metadata_tracks_status_and_last_result() -> None:
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window._lcr_correction_status = lcr6000.LcrCorrectionStatus(
+        open_enabled=True,
+        short_enabled=False,
+        checked_utc="2026-06-05T12:00:00+00:00",
+        raw_open_state="on",
+        raw_short_state="off",
+    )
+    window._lcr_correction_last_result = lcr6000.LcrCorrectionResult(
+        kind="open",
+        passed=True,
+        responses=("LCR open", "pass"),
+        timestamp_utc="2026-06-05T12:00:01+00:00",
+    )
+
+    metadata = window._lcr_correction_metadata()
+
+    assert metadata["source"] == "queried_meter"
+    assert metadata["open_enabled"] is True
+    assert metadata["short_enabled"] is False
+    assert metadata["last_result"] == {
+        "kind": "open",
+        "passed": True,
+        "timestamp_utc": "2026-06-05T12:00:01+00:00",
+        "responses": ["LCR open", "pass"],
+    }
+
+
+def test_ac_logger_lcr_correction_progress_uses_busy_progress_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "lcr_correction_progress")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window._set_lcr_correction_progress(kind="open", running=True)
+
+        assert window.progress_ac_run.minimum() == 0
+        assert window.progress_ac_run.maximum() == 0
+        assert "LCR open correction: running on meter" in window.progress_ac_run.format()
+        assert window.label_ac_current_task.text() == "Current task: LCR open correction running"
+
+        window._set_lcr_correction_progress(kind="open", running=False)
+
+        assert window.progress_ac_run.minimum() == 0
+        assert window.progress_ac_run.maximum() == 100
+        assert window.progress_ac_run.format() == "AC progress: idle"
+        assert window.label_ac_current_task.text() == "Current task: idle"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_disable_lcr_correction_does_not_touch_psu(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    class FakeMeter:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[bool | None, bool | None]] = []
+
+        def set_correction_state(
+            self,
+            *,
+            open_enabled: bool | None = None,
+            short_enabled: bool | None = None,
+        ) -> lcr6000.LcrCorrectionStatus:
+            self.calls.append((open_enabled, short_enabled))
+            return lcr6000.LcrCorrectionStatus(
+                open_enabled=False,
+                short_enabled=False,
+                checked_utc="2026-06-05T12:00:00+00:00",
+                raw_open_state="off",
+                raw_short_state="off",
+            )
+
+    class FakeLabel:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.text = text
+
+    monkeypatch.setattr(ac_logger.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ac_logger.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    meter = FakeMeter()
+    window.lcr_meter = meter
+    window._ac_sweep_running = False
+    window._ac_worker = None
+    window._lcr_correction_last_result = object()
+    window.label_lcr_status = FakeLabel()
+    window.label_lcr_correction_status = FakeLabel()
+    window.pushButton_lcr_open_correction = QtWidgets.QPushButton()
+    window.pushButton_lcr_short_correction = QtWidgets.QPushButton()
+    window.pushButton_lcr_disable_correction = QtWidgets.QPushButton()
+
+    window.handle_disable_lcr_correction_clicked()
+
+    assert meter.calls == [(False, False)]
+    assert window._lcr_correction_status.open_enabled is False
+    assert window._lcr_correction_status.short_enabled is False
+    assert window._lcr_correction_last_result is None
+    assert "disabled" in window.label_lcr_status.text
+    app.processEvents()
 
 
 def test_ac_logger_formats_baseline_row_without_current_columns() -> None:

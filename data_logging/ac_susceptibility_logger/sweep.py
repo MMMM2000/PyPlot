@@ -171,6 +171,7 @@ class AcSweepConfig:
     lcr_continuous_log_cadence_s: float = 1.0
     lcr_continuous_log_aggregate_s: float = 1.0
     lcr_continuous_log_max_rows_per_point: int = 120
+    lcr_correction: dict[str, Any] | None = None
 
     @property
     def uses_shared_broker(self) -> bool:
@@ -545,6 +546,12 @@ class AcSweepTsvWriter:
                 "cadence_s": float(self.config.lcr_continuous_log_cadence_s),
                 "aggregate_s": float(self.config.lcr_continuous_log_aggregate_s),
                 "max_rows_per_point": int(self.config.lcr_continuous_log_max_rows_per_point),
+            },
+            "lcr_correction": self.config.lcr_correction or {
+                "open_enabled": None,
+                "short_enabled": None,
+                "checked_utc": "",
+                "source": "not_checked",
             },
             "lcr_slow_retry": {
                 "enabled": bool(self.config.lcr_slow_retry_enabled),

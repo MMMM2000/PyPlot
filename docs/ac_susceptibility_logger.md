@@ -91,9 +91,27 @@ recorded are skipped. Any partially recorded AC setting is measured again from
 its first current point, then the missing settings continue into a new
 timestamped TSV file.
 
+Use **Open** and **Short** under **Fixture correction** when the LCR fixture,
+clips, coil wiring, or cable routing changes. These actions run the LCR-6000
+series full-range AC open/short correction commands only; they do not lease,
+enable, disable, or otherwise command the PSU or shared HMP broker. Open
+correction is done with the fixture connected but no DUT attached. Short
+correction is done with the measurement terminals shorted at the fixture
+contacts. The LCR-6000 manual describes full open/short correction as measuring
+the meter's preset trimming points and interpolating other frequencies, so the
+correction is separate from the logger's selected frequency chips. Use
+**Disable** to turn the stored LCR open/short correction state off without
+clearing the logger's empty-coil baseline workflow.
+
+During open/short correction, the app shows an indeterminate AC progress bar
+while the LCR meter performs the correction. The meter owns the detailed percent
+display; the app disables baseline/sweep actions until the correction returns.
+
 The AC Susceptibility Logger keeps its output directory and sweep-base setting
 separate from the Current Annealing Logger. By default, AC files go under
 `Downloads/ac_susceptibility` with the sweep base `ac_susc_current_sweep`.
+**Auto-connect hardware** connects or refreshes instrument state without
+changing the selected frequency chips, excitation chips, or model options.
 
 Point acquisition controls are named for the AC experiment:
 
@@ -129,12 +147,30 @@ Point acquisition controls are named for the AC experiment:
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.
 
+To subtract an empty-coil baseline offline without modifying the measured sweep,
+use:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\ac_lcr_subtract_empty_coil.py `
+  path\to\microwire_sweep.tsv `
+  --baseline path\to\ac_susc_empty_coil_baseline.tsv
+```
+
+The command writes a derived `<sweep>_empty_coil_subtracted.tsv` file. Original
+`LCR primary` and `LCR secondary` columns are preserved, and new columns contain
+the matched empty-coil mean and baseline-subtracted values. Matching is by LCR
+function, frequency, excitation mode, and excitation level. Use a baseline
+measured with the same LCR open/short correction state as the sweep; for an
+overnight uncorrected sweep, pair it with the uncorrected empty-coil baseline
+from that run rather than a newly corrected baseline.
+
 Each generated TSV begins with commented metadata lines. Both empty-coil
 baseline and microwire sweep files include a compact `config_json` snapshot with
 the selected LCR settings, acquisition timing, current-loop points and
-directions, and, for current sweeps, the selected PSU backend/resource/voltage
-limit and retry settings. This makes partial or overnight files self-describing
-for debugging even if UI settings are changed later.
+directions, the last queried LCR open/short correction state, and, for current
+sweeps, the selected PSU backend/resource/voltage limit and retry settings. This
+makes partial or overnight files self-describing for debugging even if UI
+settings are changed later.
 
 Suggested precision-baseline settings for the 1 cm, roughly 1 mm coil around a
 Ni50Fe27Ga23 microwire:

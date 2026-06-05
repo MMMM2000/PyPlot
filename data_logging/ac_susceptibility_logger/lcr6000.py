@@ -127,6 +127,27 @@ class Lcr6000Reading:
     comparator: str
 
 
+@dataclass(frozen=True)
+class LcrCorrectionResult:
+    """Result from an LCR-6000 open/short correction command."""
+
+    kind: str
+    passed: bool
+    responses: tuple[str, ...]
+    timestamp_utc: str
+
+
+@dataclass(frozen=True)
+class LcrCorrectionStatus:
+    """Current LCR-6000 fixture correction enable state."""
+
+    open_enabled: bool | None
+    short_enabled: bool | None
+    checked_utc: str
+    raw_open_state: str = ""
+    raw_short_state: str = ""
+
+
 def available_serial_ports() -> list[SerialPortCandidate]:
     """Return serial ports, sorted with LCR-6000 candidates first."""
 
@@ -332,6 +353,28 @@ def parse_fetch_impedance(response: str) -> Lcr6000Reading:
     )
 
 
+def parse_correction_state(response: str) -> bool | None:
+    """Parse ``CORR:*:STATe?`` responses into booleans when possible."""
+
+    token = response.strip().lower()
+    if token in {"on", "1"}:
+        return True
+    if token in {"off", "0"}:
+        return False
+    return None
+
+
+def correction_state_commands(*, open_enabled: bool | None, short_enabled: bool | None) -> list[str]:
+    """Return commands that enable or disable stored OPEN/SHORT correction data."""
+
+    commands: list[str] = []
+    if open_enabled is not None:
+        commands.append(f"CORR:OPEN:STAT {_scpi_on_off(open_enabled)}\n")
+    if short_enabled is not None:
+        commands.append(f"CORR:SHOR:STAT {_scpi_on_off(short_enabled)}\n")
+    return commands
+
+
 def commands_for_settings(settings: Lcr6000Settings) -> list[str]:
     """Return line-terminated commands needed to apply one setting."""
 
@@ -409,6 +452,10 @@ class Lcr6000Serial:
                 time.sleep(0.2)
         return ""
 
+    def _readline_text(self) -> str:
+        data = self._serial.readline()
+        return data.decode("ascii", errors="replace").strip()
+
     def identify(self) -> str:
         return self.query("*IDN?")
 
@@ -431,6 +478,79 @@ class Lcr6000Serial:
 
     def fetch_impedance(self) -> Lcr6000Reading:
         return parse_fetch_impedance(self.query("FETC:IMP?"))
+
+    def correction_status(self) -> LcrCorrectionStatus:
+        raw_open = self.query("CORR:OPEN:STAT?", attempts=2)
+        raw_short = self.query("CORR:SHOR:STAT?", attempts=2)
+        return LcrCorrectionStatus(
+            open_enabled=parse_correction_state(raw_open),
+            short_enabled=parse_correction_state(raw_short),
+            checked_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            raw_open_state=raw_open,
+            raw_short_state=raw_short,
+        )
+
+    def set_correction_state(
+        self,
+        *,
+        open_enabled: bool | None = None,
+        short_enabled: bool | None = None,
+    ) -> LcrCorrectionStatus:
+        for command in correction_state_commands(
+            open_enabled=open_enabled,
+            short_enabled=short_enabled,
+        ):
+            self.write(command)
+            time.sleep(0.15)
+        return self.correction_status()
+
+    def _run_lcr_correction(self, *, kind: str, command: str, timeout_s: float = 120.0) -> LcrCorrectionResult:
+        responses: list[str] = []
+        deadline = time.monotonic() + max(1.0, float(timeout_s))
+        previous_timeout = getattr(self._serial, "timeout", None)
+        try:
+            try:
+                self._serial.reset_input_buffer()
+            except Exception:
+                pass
+            try:
+                self._serial.timeout = min(max(float(previous_timeout or self.timeout), 0.2), 1.0)
+            except Exception:
+                pass
+            self.write(command)
+            while time.monotonic() < deadline:
+                text = self._readline_text()
+                if not text:
+                    continue
+                responses.append(text)
+                lower = text.strip().lower()
+                if lower in {"pass", "fail"}:
+                    return LcrCorrectionResult(
+                        kind=kind,
+                        passed=lower == "pass",
+                        responses=tuple(responses),
+                        timestamp_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    )
+            raise TimeoutError(f"LCR {kind} correction did not finish within {timeout_s:g} s")
+        finally:
+            try:
+                self._serial.timeout = previous_timeout
+            except Exception:
+                pass
+
+    def run_open_lcr_correction(self, *, timeout_s: float = 120.0) -> LcrCorrectionResult:
+        return self._run_lcr_correction(
+            kind="open",
+            command="CORR:OPEN:LCR\n",
+            timeout_s=timeout_s,
+        )
+
+    def run_short_lcr_correction(self, *, timeout_s: float = 120.0) -> LcrCorrectionResult:
+        return self._run_lcr_correction(
+            kind="short",
+            command="CORR:SHOR:LCR\n",
+            timeout_s=timeout_s,
+        )
 
 
 def first_lcr_port(candidates: Iterable[SerialPortCandidate] | None = None) -> SerialPortCandidate | None:
