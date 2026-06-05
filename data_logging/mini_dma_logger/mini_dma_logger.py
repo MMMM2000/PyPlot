@@ -127,6 +127,7 @@ CONTROL_LOGIC_FEATURES = [
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
     "current_sweep_no_conduction_readback_guard",
+    "current_sweep_low_current_voltage_compliance_guard",
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "single_prompt_length_setup",
@@ -507,6 +508,9 @@ CURRENT_SWEEP_NO_CONDUCTION_MIN_SETPOINT_MA = 2.0
 CURRENT_SWEEP_NO_CONDUCTION_MAX_MEASURED_MA = 0.5
 CURRENT_SWEEP_NO_CONDUCTION_MAX_VOLTAGE_V = 0.05
 CURRENT_SWEEP_NO_CONDUCTION_CONFIRM_COUNT = 2
+CURRENT_SWEEP_OPEN_CIRCUIT_MIN_SETPOINT_MA = 1.0
+CURRENT_SWEEP_OPEN_CIRCUIT_VOLTAGE_LIMIT_FRACTION = 0.90
+CURRENT_SWEEP_OPEN_CIRCUIT_MAX_MEASURED_FRACTION = 0.35
 CONTINUITY_CURRENT_DEFAULT_MA = 1.0
 MIN_RECIPE_CURRENT_MA = 1.0
 RAW_SCALE_DISPLAY_LIMIT_DEFAULT_G = 30.0
@@ -7995,7 +7999,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self._current_sweep_no_conduction_count = 0
             return True
-        if float(setpoint_mA) < CURRENT_SWEEP_NO_CONDUCTION_MIN_SETPOINT_MA:
+        setpoint_abs_mA = abs(float(setpoint_mA))
+        if setpoint_abs_mA < min(
+            CURRENT_SWEEP_NO_CONDUCTION_MIN_SETPOINT_MA,
+            CURRENT_SWEEP_OPEN_CIRCUIT_MIN_SETPOINT_MA,
+        ):
             self._current_sweep_no_conduction_count = 0
             return True
         channel = self._current_sweep_supply_channel()
@@ -8013,8 +8021,47 @@ class MainWindow(QtWidgets.QMainWindow):
         measured_voltage_v = snapshot.get("voltage_V")
         if measured_current_mA is None or measured_voltage_v is None:
             return True
-        near_zero_current = abs(float(measured_current_mA)) <= CURRENT_SWEEP_NO_CONDUCTION_MAX_MEASURED_MA
-        near_zero_voltage = abs(float(measured_voltage_v)) <= CURRENT_SWEEP_NO_CONDUCTION_MAX_VOLTAGE_V
+        measured_abs_mA = abs(float(measured_current_mA))
+        voltage_abs_v = abs(float(measured_voltage_v))
+        voltage_limit_v = max(0.0, float(self.spin_supply_voltage_limit.value()))
+        open_current_threshold_mA = max(
+            self._supply_current_resolution_mA(),
+            setpoint_abs_mA * CURRENT_SWEEP_OPEN_CIRCUIT_MAX_MEASURED_FRACTION,
+        )
+        if (
+            setpoint_abs_mA >= CURRENT_SWEEP_OPEN_CIRCUIT_MIN_SETPOINT_MA
+            and voltage_limit_v > 0.0
+            and measured_abs_mA <= open_current_threshold_mA
+            and voltage_abs_v >= voltage_limit_v * CURRENT_SWEEP_OPEN_CIRCUIT_VOLTAGE_LIMIT_FRACTION
+        ):
+            self._write_control_trace(
+                decision="supply_open_circuit",
+                basis=self._automation_basis,
+                target_value=self._automation_target_value,
+                current_value=self._current_distribution_value(
+                    self._automation_basis,
+                    require_after_last_move=False,
+                ),
+                tolerance=None,
+                result="stopped",
+                reason=(
+                    f"setpoint={setpoint_mA:.3f}mA measured={float(measured_current_mA):.3f}mA "
+                    f"voltage={float(measured_voltage_v):.3f}V"
+                ),
+            )
+            self._log(
+                "Recipe stopped because the current-sweep circuit is voltage-limited/open: "
+                f"commanded {setpoint_mA:.3f} mA but measured "
+                f"{float(measured_current_mA):.3f} mA at {float(measured_voltage_v):.3f} V."
+            )
+            self._disable_supply_output()
+            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return False
+        if setpoint_abs_mA < CURRENT_SWEEP_NO_CONDUCTION_MIN_SETPOINT_MA:
+            self._current_sweep_no_conduction_count = 0
+            return True
+        near_zero_current = measured_abs_mA <= CURRENT_SWEEP_NO_CONDUCTION_MAX_MEASURED_MA
+        near_zero_voltage = voltage_abs_v <= CURRENT_SWEEP_NO_CONDUCTION_MAX_VOLTAGE_V
         if near_zero_current and near_zero_voltage:
             self._current_sweep_no_conduction_count += 1
             if self._current_sweep_no_conduction_count >= CURRENT_SWEEP_NO_CONDUCTION_CONFIRM_COUNT:
@@ -15624,6 +15671,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 "scale_control_startup_min_stable_samples": SCALE_CONTROL_STARTUP_MIN_STABLE_SAMPLES,
                 "scale_control_startup_max_std_g": SCALE_CONTROL_STARTUP_MAX_STD_G,
                 "scale_control_startup_max_span_g": SCALE_CONTROL_STARTUP_MAX_SPAN_G,
+                "current_sweep_open_circuit_min_setpoint_mA": CURRENT_SWEEP_OPEN_CIRCUIT_MIN_SETPOINT_MA,
+                "current_sweep_open_circuit_voltage_limit_fraction": (
+                    CURRENT_SWEEP_OPEN_CIRCUIT_VOLTAGE_LIMIT_FRACTION
+                ),
+                "current_sweep_open_circuit_max_measured_fraction": (
+                    CURRENT_SWEEP_OPEN_CIRCUIT_MAX_MEASURED_FRACTION
+                ),
             },
             "settings": {
                 "control_interval_ms": self._control_interval_ms(),

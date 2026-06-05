@@ -12397,6 +12397,9 @@ def test_current_sweep_no_conduction_guard_stops_zero_readback(tmp_path: Path, q
                 "power_W": 0.0,
             }
 
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
         def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
             self.shutdowns += 1
 
@@ -12428,6 +12431,69 @@ def test_current_sweep_no_conduction_guard_stops_zero_readback(tmp_path: Path, q
         assert stops == [(False, True)]
         assert supply.shutdowns == 1
         assert traces[-1]["decision"] == "supply_no_conduction"
+        assert traces[-1]["result"] == "stopped"
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_open_circuit_guard_stops_low_current_compliance(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"shared_broker": True}
+
+        def __init__(self) -> None:
+            self.shutdowns = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            return None
+
+        def output_state(self, _channel: int | None = None) -> bool:
+            return True
+
+        def measure(self) -> dict[str, float | None]:
+            return {
+                "current_mA": 0.1,
+                "voltage_V": 32.021,
+                "resistance_ohm": None,
+                "power_W": 0.0,
+            }
+
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def shutdown_output(self, *, reset_voltage_v: float = 1.0, reset_current_mA: float = 1.0) -> None:
+            self.shutdowns += 1
+
+    supply = _FakeSupply()
+    stops: list[tuple[bool, bool]] = []
+    traces: list[dict[str, object]] = []
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._automation_target_value = 50.0
+    window._active_current_sweep_step_index = 3
+    window._supply_output_enabled = True
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(4)
+    )
+    window._current_distribution_value = lambda *_args, **_kwargs: 0.34  # type: ignore[method-assign]
+    window._write_control_trace = lambda **kwargs: traces.append(dict(kwargs))  # type: ignore[method-assign]
+    window._stop_auto_ramp = lambda **kwargs: stops.append(  # type: ignore[method-assign]
+        (bool(kwargs.get("log_completion", True)), bool(kwargs.get("offer_recovery", False)))
+    )
+
+    try:
+        assert window._verify_current_sweep_supply_conducting(1.0) is False
+
+        assert stops == [(False, True)]
+        assert supply.shutdowns == 1
+        assert traces[-1]["decision"] == "supply_open_circuit"
         assert traces[-1]["result"] == "stopped"
     finally:
         _close_test_window(window)
