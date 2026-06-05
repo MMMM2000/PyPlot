@@ -1474,11 +1474,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 return text.split(" - ")[0]
         return str(getattr(self, "port_name", "") or "").strip()
 
-    def _candidate_hmp_ports_for_broker(self) -> list[str]:
+    def _candidate_hmp_ports_for_broker(self, *, include_all: bool = False) -> list[str]:
         candidates: list[str] = []
         selected = self._selected_hmp_port_name()
         if selected:
             candidates.append(selected)
+        if not include_all:
+            return candidates
         combo = getattr(self.ui, "comboBox_port", None)
         if isinstance(combo, QtWidgets.QComboBox):
             for index in range(combo.count()):
@@ -1564,13 +1566,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _auto_detect_hmp_port(self, *, show_errors: bool = True) -> bool:
         errors: list[str] = []
-        candidates = self._candidate_hmp_ports_for_broker()
+        candidates = self._candidate_hmp_ports_for_broker(include_all=True)
         if not candidates:
             try:
                 self.populate_ports()
             except Exception:
                 pass
-            candidates = self._candidate_hmp_ports_for_broker()
+            candidates = self._candidate_hmp_ports_for_broker(include_all=True)
         for port_name in candidates:
             match = self._probe_hmp_candidate(port_name)
             if match is None:
@@ -1667,7 +1669,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         candidates = self._candidate_hmp_ports_for_broker()
         if not candidates:
-            raise RuntimeError("Select the HMP COM port before starting the shared HMP broker.")
+            raise RuntimeError(
+                "No shared HMP broker is running. Expand 'Show broker and HMP port options', "
+                "select or auto-detect the HMP COM port, then connect broker."
+            )
 
         errors: list[str] = []
         for port_name in candidates:
@@ -1689,7 +1694,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 broker.confirm_profile(name="Current Annealing auto-started shared HMP broker")
                 server, thread = start_broker_server(broker, host=host, port=port)
             except Exception as exc:
-                errors.append(f"{port_name}: {exc}")
+                errors.append(self._format_shared_broker_start_error(port_name, exc))
                 try:
                     driver.close()
                 except Exception:
@@ -1708,7 +1713,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         detail = "; ".join(errors) if errors else "no HMP ports found"
-        raise RuntimeError(f"No existing broker answered, and auto-starting a broker failed ({detail}).")
+        raise RuntimeError(
+            "No existing broker answered, and the selected HMP port could not start a broker "
+            f"({detail})."
+        )
+
+    def _format_shared_broker_start_error(self, port_name: str, exc: Exception) -> str:
+        text = str(exc).strip()
+        if "Access is denied" in text or "PermissionError" in text:
+            return f"{port_name}: port is busy or access was denied"
+        if "Unsupported shared HMP response" in text:
+            return f"{port_name}: not a supported HMP4030/HMP4040 response"
+        return f"{port_name}: {text or exc.__class__.__name__}"
 
     def _stop_owned_shared_broker(self) -> None:
         server = self._owned_shared_broker_server
@@ -4113,12 +4129,16 @@ class MainWindow(QtWidgets.QMainWindow):
         base = palette.color(QtGui.QPalette.ColorRole.Base)
         text = palette.color(QtGui.QPalette.ColorRole.Text)
         grid = palette.color(QtGui.QPalette.ColorRole.Mid)
+        plot_item = plot.getPlotItem()
         plot.setBackground(base)
         plot.showGrid(x=False, y=False)
-        plot.setLabel("bottom", bottom_label, units=bottom_units)
-        plot.setLabel("left", left_label, units=left_units)
-        plot.showAxis("top", True)
-        plot.showAxis("right", True)
+        plot_item.showGrid(x=False, y=False)
+        plot_item.setLabel("bottom", bottom_label, units=bottom_units)
+        plot_item.setLabel("left", left_label, units=left_units)
+        plot_item.setLabel("top", "")
+        plot_item.setLabel("right", "")
+        plot_item.showAxis("top", True)
+        plot_item.showAxis("right", True)
         for axis_name in ("bottom", "left"):
             axis = plot.getAxis(axis_name)
             axis.setPen(pg.mkPen(text))
@@ -4132,13 +4152,12 @@ class MainWindow(QtWidgets.QMainWindow):
             axis.setTicks([])
             axis.setGrid(False)
             axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
-        plot.getPlotItem().getViewBox().setBackgroundColor(base)
-        plot.getPlotItem().showGrid(x=False, y=False)
+        plot_item.getViewBox().setBackgroundColor(base)
         try:
-            plot.getPlotItem().ctrl.xGridCheck.setChecked(False)
-            plot.getPlotItem().ctrl.yGridCheck.setChecked(False)
-            plot.getPlotItem().getAxis("bottom").setGrid(False)
-            plot.getPlotItem().getAxis("left").setGrid(False)
+            plot_item.ctrl.xGridCheck.setChecked(False)
+            plot_item.ctrl.yGridCheck.setChecked(False)
+            plot_item.getAxis("bottom").setGrid(False)
+            plot_item.getAxis("left").setGrid(False)
         except Exception:
             _ = grid
 

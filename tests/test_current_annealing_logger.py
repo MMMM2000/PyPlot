@@ -619,6 +619,7 @@ def test_shared_broker_connect_starts_owned_broker_when_no_existing_broker(
         return object(), object()
 
     _FakeHmpDriver.instances = []
+    _FakeHmpDriver.responses = {}
     monkeypatch.setattr(logger_mod, "BrokerJsonClient", _client_factory)
     monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
     monkeypatch.setattr(logger_mod, "SharedPowerSupplyBroker", _FakeOwnedBroker)
@@ -644,6 +645,91 @@ def test_shared_broker_connect_starts_owned_broker_when_no_existing_broker(
         ),
         ("confirm_profile", {"name": "Current Annealing auto-started shared HMP broker"}),
     ]
+
+
+def test_shared_broker_connect_auto_detects_hmp_before_owned_start(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.spinBox_max_current.setValue(30)
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM6 - scale", "COM6")
+    window.ui.comboBox_port.addItem("COM9 - LCR", "COM9")
+    window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+    window.ui.comboBox_baudrate.setCurrentText("9600")
+    started: list[tuple[object, str, int]] = []
+    _FakeHmpDriver.instances = []
+    _FakeHmpDriver.responses = {
+        ("COM6", 115200): RuntimeError("not an HMP"),
+        ("COM6", 9600): RuntimeError("not an HMP"),
+        ("COM9", 115200): (None, "LCR-6200,REV E8.13,GEZ883931,Good Will Instrument Co., Ltd."),
+        ("COM9", 9600): (None, "LCR-6200,REV E8.13,GEZ883931,Good Will Instrument Co., Ltd."),
+        (
+            "COM3",
+            115200,
+        ): (
+            logger_mod.HMP4040_PROFILE,
+            "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62",
+        ),
+    }
+
+    def _client_factory(*, host: str, port: int) -> object:
+        if not started:
+            return _FailingBrokerClient()
+        return _FakeBrokerClient()
+
+    def _start_server(broker: object, *, host: str, port: int) -> tuple[object, object]:
+        started.append((broker, host, port))
+        return object(), object()
+
+    monkeypatch.setattr(logger_mod, "BrokerJsonClient", _client_factory)
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+    monkeypatch.setattr(logger_mod, "SharedPowerSupplyBroker", _FakeOwnedBroker)
+    monkeypatch.setattr(logger_mod, "start_broker_server", _start_server)
+
+    window._connect_shared_broker_mode()
+
+    assert window.is_connected is True
+    assert window.ui.comboBox_port.currentData() == "COM3"
+    assert window.ui.comboBox_baudrate.currentText() == "115200"
+    assert [driver.port_name for driver in _FakeHmpDriver.instances if not driver.closed] == ["COM3"]
+    assert len(started) == 1
+
+
+def test_shared_broker_owned_start_uses_selected_hmp_port_only(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+    window.ui.comboBox_port.addItem("COM9 - LCR", "COM9")
+    window.ui.comboBox_port.setCurrentIndex(0)
+    window.ui.comboBox_baudrate.setCurrentText("115200")
+    started: list[tuple[object, str, int]] = []
+    _FakeHmpDriver.instances = []
+    _FakeHmpDriver.responses = {}
+
+    def _start_server(broker: object, *, host: str, port: int) -> tuple[object, object]:
+        started.append((broker, host, port))
+        return object(), object()
+
+    monkeypatch.setattr(logger_mod, "HmpSerialDriver", _FakeHmpDriver)
+    monkeypatch.setattr(logger_mod, "SharedPowerSupplyBroker", _FakeOwnedBroker)
+    monkeypatch.setattr(logger_mod, "start_broker_server", _start_server)
+
+    window._start_owned_shared_broker()
+
+    assert [driver.port_name for driver in _FakeHmpDriver.instances] == ["COM3"]
+    assert len(started) == 1
+    assert window._candidate_hmp_ports_for_broker(include_all=True) == ["COM3", "COM9"]
 
 
 def test_shared_broker_disconnect_clears_connected_state(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
