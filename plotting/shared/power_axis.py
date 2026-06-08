@@ -25,6 +25,7 @@ def add_power_top_axis(
     resistance_ohm: Sequence[float],
     *,
     label: str = "Power [mW]",
+    power_scale: float = 1.0,
     label_size: float | None = None,
     tick_size: float | None = None,
 ) -> Axes | None:
@@ -35,6 +36,7 @@ def add_power_top_axis(
         current_mA,
         resistance_ohm,
         tick_positions=tick_positions,
+        power_scale=power_scale,
     )
     if ticks_and_labels is None:
         return None
@@ -58,6 +60,7 @@ def power_tick_positions_and_labels(
     resistance_ohm: Sequence[float],
     *,
     tick_positions: Sequence[float],
+    power_scale: float = 1.0,
 ) -> tuple[np.ndarray, list[str]] | None:
     """Return current-axis tick positions and power labels for P = I^2 R."""
 
@@ -67,10 +70,17 @@ def power_tick_positions_and_labels(
     if not mask.any():
         return None
 
+    try:
+        scale = float(power_scale)
+    except (TypeError, ValueError):
+        scale = 1.0
+    if not math.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
     frame = pd.DataFrame(
         {
             "current_mA": current[mask],
-            "power_mW": power_mw_from_current_resistance(current[mask], resistance[mask]),
+            "power_mW": power_mw_from_current_resistance(current[mask], resistance[mask])
+            * scale,
         }
     )
     frame = frame.replace([np.inf, -np.inf], np.nan).dropna()

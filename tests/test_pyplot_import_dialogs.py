@@ -11,12 +11,14 @@ from matplotlib.figure import Figure
 import pandas as pd
 
 from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins.mini_dma import core as mini_dma_core
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import (
     TOOLBAR_SECTION_PROPERTY,
     GraphLineState,
     PyPlotWindow,
     TabDescriptor,
+    WorksheetData,
 )
 
 
@@ -451,6 +453,26 @@ def test_select_directories_accepts_bound_parent_argument(monkeypatch, tmp_path:
         app.processEvents()
 
 
+def test_normalise_selected_directories_deduplicates_multi_dialog_selection(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    dir_one = tmp_path / "folder_one"
+    dir_two = tmp_path / "folder_two"
+    dir_one.mkdir()
+    dir_two.mkdir()
+    not_a_folder = tmp_path / "notes.txt"
+    not_a_folder.write_text("skip", encoding="utf-8")
+    try:
+        selected = window._normalise_selected_directories(  # noqa: SLF001
+            [str(dir_one), str(dir_two), str(dir_one), str(not_a_folder)]
+        )
+
+        assert selected == [str(dir_one.resolve()), str(dir_two.resolve())]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_import_data_from_folder_uses_plugin_scoped_start_dir(tmp_path: Path) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -476,6 +498,179 @@ def test_import_data_from_folder_uses_plugin_scoped_start_dir(tmp_path: Path) ->
         window._import_data_from_folder()
 
         assert captured.get("start_dir") == start_dir
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_mini_dma_import_folder_keeps_directory_selection(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Mini DMA")
+    run_folder = tmp_path / "mini_dma_parent" / "sample_run01"
+    run_folder.mkdir(parents=True)
+    try:
+        window._commit_selected_paths([run_folder.parent])  # noqa: SLF001 - test hook
+        plugin = window._current_plugin  # noqa: SLF001 - test hook
+        assert isinstance(plugin, PyPlotPlugin)
+
+        assert window.ensure_data_selection(plugin) == [run_folder.parent]
+        assert window._plugin_ready_to_plot(plugin) is True  # noqa: SLF001
+
+        window._sync_selected_paths_with_imports(plugin=plugin)  # noqa: SLF001
+        assert window._selected_paths() == [run_folder.parent]  # noqa: SLF001
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_mini_dma_import_folder_autoloads_multiple_run_folders(tmp_path: Path) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Mini DMA")
+    parent = tmp_path / "mini_dma_parent"
+    first = parent / "sample_run01"
+    second = parent / "sample_run02"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0],
+            "automation_phase": ["current", "current"],
+            "automation_target_value": [50.0, 50.0],
+            "plateau_index": [1, 1],
+            "strain_pct": [0.0, 0.1],
+            "resistance_ohm": [100.0, 101.0],
+            "current_set_mA": [10.0, 20.0],
+            "current_measured_mA": [10.0, 20.0],
+        }
+    )
+    frame.to_csv(first / mini_dma_core.MEASUREMENT_FILE, index=False)
+    frame.to_csv(second / mini_dma_core.MEASUREMENT_FILE, index=False)
+    try:
+        window._commit_selected_paths([parent])  # noqa: SLF001 - test hook
+        plugin = window._current_plugin  # noqa: SLF001 - test hook
+        assert isinstance(plugin, PyPlotPlugin)
+
+        plugin.load_data()
+
+        runs = getattr(plugin, "_runs")
+        assert [run.path for run in runs] == [first.resolve(), second.resolve()]
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
+        window.close()
+        app.processEvents()
+
+
+def test_mini_dma_folder_import_skips_generic_sidecar_workbook_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Mini DMA")
+    parent = tmp_path / "mini_dma_parent"
+    run_folder = parent / "sample_run01"
+    run_folder.mkdir(parents=True)
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0],
+            "automation_phase": ["current", "current"],
+            "automation_target_value": [50.0, 50.0],
+            "plateau_index": [1, 1],
+            "strain_pct": [0.0, 0.1],
+            "resistance_ohm": [100.0, 101.0],
+            "current_set_mA": [10.0, 20.0],
+            "current_measured_mA": [10.0, 20.0],
+        }
+    )
+    frame.to_csv(run_folder / mini_dma_core.MEASUREMENT_FILE, index=False)
+    (run_folder / "run_quality.json").write_text(
+        '{"a": [1, 2], "b": [1]}',
+        encoding="utf-8",
+    )
+    information_calls: list[str] = []
+    warning_calls: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, _title, message: information_calls.append(str(message)),
+    )
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warning_calls.append(str(message)),
+    )
+    try:
+        window._select_directories = (  # type: ignore[assignment]
+            lambda _parent=None, *, title, start_dir: [str(parent)]
+        )
+
+        window._import_data_from_folder()
+
+        plugin = window._current_plugin  # noqa: SLF001 - test hook
+        runs = getattr(plugin, "_runs")
+        assert [run.path for run in runs] == [run_folder.resolve()]
+        assert window._workbooks == {}  # noqa: SLF001 - Mini DMA folders are plugin data
+        assert information_calls == []
+        assert warning_calls == []
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
+        window.close()
+        app.processEvents()
+
+
+def test_origin_power_top_axis_uses_metadata_scale_and_label() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+
+    class _FakeLayer:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+            self.axis_titles: dict[str, str] = {}
+
+        def lt_exec(self, command: str) -> bool:
+            self.commands.append(command)
+            return True
+
+    layer = _FakeLayer()
+    frame = pd.DataFrame(
+        {
+            "current_mA": [1.0, 2.0, 3.0],
+            "resistance_ohm": [1000.0, 1000.0, 1000.0],
+        }
+    )
+    worksheet = WorksheetData(
+        key="sheet",
+        name="sheet",
+        dataframe=frame,
+        columns={},
+        metadata={
+            "show_power_top_axis": True,
+            "power_axis_current_mA": [1.0, 2.0, 3.0],
+            "power_axis_resistance_ohm": [1000.0, 1000.0, 1000.0],
+            "power_axis_scale": 2.0,
+            "power_axis_label": "Power/cm [mW/cm]",
+        },
+    )
+    try:
+        window._set_origin_axis_title = (  # type: ignore[method-assign]
+            lambda target, axis, title: target.axis_titles.__setitem__(axis, title)
+        )
+
+        window._apply_origin_power_top_axis(  # noqa: SLF001
+            layer,
+            frame,
+            worksheet,
+            ["current_mA", "resistance_ohm"],
+            [(0, 1)],
+        )
+
+        formulas = [
+            command
+            for command in layer.commands
+            if 'layer.x2.label.formula$="' in command
+        ]
+        assert formulas == ['layer.x2.label.formula$="(2)*x^2";']
+        assert layer.axis_titles["x2"] == "Power/cm [mW/cm]"
     finally:
         window.close()
         app.processEvents()
