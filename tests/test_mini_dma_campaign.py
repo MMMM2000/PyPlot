@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from data_logging.mini_dma_logger.campaign import load_campaign, validate_campaign
@@ -166,3 +168,25 @@ def test_mini_dma_report_generates_standard_outputs(tmp_path: Path) -> None:
     assert len(summary["runs"]) == 1
     assert Path(summary["runs"][0]["image_path"]).exists()
     assert summary["runs"][0]["hold_spans"] == 1
+
+
+def test_campaign_check_cli_json(tmp_path: Path) -> None:
+    manifest = tmp_path / "campaign.json"
+    _write_manifest(manifest, tmp_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/mini_dma_campaign_check.py",
+            str(manifest),
+            "--skip-git",
+            "--json",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is True
+    assert payload["campaign_id"] == "test-campaign"
