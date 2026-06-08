@@ -16,7 +16,7 @@ The source project must remain untouched unless the user explicitly asks to over
 ## Implemented
 
 - `launcher.py --automation-recipe <recipe.json>` now accepts `kind: "builder"` recipes.
-- `action: "update_section"` supports graph-backed sections including `annealing`, `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, and `fmr`.
+- `action: "update_section"` supports `microscope` plus graph-backed sections including `annealing`, `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, and `fmr`.
 - `action: "rebuild_assemble"` refreshes saved Assemble rows from the copied project's embedded section payloads without opening the full Builder UI.
 - Builder section project payloads now embed parsed graph payloads as `pickle-base64`, so copied `.pydpj` files can restore graph records without the global AppData store.
 - Automation runs patch the Builder storage root to a working-copy-local `_builder_store` folder while processing, so tests and CLI recipes do not depend on the user's real Builder cache.

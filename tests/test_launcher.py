@@ -936,6 +936,83 @@ def test_builder_automation_recipe_updates_annealing_copy(
     assert assemble_row["Microwire"] == "12/2"
 
 
+def test_builder_automation_recipe_updates_microscope_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    core_image = tmp_path / "Ni50Fe27Ga23 12_2 core.jpg"
+    glass_image = tmp_path / "Ni50Fe27Ga23 12_2 glass.jpg"
+    core_image.write_bytes(b"core image")
+    glass_image.write_bytes(b"glass image")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "microscope",
+                        "paths": [str(core_image), str(glass_image)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["microscope"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["microscope"]
+    assert section_payload["payloads"]["microscope_index"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row["_core_image"] == str(core_image)
+    assert row["_glass_image"] == str(glass_image)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "microscope"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 2
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+
+
 def test_builder_automation_recipe_updates_vsm_hysteresis_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

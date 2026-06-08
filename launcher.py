@@ -455,6 +455,15 @@ def _record_path_key(record: object) -> str:
 
 def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
     return {
+        "microscope": {
+            "class": builder_ui.MicroscopeSection,
+            "payload": "microscope_index",
+            "payload_kind": "mapping",
+            "table_builder": lambda records, extra: builder_ui._microscope_index_to_frame(
+                records,
+                extra.get("overrides", {}) if isinstance(extra, Mapping) else {},
+            ),
+        },
         "annealing": {
             "class": builder_ui.AnnealingSection,
             "payload": "annealing_records",
@@ -581,11 +590,22 @@ def _run_builder_update_section_command(
             if candidate_key not in processed_keys:
                 skipped_sources.append(str(candidate))
 
-        new_payload = result.payloads.get(payload_name, [])
-        new_records = list(new_payload) if isinstance(new_payload, list) else []
-        merged_records = _merge_builder_records(existing_records, new_records)
+        payload_kind = spec.get("payload_kind", "sequence")
+        if payload_kind == "mapping":
+            existing_mapping = dict(existing_payload) if isinstance(existing_payload, Mapping) else {}
+            new_payload = result.payloads.get(payload_name, {})
+            new_mapping = dict(new_payload) if isinstance(new_payload, Mapping) else {}
+            merged_records = {**existing_mapping, **new_mapping}
+        else:
+            new_payload = result.payloads.get(payload_name, [])
+            new_records = list(new_payload) if isinstance(new_payload, list) else []
+            merged_records = _merge_builder_records(existing_records, new_records)
+
         if callable(table_builder):
-            section.data.table = table_builder(merged_records)
+            try:
+                section.data.table = table_builder(merged_records, result.extra)
+            except TypeError:
+                section.data.table = table_builder(merged_records)
         else:
             section.data.table = builder_ui._graph_records_to_frame(
                 merged_records,
