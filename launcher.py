@@ -93,6 +93,11 @@ EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
         module="data_logging.mini_dma_logger.mini_dma_logger",
         resource_tag="mini_dma",
     ),
+    "ac_susceptibility": ExperimentProcessSpec(
+        display_name="AC Susceptibility Logger",
+        module="data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+        resource_tag="ac_susceptibility",
+    ),
 }
 
 
@@ -4137,6 +4142,11 @@ LOGGERS: Dict[str, LauncherFactory] = {
         "Current Annealing Logger",
         "data_logging.current_annealing_logger.current_annealing_logger",
         "current_annealing",
+    ),
+    "AC Susceptibility Logger": _experiment_process_launcher(
+        "AC Susceptibility Logger",
+        "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
+        "ac_susceptibility",
     ),
     "Mini DMA Logger": _experiment_process_launcher(
         "Mini DMA Logger",
