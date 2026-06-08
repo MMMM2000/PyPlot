@@ -506,6 +506,68 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["Mini DMA graphs"] == mini_dma_path.parent.name
 
 
+def test_microwire_word_report_project_keeps_explicit_mini_dma_sources(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    explicit_path = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 heat shield iso-stress_run03"
+    stray_path = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 baseline-50mpa-01"
+    for path in (explicit_path, stray_path):
+        path.mkdir(parents=True)
+        (path / "measurement.csv").write_text(
+            "\n".join(
+                [
+                    "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,resistance_ohm,current_measured_mA",
+                    "0.1,current,50,1,0.0,100.0,1.0",
+                    "0.2,current,50,1,0.1,101.0,2.0",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "mini_dma": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Mini DMA graphs": ["heat shield"],
+                                "_sources": [str(explicit_path)],
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, _origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["_word_mini_dma_sources"] == str(explicit_path)
+    mini_dma_graphs = row["Mini DMA graphs"]
+    assert "heat shield" in mini_dma_graphs
+    assert explicit_path.name in mini_dma_graphs
+    assert stray_path.name not in mini_dma_graphs
+
+
 def test_microwire_word_report_project_exports_rvst_through_pyplot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

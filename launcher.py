@@ -2492,6 +2492,8 @@ def _load_project_word_report_frame(
         for index, row in frame.iterrows():
             composition = row.get("Composition")
             microwire = row.get("Microwire")
+            if _word_project_value_items(row.get(source_column)):
+                continue
             matching_mini_dma = []
             for path in mini_dma_paths:
                 inferred_composition, inferred_microwire = _infer_mini_dma_word_sample(path)
