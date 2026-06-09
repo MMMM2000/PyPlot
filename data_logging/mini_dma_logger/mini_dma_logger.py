@@ -236,6 +236,8 @@ DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 16
 DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 500
+SESSION_DATA_FLUSH_INTERVAL_S = 2.0
+SESSION_METADATA_WRITE_INTERVAL_S = 5.0
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
 DISPLAY_PLOT_MAX_POINTS = 1500
@@ -3719,6 +3721,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s: float | None = None
+        self._last_session_data_flush_s = 0.0
+        self._last_session_metadata_write_s = 0.0
+        self._session_metadata_dirty = False
         self._session_logging_enabled = True
         self._load_offset_g = 0.0
         self._position_reference_mm = 0.0
@@ -3739,6 +3744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_composition_lookup: dict[str, str] = {}
         self._fabrication_record_lookup: dict[tuple[str, str], FabricationSampleRecord] = {}
         self._fabrication_completer_compositions: tuple[str, ...] = ()
+        self._fabrication_failed_composition_loads: set[tuple[str, str]] = set()
         self._fabrication_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
         self._fabrication_composition_model: QtCore.QStringListModel | None = None
         self._fabrication_microwire_model: QtCore.QStringListModel | None = None
@@ -8410,6 +8416,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_folder_path = None
             self._fabrication_records_by_composition = {}
             self._fabrication_loaded_compositions = set()
+            self._fabrication_failed_composition_loads.clear()
             self._fabrication_loading_composition = None
             self._refresh_fabrication_completers()
             self.label_fabrication_status.setText(
@@ -8423,12 +8430,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_fabrication_folder_load(self, root: Path, *, composition: str | None = None) -> None:
         self._cancel_fabrication_folder_load()
+        if self._fabrication_folder_path != root:
+            self._fabrication_failed_composition_loads.clear()
         self._fabrication_folder_path = root
         self._fabrication_loading_composition = composition
         if composition:
             self.label_fabrication_status.setText(f"Loading fabrication data for {composition}...")
         else:
             self._fabrication_loaded_compositions = set()
+            self._fabrication_failed_composition_loads.clear()
             self.label_fabrication_status.setText(f"Scanning fabrication folder: {root}")
         self._set_fabrication_loading_ui(True)
         thread = QtCore.QThread(self)
@@ -8479,6 +8489,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         composition = str(composition_obj).strip() if composition_obj else None
         if composition:
+            normalized_composition = _normalized_token(composition)
+            if normalized_composition:
+                self._fabrication_failed_composition_loads.discard((str(root), normalized_composition))
             merged_records = dict(self._fabrication_records_by_composition)
             for name, records in records_by_composition.items():
                 merged_records[name] = records
@@ -8508,6 +8521,11 @@ class MainWindow(QtWidgets.QMainWindow):
         root = Path(root_obj)
         if self._fabrication_folder_path != root:
             return
+        if self._fabrication_loading_composition is not None:
+            normalized = _normalized_token(self._fabrication_loading_composition)
+            if normalized:
+                self._fabrication_failed_composition_loads.add((str(root), normalized))
+                self._fabrication_loaded_compositions.add(normalized)
         if self._fabrication_loading_composition is None:
             self._fabrication_records_by_composition = {}
             self._fabrication_loaded_compositions = set()
@@ -8517,11 +8535,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_fabrication_load_cancelled(self, root_obj: object) -> None:
         root = Path(root_obj)
         if self._fabrication_folder_path == root:
+            if self._fabrication_loading_composition is not None:
+                normalized = _normalized_token(self._fabrication_loading_composition)
+                if normalized:
+                    self._fabrication_failed_composition_loads.add((str(root), normalized))
             self.label_fabrication_status.setText("Fabrication suggestion loading cancelled.")
 
     def _load_fabrication_folder_sync(self, root: Path) -> bool:
         self._fabrication_folder_path = root
         self._fabrication_loaded_compositions = set()
+        self._fabrication_failed_composition_loads.clear()
         self._fabrication_loading_composition = None
         if not root.exists() or not root.is_dir():
             self._fabrication_records_by_composition = {}
@@ -8681,6 +8704,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not normalized:
             return
         if normalized in self._fabrication_loaded_compositions:
+            return
+        failed_key = (str(root), normalized)
+        if failed_key in self._fabrication_failed_composition_loads:
             return
         if self._fabrication_loading_composition and _normalized_token(self._fabrication_loading_composition) == normalized:
             return
@@ -15568,6 +15594,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _current_sweep_log_interval_ms(self) -> int:
         return self._log_interval_ms()
 
+    def _session_data_flush_due(self, *, now_s: float | None = None) -> bool:
+        now = time.monotonic() if now_s is None else float(now_s)
+        if self._last_session_data_flush_s <= 0.0:
+            self._last_session_data_flush_s = now
+            return True
+        return now - self._last_session_data_flush_s >= SESSION_DATA_FLUSH_INTERVAL_S
+
+    def _flush_session_data_handles(self) -> None:
+        for handle in (
+            self._session_txt_handle,
+            self._session_csv_handle,
+            self._session_setup_txt_handle,
+            self._session_setup_csv_handle,
+        ):
+            if handle is not None:
+                handle.flush()
+        self._last_session_data_flush_s = time.monotonic()
+
     def _apply_ui_refresh_interval(self) -> None:
         if hasattr(self, "_ui_refresh_timer"):
             self._ui_refresh_timer.setInterval(self._ui_refresh_interval_ms())
@@ -15959,9 +16003,17 @@ class MainWindow(QtWidgets.QMainWindow):
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
 
-    def _write_session_metadata(self, *, finished_utc: str | None = None) -> None:
+    def _write_session_metadata(self, *, finished_utc: str | None = None, throttle: bool = False) -> None:
         if self._session_json_path is None:
             return
+        if throttle and finished_utc is None:
+            now_s = time.monotonic()
+            if (
+                self._last_session_metadata_write_s > 0.0
+                and now_s - self._last_session_metadata_write_s < SESSION_METADATA_WRITE_INTERVAL_S
+            ):
+                self._session_metadata_dirty = True
+                return
         payload = self._session_metadata()
         payload["point_count"] = len(self._session_points)
         if self._session_active:
@@ -15973,6 +16025,8 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["finished_utc"] = finished_utc
         try:
             self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self._last_session_metadata_write_s = time.monotonic()
+            self._session_metadata_dirty = False
         except OSError as exc:
             self._write_emergency_session_snapshot(
                 payload,
@@ -16162,6 +16216,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s = None
+        self._last_session_data_flush_s = 0.0
+        self._last_session_metadata_write_s = 0.0
+        self._session_metadata_dirty = False
         self._acquire_experiment_sleep_guard()
         self._session_txt_handle = txt_handle
         self._session_csv_handle = csv_handle
@@ -16215,6 +16272,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_start_wall_s = time.time()
         self._last_session_log_timestamp_s = self._session_start_wall_s
         self._ui_refresh_last_monotonic_s = None
+        self._last_session_data_flush_s = 0.0
+        self._last_session_metadata_write_s = 0.0
+        self._session_metadata_dirty = False
         self._set_automation_context(phase="start")
         self._write_session_metadata()
         self._refresh_plots()
@@ -16247,6 +16307,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self._session_active = False
         self._session_logging_enabled = False
+        self._flush_session_data_handles()
         if self._session_txt_handle is not None:
             self._session_txt_handle.close()
             self._session_txt_handle = None
@@ -16697,10 +16758,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if live_point.elapsed_s < point.elapsed_s
             and not math.isclose(live_point.elapsed_s, point.elapsed_s, rel_tol=0.0, abs_tol=1e-6)
         ]
-        self._write_point(point)
+        now_monotonic_s = time.monotonic()
+        flush_now = (not self._automation_active) or self._session_data_flush_due(now_s=now_monotonic_s)
+        self._write_point(point, flush=flush_now)
+        if flush_now:
+            self._last_session_data_flush_s = now_monotonic_s
         self._last_session_log_timestamp_s = record_wall_s
-        self._write_session_metadata()
-        self._refresh_plots()
+        self._write_session_metadata(throttle=self._automation_active)
+        if self._dashboard_graph_refresh_due(now_s=now_monotonic_s):
+            self._refresh_plots()
+            self._last_dashboard_plot_refresh_s = now_monotonic_s
         self._refresh_live_labels()
         if not quiet:
             self._log(
@@ -16774,6 +16841,7 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_handle: Any,
         csv_writer: csv.DictWriter[str],
         csv_handle: Any,
+        flush: bool = True,
     ) -> None:
         if txt_handle is None or csv_writer is None:
             return
@@ -16784,7 +16852,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "" if point.stress_mpa is None else f"{point.stress_mpa:.6f}",
         )
         txt_handle.write("\t".join(txt_values) + "\n")
-        txt_handle.flush()
 
         csv_writer.writerow(
             {
@@ -16831,10 +16898,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "power_W": "" if point.power_W is None else f"{point.power_W:.6f}",
             }
         )
-        if csv_handle is not None:
+        if flush:
+            txt_handle.flush()
+        if flush and csv_handle is not None:
             csv_handle.flush()
 
-    def _write_point(self, point: MeasurementPoint) -> None:
+    def _write_point(self, point: MeasurementPoint, *, flush: bool = True) -> None:
         if self._session_txt_handle is None or self._session_csv_writer is None:
             return
         self._write_point_to_handles(
@@ -16842,9 +16911,10 @@ class MainWindow(QtWidgets.QMainWindow):
             txt_handle=self._session_txt_handle,
             csv_writer=self._session_csv_writer,
             csv_handle=self._session_csv_handle,
+            flush=flush,
         )
 
-    def _write_setup_point(self, point: MeasurementPoint) -> None:
+    def _write_setup_point(self, point: MeasurementPoint, *, flush: bool = True) -> None:
         if self._session_setup_txt_handle is None or self._session_setup_csv_writer is None:
             return
         self._write_point_to_handles(
@@ -16852,6 +16922,7 @@ class MainWindow(QtWidgets.QMainWindow):
             txt_handle=self._session_setup_txt_handle,
             csv_writer=self._session_setup_csv_writer,
             csv_handle=self._session_setup_csv_handle,
+            flush=flush,
         )
 
     def _recipe_requires_tic(self, steps: Sequence[AutomationStep]) -> bool:
@@ -18937,10 +19008,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._length_setup_points.append(point)
         self._length_setup_last_record_scale_timestamp = self._latest_scale_timestamp
-        self._write_setup_point(point)
+        now_s = time.monotonic()
+        flush_now = self._session_data_flush_due(now_s=now_s)
+        self._write_setup_point(point, flush=flush_now)
+        if flush_now:
+            self._last_session_data_flush_s = now_s
         if len(self._length_setup_points) > 1000:
             self._length_setup_points = self._length_setup_points[-1000:]
-        now_s = time.monotonic()
         if self._dialog_plot_refresh_due(self._last_length_setup_plot_refresh_s, now_s=now_s):
             self._last_length_setup_plot_refresh_s = now_s
             self._refresh_length_setup_plot()
