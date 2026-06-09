@@ -52,6 +52,7 @@
 - On this Windows machine, create PyPlot worker threads inside the PyPlot project with a new worktree and `no environment` selected. Avoid generic Chats/local-environment workers for PyPlot implementation unless the user explicitly asks for that mode.
 - Name worker threads immediately with a short subsystem-first title that matches the task and branch/ledger entry, for example `Mini DMA 12/2 optimization`, `AC logger broker autostart`, or `Thermo sensor MLX90614 bring-up`.
 - Avoid leaving worker titles as generic prompt fragments such as `You are a focused worker...`, `Continue...`, or `Fix issue`; rename them as soon as the worker is created or when the real task becomes clear.
+- Keep active worker threads pinned while they own unfinished work, pending integration, live validation, or deferred branch decisions. Unpin a worker only after its changes have been integrated here, explicitly rejected/deferred in the ledger, or the branch is no longer needed.
 
 ## Integration Regression Ledger
 - Treat accepted worker behavior as part of the integration contract, not just the code diff.
