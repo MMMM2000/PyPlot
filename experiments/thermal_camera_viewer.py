@@ -86,8 +86,15 @@ def _raw_payload_len_is_valid(words: int, payload_len: int) -> bool:
 BINARY_TEXT = "text"
 BINARY_FAST = "binary"
 CUBE_RAW = "cube_raw"
+MLX90614_TEXT = "mlx90614_text"
 BAUD_RATES = (115200, 230400, 460800, 921600, 1000000, 2000000)
 REFRESH_RATES = ((16, 5), (32, 6), (64, 7))
+MLX90614_INTERVALS = (
+    ("10 Hz", 3),
+    ("50 Hz", 5),
+    ("100 Hz", 6),
+    ("Max stream", 7),
+)
 
 
 @dataclass(frozen=True)
@@ -201,6 +208,48 @@ def parse_frame_lines(lines: Iterable[str]) -> ThermalFrame | None:
                 return None
 
     return None
+
+
+def parse_mlx90614_line(line: str) -> ThermalFrame | None:
+    """Parse one text line from the MLX90614 serial probe firmware.
+
+    Expected format:
+    ``MLX90614,<seq>,<elapsed_ms>,<read_us>,<ambient_c>,<object_c>,<raw_ta>,<raw_to>,<flags>``.
+    """
+
+    parts = [part.strip() for part in line.strip().split(",")]
+    if len(parts) < 6 or parts[0] != "MLX90614":
+        return None
+    sequence = _parse_int(parts[1])
+    elapsed_ms = _parse_int(parts[2])
+    read_us = _parse_int(parts[3])
+    ambient_c = _parse_float(parts[4])
+    object_c = _parse_float(parts[5])
+    if (ambient_c is None or object_c is None) and len(parts) > 7:
+        raw_ambient = _parse_int(parts[6])
+        raw_object = _parse_int(parts[7])
+        if raw_ambient is not None and raw_object is not None:
+            ambient_c = (raw_ambient * 0.02) - 273.15
+            object_c = (raw_object * 0.02) - 273.15
+    if ambient_c is None or object_c is None:
+        return None
+    flags = _parse_int(parts[8]) if len(parts) > 8 else 0
+    return ThermalFrame(
+        elapsed_ms,
+        ambient_c,
+        (object_c,),
+        "C",
+        read_us,
+        sequence,
+        flags or 0,
+        (),
+        (),
+        0,
+        0,
+        1,
+        1,
+        0,
+    )
 
 
 def parse_binary_frame(packet: bytes) -> ThermalFrame | None:
@@ -553,6 +602,8 @@ class ThermalSerialWorker(QtCore.QObject):
                 )
                 if self.protocol in {BINARY_FAST, CUBE_RAW}:
                     self._run_binary(port)
+                elif self.protocol == MLX90614_TEXT:
+                    self._run_mlx90614_text(port)
                 else:
                     self._run_text(port)
         except Exception as exc:
@@ -586,6 +637,31 @@ class ThermalSerialWorker(QtCore.QObject):
                     self.status_changed.emit("Skipped malformed thermal frame.")
                 buffer = []
                 in_frame = False
+
+    def _run_mlx90614_text(self, port: object) -> None:
+        self._write_refresh_code(port, self.refresh_code)
+        while not self._stop.is_set():
+            self._send_pending_refresh_requests(port)
+            raw = port.readline()
+            if not raw:
+                continue
+            try:
+                line = raw.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            if not line:
+                continue
+            if line.startswith("MLX90614_BOOT") or line.startswith("MLX90614_STREAM"):
+                self.status_changed.emit(line)
+                continue
+            if line.startswith("MLX90614_ERROR"):
+                self.status_changed.emit(line)
+                continue
+            frame = parse_mlx90614_line(line)
+            if frame is not None:
+                self.frame_ready.emit(frame)
+            elif line.startswith("MLX90614"):
+                self.status_changed.emit("Skipped malformed MLX90614 sample.")
 
     def _run_binary(self, port: object) -> None:
         buffer = bytearray()
@@ -700,13 +776,15 @@ class ThermalSerialWorker(QtCore.QObject):
             self._write_refresh_code(port, latest)
 
     def _write_refresh_code(self, port: object, refresh_code: int) -> None:
-        if refresh_code not in {5, 6, 7}:
+        valid_codes = {1, 2, 3, 4, 5, 6, 7} if self.protocol == MLX90614_TEXT else {5, 6, 7}
+        if refresh_code not in valid_codes:
             return
         try:
             port.write(f"{refresh_code}\n".encode("ascii"))
-            self.status_changed.emit(f"Requested MLX90640 refresh code {refresh_code}.")
+            sensor = "MLX90614 interval" if self.protocol == MLX90614_TEXT else "MLX90640 refresh"
+            self.status_changed.emit(f"Requested {sensor} code {refresh_code}.")
         except Exception as exc:
-            self.status_changed.emit(f"Could not send refresh-rate command: {exc}")
+            self.status_changed.emit(f"Could not send rate command: {exc}")
 
 
 class ThermalCameraViewer(QtWidgets.QWidget):
@@ -750,12 +828,11 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.baud_combo.setCurrentIndex(self.baud_combo.findData(921600))
         self.protocol_combo = QtWidgets.QComboBox()
         self.protocol_combo.addItem("Cube raw", CUBE_RAW)
+        self.protocol_combo.addItem("MLX90614 spot thermometer", MLX90614_TEXT)
         self.protocol_combo.addItem("Arduino binary", BINARY_FAST)
         self.protocol_combo.addItem("Text frame dump", BINARY_TEXT)
         self.refresh_rate_combo = QtWidgets.QComboBox()
-        for label_hz, code in REFRESH_RATES:
-            suffix = " experimental" if label_hz == 64 else ""
-            self.refresh_rate_combo.addItem(f"{label_hz} Hz{suffix}", code)
+        self._populate_rate_options(CUBE_RAW)
         controls.addWidget(QtWidgets.QLabel("Port"))
         controls.addWidget(self.port_combo, 1)
         controls.addWidget(self.refresh_button)
@@ -849,13 +926,32 @@ class ThermalCameraViewer(QtWidgets.QWidget):
 
     def _protocol_changed(self) -> None:
         protocol = self.protocol_combo.currentData()
+        previous_code = self._refresh_code()
+        self._populate_rate_options(protocol if isinstance(protocol, str) else CUBE_RAW)
         if protocol == CUBE_RAW:
+            self._set_baudrate(2000000)
+        elif protocol == MLX90614_TEXT:
             self._set_baudrate(2000000)
         elif protocol == BINARY_FAST and self._baudrate() == 115200:
             self._set_baudrate(921600)
         elif protocol == BINARY_TEXT and self._baudrate() != 115200:
             self._set_baudrate(115200)
-        self.refresh_rate_combo.setEnabled(protocol == CUBE_RAW)
+        self._set_refresh_code(previous_code)
+        self.refresh_rate_combo.setEnabled(protocol in {CUBE_RAW, MLX90614_TEXT})
+
+    def _populate_rate_options(self, protocol: str) -> None:
+        current_code = self._refresh_code()
+        self.refresh_rate_combo.blockSignals(True)
+        self.refresh_rate_combo.clear()
+        if protocol == MLX90614_TEXT:
+            for label, code in MLX90614_INTERVALS:
+                self.refresh_rate_combo.addItem(label, code)
+        else:
+            for label_hz, code in REFRESH_RATES:
+                suffix = " experimental" if label_hz == 64 else ""
+                self.refresh_rate_combo.addItem(f"{label_hz} Hz{suffix}", code)
+        self.refresh_rate_combo.blockSignals(False)
+        self._set_refresh_code(current_code)
 
     def _refresh_rate_changed(self) -> None:
         self.settings.setValue("refresh_code", self._refresh_code())
@@ -952,7 +1048,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.connect_button.setText("Connect")
         self.port_combo.setEnabled(True)
         self.protocol_combo.setEnabled(True)
-        self.refresh_rate_combo.setEnabled(self.protocol_combo.currentData() == CUBE_RAW)
+        self.refresh_rate_combo.setEnabled(self.protocol_combo.currentData() in {CUBE_RAW, MLX90614_TEXT})
         self.baud_combo.setEnabled(True)
         self.refresh_button.setEnabled(True)
 
@@ -963,7 +1059,7 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         self.connect_button.setText("Connect")
         self.port_combo.setEnabled(True)
         self.protocol_combo.setEnabled(True)
-        self.refresh_rate_combo.setEnabled(self.protocol_combo.currentData() == CUBE_RAW)
+        self.refresh_rate_combo.setEnabled(self.protocol_combo.currentData() in {CUBE_RAW, MLX90614_TEXT})
         self.baud_combo.setEnabled(True)
         self.refresh_button.setEnabled(True)
 
@@ -1005,8 +1101,9 @@ class ThermalCameraViewer(QtWidgets.QWidget):
         downloads = _downloads_path()
         downloads.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        png_path = downloads / f"mlx90640_live_{timestamp}.png"
-        txt_path = downloads / f"mlx90640_live_{timestamp}_frame.txt"
+        prefix = "mlx90614_live" if frame.width == 1 and frame.height == 1 else "mlx90640_live"
+        png_path = downloads / f"{prefix}_{timestamp}.png"
+        txt_path = downloads / f"{prefix}_{timestamp}_frame.txt"
         minimum = None if self.auto_scale_cb.isChecked() else self.min_spin.value()
         maximum = None if self.auto_scale_cb.isChecked() else self.max_spin.value()
         pixmap = render_frame_pixmap(frame, minimum_c=minimum, maximum_c=maximum, scale=20)
@@ -1023,6 +1120,21 @@ def _downloads_path() -> Path:
 
 
 def _write_frame_text(path: Path, frame: ThermalFrame) -> None:
+    if frame.width == 1 and frame.height == 1:
+        ambient = "--" if frame.ambient_c is None else f"{frame.ambient_c:.2f}"
+        path.write_text(
+            "\n".join(
+                [
+                    f"MLX90614_SAMPLE,{frame.sequence or 0},{frame.elapsed_ms or 0}",
+                    f"AMBIENT_C,{ambient}",
+                    f"OBJECT_C,{frame.values[0]:.2f}",
+                    f"READ_US,{frame.raw_read_us or 0}",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return
     lines = [
         f"FRAME_BEGIN,{frame.elapsed_ms or 0},{frame.ambient_c or 0:.2f}",
         f"WIDTH,{frame.width}",
@@ -1059,6 +1171,7 @@ __all__ = [
     "main",
     "parse_binary_frame",
     "parse_cube_eeprom_packet",
+    "parse_mlx90614_line",
     "parse_raw_cube_frame",
     "parse_frame_lines",
     "pop_binary_frames",
