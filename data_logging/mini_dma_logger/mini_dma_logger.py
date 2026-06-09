@@ -11726,6 +11726,17 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
         )
 
+    def _current_sweep_blocks_live_seek_stiffness_learning(self) -> bool:
+        if not self._is_current_sweep_mode(self._automation_name):
+            return False
+        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            return False
+        # The mechanical ramp to the requested stress/load target happens before
+        # heating, so it is the right place to relearn local sample stiffness.
+        if self._automation_phase == "target_ramp":
+            return False
+        return True
+
     def _basis_sensitivity_per_mm(
         self,
         basis: str,
@@ -12003,7 +12014,7 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str,
         current_value: float,
     ) -> None:
-        if self._current_sweep_freezes_live_stiffness():
+        if self._current_sweep_blocks_live_seek_stiffness_learning():
             self._update_current_sweep_hold_response_stiffness(
                 seek_key,
                 basis,
