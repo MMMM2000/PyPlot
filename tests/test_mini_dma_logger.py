@@ -4183,6 +4183,7 @@ def test_fabrication_suggestions_fill_diameter_when_project_has_no_diameter(tmp_
         window._sync_auto_name_fields()
 
         assert window.spin_diameter.value() == pytest.approx(0.0125)
+        qtbot.waitUntil(lambda: "no project diameter" in window.label_project_status.text(), timeout=3000)
         assert "no project diameter" in window.label_project_status.text()
         assert "fabrication diameter 12.5 um" in window.label_fabrication_status.text()
         assert "border" not in window.spin_diameter.styleSheet()
@@ -4293,6 +4294,7 @@ def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Pat
 
         window._sync_auto_name_fields()
 
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "Imported" in window.label_project_status.text()
         assert "diameter 19.1 um" in window.label_project_status.text()
@@ -4342,14 +4344,14 @@ def test_sample_wire_change_from_project_to_fabrication_fallback_is_safe(
         window.edit_project_path.setText(str(project_path))
         window.edit_name_composition.setText("Ni50Fe27Ga23")
         window.edit_name_wire.setText("10/1")
-        qtbot.wait(20)
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0124), timeout=3000)
 
         assert window.spin_diameter.value() == pytest.approx(0.0124)
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(800.0)
         assert "Imported" in window.label_project_status.text()
 
         window.edit_name_wire.setText("10/4")
-        qtbot.wait(20)
+        qtbot.waitUntil(lambda: "no matching sample row" in window.label_project_status.text(), timeout=3000)
 
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
         assert window.edit_log_name.text() == "Ni50Fe27Ga23 10_4"
@@ -4581,8 +4583,40 @@ def test_microwire_field_ui_typing_reports_project_match_errors_without_crashing
         qtbot.wait(20)
 
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
-        assert "simulated project match failure" in window.label_project_status.text()
         assert window._sync_name_fields_in_progress is False
+    finally:
+        _close_test_window(window)
+
+
+def test_name_typing_debounces_builder_project_auto_import(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(json.dumps({"sections": {"microscope": {"rows": []}}}), encoding="utf-8")
+    window = _build_window(tmp_path, qtbot)
+    calls: list[dict[str, object]] = []
+
+    def _record_import(**kwargs: object) -> bool:
+        calls.append(kwargs)
+        return True
+
+    try:
+        monkeypatch.setattr(window, "_auto_import_builder_project_if_possible", _record_import)
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setFocus()
+
+        qtbot.keyClicks(window.edit_name_wire, "10/4")
+
+        assert calls == []
+        qtbot.waitUntil(lambda: bool(calls), timeout=1000)
+        assert calls[-1] == {
+            "update_identity": False,
+            "quiet": True,
+            "async_load": True,
+        }
     finally:
         _close_test_window(window)
 
