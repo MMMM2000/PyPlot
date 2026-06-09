@@ -119,6 +119,7 @@ CONTROL_LOGIC_FEATURES = [
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
+    "automation_controller_boundary",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -2398,6 +2399,242 @@ class AutomationControlLoop:
             next_tick_s = max(next_tick_s + interval_s, time.monotonic())
 
 
+class MiniDmaAutomationController:
+    """Own recipe step dispatch outside the Qt window.
+
+    The host still provides the hardware, logging, and UI adapters. Keeping the
+    step scheduler here prevents new automation state from being embedded
+    directly in MainWindow and gives the later process worker a single boundary
+    to replace with IPC.
+    """
+
+    def __init__(self, host: Any) -> None:
+        self._host = host
+        self._tick_running = False
+
+    def tick(self) -> None:
+        host = self._host
+        if not host._automation_active or host._automation_paused:
+            return
+        if self._tick_running:
+            return
+        self._tick_running = True
+        host._automation_tick_running = True
+        try:
+            self.execute_next_tick()
+        finally:
+            host._automation_tick_running = False
+            self._tick_running = False
+
+    def execute_next_tick(self) -> None:
+        host = self._host
+        if host._automation_index >= len(host._automation_steps):
+            if not host._is_ui_thread():
+                host._call_on_ui_thread_sync(self.execute_next_tick)
+                return
+            is_recovery = host._is_recovery_mode()
+            is_calibration = host._is_calibration_mode(host._automation_name)
+            if is_calibration and host._session_active:
+                host._finalize_calibration_report()
+            recovery_return_duration_s = host._setup_return_duration_s() if is_calibration else None
+            config = host._control_config()
+            return_to_origin = config.return_to_origin if config is not None else host.check_return_to_origin.isChecked()
+            if host._is_constant_current_strain_sweep_mode(host._automation_name):
+                return_to_origin = False
+            host._update_recipe_progress(complete=True)
+            host._stop_auto_ramp(log_completion=False, keep_progress=True)
+            host._log("Recovery completed." if is_recovery else "Recipe completed.")
+            if not is_recovery and host._session_active:
+                host._stop_session(reason="recipe_completed", detail="Recipe completed.")
+            if not is_recovery and return_to_origin:
+                host._pending_recovery_return_duration_s = recovery_return_duration_s
+                host._start_recovery_position_origin()
+                return
+            host._restore_main_window_focus_soon()
+            return
+        step_index = host._automation_index
+        step = host._automation_steps[step_index]
+        host._automation_index += 1
+        if step.action == "move":
+            finished = host._handle_move_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "ramp_target":
+            finished = host._handle_target_ramp_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "seek_target":
+            if step.target_value is None or not step.basis:
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+            if step.note == "setup_return_zero" and host._automation_step_note != "setup_return_zero":
+                host._setup_return_zero_speed_mm_s_value = None
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            host._set_automation_context(
+                phase="seek",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+                note=step.note,
+            )
+            tolerance = host._automation_tolerance_for_step(step)
+            if tolerance <= 0.0:
+                host._log("Recipe stopped because the target tolerance is zero.")
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+            try:
+                reached = host._seek_distribution_target(step.basis, step.target_value, tolerance)
+            except Exception as exc:
+                host._log(f"Recipe stopped: {exc}")
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+            if reached:
+                current_value = host._current_distribution_value(step.basis)
+                if current_value is None:
+                    current_value = 0.0
+                label = HSW_BASIS_LABELS.get(step.basis, step.basis)
+                host._log(
+                    f"Reached {label} plateau {step.target_value:.4f} "
+                    f"(live {current_value:.4f})."
+                )
+            else:
+                host._automation_index -= 1
+        elif step.action == "set_current":
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            host._set_automation_context(
+                phase="current",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
+            if step.current_mA is None or not host._set_recipe_current_mA(float(step.current_mA), measure_after=False):
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            elif not host._record_scheduled_recipe_point(step):
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        elif step.action == "mark_current_zero":
+            if not host._handle_current_zero_mark_step(step):
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        elif step.action == "sweep_current":
+            finished = host._handle_current_sweep_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "mechanical_scan":
+            finished = host._handle_mechanical_scan_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "starting_length_prompt":
+            host._set_automation_context(phase="starting_length", note=step.note)
+            host._handle_starting_length_prompt_step()
+        elif step.action == "measure_length_prompt":
+            host._set_automation_context(
+                phase="length_prompt",
+                basis=step.basis,
+                target_value=step.target_value,
+                note=step.note,
+            )
+            host._handle_measure_length_prompt_step()
+        elif step.action == "mark_setup_return_zero":
+            host._set_automation_context(
+                phase="return_zero_start",
+                basis=step.basis,
+                target_value=step.target_value,
+                note=step.note,
+            )
+            host._handle_mark_setup_return_zero_step()
+        elif step.action == "apply_length_setup":
+            host._set_automation_context(phase="apply_l0", note=step.note)
+            host._handle_apply_length_setup_step()
+        elif step.action == "start_session":
+            host._begin_recipe_logging()
+            host._close_length_setup_dialog()
+        elif step.action == "calibration_move":
+            finished = host._handle_calibration_move_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "calibration_record":
+            finished = host._handle_timed_record_step(step, step_index, calibration=True)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "settle":
+            self._handle_settle_step(step, step_index)
+        elif step.action == "record":
+            finished = host._handle_timed_record_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        if host._automation_active:
+            host._automation_completed_ticks = min(
+                max(1, host._automation_total_steps or len(host._automation_steps)),
+                host._automation_completed_ticks + 1,
+            )
+        host._update_recipe_progress()
+        host._refresh_live_labels()
+
+    def _handle_settle_step(self, step: AutomationStep, step_index: int) -> None:
+        host = self._host
+        if step.note == "setup_preload" and host._setup_preload_ramp_skipped:
+            host._set_automation_context(
+                phase="settle",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=int(step.note) if step.note.isdigit() else None,
+                note=step.note,
+            )
+            host._record_length_setup_point()
+            host._log("Skipping setup preload settle because the run started above preload.")
+            if host._automation_active:
+                host._automation_completed_ticks = min(
+                    max(1, host._automation_total_steps or len(host._automation_steps)),
+                    host._automation_completed_ticks + 1,
+                )
+            host._update_recipe_progress()
+            host._refresh_live_labels()
+            return
+        host._timed_step_elapsed_s(step_index)
+        plateau_index = int(step.note) if step.note.isdigit() else None
+        setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}
+        host._set_automation_context(
+            phase="settle",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=plateau_index,
+            note=step.note,
+        )
+        settle_target_reached = True
+        setup_points_before = len(host._length_setup_points) if setup_settle_phase else None
+        if (
+            step.basis
+            and step.target_value is not None
+            and not host._is_recovery_mode()
+        ):
+            tolerance = host._automation_tolerance_for_step(step)
+            try:
+                settle_target_reached = host._seek_distribution_target(step.basis, step.target_value, tolerance)
+            except Exception as exc:
+                host._log(f"Recipe stopped: {exc}")
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+        elif host._is_recovery_mode():
+            host._record_recovery_point()
+        elif not host._record_scheduled_recipe_point(step):
+            host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return
+        if setup_settle_phase and setup_points_before == len(host._length_setup_points):
+            host._record_length_setup_point()
+        current_sweep_timed_settle = host._is_current_sweep_mode(host._automation_name)
+        if setup_settle_phase:
+            current_sweep_timed_settle = False
+        if not settle_target_reached and not current_sweep_timed_settle:
+            host._reset_timed_step_state()
+        if (
+            (
+                (not settle_target_reached and not current_sweep_timed_settle)
+                or not host._timed_step_finished(step, step_index)
+            )
+            and host._automation_active
+        ):
+            host._automation_index -= 1
+
+
 @dataclass(slots=True)
 class MiniDmaControlConfig:
     diameter_mm: float
@@ -3767,6 +4004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._supply_last_setpoint_mA: float | None = None
         self._heating_program_current_mA: float | None = None
         self._heating_program_direction = 1.0
+        self._automation_controller = MiniDmaAutomationController(self)
         self._automation_active = False
         self._automation_tick_running = False
         self._automation_steps: list[AutomationStep] = []
@@ -21436,218 +21674,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._finalize_calibration_report()
 
     def _handle_auto_ramp_tick(self) -> None:
-        if not self._automation_active or self._automation_paused:
-            return
-        if self._automation_tick_running:
-            return
-        self._automation_tick_running = True
-        try:
-            self._handle_auto_ramp_tick_inner()
-        finally:
-            self._automation_tick_running = False
+        self._automation_controller.tick()
 
     def _handle_auto_ramp_tick_inner(self) -> None:
-        if self._automation_index >= len(self._automation_steps):
-            if not self._is_ui_thread():
-                self._call_on_ui_thread_sync(self._handle_auto_ramp_tick_inner)
-                return
-            is_recovery = self._is_recovery_mode()
-            is_calibration = self._is_calibration_mode(self._automation_name)
-            if is_calibration and self._session_active:
-                self._finalize_calibration_report()
-            recovery_return_duration_s = self._setup_return_duration_s() if is_calibration else None
-            config = self._control_config()
-            return_to_origin = config.return_to_origin if config is not None else self.check_return_to_origin.isChecked()
-            if self._is_constant_current_strain_sweep_mode(self._automation_name):
-                return_to_origin = False
-            self._update_recipe_progress(complete=True)
-            self._stop_auto_ramp(log_completion=False, keep_progress=True)
-            self._log("Recovery completed." if is_recovery else "Recipe completed.")
-            if not is_recovery and self._session_active:
-                self._stop_session(reason="recipe_completed", detail="Recipe completed.")
-            if not is_recovery and return_to_origin:
-                self._pending_recovery_return_duration_s = recovery_return_duration_s
-                self._start_recovery_position_origin()
-                return
-            self._restore_main_window_focus_soon()
-            return
-        step_index = self._automation_index
-        step = self._automation_steps[step_index]
-        self._automation_index += 1
-        if step.action == "move":
-            finished = self._handle_move_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "ramp_target":
-            finished = self._handle_target_ramp_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "seek_target":
-            if step.target_value is None or not step.basis:
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            if step.note == "setup_return_zero" and self._automation_step_note != "setup_return_zero":
-                self._setup_return_zero_speed_mm_s_value = None
-            plateau_index = int(step.note) if step.note.isdigit() else None
-            self._set_automation_context(
-                phase="seek",
-                basis=step.basis,
-                target_value=step.target_value,
-                plateau_index=plateau_index,
-                note=step.note,
-            )
-            tolerance = self._automation_tolerance_for_step(step)
-            if tolerance <= 0.0:
-                self._log("Recipe stopped because the target tolerance is zero.")
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            try:
-                reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
-            except Exception as exc:
-                self._log(f"Recipe stopped: {exc}")
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            if reached:
-                current_value = self._current_distribution_value(step.basis)
-                if current_value is None:
-                    current_value = 0.0
-                label = HSW_BASIS_LABELS.get(step.basis, step.basis)
-                self._log(
-                    f"Reached {label} plateau {step.target_value:.4f} "
-                    f"(live {current_value:.4f})."
-                )
-            else:
-                self._automation_index -= 1
-        elif step.action == "set_current":
-            plateau_index = int(step.note) if step.note.isdigit() else None
-            self._set_automation_context(
-                phase="current",
-                basis=step.basis,
-                target_value=step.target_value,
-                plateau_index=plateau_index,
-            )
-            if step.current_mA is None or not self._set_recipe_current_mA(float(step.current_mA), measure_after=False):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-            elif not self._record_scheduled_recipe_point(step):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-        elif step.action == "mark_current_zero":
-            if not self._handle_current_zero_mark_step(step):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-        elif step.action == "sweep_current":
-            finished = self._handle_current_sweep_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "mechanical_scan":
-            finished = self._handle_mechanical_scan_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "starting_length_prompt":
-            self._set_automation_context(phase="starting_length", note=step.note)
-            self._handle_starting_length_prompt_step()
-        elif step.action == "measure_length_prompt":
-            self._set_automation_context(
-                phase="length_prompt",
-                basis=step.basis,
-                target_value=step.target_value,
-                note=step.note,
-            )
-            self._handle_measure_length_prompt_step()
-        elif step.action == "mark_setup_return_zero":
-            self._set_automation_context(
-                phase="return_zero_start",
-                basis=step.basis,
-                target_value=step.target_value,
-                note=step.note,
-            )
-            self._handle_mark_setup_return_zero_step()
-        elif step.action == "apply_length_setup":
-            self._set_automation_context(phase="apply_l0", note=step.note)
-            self._handle_apply_length_setup_step()
-        elif step.action == "start_session":
-            self._begin_recipe_logging()
-            self._close_length_setup_dialog()
-        elif step.action == "calibration_move":
-            finished = self._handle_calibration_move_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "calibration_record":
-            finished = self._handle_timed_record_step(step, step_index, calibration=True)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "settle":
-            if step.note == "setup_preload" and self._setup_preload_ramp_skipped:
-                self._set_automation_context(
-                    phase="settle",
-                    basis=step.basis,
-                    target_value=step.target_value,
-                    plateau_index=int(step.note) if step.note.isdigit() else None,
-                    note=step.note,
-                )
-                self._record_length_setup_point()
-                self._log("Skipping setup preload settle because the run started above preload.")
-                if self._automation_active:
-                    self._automation_completed_ticks = min(
-                        max(1, self._automation_total_steps or len(self._automation_steps)),
-                        self._automation_completed_ticks + 1,
-                    )
-                self._update_recipe_progress()
-                self._refresh_live_labels()
-                return
-            self._timed_step_elapsed_s(step_index)
-            plateau_index = int(step.note) if step.note.isdigit() else None
-            setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}
-            self._set_automation_context(
-                phase="settle",
-                basis=step.basis,
-                target_value=step.target_value,
-                plateau_index=plateau_index,
-                note=step.note,
-            )
-            settle_target_reached = True
-            setup_points_before = len(self._length_setup_points) if setup_settle_phase else None
-            if (
-                step.basis
-                and step.target_value is not None
-                and not self._is_recovery_mode()
-            ):
-                tolerance = self._automation_tolerance_for_step(step)
-                try:
-                    settle_target_reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
-                except Exception as exc:
-                    self._log(f"Recipe stopped: {exc}")
-                    self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                    return
-            elif self._is_recovery_mode():
-                self._record_recovery_point()
-            elif not self._record_scheduled_recipe_point(step):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            if setup_settle_phase and setup_points_before == len(self._length_setup_points):
-                self._record_length_setup_point()
-            current_sweep_timed_settle = self._is_current_sweep_mode(self._automation_name)
-            if setup_settle_phase:
-                current_sweep_timed_settle = False
-            if not settle_target_reached and not current_sweep_timed_settle:
-                self._reset_timed_step_state()
-            if (
-                (
-                    (not settle_target_reached and not current_sweep_timed_settle)
-                    or not self._timed_step_finished(step, step_index)
-                )
-                and self._automation_active
-            ):
-                self._automation_index -= 1
-        elif step.action == "record":
-            finished = self._handle_timed_record_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        if self._automation_active:
-            self._automation_completed_ticks = min(
-                max(1, self._automation_total_steps or len(self._automation_steps)),
-                self._automation_completed_ticks + 1,
-            )
-        self._update_recipe_progress()
-        self._refresh_live_labels()
+        self._automation_controller.execute_next_tick()
 
     def _handle_status_timer(self) -> None:
         if self._automation_active or self._session_active:
