@@ -649,6 +649,32 @@ def test_restore_keeps_custom_sample_and_log_names(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
+def test_restore_replaces_stale_auto_sample_name_from_saved_fields(tmp_path: Path, qtbot) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("name_composition", "Ni46Fe27Ga23Co2Cu2")
+    settings.setValue("name_wire", "2/8")
+    settings.setValue("name_specimen", "")
+    settings.setValue("name_condition", "")
+    settings.setValue("sample_name", "Ni50Fe27Ga23 12_2 heat shield")
+    settings.setValue("log_name", "Ni46Fe27Ga23Co2Cu2 2_8 iso-stress")
+    settings.sync()
+
+    try:
+        window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+        window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+        qtbot.addWidget(window)
+
+        assert window.edit_name_composition.text() == "Ni46Fe27Ga23Co2Cu2"
+        assert window.edit_name_wire.text() == "2/8"
+        assert window.edit_sample_name.text() == "Ni46Fe27Ga23Co2Cu2 2/8"
+        assert "Ni46Fe27Ga23Co2Cu2 2/8" in window.label_recipe_sample.text()
+    finally:
+        _close_test_window(window)
+
+
 def test_session_start_persists_sample_fields_without_close(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
@@ -15165,6 +15191,37 @@ def test_current_sweep_load_target_ramp_uses_target_stage_speed(tmp_path: Path, 
         assert reached is False
         assert controller.target_steps == 7500
         assert controller.max_speed == 100_000_000
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_ramp_speed_cap_honors_ramp_rate_for_large_error(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._calibrated_stiffness_g_per_mm = 10.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+    window._active_target_ramp_rate_value_s = 0.5
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+
+    try:
+        speed_cap = window._target_ramp_speed_cap_mm_s(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            seek_key=seek_key,
+            current_value=0.0,
+            target_value=5.0,
+        )
+
+        assert speed_cap == pytest.approx(0.05)
     finally:
         _close_test_window(window)
 

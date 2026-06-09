@@ -9540,6 +9540,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
             self._log(f"Applied naming fields: {built}")
 
+    @staticmethod
+    def _sample_name_looks_auto_generated(sample_name: str) -> bool:
+        parts = sample_name.strip().split()
+        if len(parts) < 2:
+            return False
+        composition = parts[0]
+        wire = MicrowireLineEdit.to_display_text(parts[1]) or parts[1].replace("_", "/")
+        return bool(re.fullmatch(r"[A-Z][A-Za-z0-9]*", composition) and re.fullmatch(r"\d+/\d+", wire))
+
     def _sync_auto_name_fields(self) -> None:
         if self._sync_name_fields_in_progress:
             return
@@ -9552,7 +9561,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_name = safe_name or DEFAULT_LOG_BASENAME
                 current_sample_name = self.edit_sample_name.text().strip()
                 current_log_name = self.edit_log_name.text().strip()
-                if not current_sample_name or current_sample_name == self._last_auto_sample_name:
+                sample_name_is_stale_auto_label = (
+                    current_sample_name != built
+                    and current_sample_name != self._last_auto_sample_name
+                    and self._sample_name_looks_auto_generated(current_sample_name)
+                )
+                if (
+                    not current_sample_name
+                    or current_sample_name == self._last_auto_sample_name
+                    or sample_name_is_stale_auto_label
+                ):
                     self.edit_sample_name.setText(built)
                     current_sample_name = built
                 if (
@@ -12589,20 +12607,6 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
             return None
-        if (
-            self._is_current_sweep_mode(self._automation_name)
-            and self._automation_step_note != "setup_preload"
-            and current_value is not None
-            and target_value is not None
-        ):
-            near_cap = self._current_sweep_basis_value_from_stress_cap(
-                basis,
-                SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA,
-            )
-            error_value = abs(float(target_value) - float(current_value))
-            ramp_gate = abs(float(ramp_rate)) * self._seek_decision_interval_s(basis) * 2.0
-            if near_cap is not None and error_value > max(near_cap, ramp_gate):
-                return None
         return max(self._minimum_held_speed_mm_s(), abs(float(ramp_rate)) / abs(float(sensitivity)))
 
     def _seek_feedback_dead_time_s(self, basis: str | None) -> float:
