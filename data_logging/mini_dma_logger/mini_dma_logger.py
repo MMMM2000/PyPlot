@@ -1662,6 +1662,54 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
         self._normalizing = False
 
 
+def _microwire_sort_key(value: object) -> tuple[int, int, str]:
+    left, right = MicrowireLineEdit._split_parts(value)
+    fallback = str(value or "").strip().lower()
+    left_int = int(left) if left else -1
+    right_int = int(right) if right else -1
+    return left_int, right_int, fallback
+
+
+def _iter_project_rows(payload: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(payload, Mapping):
+        sections = payload.get("sections", {})
+        if isinstance(sections, Mapping):
+            for section_payload in sections.values():
+                if not isinstance(section_payload, Mapping):
+                    continue
+                rows = section_payload.get("rows")
+                if isinstance(rows, list):
+                    for row in rows:
+                        if isinstance(row, Mapping):
+                            yield row
+        rows = payload.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, Mapping):
+                    yield row
+    elif isinstance(payload, list):
+        for row in payload:
+            if isinstance(row, Mapping):
+                yield row
+
+
+def _project_sample_suggestions_from_payload(payload: Any) -> dict[str, tuple[str, ...]]:
+    records: dict[str, set[str]] = {}
+    for row in _iter_project_rows(payload):
+        composition = str(row.get("Composition") or "").strip()
+        if not composition:
+            continue
+        wires = records.setdefault(composition, set())
+        microwire = _project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS)
+        wire_display = MicrowireLineEdit.to_display_text(microwire) or str(microwire or "").strip()
+        if wire_display:
+            wires.add(wire_display)
+    return {
+        composition: tuple(sorted(wires, key=_microwire_sort_key))
+        for composition, wires in sorted(records.items(), key=lambda item: item[0].lower())
+    }
+
+
 def _fabrication_records_from_index(index: Any) -> dict[str, list[FabricationSampleRecord]]:
     records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
     piece_level = getattr(index, "piece_level", {})
@@ -2204,6 +2252,7 @@ class FabricationSuggestionWorker(QtCore.QObject):
 
 
 class BuilderProjectImportWorker(QtCore.QObject):
+    suggestions = QtCore.pyqtSignal(object, object, object)
     succeeded = QtCore.pyqtSignal(object, object, object)
     failed = QtCore.pyqtSignal(object, object, str)
     no_match = QtCore.pyqtSignal(object, object)
@@ -2237,6 +2286,7 @@ class BuilderProjectImportWorker(QtCore.QObject):
             except Exception as exc:
                 self.failed.emit(path, self.request_key, f"Failed to read saved project file: {exc}")
                 return
+            self.suggestions.emit(path, self.request_key, _project_sample_suggestions_from_payload(payload))
             try:
                 match = _find_project_sample_in_payload(
                     payload,
@@ -3679,6 +3729,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
+        self._builder_project_sample_suggestions: dict[str, tuple[str, ...]] = {}
         self._builder_project_import_timer = QtCore.QTimer(self)
         self._builder_project_import_timer.setSingleShot(True)
         self._builder_project_import_timer.setInterval(350)
@@ -8517,7 +8568,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_fabrication_completers(self) -> None:
         self._rebuild_fabrication_lookup_cache()
-        compositions = tuple(self._fabrication_records_by_composition)
+        self._fabrication_microwire_completer_key = None
+        compositions = tuple(
+            sorted(
+                set(self._fabrication_records_by_composition) | set(self._builder_project_sample_suggestions),
+                key=str.lower,
+            )
+        )
         if self._fabrication_composition_model is None:
             self._fabrication_composition_model = QtCore.QStringListModel(self.edit_name_composition)
         if self._fabrication_composition_completer is None:
@@ -8533,16 +8590,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if compositions != self._fabrication_completer_compositions:
             self._fabrication_composition_model.setStringList(list(compositions))
             self._fabrication_completer_compositions = compositions
-            self._fabrication_microwire_completer_key = None
         self._update_fabrication_microwire_completer()
 
     def _update_fabrication_microwire_completer(self) -> None:
         composition = self._matching_fabrication_composition()
-        labels_tuple = tuple(
-            record.label
-            for record in self._fabrication_records_by_composition.get(composition or "", [])
-        )
         composition_key = _normalized_token(composition)
+        if (
+            self._fabrication_microwire_completer_key is not None
+            and self._fabrication_microwire_completer_key[0] == composition_key
+        ):
+            self._ensure_fabrication_composition_loaded()
+            return
+        labels_tuple = tuple(
+            sorted(
+                {
+                    record.label
+                    for record in self._fabrication_records_by_composition.get(composition or "", [])
+                }
+                | set(self._builder_project_sample_suggestions.get(composition or "", ())),
+                key=_microwire_sort_key,
+            )
+        )
         completer_key = (composition_key, labels_tuple)
         if self._fabrication_microwire_model is None:
             self._fabrication_microwire_model = QtCore.QStringListModel(self.edit_name_wire)
@@ -8564,7 +8632,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _rebuild_fabrication_lookup_cache(self) -> None:
         self._fabrication_composition_lookup = {
             normalized: composition
-            for composition in self._fabrication_records_by_composition
+            for composition in (
+                set(self._fabrication_records_by_composition) | set(self._builder_project_sample_suggestions)
+            )
             if (normalized := _normalized_token(composition))
         }
         record_lookup: dict[tuple[str, str], FabricationSampleRecord] = {}
@@ -9072,6 +9142,7 @@ class MainWindow(QtWidgets.QMainWindow):
             request_key=request_key,
         )
         worker.moveToThread(thread)
+        worker.suggestions.connect(self._handle_builder_project_suggestions)
         worker.succeeded.connect(
             lambda path_obj, key_obj, match_obj, quiet=quiet: self._handle_builder_project_auto_import_success(
                 path_obj,
@@ -9157,6 +9228,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._mark_diameter_imported(False)
         self.label_project_status.setText(message)
+
+    def _handle_builder_project_suggestions(
+        self,
+        path_obj: object,
+        key_obj: object,
+        suggestions_obj: object,
+    ) -> None:
+        if not self._builder_project_auto_import_is_current(path_obj, key_obj):
+            return
+        suggestions = suggestions_obj if isinstance(suggestions_obj, dict) else {}
+        self._builder_project_sample_suggestions = {
+            str(composition).strip(): tuple(str(wire).strip() for wire in wires if str(wire).strip())
+            for composition, wires in suggestions.items()
+            if str(composition).strip() and isinstance(wires, Sequence) and not isinstance(wires, (str, bytes))
+        }
+        self._refresh_fabrication_completers()
 
     def _handle_builder_project_auto_import_no_match(self, path_obj: object, key_obj: object) -> None:
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
