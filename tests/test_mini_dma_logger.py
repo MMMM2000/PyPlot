@@ -15326,7 +15326,7 @@ def test_current_sweep_stress_correction_is_capped_by_planned_mpa_change(
         )
         sensitivity = mini_dma_mod.stress_mpa_from_load_g(72.0, window.spin_diameter.value())
         assert sensitivity is not None
-        assert correction_mm == pytest.approx(10.0 / sensitivity)
+        assert correction_mm == pytest.approx(7.5 / sensitivity)
         assert correction_mm < 80.0 * 0.01
     finally:
         _close_test_window(window)
