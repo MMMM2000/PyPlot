@@ -448,6 +448,7 @@ SERVO_CURRENT_SWEEP_MIN_COMMAND_SPEED_MM_S = 0.05
 SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION = 0.20
 SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION = 0.60
 SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
+SERVO_CURRENT_SWEEP_TARGET_RAMP_TRUST_FRACTION = 0.15
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
@@ -10872,6 +10873,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
             if max_cap is not None and max_cap > 0.0:
+                if self._automation_phase == "target_ramp":
+                    cap_value = min(
+                        max_cap,
+                        max(
+                            near_threshold,
+                            error_abs * SERVO_CURRENT_SWEEP_TARGET_RAMP_TRUST_FRACTION,
+                        ),
+                    )
+                    return max(self._motor_step_mm(), cap_value / sensitivity)
                 error_over_near = max(0.0, error_abs - near_threshold)
                 scale = max(1e-9, SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA)
                 fraction = SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION + (
