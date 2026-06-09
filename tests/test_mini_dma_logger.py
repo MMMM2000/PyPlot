@@ -138,7 +138,7 @@ def test_automation_control_loop_pause_resume_and_stop() -> None:
         loop.stop()
 
 
-def test_main_window_automation_control_loop_ticks_off_ui_thread(tmp_path: Path, qtbot) -> None:
+def test_main_window_automation_control_loop_ticks_on_ui_thread(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     main_thread_id = threading.get_ident()
     tick_thread_ids: list[int] = []
@@ -149,14 +149,13 @@ def test_main_window_automation_control_loop_ticks_off_ui_thread(tmp_path: Path,
             window._stop_automation_control_loop()
 
     try:
-        window._handle_auto_ramp_tick = fake_tick  # type: ignore[method-assign]
+        window._auto_ramp_timer.timeout.disconnect()
+        window._auto_ramp_timer.timeout.connect(fake_tick)
         window._start_automation_control_loop(20)
-        deadline = time.monotonic() + 0.35
-        while len(tick_thread_ids) < 3 and time.monotonic() < deadline:
-            time.sleep(0.01)
+        qtbot.waitUntil(lambda: len(tick_thread_ids) >= 3, timeout=500)
 
         assert len(tick_thread_ids) >= 3
-        assert all(thread_id != main_thread_id for thread_id in tick_thread_ids)
+        assert all(thread_id == main_thread_id for thread_id in tick_thread_ids)
         assert window._auto_ramp_timer.isActive() is False
     finally:
         window._stop_automation_control_loop()

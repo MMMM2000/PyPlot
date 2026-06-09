@@ -18484,14 +18484,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_on_ui_thread(lambda: self._log(f"Recipe control worker stopped: {self._automation_control_error}"))
 
     def _start_automation_control_loop(self, interval_ms: int) -> None:
-        self._auto_ramp_timer.stop()
-        if self._automation_control_loop is None:
-            self._automation_control_loop = AutomationControlLoop(
-                self._run_automation_control_tick,
-                error_callback=self._handle_automation_control_loop_error,
-            )
         self._automation_control_error = None
-        self._automation_control_loop.start(interval_ms)
+        if self._automation_control_loop is not None:
+            self._automation_control_loop.stop()
+            self._automation_control_loop = None
+        self._auto_ramp_timer.stop()
+        self._auto_ramp_timer.setInterval(max(1, int(interval_ms)))
+        self._auto_ramp_timer.start()
 
     def _pause_automation_control_loop(self) -> None:
         if self._automation_control_loop is not None:
@@ -18499,15 +18498,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_ramp_timer.stop()
 
     def _resume_automation_control_loop(self) -> None:
-        if self._automation_control_loop is None:
-            self._start_automation_control_loop(self._automation_interval_ms)
-            return
-        self._auto_ramp_timer.stop()
-        self._automation_control_loop.resume()
+        if self._automation_control_loop is not None:
+            self._automation_control_loop.stop()
+            self._automation_control_loop = None
+        self._auto_ramp_timer.setInterval(max(1, int(self._automation_interval_ms)))
+        self._auto_ramp_timer.start()
 
     def _stop_automation_control_loop(self) -> None:
         if self._automation_control_loop is not None:
             self._automation_control_loop.stop()
+            self._automation_control_loop = None
         self._auto_ramp_timer.stop()
 
     def _start_auto_ramp(self) -> None:
