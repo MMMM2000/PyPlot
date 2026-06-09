@@ -121,6 +121,15 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                comparing before/after current frames so colour changes are easier to judge.
             5. Press **Export frame** to save the current PNG heatmap and raw text frame to
                Downloads.
+
+            ### Live MLX90614 spot thermometer
+            1. Keep the Nucleo running the STM32Cube MLX90614 probe firmware with the
+               module connected on PB9/PB8 I2C.
+            2. Select **MLX90614 spot thermometer**, use the Nucleo serial port at
+               `2000000` baud, choose an interval, and press **Connect**.
+            3. The MLX90614 reports one object-temperature spot plus sensor ambient
+               temperature. It is not a 32 x 24 camera, so the display is a single live
+               temperature cell rather than a thermal image.
             """
         ).strip(),
     },
