@@ -3952,6 +3952,150 @@ def test_recipe_current_command_clamps_zero_to_continuity_floor(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_recipe_current_command_retries_when_current_output_readback_is_off(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, float | None]] = []
+            self.output_checks = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(("initialize", current_mA))
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(("current", current_mA))
+
+        def output_on(self) -> None:
+            self.commands.append(("output_on", None))
+
+        def output_state(self, channel: int | None = None) -> bool:
+            self.output_checks += 1
+            return self.output_checks >= 2
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(4)
+    )
+    window._automation_active = True
+
+    try:
+        assert window._set_recipe_current_mA(10.0) is True
+
+        assert supply.commands == [("initialize", 10.0), ("output_on", None)]
+        assert window._supply_output_enabled is True
+        assert window._supply_last_setpoint_mA == pytest.approx(10.0)
+        assert "output readback is OFF; retrying output enable" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_recipe_current_command_enables_stale_off_current_output(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, float | None]] = []
+            self.output_checks = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(("current", current_mA))
+
+        def output_on(self) -> None:
+            self.commands.append(("output_on", None))
+
+        def output_state(self, channel: int | None = None) -> bool:
+            self.output_checks += 1
+            return self.output_checks >= 2
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(4)
+    )
+    window._supply_output_enabled = True
+    window._automation_active = True
+
+    try:
+        assert window._set_recipe_current_mA(20.0) is True
+
+        assert supply.commands == [("current", 20.0), ("output_on", None)]
+        assert window._supply_output_enabled is True
+        assert window._supply_last_setpoint_mA == pytest.approx(20.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_recipe_current_command_fails_when_current_output_readback_stays_off(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append("initialize")
+
+        def output_on(self) -> None:
+            self.commands.append("output_on")
+
+        def output_state(self, channel: int | None = None) -> bool:
+            return False
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(4)
+    )
+    window._automation_active = True
+
+    try:
+        assert window._set_recipe_current_mA(10.0) is False
+
+        assert supply.commands == ["initialize", "output_on"]
+        assert window._supply_output_enabled is False
+        assert "current-sweep CH4 output did not report ON" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_constant_current_recipe_has_no_max_step_cap_setting(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:

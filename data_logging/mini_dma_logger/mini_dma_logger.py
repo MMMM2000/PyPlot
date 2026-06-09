@@ -8223,6 +8223,44 @@ class MainWindow(QtWidgets.QMainWindow):
     def _recipe_current_setpoint_mA(self, current_mA: float) -> float:
         return max(self._minimum_recipe_current_mA(), self._quantize_supply_current_mA(current_mA))
 
+    def _ensure_current_sweep_output_enabled_after_command(self, *, channel: int | None = None) -> bool:
+        if self._supply_controller is None:
+            return False
+        method = getattr(self._supply_controller, "output_state", None)
+        if not callable(method):
+            self._supply_output_enabled = True
+            return True
+        current_channel = self._current_sweep_supply_channel() if channel is None else int(channel)
+        if current_channel is None:
+            selected_channel = getattr(self._supply_controller, "selected_channel", None)
+            if callable(selected_channel):
+                try:
+                    selected = int(selected_channel())
+                except Exception:
+                    selected = 0
+                current_channel = selected if selected > 0 else None
+        if current_channel is None:
+            self._supply_output_enabled = True
+            return True
+        output_state = self._supply_channel_output_state(current_channel)
+        if output_state is not False:
+            self._supply_output_enabled = True
+            return True
+        try:
+            self._log(f"Current-sweep CH{current_channel} output readback is OFF; retrying output enable.")
+            self._supply_controller.output_on()
+        except Exception as exc:
+            self._log(f"Current-sweep CH{current_channel} output enable retry failed: {exc}")
+            self._supply_output_enabled = False
+            return False
+        output_state = self._supply_channel_output_state(current_channel)
+        if output_state is False:
+            self._log(f"Recipe stopped because current-sweep CH{current_channel} output did not report ON.")
+            self._supply_output_enabled = False
+            return False
+        self._supply_output_enabled = True
+        return True
+
     def _quantize_ramp_current_mA(self, current_mA: float, direction: float, end_mA: float) -> float:
         resolution_mA = self._supply_current_resolution_mA()
         if direction >= 0.0:
@@ -8235,6 +8273,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_controller is None or not self._supply_controller.is_connected():
             self._log("Recipe stopped because the power supply is not connected.")
             return False
+        current_channel = self._current_sweep_supply_channel()
         current_mA = self._quantize_supply_current_mA(current_mA)
         if self._automation_active or self._session_active:
             current_mA = max(self._minimum_recipe_current_mA(), current_mA)
@@ -8247,9 +8286,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         and not self._motor_supply_enabled()
                     ),
                 )
-                self._supply_output_enabled = True
             else:
                 self._supply_controller.set_current_mA(current_mA)
+            if not self._ensure_current_sweep_output_enabled_after_command(channel=current_channel):
+                return False
             self._supply_last_setpoint_mA = current_mA
             self._heating_program_current_mA = current_mA
             if measure_after:
