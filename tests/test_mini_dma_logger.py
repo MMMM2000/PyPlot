@@ -13113,6 +13113,25 @@ def test_dashboard_speed_reports_effective_average_um_per_s(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
+def test_dashboard_speed_holds_average_between_one_second_samples(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._current_position_mm = 0.0
+        window._effective_position_mm = 0.0
+        window._reset_effective_linear_speed_sample(now_s=100.0)
+        window._current_position_mm = 0.010
+        window._effective_position_mm = 0.010
+        window._sample_effective_linear_speed(now_s=101.0)
+        assert window._effective_average_speed_mm_s == pytest.approx(0.010)
+
+        window._sample_effective_linear_speed(now_s=101.2)
+
+        assert window._effective_average_speed_mm_s == pytest.approx(0.010)
+    finally:
+        _close_test_window(window)
+
+
 def test_live_speed_summary_marks_command_cap_as_secondary(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -16424,7 +16443,7 @@ def test_distribution_seek_rejects_stale_scale_readings(tmp_path: Path, qtbot) -
     window = _build_window(tmp_path, qtbot)
     window._latest_scale_value_g = 12.0
     window._latest_scale_timestamp = time.time() - (
-        mini_dma_mod.STALE_SCALE_AFTER_S + 5.0
+        mini_dma_mod.CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S + 5.0
     )
 
     called = False
@@ -16444,6 +16463,36 @@ def test_distribution_seek_rejects_stale_scale_readings(tmp_path: Path, qtbot) -
                 tolerance=0.5,
             )
         assert called is False
+    finally:
+        _close_test_window(window)
+
+
+def test_distribution_seek_waits_through_brief_stale_scale_gap(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._latest_scale_value_g = 12.0
+    window._latest_scale_timestamp = time.time() - (
+        mini_dma_mod.STALE_SCALE_AFTER_S + 1.0
+    )
+
+    called = False
+
+    def _fail_if_called(_target_mm: float, **_kwargs: object) -> bool:
+        nonlocal called
+        called = True
+        return True
+
+    window._move_to_position_mm = _fail_if_called  # type: ignore[method-assign]
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=15.0,
+            tolerance=0.5,
+        )
+
+        assert reached is False
+        assert called is False
+        assert "temporarily stale" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
