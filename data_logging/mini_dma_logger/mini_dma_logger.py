@@ -102,6 +102,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_moving_away_bypasses_persistence",
     "current_hold_moving_away_preserves_predictive_step",
     "current_hold_large_error_not_masked_by_noise",
+    "current_hold_untrusted_response_probe",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -435,7 +436,7 @@ SERVO_LIVE_STIFFNESS_ALPHA = 0.35
 SERVO_NOISE_SIGMA = 3.0
 SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S = 1.5
 SERVO_CURRENT_SWEEP_RATE_GAIN = 1.2
-SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 5
+SERVO_CURRENT_SWEEP_DEFAULTS_VERSION = 6
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_STRAIN_PCT = 5.0
 SERVO_CURRENT_SWEEP_MAX_CORRECTION_RATE_PCT_S = 15.0
 SERVO_CURRENT_SWEEP_MAX_STAGE_SPEED_MM_S = 5.0
@@ -449,6 +450,7 @@ SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION = 0.20
 SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION = 0.60
 SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
 SERVO_CURRENT_SWEEP_TARGET_RAMP_TRUST_FRACTION = 0.15
+SERVO_CURRENT_SWEEP_HOLD_UNTRUSTED_RESPONSE_FRACTION = 0.20
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
@@ -10870,6 +10872,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._motor_step_mm(),
                     min(self._current_sweep_hold_adaptive_command_cap_mm(), adaptive_mm),
                 )
+            if self._automation_phase == "current_hold" and max_cap is not None and max_cap > 0.0:
+                cap_value = min(
+                    max_cap,
+                    max(
+                        near_threshold,
+                        error_abs * SERVO_CURRENT_SWEEP_HOLD_UNTRUSTED_RESPONSE_FRACTION,
+                    ),
+                )
+                return max(self._motor_step_mm(), cap_value / sensitivity)
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
             if max_cap is not None and max_cap > 0.0:
@@ -15504,6 +15515,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_sweep_dynamic_min_fraction": SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION,
                 "current_sweep_dynamic_max_fraction": SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION,
                 "current_sweep_dynamic_scale_mpa": SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA,
+                "current_hold_untrusted_response_fraction": (
+                    SERVO_CURRENT_SWEEP_HOLD_UNTRUSTED_RESPONSE_FRACTION
+                ),
                 "current_hold_adaptive_min_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION,
                 "current_hold_adaptive_max_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION,
                 "current_hold_adaptive_large_error_mpa": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA,
