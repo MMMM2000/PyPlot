@@ -4621,6 +4621,33 @@ def test_name_typing_debounces_builder_project_auto_import(
         _close_test_window(window)
 
 
+def test_builder_project_rows_feed_sample_completers(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._builder_project_sample_suggestions = {
+            "Ni44Fe27Ga23Cu3Co3": ("1/2", "1/5", "1/6", "1/7")
+        }
+        window._refresh_fabrication_completers()
+
+        composition_model = window.edit_name_composition.completer().model()
+        compositions = [
+            composition_model.data(composition_model.index(row, 0))
+            for row in range(composition_model.rowCount())
+        ]
+        assert "Ni44Fe27Ga23Cu3Co3" in compositions
+
+        window.edit_name_composition.setText("Ni44Fe27Ga23Cu3Co3")
+        microwire_model = window.edit_name_wire.completer().model()
+        microwires = [
+            microwire_model.data(microwire_model.index(row, 0))
+            for row in range(microwire_model.rowCount())
+        ]
+        assert microwires == ["1/2", "1/5", "1/6", "1/7"]
+    finally:
+        _close_test_window(window)
+
+
 def test_wire_diameter_displays_micrometers_while_storing_mm(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
