@@ -7836,6 +7836,73 @@ def test_current_sweep_hold_recovery_band_uses_physical_tolerance_without_fixed_
         _close_test_window(window)
 
 
+def test_current_sweep_hold_backs_off_current_after_large_sign_changing_error(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    commands: list[float] = []
+    window._set_recipe_current_mA = lambda current_mA, **_kwargs: commands.append(current_mA) or True  # type: ignore[method-assign]
+    window._supply_current_resolution_mA = lambda: 0.2  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window.spin_diameter.setValue(0.0185)
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_last_setpoint_mA = 4.2
+    window._active_current_sweep_started_s = 100.0
+    window._current_sweep_ramp_hold_step_index = 4
+    window._current_sweep_ramp_hold_started_s = 110.0
+    window._current_sweep_hold_instability_last_sign = -1.0
+    window._current_sweep_hold_instability_last_error = -24.0
+    window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (20.0, 20.0, 0.2, 0.0)
+    )
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    load_g = mini_dma_mod.load_g_from_stress_mpa(30.0, window.spin_diameter.value())
+    assert load_g is not None
+    window._latest_scale_value_g = load_g
+    window._latest_scale_timestamp = 120.0
+    window._scale_signal_buffer.add_sample(
+        timestamp_s=120.0,
+        raw_g=load_g,
+        applied_load_g=load_g,
+        raw_text=f"{load_g:.5f} g",
+    )
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=80.0,
+        current_ramp_rate_mA_s=0.4,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+    )
+
+    try:
+        backed_off = window._current_sweep_backoff_unstable_hold_current(
+            step,
+            4,
+            now_s=120.0,
+            tolerance=0.2,
+        )
+
+        assert backed_off is True
+        assert commands == [pytest.approx(4.0)]
+        assert window._active_current_sweep_last_setpoint_mA == pytest.approx(4.0)
+        assert window._current_sweep_hold_current_backoff_count == 1
+        assert window._active_current_sweep_started_s == pytest.approx(112.5)
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_uses_absolute_stress_error_on_current_down_ramp(
     tmp_path: Path,
     qtbot,
