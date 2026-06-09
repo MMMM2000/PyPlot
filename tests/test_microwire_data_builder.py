@@ -4084,6 +4084,48 @@ def test_word_report_export_embeds_available_origin_objects(
     assert "Origin object placeholder" in document_xml
 
 
+def test_word_report_export_writes_sample_header_and_page_footer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_embed_pictures_with_word", lambda *args, **kwargs: None)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", lambda *args, **kwargs: None)
+
+    reports = core.export_word_reports(
+        pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                }
+            ]
+        ),
+        tmp_path / "reports",
+        origin_artifacts={},
+    )
+
+    assert len(reports) == 1
+    from zipfile import ZipFile
+
+    with ZipFile(reports[0], "r") as archive:
+        names = set(archive.namelist())
+        assert "word/header1.xml" in names
+        assert "word/footer1.xml" in names
+        assert "word/_rels/document.xml.rels" in names
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+        header_xml = archive.read("word/header1.xml").decode("utf-8")
+        footer_xml = archive.read("word/footer1.xml").decode("utf-8")
+        rels_xml = archive.read("word/_rels/document.xml.rels").decode("utf-8")
+
+    assert 'w:headerReference w:type="default" r:id="rId3"' in document_xml
+    assert 'w:footerReference w:type="default" r:id="rId4"' in document_xml
+    assert "Ni50Fe27Ga23 12/2" in header_xml
+    assert 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"' in rels_xml
+    assert 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer"' in rels_xml
+    assert "PAGE" in footer_xml
+    assert "NUMPAGES" in footer_xml
+
+
 def test_word_report_export_accepts_clipboard_only_origin_objects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
