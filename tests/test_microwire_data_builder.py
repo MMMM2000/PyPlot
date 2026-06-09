@@ -1104,6 +1104,57 @@ def test_build_database_includes_mini_dma_strain_and_break_summary(tmp_path: Pat
     assert row[MINI_DMA_BREAK_COLUMN] == ["400 MPa / 11.69 g @ 35 mA"]
 
 
+def test_mini_dma_section_frame_accepts_multiple_break_summaries(tmp_path: Path) -> None:
+    first = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 run01",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="run01",
+        break_summary="400 MPa / 11.69 g @ 35 mA",
+    )
+    second = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 run02",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame({"current_mA": [30.0]}),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="run02",
+        break_summary="450 MPa / 13.15 g @ 42 mA",
+    )
+
+    frame = builder_ui._mini_dma_records_to_frame([first, second])
+
+    assert len(frame) == 1
+    assert frame.iloc[0][MINI_DMA_BREAK_COLUMN] == [
+        "400 MPa / 11.69 g @ 35 mA",
+        "450 MPa / 13.15 g @ 42 mA",
+    ]
+
+
+def test_mini_dma_section_collect_candidates_uses_only_report_measurements(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    good = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "measurement.csv"
+    sidecar = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "control_trace_replay.csv"
+    archived = tmp_path / "archive" / "Ni50Fe27Ga23 12_2 old_run" / "measurement.csv"
+    control_test = tmp_path / "automated_control_tests" / "probe_run" / "measurement.csv"
+    history = tmp_path / "automation_history" / "campaign" / "history_run" / "measurement.csv"
+    for path in (good, sidecar, archived, control_test, history):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("placeholder", encoding="utf-8")
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section.data = MiniDatabaseData(sources=[str(tmp_path)])
+
+        candidates = section._collect_candidates()
+    finally:
+        section.close()
+        section.deleteLater()
+
+    assert candidates == [good]
+
+
 def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
     anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
     anneal_path.write_text("placeholder", encoding="utf-8")
