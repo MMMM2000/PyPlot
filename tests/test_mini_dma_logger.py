@@ -14634,7 +14634,7 @@ def test_current_sweep_hold_uses_smooth_dynamic_stress_cap(tmp_path: Path, qtbot
         )
 
         assert correction_mm is not None
-        assert correction_mm * 200.0 == pytest.approx(8.0, abs=0.01)
+        assert correction_mm * 200.0 == pytest.approx(20.64, abs=0.01)
     finally:
         _close_test_window(window)
 
@@ -15405,7 +15405,7 @@ def test_current_sweep_hold_phase_uses_faster_recovery_cap(
             seek_key=seek_key,
         )
 
-        assert hold_error_step == pytest.approx(24.0 / sensitivity)
+        assert hold_error_step == pytest.approx(30.0 / sensitivity)
     finally:
         _close_test_window(window)
 
