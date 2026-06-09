@@ -3679,6 +3679,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
+        self._builder_project_import_timer = QtCore.QTimer(self)
+        self._builder_project_import_timer.setSingleShot(True)
+        self._builder_project_import_timer.setInterval(350)
+        self._builder_project_import_timer.timeout.connect(self._run_scheduled_builder_project_auto_import)
         self._fabrication_folder_path: Path | None = None
         self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
         self._fabrication_composition_lookup: dict[str, str] = {}
@@ -8632,8 +8636,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._fabrication_record_lookup.get((_normalized_token(composition), current_wire))
 
-    def _apply_fabrication_sample_if_possible(self) -> bool:
-        if self._diameter_imported:
+    def _apply_fabrication_sample_if_possible(self, *, force: bool = False) -> bool:
+        if self._diameter_imported and not force:
             return False
         try:
             record = self._matching_fabrication_record()
@@ -9024,7 +9028,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.spin_diameter.setValue(match.diameter_mm)
                 self._mark_diameter_imported(True)
             else:
-                self._mark_diameter_imported(False)
+                if not self._apply_fabrication_sample_if_possible(force=True):
+                    self._mark_diameter_imported(False)
             if match.current_mA is not None:
                 self.spin_current_sweep_end_mA.setValue(match.current_mA)
         finally:
@@ -9156,7 +9161,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_builder_project_auto_import_no_match(self, path_obj: object, key_obj: object) -> None:
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
             return
-        self._mark_diameter_imported(False)
+        if not self._apply_fabrication_sample_if_possible(force=True):
+            self._mark_diameter_imported(False)
         self.label_project_status.setText(
             "Project loaded, but no matching sample row was found from the current naming fields."
         )
@@ -9207,6 +9213,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return False
         return True
+
+    def _schedule_builder_project_auto_import(self) -> None:
+        if self._builder_import_in_progress:
+            return
+        if not self.edit_project_path.text().strip():
+            self._mark_diameter_imported(False)
+            return
+        self._builder_project_import_timer.start()
+
+    def _run_scheduled_builder_project_auto_import(self) -> None:
+        self._auto_import_builder_project_if_possible(
+            update_identity=False,
+            quiet=True,
+            async_load=True,
+        )
 
     def _import_builder_project(self) -> None:
         path = Path(self.edit_project_path.text().strip())
@@ -9587,7 +9608,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_auto_log_name = safe_name
             self._refresh_recipe_sample_label()
             self._update_fabrication_microwire_completer()
-            self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+            self._schedule_builder_project_auto_import()
             try:
                 self._apply_fabrication_sample_if_possible()
             except Exception as exc:
@@ -22862,6 +22883,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail="Application window closed while automation was active.",
         )
         self._stop_tic_dispatcher()
+        self._builder_project_import_timer.stop()
         self._stop_builder_project_import_thread()
         self._cancel_fabrication_folder_load()
         self._disconnect_scale()
