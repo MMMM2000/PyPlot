@@ -10886,6 +10886,30 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return max(self._motor_step_mm(), cap_value / sensitivity)
 
+    def _current_sweep_target_ramp_probe_correction_mm(
+        self,
+        basis: str,
+        sensitivity_per_mm: float | None,
+    ) -> float | None:
+        if (
+            not self._is_current_sweep_mode(self._automation_name)
+            or self._automation_phase != "target_ramp"
+            or self._automation_step_note == "setup_preload"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or sensitivity_per_mm is None
+        ):
+            return None
+        sensitivity = abs(float(sensitivity_per_mm))
+        if not math.isfinite(sensitivity) or sensitivity <= 0.0:
+            return None
+        cap_value = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            self._current_sweep_near_correction_stress_mpa(),
+        )
+        if cap_value is None:
+            return None
+        return max(self._motor_step_mm(), abs(float(cap_value)) / sensitivity)
+
     def _current_sweep_hold_adaptive_command_cap_mm(self) -> float:
         strain_cap_mm = self._strain_pct_to_stage_mm(
             SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
@@ -12607,6 +12631,20 @@ class MainWindow(QtWidgets.QMainWindow):
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
             return None
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_step_note != "setup_preload"
+            and current_value is not None
+            and target_value is not None
+        ):
+            near_cap = self._current_sweep_basis_value_from_stress_cap(
+                basis,
+                SERVO_CURRENT_SWEEP_NEAR_CORRECTION_STRESS_MPA,
+            )
+            error_value = abs(float(target_value) - float(current_value))
+            ramp_gate = abs(float(ramp_rate)) * self._seek_decision_interval_s(basis) * 2.0
+            if near_cap is not None and error_value > max(near_cap, ramp_gate):
+                return None
         return max(self._minimum_held_speed_mm_s(), abs(float(ramp_rate)) / abs(float(sensitivity)))
 
     def _seek_feedback_dead_time_s(self, basis: str | None) -> float:
@@ -13618,16 +13656,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             ):
                 sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
-                stress_cap_mm = (
-                    None
-                    if sensitivity is None
-                    else self._current_sweep_max_stress_correction_mm(
+                stress_cap_mm = self._current_sweep_target_ramp_probe_correction_mm(
+                    basis,
+                    sensitivity,
+                )
+                if stress_cap_mm is None and sensitivity is not None:
+                    stress_cap_mm = self._current_sweep_max_stress_correction_mm(
                         basis,
                         sensitivity,
                         error_value=delta_value,
                         seek_key=seek_key,
                     )
-                )
                 if stress_cap_mm is not None:
                     nudge_mm = max(self._motor_step_mm(), min(nudge_mm, stress_cap_mm))
             else:
