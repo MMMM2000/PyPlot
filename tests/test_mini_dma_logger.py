@@ -7063,6 +7063,46 @@ def test_recipe_preflight_reports_scale_and_supply_together(
         _close_test_window(window)
 
 
+def test_length_setup_prompt_blocks_nested_automation_tick(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    nested_steps: list[str] = []
+
+    def _prompt_reenters_event_loop(*args: object, **kwargs: object) -> tuple[float, bool]:
+        window._handle_auto_ramp_tick()
+        return 42.461, True
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.QtWidgets.QInputDialog,
+            "getDouble",
+            _prompt_reenters_event_loop,
+        )
+        monkeypatch.setattr(
+            window,
+            "_handle_mark_setup_return_zero_step",
+            lambda: nested_steps.append("advanced") or True,
+        )
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_index = 0
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("starting_length_prompt", note="setup_start_length"),
+            mini_dma_mod.AutomationStep("mark_setup_return_zero", note="setup_return_zero_start"),
+        ]
+
+        window._handle_auto_ramp_tick()
+
+        assert nested_steps == []
+        assert window._automation_index == 1
+        assert window._setup_measured_length_mm == pytest.approx(42.461)
+    finally:
+        _close_test_window(window)
+
+
 def test_recipe_preflight_restores_real_gram_zero_load_reference_before_setup(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

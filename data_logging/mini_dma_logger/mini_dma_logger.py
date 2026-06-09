@@ -3762,6 +3762,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._heating_program_current_mA: float | None = None
         self._heating_program_direction = 1.0
         self._automation_active = False
+        self._automation_tick_running = False
         self._automation_steps: list[AutomationStep] = []
         self._automation_index = 0
         self._automation_interval_ms = DEFAULT_CONTROL_INTERVAL_MS
@@ -21363,9 +21364,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_auto_ramp_tick(self) -> None:
         if not self._automation_active or self._automation_paused:
             return
+        if self._automation_tick_running:
+            return
+        self._automation_tick_running = True
+        try:
+            self._handle_auto_ramp_tick_inner()
+        finally:
+            self._automation_tick_running = False
+
+    def _handle_auto_ramp_tick_inner(self) -> None:
         if self._automation_index >= len(self._automation_steps):
             if not self._is_ui_thread():
-                self._call_on_ui_thread_sync(self._handle_auto_ramp_tick)
+                self._call_on_ui_thread_sync(self._handle_auto_ramp_tick_inner)
                 return
             is_recovery = self._is_recovery_mode()
             is_calibration = self._is_calibration_mode(self._automation_name)
