@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import pickle
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -566,6 +569,97 @@ def test_microwire_word_report_project_keeps_explicit_mini_dma_sources(
     assert "heat shield" in mini_dma_graphs
     assert explicit_path.name in mini_dma_graphs
     assert stray_path.name not in mini_dma_graphs
+
+
+def test_microwire_word_report_project_uses_shape_memory_payload_sources(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    manual_root = data_root / "manual stress-strain"
+    first_path = manual_root / "Ni50Fe27Ga23 12_2 0mA.txt"
+    second_path = manual_root / "Ni50Fe27Ga23 12_2 50mA fracture.txt"
+    manual_root.mkdir(parents=True)
+    for path in (first_path, second_path):
+        path.write_text("0.1 0.01\n0.2 0.02\n", encoding="utf-8")
+    records = [
+        SimpleNamespace(
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            sample="Ni50Fe27Ga23 12-2",
+            label="0mA - Ni50Fe27Ga23 12_2 0mA",
+            path=first_path,
+        ),
+        SimpleNamespace(
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            sample="Ni50Fe27Ga23 12-2",
+            label="50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+            path=second_path,
+        ),
+    ]
+    encoded_records = {
+        "encoding": "pickle-base64",
+        "value": base64.b64encode(pickle.dumps(records)).decode("ascii"),
+    }
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "shape_memory_stress_strain": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Manual stress/strain graphs": "0mA - Ni50Fe27Ga23 12_2 0mA",
+                                "_sources": [str(first_path)],
+                            }
+                        ],
+                        "payloads": {
+                            "shape_memory_stress_strain_records": encoded_records,
+                        },
+                    },
+                    "assemble": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Manual stress/strain graphs": [
+                                    "0mA - Ni50Fe27Ga23 12_2 0mA",
+                                    "50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+                                ],
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert origin_artifacts == {}
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["Manual stress/strain graphs"] == [
+        "0mA - Ni50Fe27Ga23 12_2 0mA",
+        "50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+    ]
+    assert row["_word_shape_memory_stress_strain_sources"] == [
+        str(first_path),
+        str(second_path),
+    ]
 
 
 def test_microwire_word_report_project_exports_rvst_through_pyplot(

@@ -11,6 +11,8 @@ import csv
 import math
 import re
 import shutil
+import base64
+import pickle
 import secrets
 import socket
 import socketserver
@@ -1999,6 +2001,87 @@ def _project_section_rows(section: object) -> list[dict[str, Any]]:
     return []
 
 
+def _decode_word_project_payload(payload: object) -> object:
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("encoding") != "pickle-base64":
+        return None
+    value = payload.get("value")
+    if not isinstance(value, str):
+        return None
+    try:
+        raw = base64.b64decode(value.encode("ascii"), validate=True)
+        return pickle.loads(raw)
+    except Exception:
+        return None
+
+
+def _word_project_section_payload(section: object, payload_name: str) -> object:
+    if not isinstance(section, Mapping):
+        return None
+    payloads = section.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return None
+    return _decode_word_project_payload(payloads.get(payload_name))
+
+
+def _word_project_record_sample(record: object) -> tuple[str, str]:
+    key = getattr(record, "key", None)
+    if isinstance(key, (list, tuple)) and len(key) >= 3:
+        composition = str(key[0] or "").strip()
+        draw = str(key[1] or "").strip()
+        piece = str(key[2] or "").strip()
+        suffix = str(key[3] or "").strip() if len(key) >= 4 and key[3] is not None else ""
+        if composition and draw and piece:
+            microwire = f"{draw}/{piece}"
+            if suffix:
+                microwire = f"{microwire} {suffix}"
+            return composition, microwire
+    sample = getattr(record, "sample", "")
+    composition, microwire = _parse_microwire_word_sample(sample)
+    return composition or "", microwire or ""
+
+
+def _word_project_record_path(record: object) -> Path | None:
+    for attr in ("path", "source_path"):
+        value = getattr(record, attr, None)
+        if value:
+            return Path(value)
+    if isinstance(record, Mapping):
+        for key in ("path", "source_path", "Source path", "Path"):
+            value = record.get(key)
+            if value:
+                return Path(str(value))
+    return None
+
+
+def _word_project_shape_memory_payload_sources(
+    section: object,
+) -> dict[tuple[str, str], list[str]]:
+    records = _word_project_section_payload(
+        section,
+        "shape_memory_stress_strain_records",
+    )
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
+        return {}
+    sources_by_key: dict[tuple[str, str], list[str]] = {}
+    for record in records:
+        composition, microwire = _word_project_record_sample(record)
+        path = _word_project_record_path(record)
+        if not composition or not microwire or path is None:
+            continue
+        key = (
+            _normalise_microwire_word_part(composition),
+            _normalise_microwire_word_key(microwire),
+        )
+        sources_by_key.setdefault(key, []).append(str(path))
+    return {
+        key: list(dict.fromkeys(paths))
+        for key, paths in sources_by_key.items()
+        if paths
+    }
+
+
 def _word_project_row_sample(row: dict[str, Any]) -> tuple[str, str]:
     composition = str(row.get("Composition") or "").strip()
     microwire = str(row.get("Microwire") or "").strip()
@@ -2331,6 +2414,9 @@ def _load_project_word_report_frame(
     for root in extra_search_roots or ():
         if root not in rvt_search_roots:
             rvt_search_roots.append(root)
+    shape_memory_payload_sources = _word_project_shape_memory_payload_sources(
+        sections.get("shape_memory_stress_strain")
+    )
 
     def _remember_rvt_search_root(value: object) -> None:
         for item in _word_project_value_items(value):
@@ -2411,6 +2497,15 @@ def _load_project_word_report_frame(
         for column in WORD_MICROWIRE_DATA_COLUMNS:
             if column in assemble_row:
                 target[column] = assemble_row.get(column)
+
+    for key, sources in shape_memory_payload_sources.items():
+        target = rows_by_key.get(key)
+        if target is None:
+            continue
+        target["_word_shape_memory_stress_strain_sources"] = _word_project_merge_value(
+            target.get("_word_shape_memory_stress_strain_sources"),
+            sources,
+        )
 
     frame = pd.DataFrame(list(rows_by_key.values()))
     for index, row in frame.iterrows():
