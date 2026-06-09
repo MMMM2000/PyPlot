@@ -4832,6 +4832,47 @@ def test_builder_project_rows_feed_sample_completers(tmp_path: Path, qtbot) -> N
         _close_test_window(window)
 
 
+def test_failed_fabrication_composition_load_is_not_retried_forever(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    started: list[tuple[Path, str | None]] = []
+    original_start = window._start_fabrication_folder_load
+
+    try:
+        window._fabrication_folder_path = root
+        window._builder_project_sample_suggestions = {
+            "Ni44Fe27Ga23Cu3Co3": ("1/1",)
+        }
+        window._refresh_fabrication_completers()
+        with QtCore.QSignalBlocker(window.edit_name_composition):
+            window.edit_name_composition.setText("Ni44Fe27Ga23Cu3Co3")
+
+        def _capture_start(path: Path, *, composition: str | None = None) -> None:
+            started.append((path, composition))
+
+        window._start_fabrication_folder_load = _capture_start  # type: ignore[method-assign]
+        window._ensure_fabrication_composition_loaded()
+
+        assert started == [(root, "Ni44Fe27Ga23Cu3Co3")]
+
+        window._fabrication_loading_composition = "Ni44Fe27Ga23Cu3Co3"
+        window._handle_fabrication_load_failure(root, "No fabrication folder matched composition Ni44Fe27Ga23Cu3Co3.")
+        window._finish_fabrication_thread(QtCore.QThread(), mini_dma_mod.FabricationSuggestionWorker(root))
+        started.clear()
+
+        window._start_fabrication_folder_load = _capture_start  # type: ignore[method-assign]
+        window._ensure_fabrication_composition_loaded()
+
+        normalized = mini_dma_mod._normalized_token("Ni44Fe27Ga23Cu3Co3")
+        assert normalized
+        assert started == []
+        assert normalized in window._fabrication_loaded_compositions
+    finally:
+        window._start_fabrication_folder_load = original_start  # type: ignore[method-assign]
+        _close_test_window(window)
+
+
 def test_wire_diameter_displays_micrometers_while_storing_mm(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -7700,8 +7741,8 @@ def test_current_sweep_logs_scheduled_points_when_strain_target_is_already_reach
     window._current_position_mm = 0.0
     window._effective_position_mm = 0.0
     window._position_reference_mm = 0.0
-    window._write_point = lambda _point: None  # type: ignore[method-assign]
-    window._write_session_metadata = lambda: None  # type: ignore[method-assign]
+    window._write_point = lambda _point, **_kwargs: None  # type: ignore[method-assign]
+    window._write_session_metadata = lambda **_kwargs: None  # type: ignore[method-assign]
     window._refresh_plots = lambda: None  # type: ignore[method-assign]
     window._handle_raw_scale_display_limit_status = lambda: False  # type: ignore[method-assign]
     ticks = iter([100.0, 100.0])
@@ -12431,6 +12472,46 @@ def test_logged_displacement_is_positive_for_tensile_pull_direction(tmp_path: Pa
         assert rows[-1]["raw_position_mm"] == "-0.500000"
         assert rows[-1]["position_mm"] == "0.500000"
     finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(("automation_active", "expected_flush", "expected_throttle"), [(True, False, True), (False, True, False)])
+def test_record_current_point_throttles_disk_work_only_during_automation(
+    tmp_path: Path,
+    qtbot,
+    automation_active: bool,
+    expected_flush: bool,
+    expected_throttle: bool,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    write_flushes: list[bool] = []
+    metadata_throttles: list[bool] = []
+
+    try:
+        now_s = time.monotonic()
+        window._session_active = True
+        window._session_logging_enabled = True
+        window._session_start_monotonic = now_s - 10.0
+        window._session_start_wall_s = time.time() - 10.0
+        window._last_session_log_timestamp_s = None
+        window._last_session_data_flush_s = now_s
+        window._last_dashboard_plot_refresh_s = now_s
+        window._automation_active = automation_active
+        window._latest_scale_value_g = 0.25
+        window._latest_scale_timestamp = time.time()
+        window._latest_scale_text = "0.250 g"
+        window._write_point = lambda _point, *, flush=True: write_flushes.append(bool(flush))  # type: ignore[method-assign]
+        window._write_session_metadata = lambda **kwargs: metadata_throttles.append(bool(kwargs.get("throttle")))  # type: ignore[method-assign]
+        window._refresh_plots = lambda: None  # type: ignore[method-assign]
+        window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+        assert window._record_current_point(quiet=True, require_fresh_after_move=False) is True
+
+        assert write_flushes == [expected_flush]
+        assert metadata_throttles == [expected_throttle]
+    finally:
+        window._automation_active = False
+        window._session_active = False
         _close_test_window(window)
 
 
