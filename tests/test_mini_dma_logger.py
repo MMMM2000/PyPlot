@@ -162,6 +162,50 @@ def test_main_window_automation_control_loop_ticks_on_ui_thread(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_main_window_automation_tick_delegates_to_controller(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[str] = []
+
+    class FakeController:
+        def tick(self) -> None:
+            calls.append("tick")
+
+    try:
+        window._automation_controller = FakeController()  # type: ignore[assignment]
+        window._handle_auto_ramp_tick()
+
+        assert calls == ["tick"]
+    finally:
+        _close_test_window(window)
+
+
+def test_automation_controller_dispatches_steps_outside_main_window(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[tuple[str, int]] = []
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("sweep_current", note="controller-boundary"),
+        ]
+        window._automation_index = 0
+        window._automation_total_steps = 1
+        window._handle_current_sweep_step = lambda _step, index: calls.append(("sweep", index)) or True  # type: ignore[method-assign]
+        window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
+        window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+        window._automation_controller.tick()
+
+        assert calls == [("sweep", 0)]
+        assert window._automation_index == 1
+        assert window._automation_completed_ticks == 1
+        assert window._automation_tick_running is False
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
