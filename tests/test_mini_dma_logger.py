@@ -15104,6 +15104,47 @@ def test_current_sweep_does_not_update_live_stiffness_from_sweep_fluctuations(
         _close_test_window(window)
 
 
+def test_current_sweep_target_ramp_updates_live_stiffness_before_heating(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_initial_length.setValue(20.0)
+    window.spin_diameter.setValue(0.0191)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_stiffness_value_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 40.0
+    window._seek_last_stiffness_position_by_basis[mini_dma_mod.HSW_BASIS_STRESS_MPA] = 0.0
+    window._seek_last_value_by_key[seek_key] = 40.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._current_position_mm = 0.02
+    window._effective_position_mm = 0.02
+
+    try:
+        window._update_live_seek_stiffness(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            90.0,
+        )
+
+        assert seek_key in window._seek_live_stiffness_by_key
+        assert window._seek_live_stiffness_g_per_mm is not None
+        assert window._basis_sensitivity_per_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            seek_key=seek_key,
+        ) > 0.0
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
