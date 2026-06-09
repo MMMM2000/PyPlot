@@ -15195,7 +15195,7 @@ def test_current_sweep_load_target_ramp_uses_target_stage_speed(tmp_path: Path, 
         _close_test_window(window)
 
 
-def test_current_sweep_target_ramp_speed_cap_honors_ramp_rate_for_large_error(
+def test_current_sweep_target_ramp_large_error_can_use_stage_speed_cap(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -15221,7 +15221,43 @@ def test_current_sweep_target_ramp_speed_cap_honors_ramp_rate_for_large_error(
             target_value=5.0,
         )
 
-        assert speed_cap == pytest.approx(0.05)
+        assert speed_cap is None
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_target_ramp_probe_cap_uses_near_stress_after_reversal(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.03)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._calibrated_stiffness_g_per_mm = 72.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+        sensitivity = window._basis_sensitivity_per_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            seek_key=seek_key,
+        )
+        assert sensitivity is not None
+
+        probe_mm = window._current_sweep_target_ramp_probe_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity,
+        )
+
+        assert probe_mm == pytest.approx(max(window._motor_step_mm(), 1.0 / sensitivity))
     finally:
         _close_test_window(window)
 
