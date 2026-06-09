@@ -476,6 +476,8 @@ CURRENT_SWEEP_HOLD_ESTIMATE_MAX_S = 60.0
 CURRENT_SWEEP_ETA_MEASURED_WEIGHT_START = 0.05
 CURRENT_SWEEP_ETA_MEASURED_WEIGHT_FULL = 0.25
 SERVO_FULL_SPEED_ERROR_RATIO = 8.0
+LIVE_LINEAR_SPEED_SAMPLE_INTERVAL_S = 1.0
+CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S = 15.0
 SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
@@ -11565,6 +11567,8 @@ class MainWindow(QtWidgets.QMainWindow):
         elapsed_s = now - float(self._effective_speed_sample_time_s)
         if elapsed_s <= 0.0 or not math.isfinite(elapsed_s):
             return
+        if elapsed_s < LIVE_LINEAR_SPEED_SAMPLE_INTERVAL_S:
+            return
         distance_mm = abs(position_mm - float(self._effective_speed_sample_position_mm))
         self._effective_average_speed_mm_s = distance_mm / elapsed_s
         self._effective_speed_sample_time_s = now
@@ -13211,9 +13215,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
-            raise RuntimeError(
-                "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
+            age_s = self._scale_reading_age_s()
+            if age_s is None or age_s > CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S:
+                raise RuntimeError(
+                    "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
+                )
+            self._log_waiting_for_feedback(
+                "Scale feedback is temporarily stale; waiting for fresh scale data before the next "
+                "load/stress correction."
             )
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="stale_scale_grace",
+            )
+            return False
         seek_key = self._seek_error_key(basis, target_value)
         if self._setup_zero_fallback_is_pending():
             return self._handle_pending_setup_zero_fallback()
