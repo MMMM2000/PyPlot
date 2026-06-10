@@ -48,10 +48,21 @@ def _write_run(
     }
     (run_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     with (run_dir / "measurement.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["elapsed_s", "stress_mpa"])
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["elapsed_s", "stress_mpa", "current_measured_mA", "strain_pct", "automation_phase"],
+        )
         writer.writeheader()
         for index in range(rows):
-            writer.writerow({"elapsed_s": index * 2.0, "stress_mpa": 10 + index})
+            writer.writerow(
+                {
+                    "elapsed_s": index * 2.0,
+                    "stress_mpa": 10 + index,
+                    "current_measured_mA": 1.0 + index,
+                    "strain_pct": 0.1 * index,
+                    "automation_phase": "current_hold" if index == 1 else "current",
+                }
+            )
     return run_dir
 
 
@@ -133,3 +144,26 @@ def test_run_cleanup_dialog_defaults_to_archiving_only_older_non_preconditioning
     assert dialog.selected_archive_paths() == [archive]
     assert keep not in dialog.selected_archive_paths()
     assert current not in dialog.selected_archive_paths()
+
+
+def test_run_cleanup_dialog_previews_selected_run_graphs(tmp_path: Path, qtbot) -> None:
+    root = tmp_path / "mini_dma"
+    current = _write_run(root, "run03", stop_reason="wire_break_or_contact_loss")
+    archive = _write_run(root, "run02", rows=5)
+    candidates = discover_cleanup_candidates_for_run(current)
+
+    dialog = mini_dma_mod.RunCleanupReviewDialog(candidates)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitExposed(dialog)
+
+    row = next(index for index, candidate in dialog._candidate_by_row.items() if candidate.path == archive)
+    dialog.table.selectRow(row)
+    dialog._update_selected_preview()
+
+    assert dialog._preview_canvas is not None
+    axes = dialog._preview_canvas.figure.axes
+    assert len(axes) == 2
+    assert axes[0].lines
+    assert axes[1].lines
+    assert axes[1].collections

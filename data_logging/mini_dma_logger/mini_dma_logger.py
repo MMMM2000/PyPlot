@@ -23,8 +23,10 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from PyQt6 import QtCore, QtGui, QtWidgets
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.figure import Figure
 except Exception:
     FigureCanvas = None  # type: ignore[assignment]
+    Figure = None  # type: ignore[assignment]
 
 try:
     import pyqtgraph as pg
@@ -3629,8 +3631,11 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self._candidates = list(candidates)
         self._archive_checks: dict[Path, QtWidgets.QCheckBox] = {}
+        self._candidate_by_row: dict[int, MiniDmaRunCleanupCandidate] = {}
+        self._preview_canvas: Any | None = None
+        self._preview_label: QtWidgets.QLabel | None = None
         self.setWindowTitle("Review Mini DMA Runs")
-        self.resize(1180, 520)
+        self.resize(1320, 720)
 
         layout = QtWidgets.QVBoxLayout(self)
         heading = QtWidgets.QLabel("Related Mini DMA run folders")
@@ -3640,6 +3645,9 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
         summary = QtWidgets.QLabel(cleanup_summary_text(self._candidates))
         summary.setWordWrap(True)
         layout.addWidget(summary)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        layout.addWidget(splitter, 1)
 
         self.table = QtWidgets.QTableWidget(len(self._candidates), 9, self)
         self.table.setHorizontalHeaderLabels(
@@ -3663,8 +3671,37 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.table, 1)
+        splitter.addWidget(self.table)
+
+        preview_panel = QtWidgets.QWidget(splitter)
+        preview_layout = QtWidgets.QVBoxLayout(preview_panel)
+        preview_layout.setContentsMargins(8, 0, 0, 0)
+        preview_layout.setSpacing(6)
+        self._preview_label = QtWidgets.QLabel("Select a run to preview its graph.", preview_panel)
+        self._preview_label.setWordWrap(True)
+        self._preview_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        preview_layout.addWidget(self._preview_label)
+        if FigureCanvas is None or Figure is None:
+            unavailable = QtWidgets.QLabel("Matplotlib Qt backend is unavailable.", preview_panel)
+            unavailable.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            unavailable.setWordWrap(True)
+            preview_layout.addWidget(unavailable, 1)
+        else:
+            figure = Figure(figsize=(6.6, 5.4), tight_layout=True)
+            self._preview_canvas = FigureCanvas(figure)
+            self._preview_canvas.setMinimumSize(520, 420)
+            self._preview_canvas.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+            preview_layout.addWidget(self._preview_canvas, 1)
+        splitter.addWidget(preview_panel)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
         self._populate_table()
+        self.table.itemSelectionChanged.connect(self._update_selected_preview)
+        self._select_initial_preview_row()
 
         name_row = QtWidgets.QHBoxLayout()
         name_row.addWidget(QtWidgets.QLabel("Archive folder"))
@@ -3684,6 +3721,7 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
 
     def _populate_table(self) -> None:
         for row, candidate in enumerate(self._candidates):
+            self._candidate_by_row[row] = candidate
             check = QtWidgets.QCheckBox(self.table)
             check.setToolTip("Move this older run folder to archive when Archive selected is pressed.")
             check.setChecked(candidate.suggested_action == "archive" and not candidate.is_current_run)
@@ -3721,6 +3759,147 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
                 elif candidate.is_preconditioning:
                     item.setToolTip("Preconditioning run; suggested keep.")
                 self.table.setItem(row, column, item)
+
+    def _select_initial_preview_row(self) -> None:
+        archive_row = next(
+            (
+                row
+                for row, candidate in self._candidate_by_row.items()
+                if not candidate.is_current_run and candidate.suggested_action == "archive"
+            ),
+            0,
+        )
+        if self.table.rowCount() > 0:
+            self.table.selectRow(archive_row)
+            self._update_selected_preview()
+
+    def _selected_candidate(self) -> MiniDmaRunCleanupCandidate | None:
+        selected_rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
+        if not selected_rows:
+            current = self.table.currentRow()
+            if current >= 0:
+                selected_rows = [current]
+        if not selected_rows:
+            return None
+        return self._candidate_by_row.get(selected_rows[0])
+
+    def _update_selected_preview(self) -> None:
+        candidate = self._selected_candidate()
+        if candidate is None:
+            return
+        self._render_candidate_preview(candidate)
+
+    def _render_candidate_preview(self, candidate: MiniDmaRunCleanupCandidate) -> None:
+        if self._preview_label is not None:
+            action = "current run" if candidate.is_current_run else candidate.suggested_action
+            self._preview_label.setText(
+                f"{candidate.name}\n"
+                f"{candidate.recipe_mode or 'unknown mode'}; {candidate.measurement_rows or 0} row(s); "
+                f"{format_duration_s(candidate.duration_s) or 'duration n/a'}; selection: {action}"
+            )
+        if self._preview_canvas is None:
+            return
+        figure = self._preview_canvas.figure
+        figure.clear()
+        axes = figure.subplots(1, 2)
+        try:
+            rows = self._read_measurement_rows(candidate.path / SESSION_MEASUREMENT_CSV)
+            self._plot_cleanup_preview_axes(axes, rows)
+        except Exception as exc:
+            ax = axes[0]
+            ax.text(0.5, 0.5, f"Preview unavailable:\n{exc}", ha="center", va="center", wrap=True)
+            ax.axis("off")
+            axes[1].axis("off")
+        figure.suptitle(candidate.name, fontsize=10, fontweight="bold")
+        self._preview_canvas.draw_idle()
+
+    @staticmethod
+    def _read_measurement_rows(path: Path) -> list[dict[str, str]]:
+        if not path.exists():
+            return []
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return list(csv.DictReader(handle))
+
+    @staticmethod
+    def _float_or_none(value: Any) -> float | None:
+        try:
+            result = float(str(value))
+        except (TypeError, ValueError):
+            return None
+        return result if math.isfinite(result) else None
+
+    @classmethod
+    def _xy(cls, rows: Sequence[Mapping[str, str]], x_name: str, y_name: str) -> tuple[list[float], list[float]]:
+        x_values: list[float] = []
+        y_values: list[float] = []
+        for row in rows:
+            x = cls._float_or_none(row.get(x_name))
+            y = cls._float_or_none(row.get(y_name))
+            if x is None or y is None:
+                continue
+            x_values.append(x)
+            y_values.append(y)
+        return x_values, y_values
+
+    @classmethod
+    def _hold_spans(cls, rows: Sequence[Mapping[str, str]]) -> list[tuple[float, float]]:
+        spans: list[tuple[float, float]] = []
+        start: float | None = None
+        previous: float | None = None
+        for row in rows:
+            elapsed = cls._float_or_none(row.get("elapsed_s"))
+            if elapsed is None:
+                continue
+            if str(row.get("automation_phase") or "") == "current_hold":
+                if start is None:
+                    start = elapsed
+                previous = elapsed
+                continue
+            if start is not None:
+                spans.append((start, previous if previous is not None else start))
+                start = None
+                previous = None
+        if start is not None:
+            spans.append((start, previous if previous is not None else start))
+        return spans
+
+    @classmethod
+    def _plot_cleanup_preview_axes(cls, axes: Sequence[Any], rows: Sequence[Mapping[str, str]]) -> None:
+        elapsed, stress = cls._xy(rows, "elapsed_s", "stress_mpa")
+        measured_current, strain = cls._xy(rows, "current_measured_mA", "strain_pct")
+        if not measured_current:
+            measured_current, strain = cls._xy(rows, "current_set_mA", "strain_pct")
+        hold_current: list[float] = []
+        hold_strain: list[float] = []
+        for row in rows:
+            if str(row.get("automation_phase") or "") != "current_hold":
+                continue
+            current = cls._float_or_none(row.get("current_measured_mA"))
+            if current is None:
+                current = cls._float_or_none(row.get("current_set_mA"))
+            y_value = cls._float_or_none(row.get("strain_pct"))
+            if current is not None and y_value is not None:
+                hold_current.append(current)
+                hold_strain.append(y_value)
+
+        ax = axes[0]
+        ax.plot(elapsed, stress, color="#2563eb", linewidth=1.2)
+        for start, end in cls._hold_spans(rows):
+            ax.axvspan(start, end, color="#f59e0b", alpha=0.22)
+        ax.set_title("Stress vs time", fontsize=9)
+        ax.set_xlabel("s")
+        ax.set_ylabel("MPa")
+        ax.grid(True, alpha=0.25)
+
+        ax = axes[1]
+        ax.plot(measured_current, strain, color="#047857", linewidth=1.2)
+        if hold_current:
+            ax.scatter(hold_current, hold_strain, color="#dc2626", s=12, label="hold", zorder=3)
+            ax.legend(loc="best", fontsize=8)
+        ax.set_title("Strain vs current", fontsize=9)
+        ax.set_xlabel("mA")
+        ax.set_ylabel("%")
+        ax.grid(True, alpha=0.25)
 
     def _update_archive_button(self) -> None:
         if not hasattr(self, "archive_button"):
