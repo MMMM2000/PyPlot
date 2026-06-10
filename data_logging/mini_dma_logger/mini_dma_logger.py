@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import hashlib
 import json
 import math
@@ -121,8 +122,6 @@ CONTROL_LOGIC_FEATURES = [
     "length_setup_commits_run_zero_load_reference",
     "automation_controller_boundary",
 ]
-CURRENT_AXIS_PLOT_KEYS = frozenset({"current_set_mA", "current_measured_mA"})
-CURRENT_AXIS_RECIPE_PHASES = frozenset({"current", "current_hold", "current_limit_unwind"})
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
     "timestamp_utc",
@@ -611,6 +610,90 @@ def _next_run_session_paths(directory: Path, basename: str) -> tuple[str, tuple[
         if not _session_paths_exist(candidate_paths):
             return candidate, candidate_paths
     raise RuntimeError(f"Could not find a free run filename for {clean_basename!r}.")
+
+
+def _legacy_session_paths_for_run_dir(run_dir: Path) -> tuple[Path, Path, Path, Path]:
+    base_dir = run_dir.parent
+    basename = run_dir.name
+    return (
+        base_dir / f"{basename}.txt",
+        base_dir / f"{basename}.csv",
+        base_dir / f"{basename}.json",
+        base_dir / f"{basename}.scale_raw.csv",
+    )
+
+
+def _unique_replaced_output_path(path: Path, *, timestamp: str) -> Path:
+    candidate = path.with_name(f"{path.name}_replaced_{timestamp}")
+    if not candidate.exists():
+        return candidate
+    for suffix in range(2, 10000):
+        numbered = path.with_name(f"{path.name}_replaced_{timestamp}_{suffix:02d}")
+        if not numbered.exists():
+            return numbered
+    raise RuntimeError(f"Could not choose a safe replacement backup path for {path}.")
+
+
+def _move_path_to_trash(path: Path) -> None:
+    if os.name == "nt":
+        class _SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", ctypes.c_void_p),
+                ("wFunc", ctypes.c_uint),
+                ("pFrom", ctypes.c_wchar_p),
+                ("pTo", ctypes.c_wchar_p),
+                ("fFlags", ctypes.c_ushort),
+                ("fAnyOperationsAborted", ctypes.c_bool),
+                ("hNameMappings", ctypes.c_void_p),
+                ("lpszProgressTitle", ctypes.c_wchar_p),
+            ]
+
+        operation = _SHFILEOPSTRUCTW()
+        operation.wFunc = 3  # FO_DELETE
+        operation.pFrom = str(path) + "\0\0"
+        operation.fFlags = 0x0040 | 0x0010 | 0x0004 | 0x0400  # recycle, no confirm, silent, no UI
+        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))  # type: ignore[attr-defined]
+        if result != 0 or operation.fAnyOperationsAborted:
+            raise OSError(f"Windows Recycle Bin move failed for {path} (code {result}).")
+        return
+    qt_file = getattr(QtCore.QFile, "moveToTrash", None)
+    if qt_file is None or not qt_file(str(path)):
+        raise OSError(f"Could not move {path} to Trash.")
+
+
+def _evacuate_path_for_replacement(path: Path, *, timestamp: str) -> str:
+    try:
+        _move_path_to_trash(path)
+        return f"moved to Trash/Recycling Bin: {path}"
+    except Exception as exc:
+        backup_path = _unique_replaced_output_path(path, timestamp=timestamp)
+        shutil.move(str(path), str(backup_path))
+        return f"Trash unavailable ({exc}); preserved as {backup_path}"
+
+
+def _evacuate_session_outputs_for_replacement(paths: Sequence[Path]) -> list[str]:
+    if not paths:
+        return []
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = paths[0].parent
+    messages: list[str] = []
+    if run_dir.exists():
+        messages.append(_evacuate_path_for_replacement(run_dir, timestamp=timestamp))
+        return messages
+    legacy_paths = [path for path in _legacy_session_paths_for_run_dir(run_dir) if path.exists()]
+    if not legacy_paths:
+        return messages
+    for legacy_path in legacy_paths:
+        try:
+            _move_path_to_trash(legacy_path)
+            messages.append(f"moved to Trash/Recycling Bin: {legacy_path}")
+        except Exception as exc:
+            backup_dir = _unique_replaced_output_path(run_dir, timestamp=timestamp)
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            destination = backup_dir / legacy_path.name
+            shutil.move(str(legacy_path), str(destination))
+            messages.append(f"Trash unavailable ({exc}); preserved legacy output as {destination}")
+    return messages
 
 
 def _utc_timestamp() -> str:
@@ -15786,10 +15869,12 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setInformativeText(
             f"{self._current_session_identity_text(paths)}\n\n"
             f"Existing file(s): {existing_names or paths[0].name}\n\n"
-            "Save as next run keeps the existing data and creates a new _run02, _run03, and so on folder."
+            "Save as next run keeps the existing data and creates a new _run02, _run03, and so on folder.\n"
+            "Replace existing first moves the old output to Trash/Recycling Bin when the platform allows it; "
+            "if not, it preserves the old output as a timestamped replacement folder."
         )
         next_button = box.addButton("Save as next run", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-        replace_button = box.addButton("Replace existing", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        replace_button = box.addButton("Move old to Trash, then replace", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
         cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(next_button)
         box.exec()
@@ -15808,6 +15893,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return paths
         action = self._ask_existing_output_action(paths)
         if action == OUTPUT_COLLISION_REPLACE:
+            for message in _evacuate_session_outputs_for_replacement(paths):
+                self._log(f"Existing output {message}.")
             return paths
         if action == OUTPUT_COLLISION_NEXT:
             directory = paths[0].parent.parent
@@ -18245,6 +18332,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         return changed_steps
 
+    def _runtime_active_reverse_step(
+        self,
+        active_step: AutomationStep,
+        values: Mapping[str, float | bool],
+        *,
+        active_index: int,
+    ) -> AutomationStep | None:
+        return_index = active_index + 1
+        if return_index >= len(self._automation_steps):
+            return None
+        old_return_step = self._automation_steps[return_index]
+        if not self._is_voltage_limited_return_pair(return_index, old_return_step):
+            return None
+        if active_step.current_start_mA is None or active_step.current_end_mA is None:
+            return None
+        return replace(
+            old_return_step,
+            current_start_mA=float(active_step.current_end_mA),
+            current_end_mA=float(active_step.current_start_mA),
+            current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+            current_hold_enabled=bool(values["current_hold_enabled"]),
+            current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+            current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+            current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+        )
+
     def _current_sweep_pending_update_preview(
         self,
         values: Mapping[str, float | bool] | None = None,
@@ -18266,6 +18379,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if active_sweep_index is not None and 0 <= active_sweep_index < len(self._automation_steps):
             active_index = active_sweep_index
         basis = self._current_sweep_runtime_basis(active_index)
+        active_update, active_step_message = self._active_current_sweep_step_update(update_values, active_index)
         replacement_tail = self._build_runtime_current_sweep_tail(
             update_values,
             basis=basis,
@@ -18274,6 +18388,14 @@ class MainWindow(QtWidgets.QMainWindow):
         tail_replanned = replacement_tail is not None
         if replacement_tail is not None:
             old_tail = self._automation_steps[active_index + 1 :]
+            active_step_for_tail = active_update or self._automation_steps[active_index]
+            active_reverse_step = self._runtime_active_reverse_step(
+                active_step_for_tail,
+                update_values,
+                active_index=active_index,
+            )
+            if active_reverse_step is not None:
+                replacement_tail = [active_reverse_step, *replacement_tail]
             updated_steps = [
                 *self._automation_steps[: active_index + 1],
                 *replacement_tail,
@@ -18333,7 +18455,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         )
 
         active_step_updated = False
-        active_update, active_step_message = self._active_current_sweep_step_update(update_values, active_index)
         if active_update is not None:
             old_active_summary = self._current_sweep_step_override_summary(self._automation_steps[active_index])
             new_active_summary = self._current_sweep_step_override_summary(active_update)
@@ -19702,39 +19823,23 @@ class MainWindow(QtWidgets.QMainWindow):
         x_values: list[float] = []
         y_values: list[float] = []
         previous_elapsed_s: float | None = None
-        previous_segment_key: tuple[str, int | None] | None = None
         for point in points:
-            if (
-                x_channel.key in CURRENT_AXIS_PLOT_KEYS
-                and point.automation_phase not in CURRENT_AXIS_RECIPE_PHASES
-            ):
-                continue
             x_value = x_channel.getter(point)
             y_value = y_channel.getter(point)
             if x_value is None or y_value is None:
                 continue
             elapsed_s = float(point.elapsed_s)
-            segment_key = (
-                (point.automation_phase, point.plateau_index)
-                if x_channel.key in CURRENT_AXIS_PLOT_KEYS
-                else None
-            )
             if (
                 point.plot_gap_before
                 or
                 previous_elapsed_s is not None
                 and elapsed_s - previous_elapsed_s > DISPLAY_PLOT_BREAK_GAP_S
-                or
-                previous_segment_key is not None
-                and segment_key is not None
-                and segment_key != previous_segment_key
             ):
                 x_values.append(float("nan"))
                 y_values.append(float("nan"))
             x_values.append(float(x_value))
             y_values.append(float(y_value))
             previous_elapsed_s = elapsed_s
-            previous_segment_key = segment_key
         return x_values, y_values
 
     def _refresh_length_setup_plot(self) -> None:

@@ -9,6 +9,7 @@ import importlib
 import json
 import math
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -6893,118 +6894,6 @@ def test_plot_xy_values_break_line_across_hidden_display_gap(tmp_path: Path, qtb
         _close_test_window(window)
 
 
-def test_plot_xy_values_skip_target_ramp_points_on_current_axis(tmp_path: Path, qtbot) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    def _point(
-        elapsed_s: float,
-        phase: str,
-        current_mA: float,
-        strain_pct: float,
-        plateau_index: int | None,
-    ) -> mini_dma_mod.MeasurementPoint:
-        return mini_dma_mod.MeasurementPoint(
-            elapsed_s=elapsed_s,
-            timestamp_utc="2026-06-10 00:00:00",
-            raw_position_mm=strain_pct,
-            position_mm=strain_pct,
-            raw_load_g=0.0,
-            load_g=0.0,
-            preload_state=mini_dma_mod.PRELOAD_DISABLED,
-            strain_pct=strain_pct,
-            stress_mpa=None,
-            current_set_mA=current_mA,
-            current_measured_mA=current_mA,
-            voltage_V=None,
-            resistance_ohm=None,
-            power_W=None,
-            automation_phase=phase,
-            automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            automation_target_value=20.0,
-            plateau_index=plateau_index,
-            plateau_label=None,
-        )
-
-    try:
-        x_channel = window._plot_channel("current_measured_mA")
-        y_channel = window._plot_channel("strain_pct")
-        assert x_channel is not None
-        assert y_channel is not None
-
-        x_values, y_values = window._plot_xy_values(
-            [
-                _point(1.0, "current", 80.0, 1.2, 4),
-                _point(2.0, "target_ramp", 1.0, 1.4, 5),
-                _point(3.0, "target_ramp", 1.0, 1.0, 5),
-                _point(4.0, "current", 1.0, 0.8, 5),
-            ],
-            x_channel,
-            y_channel,
-        )
-
-        assert x_values[0] == pytest.approx(80.0)
-        assert y_values[0] == pytest.approx(1.2)
-        assert math.isnan(x_values[1])
-        assert math.isnan(y_values[1])
-        assert x_values[2] == pytest.approx(1.0)
-        assert y_values[2] == pytest.approx(0.8)
-    finally:
-        _close_test_window(window)
-
-
-def test_plot_xy_values_break_current_axis_between_plateaus(tmp_path: Path, qtbot) -> None:
-    window = _build_window(tmp_path, qtbot)
-
-    def _point(
-        elapsed_s: float,
-        current_mA: float,
-        strain_pct: float,
-        plateau_index: int,
-    ) -> mini_dma_mod.MeasurementPoint:
-        return mini_dma_mod.MeasurementPoint(
-            elapsed_s=elapsed_s,
-            timestamp_utc="2026-06-10 00:00:00",
-            raw_position_mm=strain_pct,
-            position_mm=strain_pct,
-            raw_load_g=0.0,
-            load_g=0.0,
-            preload_state=mini_dma_mod.PRELOAD_DISABLED,
-            strain_pct=strain_pct,
-            stress_mpa=None,
-            current_set_mA=current_mA,
-            current_measured_mA=current_mA,
-            voltage_V=None,
-            resistance_ohm=None,
-            power_W=None,
-            automation_phase="current",
-            automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            automation_target_value=float(plateau_index) * 50.0,
-            plateau_index=plateau_index,
-            plateau_label=None,
-        )
-
-    try:
-        x_channel = window._plot_channel("current_measured_mA")
-        y_channel = window._plot_channel("strain_pct")
-        assert x_channel is not None
-        assert y_channel is not None
-
-        x_values, y_values = window._plot_xy_values(
-            [_point(1.0, 80.0, 1.2, 4), _point(2.0, 1.0, 0.8, 5)],
-            x_channel,
-            y_channel,
-        )
-
-        assert x_values[0] == pytest.approx(80.0)
-        assert y_values[0] == pytest.approx(1.2)
-        assert math.isnan(x_values[1])
-        assert math.isnan(y_values[1])
-        assert x_values[2] == pytest.approx(1.0)
-        assert y_values[2] == pytest.approx(0.8)
-    finally:
-        _close_test_window(window)
-
-
 def test_display_plot_points_connect_downsampled_history_to_recent_tail(
     tmp_path: Path,
     qtbot,
@@ -12253,6 +12142,109 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
         assert overrides[0]["active_step_updated"] is True
         assert overrides[0]["changed_step_count"] == 5
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_runtime_update_keeps_active_plateau_reverse_before_next_target(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_keep_active_reverse")
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=400.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=80.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=False,
+        note="8",
+    )
+    active_reverse = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=400.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=80.0,
+        current_end_mA=1.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=False,
+        note="8",
+    )
+    old_future = [
+        mini_dma_mod.AutomationStep(
+            "set_current",
+            target_value=450.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_mA=1.0,
+            note="9",
+        ),
+        mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=450.0,
+            target_start_value=400.0,
+            target_end_value=450.0,
+            target_ramp_rate_value_s=5.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="9",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=450.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=80.0,
+            current_ramp_rate_mA_s=1.0,
+            current_hold_enabled=False,
+            note="9",
+        ),
+    ]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep, active_reverse, *old_future]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+        window._automation_target_value = 400.0
+        window._active_current_sweep_last_setpoint_mA = 42.0
+        window._automation_interval_ms = 250
+        window._recipe_estimated_points, window._automation_total_steps = window._estimate_recipe_points_and_ticks(
+            window._automation_steps,
+            window._automation_interval_ms,
+        )
+
+        window.spin_current_sweep_target_start.setValue(400.0)
+        window.spin_current_sweep_target_end.setValue(500.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(85.0)
+        window.spin_current_sweep_step_mA.setValue(0.4)
+        window.check_current_sweep_hold_on_error.setChecked(False)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0].target_value == pytest.approx(400.0)
+        assert window._automation_steps[0].current_start_mA == pytest.approx(1.0)
+        assert window._automation_steps[0].current_end_mA == pytest.approx(85.0)
+        assert window._automation_steps[1].target_value == pytest.approx(400.0)
+        assert window._automation_steps[1].current_start_mA == pytest.approx(85.0)
+        assert window._automation_steps[1].current_end_mA == pytest.approx(1.0)
+        assert window._automation_steps[1].current_ramp_rate_mA_s == pytest.approx(0.4)
+        assert window._automation_steps[2].action == "set_current"
+        assert window._automation_steps[2].target_value == pytest.approx(450.0)
+        assert window._automation_steps[2].current_mA == pytest.approx(1.0)
+
+        window._stop_session()
+        metadata = json.loads((tmp_path / "runtime_keep_active_reverse" / "metadata.json").read_text(encoding="utf-8"))
+        override = metadata["controlled_current_sweep"]["runtime_overrides"][0]
+        assert override["active_step_updated"] is True
+        assert override["tail_replanned"] is True
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -17881,13 +17873,22 @@ def test_prepare_session_files_does_not_chain_run_suffixes(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
-def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbot) -> None:
+def test_prepare_session_files_can_replace_existing_outputs(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_sample_name.setText("repeat sample")
     window.edit_log_name.setText("replace_sample")
     txt_path = tmp_path / "replace_sample" / "measurement.txt"
     txt_path.parent.mkdir()
     txt_path.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_move_path_to_trash",
+        lambda path: shutil.move(str(path), str(tmp_path / "trash_replace_sample")),
+    )
     window._ask_existing_output_action = (  # type: ignore[method-assign]
         lambda _paths: mini_dma_mod.OUTPUT_COLLISION_REPLACE
     )
@@ -17921,8 +17922,123 @@ def test_prepare_session_files_can_replace_existing_outputs(tmp_path: Path, qtbo
             handle.close()
 
         assert returned_txt_path == txt_path
+        assert (tmp_path / "trash_replace_sample" / "measurement.txt").read_text(encoding="utf-8") == "old"
         assert txt_path.read_text(encoding="utf-8").startswith("Displacement\t")
         assert window.edit_log_name.text() == "replace_sample"
+    finally:
+        _close_test_window(window)
+
+
+def test_prepare_session_files_moves_replaced_output_to_trash_first(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_sample_name.setText("repeat sample")
+    window.edit_log_name.setText("replace_sample")
+    txt_path = tmp_path / "replace_sample" / "measurement.txt"
+    txt_path.parent.mkdir()
+    txt_path.write_text("old", encoding="utf-8")
+    trash_dir = tmp_path / "trash"
+
+    def _fake_move_to_trash(path: Path) -> None:
+        trash_dir.mkdir()
+        shutil.move(str(path), str(trash_dir / path.name))
+
+    monkeypatch.setattr(mini_dma_mod, "_move_path_to_trash", _fake_move_to_trash)
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda _paths: mini_dma_mod.OUTPUT_COLLISION_REPLACE
+    )
+
+    try:
+        (
+            txt_handle,
+            csv_handle,
+            _csv_writer,
+            raw_scale_handle,
+            _raw_scale_writer,
+            control_trace_handle,
+            _control_trace_writer,
+            ui_telemetry_handle,
+            _ui_telemetry_writer,
+            setup_txt_handle,
+            setup_csv_handle,
+            _setup_csv_writer,
+            returned_txt_path,
+            *_paths,
+        ) = window._prepare_session_files(created_utc="2026-04-28 12:05:00")
+        for handle in (
+            txt_handle,
+            csv_handle,
+            raw_scale_handle,
+            control_trace_handle,
+            ui_telemetry_handle,
+            setup_txt_handle,
+            setup_csv_handle,
+        ):
+            handle.close()
+
+        assert returned_txt_path == txt_path
+        assert (trash_dir / "replace_sample" / "measurement.txt").read_text(encoding="utf-8") == "old"
+        assert txt_path.read_text(encoding="utf-8").startswith("Displacement\t")
+        assert "Trash/Recycling Bin" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_prepare_session_files_preserves_replaced_output_when_trash_unavailable(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("replace_sample")
+    txt_path = tmp_path / "replace_sample" / "measurement.txt"
+    txt_path.parent.mkdir()
+    txt_path.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_move_path_to_trash",
+        lambda _path: (_ for _ in ()).throw(OSError("trash disabled")),
+    )
+    window._ask_existing_output_action = (  # type: ignore[method-assign]
+        lambda _paths: mini_dma_mod.OUTPUT_COLLISION_REPLACE
+    )
+
+    try:
+        (
+            txt_handle,
+            csv_handle,
+            _csv_writer,
+            raw_scale_handle,
+            _raw_scale_writer,
+            control_trace_handle,
+            _control_trace_writer,
+            ui_telemetry_handle,
+            _ui_telemetry_writer,
+            setup_txt_handle,
+            setup_csv_handle,
+            _setup_csv_writer,
+            returned_txt_path,
+            *_paths,
+        ) = window._prepare_session_files(created_utc="2026-04-28 12:05:00")
+        for handle in (
+            txt_handle,
+            csv_handle,
+            raw_scale_handle,
+            control_trace_handle,
+            ui_telemetry_handle,
+            setup_txt_handle,
+            setup_csv_handle,
+        ):
+            handle.close()
+
+        preserved = list(tmp_path.glob("replace_sample_replaced_*"))
+        assert len(preserved) == 1
+        assert (preserved[0] / "measurement.txt").read_text(encoding="utf-8") == "old"
+        assert returned_txt_path == txt_path
+        assert txt_path.read_text(encoding="utf-8").startswith("Displacement\t")
     finally:
         _close_test_window(window)
 
