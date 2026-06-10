@@ -7685,6 +7685,102 @@ def test_tic_status_warns_when_motor_power_vin_is_low(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
+def test_tic_status_missing_vin_uses_recent_good_power_briefly(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = 1000.0
+
+    class _FakeController:
+        calls = 0
+
+        def get_status(self) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "\n".join(
+                    [
+                        "VIN voltage: 12.00 V",
+                        "Operation state: Normal",
+                        "Current position: 42",
+                        "Errors currently stopping the motor: none",
+                    ]
+                )
+            return "\n".join(
+                [
+                    "Operation state: Normal",
+                    "Current position: 42",
+                    "Errors currently stopping the motor: none",
+                ]
+            )
+
+    controller = _FakeController()
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: now_s)
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+
+    try:
+        assert window._refresh_tic_status() is True
+        assert window._tic_motor_power_ok is True
+        assert window._last_tic_vin_v == pytest.approx(12.0)
+
+        now_s += 5.0
+        assert window._refresh_tic_status() is True
+
+        assert window._tic_motor_power_ok is None
+        assert window._last_tic_vin_v == pytest.approx(12.0)
+        assert "stale" in window.label_tic_summary.text().lower()
+        assert "12.00 V" in window.label_tic_summary.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_tic_status_missing_vin_blocks_after_recent_good_power_expires(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = 1000.0
+
+    class _FakeController:
+        calls = 0
+
+        def get_status(self) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "\n".join(
+                    [
+                        "VIN voltage: 12.00 V",
+                        "Operation state: Normal",
+                        "Current position: 42",
+                        "Errors currently stopping the motor: none",
+                    ]
+                )
+            return "\n".join(
+                [
+                    "Operation state: Normal",
+                    "Current position: 42",
+                    "Errors currently stopping the motor: none",
+                ]
+            )
+
+    controller = _FakeController()
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: now_s)
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+
+    try:
+        assert window._refresh_tic_status() is True
+        now_s += mini_dma_mod.TIC_MOTOR_POWER_STALE_GRACE_S + 1.0
+
+        assert window._refresh_tic_status() is True
+
+        assert window._tic_motor_power_ok is False
+        assert "Motor power" in window.label_card_motion.text()
+    finally:
+        _close_test_window(window)
+
+
 def test_recipe_preflight_blocks_when_tic_motor_power_is_low(
     tmp_path: Path,
     qtbot,
