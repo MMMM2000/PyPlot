@@ -131,6 +131,8 @@ CONTROL_LOGIC_FEATURES = [
     "length_setup_commits_run_zero_load_reference",
     "automation_controller_boundary",
 ]
+CURRENT_AXIS_PLOT_KEYS = frozenset({"current_set_mA", "current_measured_mA"})
+CURRENT_AXIS_RECIPE_PHASES = frozenset({"current", "current_hold", "current_limit_unwind"})
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
     "timestamp_utc",
@@ -20105,23 +20107,39 @@ class MainWindow(QtWidgets.QMainWindow):
         x_values: list[float] = []
         y_values: list[float] = []
         previous_elapsed_s: float | None = None
+        previous_segment_key: tuple[str, int | None] | None = None
         for point in points:
+            if (
+                x_channel.key in CURRENT_AXIS_PLOT_KEYS
+                and point.automation_phase not in CURRENT_AXIS_RECIPE_PHASES
+            ):
+                continue
             x_value = x_channel.getter(point)
             y_value = y_channel.getter(point)
             if x_value is None or y_value is None:
                 continue
             elapsed_s = float(point.elapsed_s)
+            segment_key = (
+                (point.automation_phase, point.plateau_index)
+                if x_channel.key in CURRENT_AXIS_PLOT_KEYS
+                else None
+            )
             if (
                 point.plot_gap_before
                 or
                 previous_elapsed_s is not None
                 and elapsed_s - previous_elapsed_s > DISPLAY_PLOT_BREAK_GAP_S
+                or
+                previous_segment_key is not None
+                and segment_key is not None
+                and segment_key != previous_segment_key
             ):
                 x_values.append(float("nan"))
                 y_values.append(float("nan"))
             x_values.append(float(x_value))
             y_values.append(float(y_value))
             previous_elapsed_s = elapsed_s
+            previous_segment_key = segment_key
         return x_values, y_values
 
     def _refresh_length_setup_plot(self) -> None:

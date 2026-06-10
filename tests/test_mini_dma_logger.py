@@ -6987,6 +6987,118 @@ def test_plot_xy_values_break_line_across_hidden_display_gap(tmp_path: Path, qtb
         _close_test_window(window)
 
 
+def test_plot_xy_values_skip_target_ramp_points_on_current_axis(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(
+        elapsed_s: float,
+        phase: str,
+        current_mA: float,
+        strain_pct: float,
+        plateau_index: int | None,
+    ) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-06-10 00:00:00",
+            raw_position_mm=strain_pct,
+            position_mm=strain_pct,
+            raw_load_g=0.0,
+            load_g=0.0,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=strain_pct,
+            stress_mpa=None,
+            current_set_mA=current_mA,
+            current_measured_mA=current_mA,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase=phase,
+            automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            automation_target_value=20.0,
+            plateau_index=plateau_index,
+            plateau_label=None,
+        )
+
+    try:
+        x_channel = window._plot_channel("current_measured_mA")
+        y_channel = window._plot_channel("strain_pct")
+        assert x_channel is not None
+        assert y_channel is not None
+
+        x_values, y_values = window._plot_xy_values(
+            [
+                _point(1.0, "current", 80.0, 1.2, 4),
+                _point(2.0, "target_ramp", 1.0, 1.4, 5),
+                _point(3.0, "target_ramp", 1.0, 1.0, 5),
+                _point(4.0, "current", 1.0, 0.8, 5),
+            ],
+            x_channel,
+            y_channel,
+        )
+
+        assert x_values[0] == pytest.approx(80.0)
+        assert y_values[0] == pytest.approx(1.2)
+        assert math.isnan(x_values[1])
+        assert math.isnan(y_values[1])
+        assert x_values[2] == pytest.approx(1.0)
+        assert y_values[2] == pytest.approx(0.8)
+    finally:
+        _close_test_window(window)
+
+
+def test_plot_xy_values_break_current_axis_between_plateaus(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    def _point(
+        elapsed_s: float,
+        current_mA: float,
+        strain_pct: float,
+        plateau_index: int,
+    ) -> mini_dma_mod.MeasurementPoint:
+        return mini_dma_mod.MeasurementPoint(
+            elapsed_s=elapsed_s,
+            timestamp_utc="2026-06-10 00:00:00",
+            raw_position_mm=strain_pct,
+            position_mm=strain_pct,
+            raw_load_g=0.0,
+            load_g=0.0,
+            preload_state=mini_dma_mod.PRELOAD_DISABLED,
+            strain_pct=strain_pct,
+            stress_mpa=None,
+            current_set_mA=current_mA,
+            current_measured_mA=current_mA,
+            voltage_V=None,
+            resistance_ohm=None,
+            power_W=None,
+            automation_phase="current",
+            automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            automation_target_value=float(plateau_index) * 50.0,
+            plateau_index=plateau_index,
+            plateau_label=None,
+        )
+
+    try:
+        x_channel = window._plot_channel("current_measured_mA")
+        y_channel = window._plot_channel("strain_pct")
+        assert x_channel is not None
+        assert y_channel is not None
+
+        x_values, y_values = window._plot_xy_values(
+            [_point(1.0, 80.0, 1.2, 4), _point(2.0, 1.0, 0.8, 5)],
+            x_channel,
+            y_channel,
+        )
+
+        assert x_values[0] == pytest.approx(80.0)
+        assert y_values[0] == pytest.approx(1.2)
+        assert math.isnan(x_values[1])
+        assert math.isnan(y_values[1])
+        assert x_values[2] == pytest.approx(1.0)
+        assert y_values[2] == pytest.approx(0.8)
+    finally:
+        _close_test_window(window)
+
+
 def test_display_plot_points_connect_downsampled_history_to_recent_tail(
     tmp_path: Path,
     qtbot,
