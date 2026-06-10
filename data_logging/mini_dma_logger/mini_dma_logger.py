@@ -3733,6 +3733,13 @@ class SharedBrokerSupplyController:
         resolution_mA = self.current_resolution_mA()
         return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
 
+    def set_current_limit_mA(self, current_limit_mA: float) -> None:
+        self.current_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
+        channel = self.selected_channel()
+        if channel <= 0:
+            return
+        self._ensure_confirmed_role(channel)
+
     def configure_channel(
         self,
         *,
@@ -7737,16 +7744,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         return True
 
+    def _planned_current_sweep_limit_mA(self) -> float:
+        return max(
+            float(self.spin_supply_manual_current.value()),
+            float(self.spin_current_sweep_start_mA.value()),
+            float(self.spin_current_sweep_end_mA.value()),
+            float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
+            1.0,
+        )
+
     def _build_supply_controller(self) -> PowerSupplyController:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         if self._using_shared_broker_supply():
-            current_limit_mA = max(
-                float(self.spin_supply_manual_current.value()),
-                float(self.spin_current_sweep_start_mA.value()),
-                float(self.spin_current_sweep_end_mA.value()),
-                float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
-                1.0,
-            )
+            current_limit_mA = self._planned_current_sweep_limit_mA()
             return SharedBrokerSupplyController(  # type: ignore[return-value]
                 host=self.edit_shared_broker_host.text().strip(),
                 port=int(self.spin_shared_broker_port.value()),
@@ -7845,13 +7855,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if driver.profile is None:
                 raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
             broker = SharedPowerSupplyBroker(driver, driver.profile)
-            current_limit_mA = max(
-                float(self.spin_supply_manual_current.value()),
-                float(self.spin_current_sweep_start_mA.value()),
-                float(self.spin_current_sweep_end_mA.value()),
-                float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
-                1.0,
-            )
+            current_limit_mA = self._planned_current_sweep_limit_mA()
             broker.assign_role(
                 channel=current_channel,
                 role=ROLE_MINI_DMA_CURRENT,
@@ -8050,6 +8054,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         current_mA = float(self.spin_supply_manual_current.value())
         try:
+            self._ensure_current_sweep_channel_limit()
             self._supply_controller.configure_channel(
                 channel=channel,
                 voltage_v=float(self.spin_supply_voltage_limit.value()),
@@ -8067,6 +8072,26 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Current-sweep CH{channel} prepared at "
             f"{_format_compact_unit(self.spin_supply_voltage_limit.value(), 'V', decimals=2)} / "
             f"{_format_compact_unit(current_mA, 'mA', decimals=2)} with output off."
+        )
+        return True
+
+    def _ensure_current_sweep_channel_limit(self) -> bool:
+        if self._supply_controller is None:
+            return False
+        method = getattr(self._supply_controller, "set_current_limit_mA", None)
+        if not callable(method):
+            return True
+        limit_mA = self._planned_current_sweep_limit_mA()
+        try:
+            method(limit_mA)
+        except Exception as exc:
+            self._log(f"Current-sweep channel limit update failed: {exc}")
+            return False
+        channel = self._current_sweep_supply_channel()
+        channel_text = "-" if channel is None else f"CH{channel}"
+        self._log(
+            f"Current-sweep {channel_text} limit checked for "
+            f"{_format_compact_unit(limit_mA, 'mA', decimals=2)} recipe maximum."
         )
         return True
 
@@ -17305,6 +17330,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_manual_auto_connect_progress("Checking power supply...", 0, preflight_steps)
             if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
                 issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
+            if not issues and self._recipe_uses_explicit_current(steps) and not self._ensure_current_sweep_channel_limit():
+                issues.append("Current-sweep channel limit could not be updated for the active recipe current range.")
             self._set_manual_auto_connect_progress("Checking motor supply...", 1, preflight_steps)
             if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
                 issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
