@@ -4324,6 +4324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_trigger_elapsed_s: float | None = None
         self._builder_project_path: Path | None = None
         self._builder_project_match: ProjectImportResult | None = None
+        self._diameter_import_sample_key: tuple[str, str, str] | None = None
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
@@ -9453,22 +9454,44 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _refresh_diameter_import_state(self) -> None:
-        self._mark_diameter_imported(self._diameter_imported)
+        self._mark_diameter_imported(
+            self._diameter_imported
+            and self._diameter_import_sample_key == self._current_diameter_import_sample_key()
+        )
+
+    def _current_diameter_import_sample_key(self) -> tuple[str, str, str]:
+        return (
+            _normalized_token(self.edit_name_composition.text()),
+            _normalized_microwire_token(self.edit_name_wire.text()),
+            _normalized_token(self.edit_name_specimen.text()),
+        )
+
+    def _invalidate_imported_diameter_if_sample_changed(self) -> None:
+        if not self._diameter_imported:
+            return
+        if self._diameter_import_sample_key == self._current_diameter_import_sample_key():
+            return
+        self._mark_diameter_imported(False)
 
     def _mark_diameter_imported(self, imported: bool) -> None:
         self._diameter_imported = bool(imported)
+        self._diameter_import_sample_key = self._current_diameter_import_sample_key() if self._diameter_imported else None
         if not hasattr(self, "spin_diameter"):
             return
         if self._diameter_imported:
             self.spin_diameter.setStyleSheet(
                 "QDoubleSpinBox { border: 1px solid #16a34a; background-color: rgba(22, 163, 74, 0.10); }"
             )
-            self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project or fabrication folder; manual edits are allowed.")
+            self.spin_diameter.setToolTip(
+                "Wire diameter imported for the current sample from the Microwire Data Builder project or fabrication folder; manual edits are allowed."
+            )
         else:
             self.spin_diameter.setStyleSheet(
                 "QDoubleSpinBox { border: 1px solid #dc2626; background-color: rgba(220, 38, 38, 0.10); }"
             )
-            self.spin_diameter.setToolTip("Wire diameter has not been imported from the Builder project or fabrication folder; manual edits are allowed.")
+            self.spin_diameter.setToolTip(
+                "Wire diameter has not been imported for the current sample from the Builder project or fabrication folder; manual edits are allowed."
+            )
 
     def _read_builder_project_payload(self, path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -10405,6 +10428,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._sync_name_fields_in_progress = True
         try:
+            self._invalidate_imported_diameter_if_sample_changed()
             built = self._build_sample_name()
             if built:
                 log_label = self._log_name_with_recipe_token(self._build_log_name_label(built))
