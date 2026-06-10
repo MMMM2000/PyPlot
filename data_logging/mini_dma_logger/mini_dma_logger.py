@@ -3804,7 +3804,7 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
         axes = figure.subplots(1, 2)
         try:
             rows = self._read_measurement_rows(candidate.path / SESSION_MEASUREMENT_CSV)
-            self._plot_cleanup_preview_axes(axes, rows)
+            self._plot_cleanup_preview_axes(axes, rows, candidate=candidate)
         except Exception as exc:
             ax = axes[0]
             ax.text(0.5, 0.5, f"Preview unavailable:\n{exc}", ha="center", va="center", wrap=True)
@@ -3863,14 +3863,34 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
             spans.append((start, previous if previous is not None else start))
         return spans
 
+    @staticmethod
+    def _is_iso_current_cleanup_candidate(candidate: MiniDmaRunCleanupCandidate) -> bool:
+        text = " ".join(
+            (
+                candidate.recipe_mode,
+                candidate.recipe_summary,
+                candidate.name,
+            )
+        ).casefold()
+        return "constant_current_strain_sweep" in text or "iso-current" in text or "constant-current" in text
+
     @classmethod
-    def _plot_cleanup_preview_axes(cls, axes: Sequence[Any], rows: Sequence[Mapping[str, str]]) -> None:
+    def _plot_cleanup_preview_axes(
+        cls,
+        axes: Sequence[Any],
+        rows: Sequence[Mapping[str, str]],
+        *,
+        candidate: MiniDmaRunCleanupCandidate,
+    ) -> None:
         elapsed, stress = cls._xy(rows, "elapsed_s", "stress_mpa")
         measured_current, strain = cls._xy(rows, "current_measured_mA", "strain_pct")
         if not measured_current:
             measured_current, strain = cls._xy(rows, "current_set_mA", "strain_pct")
+        stress_for_strain, strain_for_stress = cls._xy(rows, "stress_mpa", "strain_pct")
         hold_current: list[float] = []
         hold_strain: list[float] = []
+        hold_stress: list[float] = []
+        hold_strain_for_stress: list[float] = []
         for row in rows:
             if str(row.get("automation_phase") or "") != "current_hold":
                 continue
@@ -3881,6 +3901,10 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
             if current is not None and y_value is not None:
                 hold_current.append(current)
                 hold_strain.append(y_value)
+            stress_value = cls._float_or_none(row.get("stress_mpa"))
+            if stress_value is not None and y_value is not None:
+                hold_stress.append(stress_value)
+                hold_strain_for_stress.append(y_value)
 
         ax = axes[0]
         ax.plot(elapsed, stress, color="#2563eb", linewidth=1.2)
@@ -3892,12 +3916,21 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
         ax.grid(True, alpha=0.25)
 
         ax = axes[1]
-        ax.plot(measured_current, strain, color="#047857", linewidth=1.2)
-        if hold_current:
-            ax.scatter(hold_current, hold_strain, color="#dc2626", s=12, label="hold", zorder=3)
-            ax.legend(loc="best", fontsize=8)
-        ax.set_title("Strain vs current", fontsize=9)
-        ax.set_xlabel("mA")
+        is_iso_current = cls._is_iso_current_cleanup_candidate(candidate)
+        if is_iso_current:
+            ax.plot(stress_for_strain, strain_for_stress, color="#047857", linewidth=1.2)
+            if hold_stress:
+                ax.scatter(hold_stress, hold_strain_for_stress, color="#dc2626", s=12, label="hold", zorder=3)
+                ax.legend(loc="best", fontsize=8)
+            ax.set_title("Strain vs stress", fontsize=9)
+            ax.set_xlabel("MPa")
+        else:
+            ax.plot(measured_current, strain, color="#047857", linewidth=1.2)
+            if hold_current:
+                ax.scatter(hold_current, hold_strain, color="#dc2626", s=12, label="hold", zorder=3)
+                ax.legend(loc="best", fontsize=8)
+            ax.set_title("Strain vs current", fontsize=9)
+            ax.set_xlabel("mA")
         ax.set_ylabel("%")
         ax.grid(True, alpha=0.25)
 

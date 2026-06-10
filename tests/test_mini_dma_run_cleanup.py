@@ -167,3 +167,30 @@ def test_run_cleanup_dialog_previews_selected_run_graphs(tmp_path: Path, qtbot) 
     assert axes[0].lines
     assert axes[1].lines
     assert axes[1].collections
+
+
+def test_run_cleanup_dialog_previews_iso_current_as_strain_vs_stress(tmp_path: Path, qtbot) -> None:
+    root = tmp_path / "mini_dma"
+    current = _write_run(
+        root,
+        "run03 iso-current",
+        mode=mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP,
+        stop_reason="wire_break_or_contact_loss",
+    )
+    archive = _write_run(root, "run02 iso-current", mode=mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP, rows=5)
+    candidates = discover_cleanup_candidates_for_run(current)
+
+    dialog = mini_dma_mod.RunCleanupReviewDialog(candidates)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitExposed(dialog)
+
+    row = next(index for index, candidate in dialog._candidate_by_row.items() if candidate.path == archive)
+    dialog.table.selectRow(row)
+    dialog._update_selected_preview()
+
+    assert dialog._preview_canvas is not None
+    axes = dialog._preview_canvas.figure.axes
+    assert axes[1].get_title() == "Strain vs stress"
+    assert axes[1].get_xlabel() == "MPa"
+    assert list(axes[1].lines[0].get_xdata()) == pytest.approx([10, 11, 12, 13, 14])
