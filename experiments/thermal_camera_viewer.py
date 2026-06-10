@@ -651,7 +651,7 @@ class ThermalSerialWorker(QtCore.QObject):
                 continue
             if not line:
                 continue
-            if line.startswith("MLX90614_BOOT") or line.startswith("MLX90614_STREAM"):
+            if line.startswith("MLX90614_BOOT") or line.startswith("MLX90614_STREAM") or line.startswith("MLX90614_"):
                 self.status_changed.emit(line)
                 continue
             if line.startswith("MLX90614_ERROR"):
