@@ -22447,8 +22447,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._refresh_live_labels)
             return
+        scale_age_s = self._scale_reading_age_s()
+        scale_missing = self._latest_scale_timestamp is None
+        scale_stale = scale_age_s is not None and scale_age_s > STALE_SCALE_AFTER_S
         effective_load = self._current_effective_load_g()
-        if self._latest_scale_timestamp is None:
+        if scale_missing:
             self.label_scale_value.setText("Raw scale: no readings yet | Applied tensile load: -")
         else:
             now_s = time.time()
@@ -22482,9 +22485,11 @@ class MainWindow(QtWidgets.QMainWindow):
         preload_state = self._current_preload_state(effective_load)
         if preload_state == PRELOAD_PENDING:
             strain = None
-            stress = None
         else:
             strain = self._strain_percent_for_position(self._effective_position_mm)
+        if scale_missing or scale_stale:
+            stress = None
+        else:
             stress = stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
         self.label_live_summary.setText(
             f"Live strain: {'-' if strain is None else f'{strain:.4f} %'} | "
@@ -22495,10 +22500,19 @@ class MainWindow(QtWidgets.QMainWindow):
         live_speed_text = self._live_speed_summary_text()
         self.label_live_speed.setText(live_speed_text)
         session_value = "Running" if self._session_active else "Idle"
-        self._set_dashboard_value("load_g", f"{effective_load:.3f} g")
+        if scale_missing:
+            load_text = "-"
+            stress_text = "-"
+        elif scale_stale:
+            load_text = f"stale {scale_age_s or 0.0:.1f} s"
+            stress_text = load_text
+        else:
+            load_text = f"{effective_load:.3f} g"
+            stress_text = "-" if stress is None else f"{stress:.1f} MPa"
+        self._set_dashboard_value("load_g", load_text)
         self._set_dashboard_value(
             "stress_mpa",
-            "-" if stress is None else f"{stress:.1f} MPa",
+            stress_text,
         )
         self._set_dashboard_value(
             "strain_pct",
