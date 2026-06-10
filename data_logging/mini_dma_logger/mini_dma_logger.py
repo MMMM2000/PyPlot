@@ -39,6 +39,14 @@ from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROL
 from data_logging.shared_power_supply.bench_guard import identify_hmp_with_blank_retry
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
+from data_logging.mini_dma_logger.run_cleanup import (
+    MiniDmaRunCleanupCandidate,
+    archive_cleanup_candidates,
+    cleanup_summary_text,
+    discover_cleanup_candidates_for_run,
+    format_duration_s,
+    sanitize_archive_name,
+)
 
 try:
     import serial
@@ -3609,6 +3617,121 @@ class SharedBrokerSupplyController:
             "resistance_ohm": None if resistance_ohm is None else float(resistance_ohm),
             "power_W": None if power_w is None else float(power_w),
         }
+
+
+class RunCleanupReviewDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        candidates: Sequence[MiniDmaRunCleanupCandidate],
+        *,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._candidates = list(candidates)
+        self._archive_checks: dict[Path, QtWidgets.QCheckBox] = {}
+        self.setWindowTitle("Review Mini DMA Runs")
+        self.resize(1180, 520)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        heading = QtWidgets.QLabel("Related Mini DMA run folders")
+        heading.setStyleSheet("font-weight: 600; font-size: 15px;")
+        layout.addWidget(heading)
+
+        summary = QtWidgets.QLabel(cleanup_summary_text(self._candidates))
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        self.table = QtWidgets.QTableWidget(len(self._candidates), 9, self)
+        self.table.setHorizontalHeaderLabels(
+            [
+                "Archive",
+                "Folder",
+                "Created",
+                "Mode",
+                "Rows",
+                "Duration",
+                "Stop",
+                "Setup",
+                "Detail",
+            ]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setWordWrap(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table, 1)
+        self._populate_table()
+
+        name_row = QtWidgets.QHBoxLayout()
+        name_row.addWidget(QtWidgets.QLabel("Archive folder"))
+        self.archive_name_edit = QtWidgets.QLineEdit(sanitize_archive_name(_utc_filename_timestamp()))
+        self.archive_name_edit.setMinimumWidth(260)
+        name_row.addWidget(self.archive_name_edit)
+        name_row.addStretch(1)
+        layout.addLayout(name_row)
+
+        buttons = QtWidgets.QDialogButtonBox(self)
+        self.archive_button = buttons.addButton("Archive selected", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
+        self.close_button = buttons.addButton("Keep all / Close", QtWidgets.QDialogButtonBox.ButtonRole.RejectRole)
+        self.archive_button.clicked.connect(self.accept)
+        self.close_button.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+        self._update_archive_button()
+
+    def _populate_table(self) -> None:
+        for row, candidate in enumerate(self._candidates):
+            check = QtWidgets.QCheckBox(self.table)
+            check.setToolTip("Move this older run folder to archive when Archive selected is pressed.")
+            check.setChecked(candidate.suggested_action == "archive" and not candidate.is_current_run)
+            check.setEnabled(not candidate.is_current_run)
+            check.toggled.connect(self._update_archive_button)
+            self._archive_checks[candidate.path] = check
+            check_holder = QtWidgets.QWidget(self.table)
+            check_layout = QtWidgets.QHBoxLayout(check_holder)
+            check_layout.setContentsMargins(0, 0, 0, 0)
+            check_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            check_layout.addWidget(check)
+            self.table.setCellWidget(row, 0, check_holder)
+
+            setup_text = "First overheating/preconditioning" if candidate.is_preconditioning else ""
+            rows_text = "" if candidate.measurement_rows is None else str(candidate.measurement_rows)
+            stop_text = candidate.stop_label or candidate.stop_reason
+            detail = candidate.stop_detail or candidate.recipe_summary
+            values = [
+                candidate.name,
+                candidate.created_utc or candidate.last_write_utc,
+                candidate.recipe_mode,
+                rows_text,
+                format_duration_s(candidate.duration_s),
+                stop_text,
+                setup_text,
+                detail,
+            ]
+            for column, value in enumerate(values, start=1):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                if candidate.is_current_run:
+                    item.setToolTip("Current run; never archived by default.")
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                elif candidate.is_preconditioning:
+                    item.setToolTip("Preconditioning run; suggested keep.")
+                self.table.setItem(row, column, item)
+
+    def _update_archive_button(self) -> None:
+        if not hasattr(self, "archive_button"):
+            return
+        self.archive_button.setEnabled(bool(self.selected_archive_paths()))
+
+    def selected_archive_paths(self) -> list[Path]:
+        return [path for path, check in self._archive_checks.items() if check.isEnabled() and check.isChecked()]
+
+    def archive_name(self) -> str:
+        return sanitize_archive_name(self.archive_name_edit.text())
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -8203,6 +8326,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._stop_session(reason="wire_break_or_contact_loss", detail=message)
             self.statusBar().showMessage(message, 15000)
             self._ask_wire_break_recovery_after_stop(message)
+            self._maybe_offer_run_cleanup_after_wire_break()
         finally:
             self._wire_break_stop_in_progress = False
 
@@ -8226,6 +8350,63 @@ class MainWindow(QtWidgets.QMainWindow):
         box.exec()
         if box.clickedButton() == return_position_button:
             self._start_recovery_displacement_zero()
+
+    def _maybe_offer_run_cleanup_after_wire_break(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._maybe_offer_run_cleanup_after_wire_break)
+            return
+        if self._session_base_path is None:
+            return
+        current_run = self._session_base_path.parent
+        try:
+            candidates = discover_cleanup_candidates_for_run(current_run)
+        except Exception as exc:
+            self._log(f"Mini DMA run cleanup scan skipped: {exc}")
+            return
+        if len(candidates) < 2:
+            return
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle(APP_NAME)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setText("Related Mini DMA runs were found for this sample and recipe.")
+        box.setInformativeText(
+            f"{cleanup_summary_text(candidates)}\n\n"
+            "Review older run folders for optional archiving now?"
+        )
+        review_button = box.addButton("Review runs", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        skip_button = box.addButton("Skip", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(skip_button)
+        box.exec()
+        if box.clickedButton() is not review_button:
+            self._log("Mini DMA run cleanup skipped by operator.")
+            return
+        dialog = RunCleanupReviewDialog(candidates, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            self._log("Mini DMA run cleanup review closed without archiving.")
+            return
+        selected_paths = dialog.selected_archive_paths()
+        if not selected_paths:
+            self._log("Mini DMA run cleanup review had no folders selected for archive.")
+            return
+        try:
+            moves = archive_cleanup_candidates(
+                candidates,
+                selected_paths,
+                archive_name=dialog.archive_name(),
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to archive selected run folders: {exc}")
+            return
+        if not moves:
+            self._log("Mini DMA run cleanup did not move any folders.")
+            return
+        moved_lines = "\n".join(f"{move.source.name} -> {move.destination}" for move in moves)
+        self._log(f"Mini DMA run cleanup archived {len(moves)} folder(s):\n{moved_lines}")
+        QtWidgets.QMessageBox.information(
+            self,
+            APP_NAME,
+            f"Archived {len(moves)} older Mini DMA run folder(s).\n\n{moved_lines}",
+        )
 
     def _mark_current_sweep_voltage_limit(
         self,
