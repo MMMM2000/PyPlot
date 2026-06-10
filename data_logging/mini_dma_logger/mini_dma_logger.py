@@ -215,6 +215,7 @@ GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
+TIC_MOTOR_POWER_STALE_GRACE_S = 30.0
 MANUAL_JOG_TIC_STATUS_FRESH_S = 2.0
 TIC_USB_VENDOR_ID = 0x1FFB
 TIC_USB_TRANSPORT_NATIVE = "native-usb"
@@ -3900,6 +3901,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._effective_average_speed_mm_s: float | None = None
         self._last_commanded_position_steps: int | None = 0
         self._last_tic_vin_v: float | None = None
+        self._last_tic_power_good_time_s: float | None = None
+        self._tic_power_unknown_since_s: float | None = None
         self._last_tic_status_error: str | None = None
         self._tic_motor_power_ok: bool | None = None
         self._tic_motor_power_warning_active = False
@@ -14984,32 +14987,80 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return None
 
+    def _tic_recent_good_power_status(self, *, now_s: float | None = None) -> bool:
+        if self._last_tic_power_good_time_s is None:
+            return False
+        if now_s is None:
+            now_s = time.time()
+        return now_s - self._last_tic_power_good_time_s <= TIC_MOTOR_POWER_STALE_GRACE_S
+
+    def _tic_vin_text(self, vin_v: float | None = None) -> str:
+        if vin_v is not None:
+            return f"{vin_v:.2f} V"
+        if self._last_tic_vin_v is None:
+            return "-"
+        age_s = 0.0
+        if self._last_tic_power_good_time_s is not None:
+            age_s = max(0.0, time.time() - self._last_tic_power_good_time_s)
+        return f"{self._last_tic_vin_v:.2f} V stale {age_s:.1f} s"
+
+    def _mark_tic_power_unknown(self, reason: str) -> bool:
+        now_s = time.time()
+        if self._tic_power_unknown_since_s is None:
+            self._tic_power_unknown_since_s = now_s
+        if self._tic_recent_good_power_status(now_s=now_s):
+            self._tic_motor_power_ok = None
+            self.label_card_motion.setText(f"Tic VIN stale | {self._tic_vin_text()}")
+            if not self._tic_motor_power_warning_active:
+                self._log(
+                    f"{reason}; using recent known-good Tic VIN for up to "
+                    f"{TIC_MOTOR_POWER_STALE_GRACE_S:.0f} s ({self._tic_vin_text()})."
+                )
+                self._tic_motor_power_warning_active = True
+            return True
+        self._tic_motor_power_ok = False
+        if not self._tic_motor_power_warning_active:
+            self._log(reason)
+            self._tic_motor_power_warning_active = True
+        return False
+
     def _refresh_tic_status(self) -> bool:
         controller = self._build_tic_controller()
         try:
             status_text = controller.get_status()
         except Exception as exc:
             self._last_tic_status_error = str(exc)
-            self._log(f"Tic status failed: {exc}")
+            reason = f"Tic status failed: {exc}"
             self.label_tic_summary.setText(str(exc))
-            self.label_card_motion.setText("Tic unavailable")
-            self._status_timer.stop()
-            self._last_tic_vin_v = None
-            self._tic_motor_power_ok = False
-            return False
+            recent_ok = self._mark_tic_power_unknown(reason)
+            if not recent_ok:
+                self.label_card_motion.setText("Tic unavailable")
+                self._status_timer.stop()
+                return False
+            self._refresh_live_labels()
+            self._status_timer.start(self._tic_status_interval_ms())
+            return True
         self._last_tic_status_error = None
         self._tic_status_text = status_text
         step_mode_text = _extract_status_value(status_text, "Step mode")
         if step_mode_text is not None and self._set_tic_step_mode_combo(step_mode_text):
             self._sync_tic_units_per_mm_from_full_steps(persist=False)
         vin_v = _extract_status_float(status_text, "VIN voltage")
-        self._last_tic_vin_v = vin_v
         power_warning = self._tic_motor_power_warning(vin_v)
-        self._tic_motor_power_ok = power_warning is None
+        if vin_v is not None:
+            self._last_tic_vin_v = vin_v
+            self._tic_motor_power_ok = power_warning is None
+            self._tic_power_unknown_since_s = None
+            if self._tic_motor_power_ok:
+                self._last_tic_power_good_time_s = time.time()
+        elif self._mark_tic_power_unknown(power_warning or "Tic VIN voltage is unknown; motor power could not be verified."):
+            power_warning = None
+        else:
+            self._last_tic_vin_v = None
         if power_warning and not self._tic_motor_power_warning_active:
             self._log(power_warning)
             self._tic_motor_power_warning_active = True
-        elif power_warning is None:
+        elif power_warning is None and vin_v is not None:
             self._tic_motor_power_warning_active = False
         current_position_text = _extract_status_value(status_text, "Current position")
         if current_position_text is not None:
@@ -15026,11 +15077,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_commanded_position_steps = current_position
         operation_state = _extract_status_value(status_text, "Operation state") or "unknown"
         errors = _extract_status_value(status_text, "Errors currently stopping the motor") or "none"
-        vin_text = "-" if vin_v is None else f"{vin_v:.2f} V"
+        vin_text = self._tic_vin_text(vin_v)
         summary = f"Operation state: {operation_state}\nVIN: {vin_text}\nErrors: {errors}"
         if power_warning:
             summary += f"\nWarning: {power_warning}"
             self.label_card_motion.setText(f"Motor power low/off | {vin_text}")
+        elif vin_v is None:
+            summary += "\nWarning: Tic VIN status is stale; using recent known-good motor-power state."
+            self.label_card_motion.setText(f"Tic VIN stale | {vin_text}")
         else:
             self.label_card_motion.setText(
                 f"{operation_state} | {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile | VIN {vin_text}"
@@ -15525,7 +15579,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _move_relative_raw_tic_steps(self, delta_steps: int, *, speed_steps_per_s: float) -> bool:
         if self._tic_motor_power_ok is False:
-            vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+            vin_text = self._tic_vin_text()
             self._log(
                 "Raw-step move cancelled because Tic motor power is not ready "
                 f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V)."
@@ -15608,7 +15662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         speed_mm_s: float | None = None,
     ) -> bool:
         if self._tic_motor_power_ok is False:
-            vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+            vin_text = self._tic_vin_text()
             self._log(
                 "Move cancelled because Tic motor power is not ready "
                 f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V)."
@@ -22092,9 +22146,14 @@ class MainWindow(QtWidgets.QMainWindow):
             rate_suffix = "" if recent_rate is None else f" | {recent_rate:.1f} Hz"
             scale_value = f"{effective_load:.4f} g | {freshness} {age_s:.1f} s{rate_suffix}"
         self.label_card_scale.setText(scale_value)
-        vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+        vin_text = self._tic_vin_text()
         if self._tic_motor_power_ok is False:
             motion_state = f"Motor power low/off | VIN {vin_text}"
+        elif self._tic_motor_power_ok is None and self._last_tic_vin_v is not None:
+            motion_state = (
+                f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile"
+                f" | VIN {vin_text}"
+            )
         else:
             motion_state = f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile"
             if self._last_tic_vin_v is not None:
