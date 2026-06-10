@@ -18787,22 +18787,80 @@ class MainWindow(QtWidgets.QMainWindow):
             if old_direction >= 0.0
             else self._recipe_current_setpoint_mA(float(values["current_start_mA"]))
         )
-        if math.isclose(new_end, old_end, rel_tol=1e-9, abs_tol=1e-9):
-            return None, "the active current target is already current"
-        if (new_end - old_start) * old_direction < -1e-9:
+        new_ramp_rate = max(1e-9, abs(float(values["current_ramp_rate_mA_s"])))
+        new_hold_enabled = bool(values["current_hold_enabled"])
+        new_pause_factor = float(values["current_hold_pause_tolerance_factor"])
+        new_resume_factor = float(values["current_hold_resume_tolerance_factor"])
+        new_resume_stable_s = float(values["current_hold_resume_stable_s"])
+        target_changed = not math.isclose(new_end, old_end, rel_tol=1e-9, abs_tol=1e-9)
+        runtime_candidate = replace(
+            step,
+            current_end_mA=new_end,
+            current_ramp_rate_mA_s=new_ramp_rate,
+            current_hold_enabled=new_hold_enabled,
+            current_hold_pause_tolerance_factor=new_pause_factor,
+            current_hold_resume_tolerance_factor=new_resume_factor,
+            current_hold_resume_stable_s=new_resume_stable_s,
+        )
+        if self._current_sweep_step_override_summary(runtime_candidate) == self._current_sweep_step_override_summary(step):
+            return None, "the active current ramp settings are already current"
+        if target_changed and (new_end - old_start) * old_direction < -1e-9:
             return None, "the edited current target reverses the active ramp direction"
 
         active_setpoint = self._active_current_sweep_last_setpoint_mA
         if active_setpoint is None:
             active_setpoint = old_start
         active_setpoint = self._recipe_current_setpoint_mA(float(active_setpoint))
-        if (new_end - active_setpoint) * old_direction < -1e-9:
+        if target_changed and (new_end - active_setpoint) * old_direction < -1e-9:
             return None, (
                 f"the active setpoint {_format_compact_unit(active_setpoint, 'mA')} "
                 f"is already beyond {_format_compact_unit(new_end, 'mA')}"
             )
 
-        return replace(step, current_end_mA=new_end), "active current target updated"
+        if target_changed:
+            message = "active current target and ramp settings updated"
+        else:
+            message = "active current ramp settings updated"
+        return runtime_candidate, message
+
+    def _apply_active_current_sweep_step_update_state(
+        self,
+        old_step: AutomationStep,
+        new_step: AutomationStep,
+        active_index: int,
+    ) -> None:
+        if old_step.action != "sweep_current" or new_step.action != "sweep_current":
+            return
+        now_s = time.monotonic()
+        if (
+            bool(old_step.current_hold_enabled)
+            and not bool(new_step.current_hold_enabled)
+            and self._current_sweep_ramp_hold_step_index == active_index
+        ):
+            self._resume_current_sweep_ramp_from_hold(
+                now_s=now_s,
+                reason="current hold was disabled by a runtime recipe update",
+            )
+
+        old_rate = None if old_step.current_ramp_rate_mA_s is None else abs(float(old_step.current_ramp_rate_mA_s))
+        new_rate = None if new_step.current_ramp_rate_mA_s is None else abs(float(new_step.current_ramp_rate_mA_s))
+        if old_rate is None or new_rate is None or math.isclose(old_rate, new_rate, rel_tol=1e-9, abs_tol=1e-9):
+            return
+        if new_step.current_start_mA is None:
+            return
+        active_setpoint = self._active_current_sweep_last_setpoint_mA
+        if active_setpoint is None:
+            return
+        start_mA = self._recipe_current_setpoint_mA(float(new_step.current_start_mA))
+        active_setpoint = self._recipe_current_setpoint_mA(float(active_setpoint))
+        elapsed_for_setpoint_s = abs(active_setpoint - start_mA) / max(1e-9, float(new_rate))
+        self._active_current_sweep_started_s = max(0.0, now_s - elapsed_for_setpoint_s)
+        self._active_current_sweep_last_schedule_update_s = now_s
+        self._current_sweep_post_hold_throttle_until_s = 0.0
+        self._log(
+            "Updated active current ramp rate to "
+            f"{new_rate:.4f} mA/s while preserving the current setpoint schedule."
+        )
 
     def _apply_current_sweep_pending_overrides(
         self,
@@ -18841,7 +18899,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             return False
 
+        old_active_step = self._automation_steps[active_index] if 0 <= active_index < len(self._automation_steps) else None
+        new_active_step = updated_steps[active_index] if 0 <= active_index < len(updated_steps) else None
         self._automation_steps = updated_steps
+        if active_step_updated and old_active_step is not None and new_active_step is not None:
+            self._apply_active_current_sweep_step_update_state(old_active_step, new_active_step, active_index)
         self._recipe_estimated_points, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
             self._automation_steps,
             self._automation_interval_ms,

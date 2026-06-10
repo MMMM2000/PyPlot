@@ -12072,10 +12072,13 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         assert window._automation_steps[0] is not active_sweep
         assert window._automation_steps[0].current_start_mA == pytest.approx(1.0)
         assert window._automation_steps[0].current_end_mA == pytest.approx(80.0)
+        assert window._automation_steps[0].current_ramp_rate_mA_s == pytest.approx(0.6)
+        assert window._automation_steps[0].current_hold_enabled is False
         assert window._automation_phase == "current_hold"
         assert window._active_current_sweep_last_setpoint_mA == pytest.approx(44.0)
-        assert window._current_sweep_ramp_hold_step_index == 0
-        assert window._current_sweep_ramp_hold_started_s == pytest.approx(123.0)
+        assert window._current_sweep_ramp_hold_step_index is None
+        assert window._current_sweep_ramp_hold_started_s == pytest.approx(0.0)
+        assert window._active_current_sweep_started_s > 123.0
         assert window._automation_steps[1].current_mA == pytest.approx(2.0)
         assert window._automation_steps[2].target_ramp_rate_value_s == pytest.approx(3.0)
         assert window._automation_steps[3].current_start_mA == pytest.approx(2.0)
@@ -12102,6 +12105,78 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
         assert overrides[0]["active_step_updated"] is True
         assert overrides[0]["changed_step_count"] == 5
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_current_sweep_runtime_update_disables_active_hold_without_current_target_change(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_disable_active_hold")
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=85.0,
+        current_ramp_rate_mA_s=0.4,
+        current_hold_enabled=True,
+        current_hold_pause_tolerance_factor=2.0,
+        current_hold_resume_tolerance_factor=1.0,
+        current_hold_resume_stable_s=0.5,
+        note="1",
+    )
+    future_sweep = dataclasses.replace(active_sweep, target_value=50.0, note="2")
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep, future_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_phase = "current_hold"
+        window._active_current_sweep_started_s = 100.0
+        window._active_current_sweep_last_schedule_update_s = 123.0
+        window._active_current_sweep_last_setpoint_mA = 64.0
+        window._current_sweep_ramp_hold_step_index = 0
+        window._current_sweep_ramp_hold_started_s = 123.0
+        window._current_sweep_ramp_hold_in_band_since_s = 124.0
+        window._current_sweep_ramp_hold_seek_accepted_since_s = 125.0
+        window._automation_interval_ms = 250
+        window._recipe_estimated_points, window._automation_total_steps = window._estimate_recipe_points_and_ticks(
+            window._automation_steps,
+            window._automation_interval_ms,
+        )
+
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(85.0)
+        window.spin_current_sweep_step_mA.setValue(0.4)
+        window.check_current_sweep_hold_on_error.setChecked(False)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0] is not active_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(85.0)
+        assert window._automation_steps[0].current_hold_enabled is False
+        assert window._automation_steps[1].current_hold_enabled is False
+        assert window._current_sweep_ramp_hold_step_index is None
+        assert window._current_sweep_ramp_hold_started_s == pytest.approx(0.0)
+        assert window._current_sweep_ramp_hold_in_band_since_s is None
+        assert window._current_sweep_ramp_hold_seek_accepted_since_s is None
+        assert window._active_current_sweep_last_setpoint_mA == pytest.approx(64.0)
+        assert window._active_current_sweep_started_s > 123.0
+
+        window._stop_session()
+        metadata = json.loads((tmp_path / "runtime_disable_active_hold" / "metadata.json").read_text(encoding="utf-8"))
+        override = metadata["controlled_current_sweep"]["runtime_overrides"][0]
+        assert override["active_step_updated"] is True
+        assert override["active_step_message"] == "active current ramp settings updated"
+        assert override["changed_step_count"] == 2
     finally:
         window._automation_active = False
         _close_test_window(window)
