@@ -10592,6 +10592,84 @@ def test_shared_broker_preflight_connects_without_serial_auto_detect(
         _close_test_window(window)
 
 
+def test_recipe_preflight_refreshes_existing_shared_broker_current_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    limits: list[float] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def set_current_limit_mA(self, current_limit_mA: float) -> None:
+            limits.append(current_limit_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(85.0)
+        window._recipe_requires_tic = lambda _steps: False  # type: ignore[method-assign]
+        window._recipe_requires_scale = lambda _steps: False  # type: ignore[method-assign]
+        window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._restore_default_zero_load_reference_if_real_grams = lambda _value: None  # type: ignore[method-assign]
+
+        steps = [mini_dma_mod.AutomationStep("sweep_current", current_start_mA=1.0, current_end_mA=85.0)]
+        assert window._preflight_recipe_hardware(steps) is True
+
+        assert limits == pytest.approx([85.0])
+        assert "CH4 limit checked" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_prepare_current_sweep_channel_refreshes_broker_limit_before_configure(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[tuple[str, float | None]] = []
+
+    class _FakeSupply:
+        def is_connected(self) -> bool:
+            return True
+
+        def set_current_limit_mA(self, current_limit_mA: float) -> None:
+            calls.append(("limit", current_limit_mA))
+
+        def configure_channel(self, *, channel: int, voltage_v: float, current_a: float, output_on: bool) -> None:
+            calls.append(("configure", current_a * 1000.0))
+
+        def select_channel(self, channel: int | None = None) -> None:
+            calls.append(("select", None if channel is None else float(channel)))
+
+        def disconnect(self) -> None:
+            return None
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(85.0)
+
+        assert window._prepare_current_sweep_supply_channel() is True
+
+        assert calls[:2] == [("limit", pytest.approx(85.0)), ("configure", pytest.approx(1.0))]
+    finally:
+        _close_test_window(window)
+
+
 def test_supply_reads_are_throttled_during_fast_recipe_logging(
     tmp_path: Path,
     qtbot,
