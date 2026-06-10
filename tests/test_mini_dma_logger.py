@@ -4489,6 +4489,97 @@ def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_project_diameter_invalidates_immediately_then_updates_for_changed_microwire(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni46Fe27Ga23Cu2Co2",
+                                "Microwire": "2/1",
+                                "d (um)": 18.2,
+                            },
+                            {
+                                "Composition": "Ni46Fe27Ga23Cu2Co2",
+                                "Microwire": "2/7",
+                                "d (um)": 14.4,
+                            },
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
+        window.edit_name_wire.setText("2/1")
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
+        assert "rgba(22, 163, 74" in window.spin_diameter.styleSheet()
+
+        window.edit_name_wire.setText("2/7")
+
+        assert "border" in window.spin_diameter.styleSheet()
+        assert window.spin_diameter.value() == pytest.approx(0.0182)
+
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0144), timeout=3000)
+        assert "rgba(22, 163, 74" in window.spin_diameter.styleSheet()
+        assert "diameter 14.4 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_project_diameter_stays_marked_stale_when_changed_microwire_has_no_match(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni46Fe27Ga23Cu2Co2",
+                                "Microwire": "2/1",
+                                "d (um)": 18.2,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
+        window.edit_name_wire.setText("2/1")
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
+        assert "rgba(22, 163, 74" in window.spin_diameter.styleSheet()
+
+        window.edit_name_wire.setText("2/7")
+
+        assert "border" in window.spin_diameter.styleSheet()
+        qtbot.waitUntil(lambda: "no matching sample row" in window.label_project_status.text(), timeout=3000)
+        assert "border" in window.spin_diameter.styleSheet()
+        assert window.spin_diameter.value() == pytest.approx(0.0182)
+    finally:
+        _close_test_window(window)
+
+
 def test_sample_wire_change_from_project_to_fabrication_fallback_is_safe(
     tmp_path: Path,
     qtbot,
