@@ -278,6 +278,15 @@ static void format_centideg(char *buffer, size_t buffer_size, int32_t centideg)
 static void handle_uart_commands(void)
 {
     uint8_t byte = 0;
+    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_ORE) != RESET) {
+        __HAL_UART_CLEAR_OREFLAG(&huart3);
+    }
+    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_FE) != RESET) {
+        __HAL_UART_CLEAR_FEFLAG(&huart3);
+    }
+    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_NE) != RESET) {
+        __HAL_UART_CLEAR_NEFLAG(&huart3);
+    }
     while (HAL_UART_Receive(&huart3, &byte, 1U, 0U) == HAL_OK) {
         switch (byte) {
         case '1':
