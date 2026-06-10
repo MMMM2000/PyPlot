@@ -6,6 +6,8 @@
 #include <string.h>
 
 #define MLX90614_ADDR 0x5AU
+#define MLX90614_EEPROM_CONFIG1 0x05U
+#define MLX90614_EEPROM_COMMAND_BASE 0x20U
 #define MLX90614_RAM_TA 0x06U
 #define MLX90614_RAM_TOBJ1 0x07U
 
@@ -24,6 +26,11 @@
 #define MLX_FLAG_READ_ERROR 0x01U
 #define MLX_FLAG_PEC_PRESENT 0x02U
 
+#define MLX_CONFIG1_IIR_MASK (0x7U << 13)
+#define MLX_CONFIG1_FIR_MASK (0x7U << 5)
+#define MLX_CONFIG1_FAST_FILTER (((uint16_t)0x4U << 13) | ((uint16_t)0x4U << 5))
+#define MLX_CONFIG1_OBSERVED_DCI_DEFAULT 0xB7F5U
+
 I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart3;
 
@@ -36,11 +43,21 @@ static void MX_I2C1_Init(void);
 static void MX_USART3_UART_Init(void);
 static void mlx_i2c_bus_recover(void);
 static HAL_StatusTypeDef mlx_read_word(uint8_t command, uint16_t *word, uint8_t *pec);
+static HAL_StatusTypeDef mlx_write_word(uint8_t command, uint16_t word);
+static HAL_StatusTypeDef mlx_go_to_sleep(void);
+static void mlx_sleep_wake_reload(void);
+static HAL_StatusTypeDef mlx_read_eeprom(uint8_t address, uint16_t *word);
+static HAL_StatusTypeDef mlx_write_eeprom(uint8_t address, uint16_t word);
 static int32_t mlx_word_to_centideg(uint16_t word);
 static void format_centideg(char *buffer, size_t buffer_size, int32_t centideg);
 static void handle_uart_commands(void);
+static void report_config(void);
+static void write_fast_filter_config(void);
+static void restore_observed_dci_config(void);
+static void reload_sensor_from_sleep(void);
 static void send_sample(void);
 static void uart_write_text(const char *text);
+static uint8_t mlx_crc8(const uint8_t *bytes, size_t length);
 static uint32_t elapsed_us_since(uint32_t start_cycles);
 static void dwt_init(void);
 
@@ -250,6 +267,86 @@ static HAL_StatusTypeDef mlx_read_word(uint8_t command, uint16_t *word, uint8_t 
     return status;
 }
 
+static HAL_StatusTypeDef mlx_write_word(uint8_t command, uint16_t word)
+{
+    uint8_t raw[4] = {
+        command,
+        (uint8_t)(word & 0xFFU),
+        (uint8_t)(word >> 8),
+        0U,
+    };
+    uint8_t pec_input[4] = {
+        (uint8_t)(MLX90614_ADDR << 1),
+        raw[0],
+        raw[1],
+        raw[2],
+    };
+    raw[3] = mlx_crc8(pec_input, sizeof(pec_input));
+    return HAL_I2C_Master_Transmit(&hi2c1, MLX90614_ADDR << 1, raw, sizeof(raw), 50U);
+}
+
+static HAL_StatusTypeDef mlx_go_to_sleep(void)
+{
+    uint8_t raw[2] = {0xFFU, 0U};
+    uint8_t pec_input[2] = {(uint8_t)(MLX90614_ADDR << 1), raw[0]};
+    raw[1] = mlx_crc8(pec_input, sizeof(pec_input));
+    return HAL_I2C_Master_Transmit(&hi2c1, MLX90614_ADDR << 1, raw, sizeof(raw), 50U);
+}
+
+static void mlx_sleep_wake_reload(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    (void)HAL_I2C_DeInit(&hi2c1);
+    HAL_Delay(2U);
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+    HAL_Delay(40U);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
+    HAL_Delay(300U);
+
+    mlx_i2c_bus_recover();
+    MX_I2C1_Init();
+}
+
+static HAL_StatusTypeDef mlx_read_eeprom(uint8_t address, uint16_t *word)
+{
+    uint8_t pec = 0;
+    return mlx_read_word((uint8_t)(MLX90614_EEPROM_COMMAND_BASE | (address & 0x1FU)), word, &pec);
+}
+
+static HAL_StatusTypeDef mlx_write_eeprom(uint8_t address, uint16_t word)
+{
+    const uint8_t command = (uint8_t)(MLX90614_EEPROM_COMMAND_BASE | (address & 0x1FU));
+    HAL_StatusTypeDef status = mlx_write_word(command, 0x0000U);
+    if (status != HAL_OK) {
+        return status;
+    }
+    HAL_Delay(10U);
+    uint16_t check = 0xFFFFU;
+    status = mlx_read_eeprom(address, &check);
+    if (status != HAL_OK || check != 0x0000U) {
+        return HAL_ERROR;
+    }
+    status = mlx_write_word(command, word);
+    if (status != HAL_OK) {
+        return status;
+    }
+    HAL_Delay(10U);
+    check = 0x0000U;
+    status = mlx_read_eeprom(address, &check);
+    if (status != HAL_OK || check != word) {
+        return HAL_ERROR;
+    }
+    return HAL_OK;
+}
+
 static int32_t mlx_word_to_centideg(uint16_t word)
 {
     return ((int32_t)word * 2) - 27315;
@@ -317,9 +414,131 @@ static void handle_uart_commands(void)
             sample_interval_ms = 0U;
             uart_write_text("MLX90614_INTERVAL_MS,0\r\n");
             break;
+        case 'C':
+        case 'c':
+            report_config();
+            break;
+        case 'F':
+        case 'f':
+            write_fast_filter_config();
+            break;
+        case 'R':
+        case 'r':
+            restore_observed_dci_config();
+            break;
+        case 'W':
+        case 'w':
+            reload_sensor_from_sleep();
+            break;
         default:
             break;
         }
+    }
+}
+
+static void report_config(void)
+{
+    uint16_t config1 = 0;
+    HAL_StatusTypeDef status = mlx_read_eeprom(MLX90614_EEPROM_CONFIG1, &config1);
+    char line[96];
+    if (status == HAL_OK) {
+        const unsigned int iir = (unsigned int)((config1 >> 13) & 0x7U);
+        const unsigned int fir = (unsigned int)((config1 >> 5) & 0x7U);
+        (void)snprintf(
+            line,
+            sizeof(line),
+            "MLX90614_CONFIG1,0x%04X,IIR=%u,FIR=%u\r\n",
+            (unsigned int)config1,
+            iir,
+            fir);
+    } else {
+        (void)snprintf(line, sizeof(line), "MLX90614_CONFIG1_ERROR,%d\r\n", (int)status);
+    }
+    uart_write_text(line);
+}
+
+static void write_fast_filter_config(void)
+{
+    uint16_t config1 = 0;
+    HAL_StatusTypeDef status = mlx_read_eeprom(MLX90614_EEPROM_CONFIG1, &config1);
+    if (status != HAL_OK) {
+        uart_write_text("MLX90614_FAST_CONFIG_ERROR,read\r\n");
+        return;
+    }
+
+    const uint16_t fast_config = (uint16_t)(
+        (config1 & (uint16_t)~(MLX_CONFIG1_IIR_MASK | MLX_CONFIG1_FIR_MASK)) |
+        MLX_CONFIG1_FAST_FILTER);
+    char line[120];
+    if (fast_config == config1) {
+        (void)snprintf(line, sizeof(line), "MLX90614_FAST_CONFIG_ALREADY,0x%04X\r\n", (unsigned int)config1);
+        uart_write_text(line);
+        return;
+    }
+
+    status = mlx_write_eeprom(MLX90614_EEPROM_CONFIG1, fast_config);
+    if (status == HAL_OK) {
+        (void)snprintf(
+            line,
+            sizeof(line),
+            "MLX90614_FAST_CONFIG_WRITTEN,old=0x%04X,new=0x%04X,power_cycle_required\r\n",
+            (unsigned int)config1,
+            (unsigned int)fast_config);
+    } else {
+        (void)snprintf(
+            line,
+            sizeof(line),
+            "MLX90614_FAST_CONFIG_ERROR,write,old=0x%04X,new=0x%04X,status=%d\r\n",
+            (unsigned int)config1,
+            (unsigned int)fast_config,
+            (int)status);
+    }
+    uart_write_text(line);
+}
+
+static void restore_observed_dci_config(void)
+{
+    uint16_t config1 = 0;
+    HAL_StatusTypeDef status = mlx_read_eeprom(MLX90614_EEPROM_CONFIG1, &config1);
+    if (status != HAL_OK) {
+        uart_write_text("MLX90614_RESTORE_CONFIG_ERROR,read\r\n");
+        return;
+    }
+    if (config1 == MLX_CONFIG1_OBSERVED_DCI_DEFAULT) {
+        uart_write_text("MLX90614_RESTORE_CONFIG_ALREADY,0xB7F5\r\n");
+        return;
+    }
+
+    status = mlx_write_eeprom(MLX90614_EEPROM_CONFIG1, MLX_CONFIG1_OBSERVED_DCI_DEFAULT);
+    char line[120];
+    if (status == HAL_OK) {
+        (void)snprintf(
+            line,
+            sizeof(line),
+            "MLX90614_RESTORE_CONFIG_WRITTEN,old=0x%04X,new=0x%04X,power_cycle_required\r\n",
+            (unsigned int)config1,
+            (unsigned int)MLX_CONFIG1_OBSERVED_DCI_DEFAULT);
+    } else {
+        (void)snprintf(
+            line,
+            sizeof(line),
+            "MLX90614_RESTORE_CONFIG_ERROR,write,old=0x%04X,new=0x%04X,status=%d\r\n",
+            (unsigned int)config1,
+            (unsigned int)MLX_CONFIG1_OBSERVED_DCI_DEFAULT,
+            (int)status);
+    }
+    uart_write_text(line);
+}
+
+static void reload_sensor_from_sleep(void)
+{
+    HAL_StatusTypeDef status = mlx_go_to_sleep();
+    HAL_Delay(5U);
+    mlx_sleep_wake_reload();
+    if (status == HAL_OK && HAL_I2C_IsDeviceReady(&hi2c1, MLX90614_ADDR << 1, 3, 100U) == HAL_OK) {
+        uart_write_text("MLX90614_WAKE_RELOAD_OK\r\n");
+    } else {
+        uart_write_text("MLX90614_WAKE_RELOAD_ERROR\r\n");
     }
 }
 
@@ -395,6 +614,22 @@ static void uart_write_text(const char *text)
         return;
     }
     (void)HAL_UART_Transmit(&huart3, (uint8_t *)text, (uint16_t)len, 100U);
+}
+
+static uint8_t mlx_crc8(const uint8_t *bytes, size_t length)
+{
+    uint8_t crc = 0;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= bytes[i];
+        for (uint8_t bit = 0; bit < 8U; ++bit) {
+            if ((crc & 0x80U) != 0U) {
+                crc = (uint8_t)((crc << 1) ^ 0x07U);
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
 }
 
 static uint32_t elapsed_us_since(uint32_t start_cycles)
