@@ -11611,6 +11611,40 @@ def test_physical_tared_scale_near_zero_keeps_zero_load_reference_at_zero(tmp_pa
         _close_test_window(window)
 
 
+def test_dashboard_load_and_stress_show_missing_scale_instead_of_zero(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._latest_scale_timestamp = None
+        window._latest_scale_value_g = 0.0
+
+        window._refresh_live_labels()
+
+        assert window._dashboard_value_labels["load_g"].text() == "-"
+        assert window._dashboard_value_labels["stress_mpa"].text() == "-"
+        assert "No readings yet" in window.label_card_scale.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_dashboard_load_and_stress_mark_stale_scale(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.check_tension_load_positive.setChecked(True)
+        window.spin_zero_load_scale_g.setValue(21.2)
+        window._latest_scale_value_g = 20.2
+        window._latest_scale_timestamp = time.time() - mini_dma_mod.STALE_SCALE_AFTER_S - 2.0
+
+        window._refresh_live_labels()
+
+        assert window._dashboard_value_labels["load_g"].text().startswith("stale ")
+        assert window._dashboard_value_labels["stress_mpa"].text().startswith("stale ")
+        assert "stale" in window.label_card_scale.text()
+    finally:
+        _close_test_window(window)
+
+
 def test_zero_load_reference_is_default_max_applied_load_limit(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
