@@ -1687,6 +1687,11 @@ _MINI_DMA_REQUIRED_COLUMNS = {
     "strain_pct",
     "resistance_ohm",
 }
+_MINI_DMA_EXCLUDED_SCAN_DIRS = {
+    "archive",
+    "automation_history",
+    "automated_control_tests",
+}
 
 
 def _parse_microwire_word_sample(sample: object) -> tuple[str | None, str | None]:
@@ -1734,6 +1739,12 @@ def _looks_like_mini_dma_measurement(path: Path) -> bool:
         return False
     columns = {column.strip().casefold() for column in header.split(",")}
     return _MINI_DMA_REQUIRED_COLUMNS.issubset(columns)
+
+
+def _is_active_mini_dma_measurement(path: Path) -> bool:
+    if any(part.casefold() in _MINI_DMA_EXCLUDED_SCAN_DIRS for part in path.parts):
+        return False
+    return path.is_file() and _looks_like_mini_dma_measurement(path)
 
 
 def _infer_rvst_word_sample(path: Path, sample_override: object) -> tuple[str, str]:
@@ -2573,7 +2584,7 @@ def _load_project_word_report_frame(
                     resolved = path
                 if resolved in seen_mini_dma_paths or not path.is_file():
                     continue
-                if not _looks_like_mini_dma_measurement(path):
+                if not _is_active_mini_dma_measurement(path):
                     continue
                 seen_mini_dma_paths.add(resolved)
                 mini_dma_paths.append(path)
@@ -2582,13 +2593,15 @@ def _load_project_word_report_frame(
         source_column = "_word_mini_dma_sources"
         if source_column not in frame.columns:
             frame[source_column] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[source_column] = frame[source_column].astype(object)
         if MINI_DMA_COLUMN not in frame.columns:
             frame[MINI_DMA_COLUMN] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[MINI_DMA_COLUMN] = frame[MINI_DMA_COLUMN].astype(object)
         for index, row in frame.iterrows():
             composition = row.get("Composition")
             microwire = row.get("Microwire")
-            if _word_project_value_items(row.get(source_column)):
-                continue
             matching_mini_dma = []
             for path in mini_dma_paths:
                 inferred_composition, inferred_microwire = _infer_mini_dma_word_sample(path)
@@ -2601,13 +2614,10 @@ def _load_project_word_report_frame(
                     matching_mini_dma.append(path.parent)
             if matching_mini_dma:
                 values = [str(path) for path in dict.fromkeys(matching_mini_dma)]
-                frame.at[index, source_column] = _word_project_merge_value(
-                    row.get(source_column),
-                    values,
-                )
-                frame.at[index, MINI_DMA_COLUMN] = _word_project_merge_value(
-                    row.get(MINI_DMA_COLUMN),
-                    [path.name for path in dict.fromkeys(matching_mini_dma)],
+                frame.at[index, source_column] = values if len(values) > 1 else values[0]
+                graph_values = [path.name for path in dict.fromkeys(matching_mini_dma)]
+                frame.at[index, MINI_DMA_COLUMN] = (
+                    graph_values if len(graph_values) > 1 else graph_values[0]
                 )
 
     if include_origin:

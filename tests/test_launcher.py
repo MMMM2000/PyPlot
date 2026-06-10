@@ -509,15 +509,16 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["Mini DMA graphs"] == mini_dma_path.parent.name
 
 
-def test_microwire_word_report_project_keeps_explicit_mini_dma_sources(
+def test_microwire_word_report_project_replaces_stale_mini_dma_sources_with_active_runs(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "Praha"
     project_path = data_root / "microwire_project_copy.pydpj"
     project_path.parent.mkdir(parents=True)
-    explicit_path = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 heat shield iso-stress_run03"
-    stray_path = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 baseline-50mpa-01"
-    for path in (explicit_path, stray_path):
+    active_a = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 heat shield iso-stress_run03"
+    active_b = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 baseline-50mpa-01"
+    archived = data_root / "mini DMA" / "archive" / "Ni50Fe27Ga23 12_2 old_run01"
+    for path in (active_a, active_b, archived):
         path.mkdir(parents=True)
         (path / "measurement.csv").write_text(
             "\n".join(
@@ -540,8 +541,8 @@ def test_microwire_word_report_project_keeps_explicit_mini_dma_sources(
                             {
                                 "Composition": "Ni50Fe27Ga23",
                                 "Microwire": "12/2",
-                                "Mini DMA graphs": ["heat shield"],
-                                "_sources": [str(explicit_path)],
+                                "Mini DMA graphs": ["stale archived run"],
+                                "_sources": [str(archived)],
                             }
                         ]
                     }
@@ -564,11 +565,11 @@ def test_microwire_word_report_project_keeps_explicit_mini_dma_sources(
 
     assert len(frame) == 1
     row = frame.iloc[0]
-    assert row["_word_mini_dma_sources"] == str(explicit_path)
+    assert set(row["_word_mini_dma_sources"]) == {str(active_a), str(active_b)}
     mini_dma_graphs = row["Mini DMA graphs"]
-    assert "heat shield" in mini_dma_graphs
-    assert explicit_path.name in mini_dma_graphs
-    assert stray_path.name not in mini_dma_graphs
+    assert set(mini_dma_graphs) == {active_a.name, active_b.name}
+    assert archived.name not in mini_dma_graphs
+    assert "stale archived run" not in mini_dma_graphs
 
 
 def test_microwire_word_report_project_uses_shape_memory_payload_sources(
