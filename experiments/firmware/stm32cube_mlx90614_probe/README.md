@@ -35,14 +35,16 @@ Runtime interval commands over the same serial port:
 Experimental config commands:
 
 - `C` reports EEPROM Config Register1 and decoded IIR/FIR filter codes
-- `F` writes the fast-filter Config Register1 value derived from the current
-  value by setting IIR=`4` and FIR=`4`
+- `F` reports that the fast-filter experiment is disabled; it does not write
+  EEPROM
 - `R` restores the observed original DCI Config Register1 value `0xB7F5`
 - `W` puts the sensor to sleep and wakes it by holding SDA low so EEPROM
   filter settings are reloaded
 
 The first tested DCI module reported Config Register1 `0xB7F5` before the
-fast-filter experiment and `0x9795` after `F`. Avoid repeated EEPROM writes.
+failed fast-filter experiment and `0x9795` after the removed write path. The
+module stopped responding usefully to warm targets in that state, so restore
+`0xB7F5` with `R` and `W`. Avoid repeated EEPROM writes.
 
 Build from this folder with STM32CubeCLT:
 
