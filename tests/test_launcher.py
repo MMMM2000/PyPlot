@@ -572,6 +572,79 @@ def test_microwire_word_report_project_replaces_stale_mini_dma_sources_with_acti
     assert "stale archived run" not in mini_dma_graphs
 
 
+def test_microwire_word_report_project_blocks_stale_mini_dma_when_newest_active_run_unfinished(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    old_finished = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 old_run01"
+    newest_running = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 active_run02"
+    for path, metadata in (
+        (
+            old_finished,
+            {
+                "sample_name": "Ni50Fe27Ga23 12/2",
+                "created_utc": "2026-06-01 09:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 09:20:00",
+            },
+        ),
+        (
+            newest_running,
+            {
+                "sample_name": "Ni50Fe27Ga23 12/2",
+                "created_utc": "2026-06-01 10:00:00",
+                "session_state": "running",
+            },
+        ),
+    ):
+        path.mkdir(parents=True)
+        (path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (path / "measurement.csv").write_text(
+            "\n".join(
+                [
+                    "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,resistance_ohm,current_measured_mA",
+                    "0.1,current,50,1,0.0,100.0,1.0",
+                    "0.2,current,50,1,0.1,101.0,2.0",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "mini_dma": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Mini DMA graphs": ["stale old run"],
+                                "_sources": [str(old_finished)],
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    frame, _origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        argparse.Namespace(microwire_word_sample="Ni50Fe27Ga23 12/2", microwire_word_origin=False),
+        tmp_path / "reports",
+    )
+
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert not launcher_module._word_project_value_items(row.get("_word_mini_dma_sources"))  # noqa: SLF001
+    assert not launcher_module._word_project_value_items(row.get("Mini DMA graphs"))  # noqa: SLF001
+
+
 def test_microwire_word_report_project_uses_shape_memory_payload_sources(
     tmp_path: Path,
 ) -> None:
@@ -1533,7 +1606,15 @@ def test_builder_automation_recipe_updates_shape_memory_copy(
 def _write_mini_dma_run(path: Path, *, sample_name: str = "Ni50Fe27Ga23 12_2") -> Path:
     path.mkdir(parents=True, exist_ok=True)
     (path / "metadata.json").write_text(
-        json.dumps({"sample_name": sample_name, "initial_length_mm": 10.0}),
+        json.dumps(
+            {
+                "sample_name": sample_name,
+                "initial_length_mm": 10.0,
+                "created_utc": "2026-06-01 09:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 09:10:00",
+            }
+        ),
         encoding="utf-8",
     )
     rows = [
@@ -1561,6 +1642,9 @@ def _write_transition_mini_dma_run(
                 "sample_name": sample_name,
                 "initial_length_mm": 10.0,
                 "wire_diameter_mm": 0.0191,
+                "created_utc": "2026-06-01 09:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 09:10:00",
             }
         ),
         encoding="utf-8",

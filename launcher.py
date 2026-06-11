@@ -1691,6 +1691,7 @@ _MINI_DMA_EXCLUDED_SCAN_DIRS = {
     "archive",
     "automation_history",
     "automated_control_tests",
+    "automated",
 }
 
 
@@ -2411,6 +2412,7 @@ def _load_project_word_report_frame(
         _plot_measurement_origin,
         _safe_plot_stem,
     )
+    from microwire_data_builder import ui as builder_ui
     from plotting.plugins.r_vs_t.core import load_file
 
     payload = json.loads(source_path.read_text(encoding="utf-8"))
@@ -2584,7 +2586,7 @@ def _load_project_word_report_frame(
         else:
             frame[column] = frame[column].astype(object)
 
-    mini_dma_paths: list[Path] = []
+    mini_dma_candidates: list[Path] = []
     seen_mini_dma_paths: set[Path] = set()
     for root in rvt_search_roots:
         for mini_root_name in ("mini DMA", "Mini DMA", "mini_dma"):
@@ -2604,9 +2606,18 @@ def _load_project_word_report_frame(
                 if not _is_active_mini_dma_measurement(path):
                     continue
                 seen_mini_dma_paths.add(resolved)
-                mini_dma_paths.append(path)
+                mini_dma_candidates.append(path)
 
-    if mini_dma_paths:
+    mini_dma_paths: list[Path] = []
+    mini_dma_reportability: list[dict[str, Any]] = []
+    if mini_dma_candidates:
+        mini_dma_paths, mini_dma_reportability = builder_ui._reportable_mini_dma_measurements(
+            mini_dma_candidates,
+            sources=[str(path) for path in rvt_search_roots],
+            excluded_dirs=_MINI_DMA_EXCLUDED_SCAN_DIRS,
+        )
+
+    if mini_dma_paths or mini_dma_reportability:
         source_column = "_word_mini_dma_sources"
         if source_column not in frame.columns:
             frame[source_column] = pd.Series([None] * len(frame), dtype=object)
@@ -2636,6 +2647,26 @@ def _load_project_word_report_frame(
                 frame.at[index, MINI_DMA_COLUMN] = (
                     graph_values if len(graph_values) > 1 else graph_values[0]
                 )
+                continue
+            blocked_mini_dma = []
+            for entry in mini_dma_reportability:
+                if bool(entry.get("reportable")):
+                    continue
+                measurement = entry.get("measurement")
+                if not isinstance(measurement, str) or not measurement:
+                    continue
+                path = Path(measurement)
+                inferred_composition, inferred_microwire = _infer_mini_dma_word_sample(path)
+                if (
+                    _normalise_microwire_word_part(inferred_composition)
+                    == _normalise_microwire_word_part(composition)
+                    and _normalise_microwire_word_key(inferred_microwire)
+                    == _normalise_microwire_word_key(microwire)
+                ):
+                    blocked_mini_dma.append(entry)
+            if blocked_mini_dma:
+                frame.at[index, source_column] = None
+                frame.at[index, MINI_DMA_COLUMN] = None
 
     if include_origin:
         origin_dir = output_dir / "_origin_objects"
