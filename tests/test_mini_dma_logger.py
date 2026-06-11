@@ -15570,6 +15570,98 @@ def test_current_sweep_hold_phase_uses_faster_recovery_cap(
         _close_test_window(window)
 
 
+def test_current_sweep_step_halving_strategy_halves_after_overshoot(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+    window.spin_diameter.setValue(1.0)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
+    window._calibrated_stiffness_g_per_mm = 1.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+        first_step = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            error_value=5.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+            seek_key=seek_key,
+        )
+        window._seek_last_error_by_key[seek_key] = 5.0
+        same_side_step = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            error_value=4.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+            seek_key=seek_key,
+        )
+        window._seek_last_error_by_key[seek_key] = 4.0
+        reversed_step = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            error_value=-1.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+            seek_key=seek_key,
+        )
+
+        assert same_side_step == pytest.approx(first_step)
+        assert reversed_step == pytest.approx(max(window._motor_step_mm(), first_step * 0.5))
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_step_halving_strategy_stops_at_motor_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+    window.spin_diameter.setValue(1.0)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(1.0)
+    window._calibrated_stiffness_g_per_mm = 1.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="current",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+        previous_error = 1.0
+        step = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            error_value=previous_error,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+            seek_key=seek_key,
+        )
+        for _ in range(20):
+            window._seek_last_error_by_key[seek_key] = previous_error
+            previous_error *= -1.0
+            step = window._predictive_seek_step_mm(
+                mini_dma_mod.HSW_BASIS_LOAD_G,
+                error_value=previous_error,
+                tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+                seek_key=seek_key,
+            )
+
+        assert step == pytest.approx(window._motor_step_mm())
+        assert window._seek_step_halving_step_mm_by_key[seek_key] == pytest.approx(window._motor_step_mm())
+    finally:
+        _close_test_window(window)
+
+
 def test_flat_seek_feedback_continues_for_shape_memory_plateau(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)

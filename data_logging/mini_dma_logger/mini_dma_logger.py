@@ -79,6 +79,8 @@ SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
 CONTROL_LOGIC_VERSION = "2026-05-29.2"
+CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE = "adaptive"
+CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING = "step_halving"
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -2452,6 +2454,7 @@ class MiniDmaControlConfig:
     current_sweep_nudge_mm: float
     current_sweep_balance_speed_mm_s: float
     current_sweep_max_seek_mm: float
+    current_sweep_control_strategy: str
     supply_profile_id: str
     supply_current_resolution_mA: float
     motor_supply_enabled: bool
@@ -3674,6 +3677,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_pending_reversal_by_key: dict[tuple[str, int, float], tuple[float, float | None]] = {}
+        self._seek_step_halving_step_mm_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
@@ -4132,6 +4136,10 @@ class MainWindow(QtWidgets.QMainWindow):
             current_sweep_nudge_mm=float(self.spin_current_sweep_nudge_mm.value()),
             current_sweep_balance_speed_mm_s=float(self.spin_current_sweep_balance_speed_mm_s.value()),
             current_sweep_max_seek_mm=self._current_sweep_config_max_seek_mm(),
+            current_sweep_control_strategy=str(
+                getattr(self, "_current_sweep_control_strategy", CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE)
+                or CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE
+            ),
             supply_profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
             supply_current_resolution_mA=supply_resolution,
             motor_supply_enabled=self.check_motor_supply_power.isChecked(),
@@ -12225,6 +12233,51 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._current_sweep_hold_response_count_by_key[seek_key] = old_count + 1
 
+    def _current_sweep_uses_step_halving_strategy(self) -> bool:
+        config = self._control_config()
+        strategy = (
+            config.current_sweep_control_strategy
+            if config is not None
+            else str(getattr(self, "_current_sweep_control_strategy", CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE))
+        )
+        return (
+            strategy == CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+            and self._is_current_sweep_mode(self._automation_name)
+            and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
+        )
+
+    def _step_halving_seek_step_mm(
+        self,
+        basis: str,
+        error_value: float,
+        *,
+        seek_key: tuple[str, int, float],
+        sensitivity_per_mm: float | None,
+    ) -> float:
+        step_mm = max(
+            self._motor_step_mm(),
+            self._seek_nudge_mm(),
+        )
+        previous_step_mm = self._seek_step_halving_step_mm_by_key.get(seek_key)
+        previous_error = self._seek_last_error_by_key.get(seek_key)
+        if previous_step_mm is not None:
+            step_mm = max(self._motor_step_mm(), float(previous_step_mm))
+        if previous_error is not None and float(previous_error) * float(error_value) < 0.0:
+            step_mm = max(self._motor_step_mm(), step_mm * 0.5)
+        correction_caps = [self._current_sweep_max_correction_mm()]
+        if sensitivity_per_mm is not None and math.isfinite(float(sensitivity_per_mm)) and float(sensitivity_per_mm) > 0.0:
+            stress_cap_mm = self._current_sweep_max_stress_correction_mm(
+                basis,
+                float(sensitivity_per_mm),
+                error_value=error_value,
+                seek_key=seek_key,
+            )
+            if stress_cap_mm is not None:
+                correction_caps.append(stress_cap_mm)
+        step_mm = max(self._motor_step_mm(), min(step_mm, *correction_caps))
+        self._seek_step_halving_step_mm_by_key[seek_key] = step_mm
+        return step_mm
+
     def _predictive_seek_step_mm(
         self,
         basis: str,
@@ -12234,6 +12287,13 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float],
     ) -> float:
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if self._current_sweep_uses_step_halving_strategy():
+            return self._step_halving_seek_step_mm(
+                basis,
+                error_value,
+                seek_key=seek_key,
+                sensitivity_per_mm=sensitivity,
+            )
         if sensitivity is None or sensitivity <= 0.0:
             if self._is_current_sweep_mode(self._automation_name):
                 return self._seek_speed_limited_step_mm(
@@ -12426,6 +12486,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
         self._seek_pending_reversal_by_key.pop(seek_key, None)
+        self._seek_step_halving_step_mm_by_key.pop(seek_key, None)
 
     def _filtered_signal_changed_after_last_correction(
         self,
@@ -18601,6 +18662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
+        self._seek_step_halving_step_mm_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
         if not self._session_active:
             self._start_session(enable_logging=False, record_initial_point=False)
@@ -19477,6 +19539,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()
         self._seek_travel_by_key.clear()
+        self._seek_step_halving_step_mm_by_key.clear()
         self._setup_preload_engaged_seek_keys.clear()
         self._setup_preload_ramp_skipped = False
         self._active_current_sweep_step_index = None
