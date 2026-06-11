@@ -231,12 +231,21 @@ MEASUREMENT_CSV_FIELDNAMES = [
 IR_TEMPERATURE_CSV_FIELDNAMES = [
     "elapsed_s",
     "timestamp_utc",
+    "sensor_type",
     "host_time_s",
     "device_elapsed_ms",
     "sequence",
     "ambient_c",
     "object_c_apparent",
     "delta_c",
+    "frame_min_c",
+    "frame_mean_c",
+    "frame_max_c",
+    "frame_center_c",
+    "frame_hotspot_row",
+    "frame_hotspot_col",
+    "frame_width",
+    "frame_height",
     "raw_ambient",
     "raw_object",
     "read_us",
@@ -244,6 +253,8 @@ IR_TEMPERATURE_CSV_FIELDNAMES = [
     "sample_rate_hz",
     "config1",
 ]
+MLX90640_FRAME_WIDTH = 32
+MLX90640_FRAME_HEIGHT = 24
 FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)?)")
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
@@ -1194,6 +1205,15 @@ class IrTemperatureSample:
     raw_object: int
     flags: int
     config1: str = ""
+    sensor_type: str = "mlx90614"
+    frame_min_c: float | None = None
+    frame_mean_c: float | None = None
+    frame_max_c: float | None = None
+    frame_center_c: float | None = None
+    frame_hotspot_row: int | None = None
+    frame_hotspot_col: int | None = None
+    frame_width: int | None = None
+    frame_height: int | None = None
 
 
 class IrTemperatureBuffer:
@@ -2358,6 +2378,79 @@ def _parse_mlx90614_probe_line(raw_text: str, *, timestamp_s: float) -> IrTemper
     )
 
 
+def _parse_mlx90640_text_frame(lines: Sequence[str], *, timestamp_s: float) -> IrTemperatureSample | None:
+    if len(lines) < MLX90640_FRAME_HEIGHT + 2:
+        return None
+    first_parts = [part.strip() for part in lines[0].strip().split(",")]
+    if not first_parts or first_parts[0] != "FRAME_BEGIN":
+        return None
+    try:
+        device_elapsed_ms = int(first_parts[1]) if len(first_parts) > 1 and first_parts[1] else 0
+    except ValueError:
+        device_elapsed_ms = 0
+    ambient_c = 0.0
+    if len(first_parts) > 2 and first_parts[2]:
+        try:
+            ambient_c = float(first_parts[2])
+        except ValueError:
+            ambient_c = 0.0
+
+    rows: list[list[float]] = []
+    raw_text = "\n".join(line.strip() for line in lines if line.strip())
+    for expected_row, line in enumerate(lines[1:]):
+        clean = line.strip()
+        if clean == "FRAME_END":
+            break
+        parts = [part.strip() for part in clean.split(",")]
+        if len(parts) != MLX90640_FRAME_WIDTH + 2 or parts[0] != "ROW":
+            return None
+        try:
+            row_index = int(parts[1])
+            values = [float(part) for part in parts[2:]]
+        except ValueError:
+            return None
+        if row_index != expected_row:
+            return None
+        rows.append(values)
+
+    if len(rows) != MLX90640_FRAME_HEIGHT:
+        return None
+    values = [value for row in rows for value in row if math.isfinite(value)]
+    if not values:
+        return None
+    frame_min = min(values)
+    frame_max = max(values)
+    frame_mean = sum(values) / len(values)
+    center_row = MLX90640_FRAME_HEIGHT // 2
+    center_col = MLX90640_FRAME_WIDTH // 2
+    frame_center = rows[center_row][center_col]
+    hotspot_index = max(
+        range(MLX90640_FRAME_WIDTH * MLX90640_FRAME_HEIGHT),
+        key=lambda index: rows[index // MLX90640_FRAME_WIDTH][index % MLX90640_FRAME_WIDTH],
+    )
+    return IrTemperatureSample(
+        timestamp_s=timestamp_s,
+        raw_text=raw_text,
+        sequence=0,
+        device_elapsed_ms=device_elapsed_ms,
+        read_us=0,
+        ambient_c=ambient_c,
+        object_c_apparent=frame_max,
+        raw_ambient=0,
+        raw_object=0,
+        flags=0,
+        sensor_type="mlx90640",
+        frame_min_c=frame_min,
+        frame_mean_c=frame_mean,
+        frame_max_c=frame_max,
+        frame_center_c=frame_center,
+        frame_hotspot_row=hotspot_index // MLX90640_FRAME_WIDTH,
+        frame_hotspot_col=hotspot_index % MLX90640_FRAME_WIDTH,
+        frame_width=MLX90640_FRAME_WIDTH,
+        frame_height=MLX90640_FRAME_HEIGHT,
+    )
+
+
 class Mlx90614Worker(QtCore.QObject):
     sample_received = QtCore.pyqtSignal(object)
     status_changed = QtCore.pyqtSignal(str)
@@ -2402,6 +2495,7 @@ class Mlx90614Worker(QtCore.QObject):
             self.status_changed.emit(
                 f"IR thermometer connected on {self.port_name} at {self.baudrate} baud."
             )
+            frame_lines: list[str] = []
             while not self._stop_event.is_set():
                 raw_bytes = port.readline()
                 if not raw_bytes:
@@ -2410,6 +2504,22 @@ class Mlx90614Worker(QtCore.QObject):
                 if not raw_text:
                     continue
                 timestamp_s = time.time()
+                if raw_text.startswith("FRAME_BEGIN"):
+                    frame_lines = [raw_text]
+                    continue
+                if frame_lines:
+                    frame_lines.append(raw_text)
+                    if raw_text == "FRAME_END":
+                        sample = _parse_mlx90640_text_frame(frame_lines, timestamp_s=timestamp_s)
+                        frame_lines = []
+                        if sample is not None:
+                            self.sample_received.emit(sample)
+                        else:
+                            self.status_changed.emit("Skipped malformed MLX90640 frame.")
+                    elif len(frame_lines) > MLX90640_FRAME_HEIGHT + 2:
+                        frame_lines = []
+                        self.status_changed.emit("Skipped oversized MLX90640 frame.")
+                    continue
                 sample = _parse_mlx90614_probe_line(raw_text, timestamp_s=timestamp_s)
                 if sample is not None:
                     sample.config1 = self._last_config1
@@ -17879,12 +17989,21 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "elapsed_s": f"{elapsed_s:.6f}",
                 "timestamp_utc": _utc_timestamp_from_epoch(sample.timestamp_s),
+                "sensor_type": sample.sensor_type,
                 "host_time_s": f"{sample.timestamp_s:.6f}",
                 "device_elapsed_ms": sample.device_elapsed_ms,
                 "sequence": sample.sequence,
                 "ambient_c": f"{sample.ambient_c:.6f}",
                 "object_c_apparent": f"{sample.object_c_apparent:.6f}",
                 "delta_c": "" if delta_c is None else f"{delta_c:.6f}",
+                "frame_min_c": "" if sample.frame_min_c is None else f"{sample.frame_min_c:.6f}",
+                "frame_mean_c": "" if sample.frame_mean_c is None else f"{sample.frame_mean_c:.6f}",
+                "frame_max_c": "" if sample.frame_max_c is None else f"{sample.frame_max_c:.6f}",
+                "frame_center_c": "" if sample.frame_center_c is None else f"{sample.frame_center_c:.6f}",
+                "frame_hotspot_row": "" if sample.frame_hotspot_row is None else sample.frame_hotspot_row,
+                "frame_hotspot_col": "" if sample.frame_hotspot_col is None else sample.frame_hotspot_col,
+                "frame_width": "" if sample.frame_width is None else sample.frame_width,
+                "frame_height": "" if sample.frame_height is None else sample.frame_height,
                 "raw_ambient": sample.raw_ambient,
                 "raw_object": sample.raw_object,
                 "read_us": sample.read_us,
