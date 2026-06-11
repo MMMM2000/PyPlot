@@ -4301,6 +4301,148 @@ def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_project_diameter_invalidates_immediately_then_updates_for_changed_microwire(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni46Fe27Ga23Cu2Co2",
+                                "Microwire": "2/1",
+                                "d (um)": 18.2,
+                            },
+                            {
+                                "Composition": "Ni46Fe27Ga23Cu2Co2",
+                                "Microwire": "2/7",
+                                "d (um)": 14.4,
+                            },
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
+        window.edit_name_wire.setText("2/1")
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
+        assert "border" not in window.spin_diameter.styleSheet()
+
+        window.edit_name_wire.setText("2/7")
+
+        assert "border" in window.spin_diameter.styleSheet()
+        assert window.spin_diameter.value() == pytest.approx(0.0182)
+
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0144), timeout=3000)
+        assert "border" not in window.spin_diameter.styleSheet()
+        assert "diameter 14.4 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_project_auto_import_retries_after_sample_change_during_background_import(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                                "Microwire": "1/5",
+                                "d (um)": 17.6,
+                            },
+                            {
+                                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                                "Microwire": "1/6",
+                                "d (um)": 16.3,
+                            },
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni44Fe27Ga23Cu3Co3")
+        window._builder_import_in_progress = True
+
+        window.edit_name_wire.setText("1/6")
+
+        assert window._builder_project_import_retry_pending is True
+        assert "border" in window.spin_diameter.styleSheet()
+
+        window._builder_import_in_progress = False
+        window._run_pending_builder_project_auto_import_if_needed()
+
+        assert window._builder_project_import_retry_pending is False
+        assert window._builder_project_import_timer.isActive()
+        window._builder_project_import_timer.stop()
+    finally:
+        window._builder_import_in_progress = False
+        _close_test_window(window)
+
+
+def test_project_diameter_stays_marked_stale_when_changed_microwire_has_no_match(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni46Fe27Ga23Cu2Co2",
+                                "Microwire": "2/1",
+                                "d (um)": 18.2,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
+        window.edit_name_wire.setText("2/1")
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
+        assert "border" not in window.spin_diameter.styleSheet()
+
+        window.edit_name_wire.setText("2/7")
+
+        assert "border" in window.spin_diameter.styleSheet()
+        qtbot.waitUntil(lambda: "no matching sample row" in window.label_project_status.text(), timeout=3000)
+        assert "border" in window.spin_diameter.styleSheet()
+        assert window.spin_diameter.value() == pytest.approx(0.0182)
+    finally:
+        _close_test_window(window)
+
+
 def test_sample_wire_change_from_project_to_fabrication_fallback_is_safe(
     tmp_path: Path,
     qtbot,
@@ -4522,6 +4664,49 @@ def test_fabrication_completer_large_dataset_reuses_models_during_quick_wire_cha
         assert window.edit_name_wire.completer() is wire_completer
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/4"
         assert "fabrication diameter" in window.label_fabrication_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_microwire_field_click_shows_loaded_suggestions_without_rebuilding(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        records = [
+            mini_dma_mod.FabricationSampleRecord(
+                composition="Ni44Fe27Ga23Cu3Co3",
+                draw=1,
+                piece=piece,
+                label=f"1/{piece}",
+                diameter_mm=0.016 + piece / 10000.0,
+            )
+            for piece in range(1, 8)
+        ]
+        window._fabrication_records_by_composition = {"Ni44Fe27Ga23Cu3Co3": records}
+        window._refresh_fabrication_completers()
+        window.edit_name_composition.setText("Ni44Fe27Ga23Cu3Co3")
+        window.edit_name_wire.setText("1/5")
+        wire_completer = window.edit_name_wire.completer()
+        assert wire_completer is not None
+        assert wire_completer.model().rowCount() == len(records)
+
+        def fail_rebuild() -> None:
+            raise AssertionError("clicking the microwire field must not rebuild suggestion models")
+
+        monkeypatch.setattr(window, "_refresh_fabrication_completers", fail_rebuild)
+
+        started_s = time.perf_counter()
+        for _ in range(10):
+            window.edit_name_wire._show_available_completions()
+        elapsed_s = time.perf_counter() - started_s
+
+        assert elapsed_s < 0.1
+        assert window.edit_name_wire.completer() is wire_completer
+        assert wire_completer.completionPrefix() == ""
     finally:
         _close_test_window(window)
 
