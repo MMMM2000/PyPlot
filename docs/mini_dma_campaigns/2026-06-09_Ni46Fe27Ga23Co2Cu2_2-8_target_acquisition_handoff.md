@@ -71,4 +71,3 @@ fair controller test and could misattribute a physical/setup state to software.
 The target-acquisition part of the objective is hardware-verified and repeated.
 The broader across-wire full-sweep/current-hold objective remains unproven until a
 fresh, inspected physical state is available for another controlled hardware trial.
-

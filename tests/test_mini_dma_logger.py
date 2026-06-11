@@ -4408,7 +4408,7 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "Imported" in window.label_project_status.text()
         assert "diameter 19.1 um" in window.label_project_status.text()
-        assert "border" not in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
     finally:
         _close_test_window(window)
 
@@ -4464,7 +4464,7 @@ def test_fabrication_suggestions_fill_diameter_when_project_has_no_diameter(tmp_
         qtbot.waitUntil(lambda: "no project diameter" in window.label_project_status.text(), timeout=3000)
         assert "no project diameter" in window.label_project_status.text()
         assert "fabrication diameter 12.5 um" in window.label_fabrication_status.text()
-        assert "border" not in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
         completer_model = window.edit_name_wire.completer().model()
         suggestions = [
             completer_model.data(completer_model.index(row, 0))
@@ -4615,15 +4615,15 @@ def test_project_diameter_invalidates_immediately_then_updates_for_changed_micro
         window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
         window.edit_name_wire.setText("2/1")
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
-        assert "rgba(22, 163, 74" in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
 
         window.edit_name_wire.setText("2/7")
 
-        assert "border" in window.spin_diameter.styleSheet()
+        assert "#dc2626" in window.spin_diameter.styleSheet()
         assert window.spin_diameter.value() == pytest.approx(0.0182)
 
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0144), timeout=3000)
-        assert "rgba(22, 163, 74" in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
         assert "diameter 14.4 um" in window.label_project_status.text()
     finally:
         _close_test_window(window)
@@ -4710,7 +4710,7 @@ def test_project_diameter_stays_marked_stale_when_changed_microwire_has_no_match
         window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
         window.edit_name_wire.setText("2/1")
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
-        assert "rgba(22, 163, 74" in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
 
         window.edit_name_wire.setText("2/7")
 
@@ -5109,7 +5109,6 @@ def test_builder_project_rows_feed_sample_completers(tmp_path: Path, qtbot) -> N
         assert microwires == ["1/2", "1/5", "1/6", "1/7"]
     finally:
         _close_test_window(window)
-
 
 def test_failed_fabrication_composition_load_is_not_retried_forever(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
@@ -17226,6 +17225,38 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
         assert relaxing_move is True
         assert controller.targets == [10]
         assert "Relaxing moves are still allowed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_move_log_leads_with_signed_micrometer_step_and_direction(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+            self.max_speeds: list[int | None] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+            self.max_speeds.append(max_speed)
+
+    controller = _FakeController()
+    _use_immediate_tic_dispatcher(window, controller)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_commanded_position_steps = 0
+    window._last_move_target_mm = 0.0
+
+    try:
+        assert window._move_to_position_mm(-0.01, speed_mm_s=4.692) is True
+
+        assert controller.targets == [-8]
+        log_text = window.log_output.toPlainText()
+        assert "Motor step -10 um (relax) at 4.692 mm/s -> target -0.01 mm (-8 steps)." in log_text
+        assert "Move command sent to" not in log_text
     finally:
         _close_test_window(window)
 
