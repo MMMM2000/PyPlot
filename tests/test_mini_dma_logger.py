@@ -1747,6 +1747,96 @@ def test_dashboard_plot_updates_pyqtgraph_left_and_right_curves(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_parse_mlx90614_probe_line_returns_temperature_sample() -> None:
+    sample = mini_dma_mod._parse_mlx90614_probe_line(
+        "MLX90614,42,1234,2370,23.01,40.25,14808,15670,2",
+        timestamp_s=100.5,
+    )
+
+    assert sample is not None
+    assert sample.sequence == 42
+    assert sample.device_elapsed_ms == 1234
+    assert sample.read_us == 2370
+    assert sample.ambient_c == pytest.approx(23.01)
+    assert sample.object_c_apparent == pytest.approx(40.25)
+    assert sample.raw_ambient == 14808
+    assert sample.raw_object == 15670
+    assert sample.flags == 2
+
+
+def test_mini_dma_plot_channels_include_ir_temperature(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        keys = {channel.key for channel in window._plot_channels()}
+
+        assert "ir_object_c_apparent" in keys
+        assert "ir_delta_c" in keys
+        assert "ir_ambient_c" in keys
+        assert "ir_sample_age_s" in keys
+    finally:
+        _close_test_window(window)
+
+
+def test_session_logs_ir_temperature_sidecar_and_measurement_columns(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.edit_log_name.setText("ir_temperature_session")
+        window._start_session(enable_logging=True, record_initial_point=False)
+        assert window._session_active is True
+        sample = mini_dma_mod.IrTemperatureSample(
+            timestamp_s=window._session_start_wall_s + 0.25,
+            raw_text="MLX90614,7,900,2370,23.10,41.50,14813,15733,2",
+            sequence=7,
+            device_elapsed_ms=900,
+            read_us=2370,
+            ambient_c=23.10,
+            object_c_apparent=41.50,
+            raw_ambient=14813,
+            raw_object=15733,
+            flags=2,
+            config1="0x9795",
+        )
+
+        window._handle_ir_sample(sample)
+        assert window._record_current_point(quiet=True) is True
+        window._stop_session(reason="test_complete", detail="IR logging test complete.")
+
+        run_dir = tmp_path / "ir_temperature_session"
+        measurement_rows = list(csv.DictReader((run_dir / "measurement.csv").open(encoding="utf-8", newline="")))
+        ir_rows = list(csv.DictReader((run_dir / "ir_temperature.csv").open(encoding="utf-8", newline="")))
+        metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        assert measurement_rows
+        assert measurement_rows[-1]["ir_object_c_apparent"] == "41.500000"
+        assert measurement_rows[-1]["ir_ambient_c"] == "23.100000"
+        assert measurement_rows[-1]["ir_delta_c"] == "0.000000"
+        assert measurement_rows[-1]["ir_raw_object"] == "15733"
+        assert measurement_rows[-1]["ir_config1"] == "0x9795"
+        assert ir_rows == [
+            {
+                "elapsed_s": "0.250000",
+                "timestamp_utc": ir_rows[0]["timestamp_utc"],
+                "host_time_s": f"{sample.timestamp_s:.6f}",
+                "device_elapsed_ms": "900",
+                "sequence": "7",
+                "ambient_c": "23.100000",
+                "object_c_apparent": "41.500000",
+                "delta_c": "0.000000",
+                "raw_ambient": "14813",
+                "raw_object": "15733",
+                "read_us": "2370",
+                "flags": "2",
+                "sample_rate_hz": "",
+                "config1": "0x9795",
+            }
+        ]
+        assert metadata["logging"]["ir_temperature_sidecar"] == "ir_temperature.csv"
+        assert metadata["logging"]["ir_temperature_sample_count"] == 1
+        assert metadata["ir_thermometer"]["baseline_object_c_apparent"] == pytest.approx(41.5)
+    finally:
+        _close_test_window(window)
+
+
 def test_dashboard_plot_uses_secondary_axis_without_duplicate_equivalent_curve(
     tmp_path: Path,
     qtbot,
