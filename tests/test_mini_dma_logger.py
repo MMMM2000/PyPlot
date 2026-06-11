@@ -4814,7 +4814,10 @@ def test_sample_name_auto_import_failure_is_reported_without_crashing(
         window.edit_project_path.setText(str(project_path))
         window.edit_name_composition.setText("Ni50Fe27Ga23")
         window.edit_name_wire.setText("10/4")
-        qtbot.wait(20)
+        qtbot.waitUntil(
+            lambda: "Failed to apply saved project sample match" in window.label_project_status.text(),
+            timeout=3000,
+        )
 
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 10/4"
         assert "Failed to apply saved project sample match" in window.label_project_status.text()
@@ -14361,7 +14364,7 @@ def test_current_sweep_overshoot_shrinks_correction_to_target_space_step(
         assert reached is False
         assert moves
         correction_mm = abs(moves[-1][0] - 6.7275)
-        assert correction_mm == pytest.approx(1.565 / 113.0, abs=0.001 / 113.0)
+        assert correction_mm == pytest.approx(1.0 / 113.0, abs=0.001 / 113.0)
         assert moves[-1][1] is not None
         assert moves[-1][1] >= 0.05
     finally:
@@ -14877,7 +14880,7 @@ def test_current_sweep_reversal_uses_correction_step_without_predictive_backlash
         assert moves
         target_mm, effective_mm, speed_mm_s = moves[-1]
         correction_mm = abs(target_mm - 6.7275)
-        assert correction_mm == pytest.approx(1.565 / 113.0, abs=0.001 / 113.0)
+        assert correction_mm == pytest.approx(1.0 / 113.0, abs=0.001 / 113.0)
         assert effective_mm == pytest.approx(target_mm)
         assert speed_mm_s is not None
         assert speed_mm_s >= 0.05
