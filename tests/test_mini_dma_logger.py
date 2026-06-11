@@ -16484,6 +16484,38 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
         _close_test_window(window)
 
 
+def test_move_log_leads_with_signed_micrometer_step_and_direction(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+            self.max_speeds: list[int | None] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+            self.max_speeds.append(max_speed)
+
+    controller = _FakeController()
+    _use_immediate_tic_dispatcher(window, controller)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._current_position_mm = 0.0
+    window._current_position_steps = 0
+    window._last_commanded_position_steps = 0
+    window._last_move_target_mm = 0.0
+
+    try:
+        assert window._move_to_position_mm(-0.01, speed_mm_s=4.692) is True
+
+        assert controller.targets == [-8]
+        log_text = window.log_output.toPlainText()
+        assert "Motor step -10 um (relax) at 4.692 mm/s -> target -0.01 mm (-8 steps)." in log_text
+        assert "Move command sent to" not in log_text
+    finally:
+        _close_test_window(window)
+
+
 def test_raw_scale_display_limit_blocks_standard_moves_when_exceeded(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
