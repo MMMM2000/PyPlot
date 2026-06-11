@@ -15027,6 +15027,51 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_instability_shrinks_trust_region_after_prediction_failures(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(42.461)
+    window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=250.0,
+        plateau_index=5,
+        note="5",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 250.0)
+
+    try:
+        normal_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            332.67878,
+            error_value=165.322519,
+            seek_key=seek_key,
+        )
+        assert normal_mm is not None
+
+        for _ in range(3):
+            window._note_current_sweep_hold_instability(seek_key)
+
+        stabilized_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            332.67878,
+            error_value=165.322519,
+            seek_key=seek_key,
+        )
+
+        assert stabilized_mm is not None
+        assert stabilized_mm < normal_mm * 0.2
+        assert stabilized_mm * 332.67878 <= 6.0
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_waits_for_filtered_signal_to_change_before_repeating_correction(
     tmp_path: Path,
     qtbot,

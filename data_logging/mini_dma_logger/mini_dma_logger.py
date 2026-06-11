@@ -469,6 +469,8 @@ SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
+SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_STEP_FACTOR = 0.55
+SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_MIN_CAP_MPA = 3.0
 SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S = 1.0
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
@@ -4364,6 +4366,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_pending_reversal_by_key: dict[tuple[str, int, float], tuple[float, float | None]] = {}
+        self._current_sweep_hold_instability_by_key: dict[tuple[str, int, float], int] = {}
         self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
@@ -11833,6 +11836,16 @@ class MainWindow(QtWidgets.QMainWindow):
             near_cap = _basis_cap_from_stress(near_mpa)
             max_cap = _basis_cap_from_stress(cap_mpa)
             near_threshold = 0.0 if near_cap is None else near_cap
+            if (
+                self._automation_phase == "current_hold"
+                and max_cap is not None
+                and max_cap > 0.0
+            ):
+                max_cap = self._current_sweep_hold_instability_cap_value(
+                    basis,
+                    max_cap,
+                    seek_key=seek_key,
+                )
             adaptive_sensitivity = self._current_sweep_hold_response_sensitivity_per_mm(
                 basis,
                 seek_key=seek_key,
@@ -11917,6 +11930,62 @@ class MainWindow(QtWidgets.QMainWindow):
             self._motor_step_mm(),
             min(strain_cap_mm, self._current_sweep_max_correction_mm()),
         )
+
+    def _current_sweep_hold_instability_level(
+        self,
+        seek_key: tuple[str, int, float] | None,
+    ) -> int:
+        if self._automation_phase != "current_hold" or seek_key is None:
+            return 0
+        return max(0, int(self._current_sweep_hold_instability_by_key.get(seek_key, 0)))
+
+    def _note_current_sweep_hold_instability(
+        self,
+        seek_key: tuple[str, int, float] | None,
+    ) -> None:
+        if self._automation_phase != "current_hold" or seek_key is None:
+            return
+        self._current_sweep_hold_instability_by_key[seek_key] = min(
+            8,
+            self._current_sweep_hold_instability_level(seek_key) + 1,
+        )
+
+    def _decay_current_sweep_hold_instability(
+        self,
+        seek_key: tuple[str, int, float] | None,
+    ) -> None:
+        if seek_key is None:
+            return
+        level = self._current_sweep_hold_instability_level(seek_key)
+        if level <= 1:
+            self._current_sweep_hold_instability_by_key.pop(seek_key, None)
+        else:
+            self._current_sweep_hold_instability_by_key[seek_key] = level - 1
+
+    def _current_sweep_hold_instability_cap_value(
+        self,
+        basis: str,
+        base_cap_value: float,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> float:
+        level = self._current_sweep_hold_instability_level(seek_key)
+        if level <= 0:
+            return abs(float(base_cap_value))
+        if basis == HSW_BASIS_STRESS_MPA:
+            min_cap = SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_MIN_CAP_MPA
+        elif basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            min_load_g = load_g_from_stress_mpa(
+                SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_MIN_CAP_MPA,
+                diameter_mm,
+            )
+            min_cap = 0.0 if min_load_g is None else abs(float(min_load_g))
+        else:
+            return abs(float(base_cap_value))
+        factor = SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_STEP_FACTOR ** float(level)
+        return max(min_cap, abs(float(base_cap_value)) * factor)
 
     def _current_sweep_hold_response_sensitivity_per_mm(
         self,
@@ -13304,6 +13373,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
         self._seek_pending_reversal_by_key.pop(seek_key, None)
+        self._current_sweep_hold_instability_by_key.pop(seek_key, None)
+        self._current_sweep_hold_response_stiffness_by_key.pop(seek_key, None)
+        self._current_sweep_hold_response_count_by_key.pop(seek_key, None)
 
     def _filtered_signal_changed_after_last_correction(
         self,
@@ -14609,6 +14681,8 @@ class MainWindow(QtWidgets.QMainWindow):
             effective_tolerance,
         )
         if overshot_target:
+            if self._automation_phase == "current_hold":
+                self._note_current_sweep_hold_instability(seek_key)
             if (
                 filtered_signal is not None
                 and self._is_current_sweep_mode(self._automation_name)
@@ -14708,6 +14782,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if error_worsened:
                 count = self._seek_no_response_count_by_key.get(seek_key, 0) + 1
                 self._seek_no_response_count_by_key[seek_key] = count
+                if self._automation_phase == "current_hold":
+                    self._note_current_sweep_hold_instability(seek_key)
                 travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
                 self._log(
                     f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
@@ -14715,6 +14791,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
+                self._decay_current_sweep_hold_instability(seek_key)
         current_hold_moving_away_fast = (
             self._automation_phase == "current_hold"
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -19697,6 +19774,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_live_stiffness_g_per_mm = None
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
+        self._current_sweep_hold_instability_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()
@@ -20576,6 +20654,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_live_stiffness_by_key.clear()
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
+        self._current_sweep_hold_instability_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()
