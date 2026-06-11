@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
-from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Callable, ClassVar, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 try:
     from .ocr import ORIGINAL_HOME as OCR_ORIGINAL_HOME
@@ -7138,6 +7138,205 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
             list(dict.fromkeys(break_lines)) if break_lines else ""
         )
     return frame
+
+
+def _mini_dma_resolve_measurement_path(path: Path) -> Path | None:
+    try:
+        if mini_dma_core is not None:
+            return mini_dma_core.resolve_measurement_path(path)
+    except Exception:
+        return None
+    candidate = Path(path)
+    if candidate.is_dir():
+        candidate = candidate / "measurement.csv"
+    if candidate.name.casefold() != "measurement.csv":
+        return None
+    try:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _read_mini_dma_metadata(measurement_path: Path) -> Dict[str, Any]:
+    metadata_path = measurement_path.with_name("metadata.json")
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _mini_dma_timestamp(value: object) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d_%H%M%S"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                parsed = None  # type: ignore[assignment]
+        if parsed is None:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _mini_dma_metadata_sort_timestamp(
+    metadata: Mapping[str, Any],
+    measurement_path: Path,
+) -> float:
+    for key in ("created_utc", "timestamp_utc", "started_utc", "finished_utc"):
+        parsed = _mini_dma_timestamp(metadata.get(key))
+        if parsed is not None:
+            return parsed
+    for candidate in (measurement_path.with_name("metadata.json"), measurement_path):
+        try:
+            return float(candidate.stat().st_mtime)
+        except OSError:
+            continue
+    return 0.0
+
+
+def _mini_dma_clear_completion_status(metadata: Mapping[str, Any]) -> Tuple[bool, str]:
+    state = str(metadata.get("session_state") or "").strip().casefold()
+    finished_utc = metadata.get("finished_utc")
+    has_finished_utc = _mini_dma_timestamp(finished_utc) is not None or bool(str(finished_utc or "").strip())
+    if state == "finished":
+        if has_finished_utc:
+            return True, "metadata session_state=finished with finished_utc"
+        return False, "metadata session_state=finished but missing finished_utc"
+    if state:
+        return False, f"metadata session_state={state}"
+    if has_finished_utc:
+        return True, "metadata finished_utc present"
+    try:
+        point_count = int(float(metadata.get("point_count")))
+        estimated = int(float(metadata.get("recipe_estimated_points")))
+    except (TypeError, ValueError):
+        point_count = 0
+        estimated = 0
+    if point_count > 0 and estimated > 0 and point_count >= estimated:
+        return True, "fallback point_count reached recipe_estimated_points"
+    if metadata:
+        return False, "metadata lacks session_state and finished_utc"
+    return True, "legacy fallback: metadata.json missing"
+
+
+def _mini_dma_reportability_sample_key(
+    measurement_path: Path,
+    metadata: Mapping[str, Any],
+    sources: Sequence[str],
+) -> str:
+    metadata_sample = str(metadata.get("sample_name") or "").strip()
+    if metadata_sample:
+        return metadata_sample.replace("/", "_")
+    run_path = measurement_path.parent
+    sample = _sample_from_path(run_path, sources)
+    return sample or run_path.name
+
+
+def _reportable_mini_dma_measurements(
+    paths: Sequence[Path],
+    *,
+    sources: Sequence[str] = (),
+    excluded_dirs: Collection[str] | None = None,
+) -> Tuple[List[Path], List[Dict[str, Any]]]:
+    ignored = {str(name).casefold() for name in (excluded_dirs or MiniDmaSection.excluded_refresh_dirs)}
+    candidates: Dict[str, Dict[str, Any]] = {}
+    for raw_path in paths:
+        measurement_path = _mini_dma_resolve_measurement_path(Path(raw_path))
+        if measurement_path is None:
+            continue
+        try:
+            resolved = str(measurement_path.resolve())
+        except OSError:
+            resolved = str(measurement_path)
+        if resolved in candidates:
+            continue
+        ignored_part = next(
+            (part for part in measurement_path.parts if part.casefold() in ignored),
+            None,
+        )
+        metadata = _read_mini_dma_metadata(measurement_path)
+        sample_key = _mini_dma_reportability_sample_key(measurement_path, metadata, sources)
+        timestamp = _mini_dma_metadata_sort_timestamp(metadata, measurement_path)
+        finished, status_reason = _mini_dma_clear_completion_status(metadata)
+        candidates[resolved] = {
+            "sample": sample_key,
+            "run_folder": str(measurement_path.parent),
+            "measurement": str(measurement_path),
+            "timestamp": timestamp,
+            "metadata_session_state": metadata.get("session_state"),
+            "metadata_finished_utc": metadata.get("finished_utc"),
+            "metadata_created_utc": metadata.get("created_utc"),
+            "reportable": False,
+            "skip_reason": f"ignored folder: {ignored_part}" if ignored_part else "",
+            "status_reason": status_reason,
+            "_path": measurement_path,
+            "_finished": finished,
+            "_ignored": ignored_part is not None,
+        }
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in candidates.values():
+        if entry["_ignored"]:
+            continue
+        grouped.setdefault(str(entry["sample"]), []).append(entry)
+
+    for sample, group in grouped.items():
+        newest = max(
+            group,
+            key=lambda item: (
+                float(item.get("timestamp") or 0.0),
+                str(item.get("run_folder") or ""),
+            ),
+        )
+        if not newest["_finished"]:
+            reason = f"newest active run is unfinished: {newest['status_reason']}"
+            for entry in group:
+                entry["skip_reason"] = reason
+            continue
+        for entry in group:
+            if entry["_finished"]:
+                entry["reportable"] = True
+                entry["skip_reason"] = ""
+            else:
+                entry["skip_reason"] = f"run is unfinished: {entry['status_reason']}"
+
+    reportable = [
+        cast(Path, entry["_path"])
+        for entry in sorted(
+            candidates.values(),
+            key=lambda item: (str(item.get("sample") or ""), float(item.get("timestamp") or 0.0), str(item.get("run_folder") or "")),
+        )
+        if bool(entry.get("reportable"))
+    ]
+    audit: List[Dict[str, Any]] = []
+    for entry in sorted(
+        candidates.values(),
+        key=lambda item: (str(item.get("sample") or ""), float(item.get("timestamp") or 0.0), str(item.get("run_folder") or "")),
+    ):
+        clean = {
+            key: value
+            for key, value in entry.items()
+            if not key.startswith("_") and key != "timestamp"
+        }
+        clean["timestamp"] = float(entry.get("timestamp") or 0.0)
+        audit.append(clean)
+    return reportable, audit
 
 
 def _drop_visible_sample_column(section: "MiniDatabaseSection") -> None:
@@ -17977,6 +18176,7 @@ class MiniDmaSection(MiniDatabaseSection):
         "archive",
         "automation_history",
         "automated_control_tests",
+        "automated",
     }
 
     def __init__(
@@ -18023,6 +18223,14 @@ class MiniDmaSection(MiniDatabaseSection):
                 candidates.setdefault(resolved, path)
         return sorted(candidates.values())
 
+    @staticmethod
+    def reportable_measurements(
+        paths: Sequence[Path],
+        *,
+        sources: Sequence[str] = (),
+    ) -> Tuple[List[Path], List[Dict[str, Any]]]:
+        return _reportable_mini_dma_measurements(paths, sources=sources)
+
     def process(
         self,
         paths: List[Path],
@@ -18030,10 +18238,14 @@ class MiniDmaSection(MiniDatabaseSection):
     ) -> SectionProcessResult:
         if mini_dma_core is None:
             raise RuntimeError("Mini DMA parser is not available.")
+        reportable_paths, reportability = self.reportable_measurements(
+            paths,
+            sources=self.data.sources,
+        )
         records: List[MiniDmaRecord] = []
         processed: Dict[str, float] = {}
-        total = len(paths)
-        for idx, path in enumerate(paths, start=1):
+        total = len(reportable_paths)
+        for idx, path in enumerate(reportable_paths, start=1):
             self._check_cancelled()
             path = Path(path)
             progress_name = path.parent.name if path.name.casefold() == "measurement.csv" else path.name
@@ -18106,6 +18318,7 @@ class MiniDmaSection(MiniDatabaseSection):
             table=table,
             processed=processed,
             payloads={"mini_dma_records": records},
+            extra={"mini_dma_reportability": reportability},
         )
 
     def refresh(self) -> None:

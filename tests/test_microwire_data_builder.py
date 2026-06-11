@@ -1139,9 +1139,10 @@ def test_mini_dma_section_collect_candidates_uses_only_report_measurements(
     good = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "measurement.csv"
     sidecar = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "control_trace_replay.csv"
     archived = tmp_path / "archive" / "Ni50Fe27Ga23 12_2 old_run" / "measurement.csv"
+    automated = tmp_path / "automated" / "Ni50Fe27Ga23 12_2 draft_run" / "measurement.csv"
     control_test = tmp_path / "automated_control_tests" / "probe_run" / "measurement.csv"
     history = tmp_path / "automation_history" / "campaign" / "history_run" / "measurement.csv"
-    for path in (good, sidecar, archived, control_test, history):
+    for path in (good, sidecar, archived, automated, control_test, history):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("placeholder", encoding="utf-8")
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
@@ -1154,6 +1155,153 @@ def test_mini_dma_section_collect_candidates_uses_only_report_measurements(
         section.deleteLater()
 
     assert candidates == [good]
+
+
+def _write_reportable_mini_dma_measurement(
+    path: Path,
+    *,
+    sample_name: str,
+    created_utc: str,
+    session_state: str = "finished",
+    finished_utc: str | None = "2026-06-01 00:10:00",
+) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "sample_name": sample_name,
+        "created_utc": created_utc,
+        "session_state": session_state,
+        "initial_length_mm": 10.0,
+    }
+    if finished_utc is not None:
+        metadata["finished_utc"] = finished_utc
+    (path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (path / "measurement.csv").write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,stress_mpa,resistance_ohm,current_set_mA,current_measured_mA,position_mm",
+                "0,current,50,1,0.0,50,100,1,1,0.0",
+                "1,current,50,1,0.1,50,101,20,20,0.1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path / "measurement.csv"
+
+
+def test_mini_dma_reportable_gating_skips_older_finished_when_newest_unfinished(
+    tmp_path: Path,
+) -> None:
+    old_finished = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    newest_running = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        session_state="running",
+        finished_utc=None,
+    )
+
+    accepted, audit = builder_ui.MiniDmaSection.reportable_measurements(
+        [old_finished, newest_running],
+        sources=[str(tmp_path)],
+    )
+
+    assert accepted == []
+    assert len(audit) == 2
+    assert all(not row["reportable"] for row in audit)
+    assert all("newest active run is unfinished" in row["skip_reason"] for row in audit)
+
+
+def test_mini_dma_reportable_gating_imports_finished_group_when_newest_finished(
+    tmp_path: Path,
+) -> None:
+    first = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    newest = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        finished_utc="2026-06-01 10:20:00",
+    )
+
+    accepted, audit = builder_ui.MiniDmaSection.reportable_measurements(
+        [first, newest],
+        sources=[str(tmp_path)],
+    )
+
+    assert accepted == [first, newest]
+    assert {row["reportable"] for row in audit} == {True}
+
+
+def test_mini_dma_reportable_gating_keeps_variant_groups_separate(tmp_path: Path) -> None:
+    base_old = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    base_running = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        session_state="running",
+        finished_utc=None,
+    )
+    glass_finished = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 glass run01",
+        sample_name="Ni50Fe27Ga23 12/2 glass",
+        created_utc="2026-06-01 09:30:00",
+        finished_utc="2026-06-01 09:50:00",
+    )
+
+    accepted, audit = builder_ui.MiniDmaSection.reportable_measurements(
+        [base_old, base_running, glass_finished],
+        sources=[str(tmp_path)],
+    )
+
+    assert accepted == [glass_finished]
+    blocked = [row for row in audit if row["sample"] == "Ni50Fe27Ga23 12_2"]
+    assert blocked and all("newest active run is unfinished" in row["skip_reason"] for row in blocked)
+    glass = [row for row in audit if row["sample"] == "Ni50Fe27Ga23 12_2 glass"]
+    assert len(glass) == 1 and glass[0]["reportable"] is True
+
+
+def test_mini_dma_section_process_reports_gated_skip_reason(tmp_path: Path) -> None:
+    _ensure_qapp()
+    old_finished = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    newest_running = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        session_state="running",
+        finished_utc=None,
+    )
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section.data = MiniDatabaseData(sources=[str(tmp_path)])
+
+        result = section.process([old_finished, newest_running])
+    finally:
+        section.close()
+        section.deleteLater()
+
+    assert result.table.empty
+    reportability = result.extra["mini_dma_reportability"]
+    assert len(reportability) == 2
+    assert all("newest active run is unfinished" in row["skip_reason"] for row in reportability)
 
 
 def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
