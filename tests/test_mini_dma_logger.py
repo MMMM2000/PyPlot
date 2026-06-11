@@ -4129,7 +4129,7 @@ def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: P
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "Imported" in window.label_project_status.text()
         assert "diameter 19.1 um" in window.label_project_status.text()
-        assert "border" not in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
     finally:
         _close_test_window(window)
 
@@ -4185,7 +4185,7 @@ def test_fabrication_suggestions_fill_diameter_when_project_has_no_diameter(tmp_
         qtbot.waitUntil(lambda: "no project diameter" in window.label_project_status.text(), timeout=3000)
         assert "no project diameter" in window.label_project_status.text()
         assert "fabrication diameter 12.5 um" in window.label_fabrication_status.text()
-        assert "border" not in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
         completer_model = window.edit_name_wire.completer().model()
         suggestions = [
             completer_model.data(completer_model.index(row, 0))
@@ -4336,15 +4336,15 @@ def test_project_diameter_invalidates_immediately_then_updates_for_changed_micro
         window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
         window.edit_name_wire.setText("2/1")
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
-        assert "border" not in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
 
         window.edit_name_wire.setText("2/7")
 
-        assert "border" in window.spin_diameter.styleSheet()
+        assert "#dc2626" in window.spin_diameter.styleSheet()
         assert window.spin_diameter.value() == pytest.approx(0.0182)
 
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0144), timeout=3000)
-        assert "border" not in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
         assert "diameter 14.4 um" in window.label_project_status.text()
     finally:
         _close_test_window(window)
@@ -4431,7 +4431,7 @@ def test_project_diameter_stays_marked_stale_when_changed_microwire_has_no_match
         window.edit_name_composition.setText("Ni46Fe27Ga23Cu2Co2")
         window.edit_name_wire.setText("2/1")
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0182), timeout=3000)
-        assert "border" not in window.spin_diameter.styleSheet()
+        assert "#16a34a" in window.spin_diameter.styleSheet()
 
         window.edit_name_wire.setText("2/7")
 

@@ -8763,7 +8763,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "spin_diameter"):
             return
         if self._diameter_imported:
-            self.spin_diameter.setStyleSheet("")
+            self.spin_diameter.setStyleSheet(
+                "QDoubleSpinBox { border: 1px solid #16a34a; background-color: rgba(22, 163, 74, 0.10); }"
+            )
             self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project or fabrication folder; manual edits are allowed.")
         else:
             self.spin_diameter.setStyleSheet(
