@@ -16484,7 +16484,7 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
         _close_test_window(window)
 
 
-def test_move_log_leads_with_signed_micrometer_step_and_direction(tmp_path: Path, qtbot) -> None:
+def test_move_log_distinguishes_tic_unit_from_commanded_micrometers(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -16506,11 +16506,15 @@ def test_move_log_leads_with_signed_micrometer_step_and_direction(tmp_path: Path
     window._last_move_target_mm = 0.0
 
     try:
-        assert window._move_to_position_mm(-0.01, speed_mm_s=4.692) is True
+        assert window._move_to_position_mm(-0.00125, speed_mm_s=5.0) is True
 
-        assert controller.targets == [-8]
+        assert controller.targets == [-1]
         log_text = window.log_output.toPlainText()
-        assert "Motor step -10 um (relax) at 4.692 mm/s -> target -0.01 mm (-8 steps)." in log_text
+        assert (
+            "Motor command -1 Tic unit (~-1.25 um commanded, relax) at "
+            "5 mm/s -> target -0.0013 mm (-1 Tic unit)."
+        ) in log_text
+        assert "Motor step -1 um" not in log_text
         assert "Move command sent to" not in log_text
     finally:
         _close_test_window(window)
