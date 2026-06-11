@@ -1690,6 +1690,27 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
         self.setPlaceholderText("e.g. 156/2")
         self.textEdited.connect(self._normalize_on_edit)
 
+    def _show_available_completions(self) -> None:
+        completer = self.completer()
+        if completer is None:
+            return
+        model = completer.model()
+        if model is None or model.rowCount() <= 0:
+            return
+        popup = completer.popup()
+        if popup is not None and popup.isVisible():
+            return
+        completer.setCompletionPrefix("")
+        completer.complete()
+
+    def focusInEvent(self, event: QtGui.QFocusEvent) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        QtCore.QTimer.singleShot(0, self._show_available_completions)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        super().mousePressEvent(event)
+        QtCore.QTimer.singleShot(0, self._show_available_completions)
+
     @staticmethod
     def _split_parts(value: object) -> tuple[str, str]:
         text = str(value or "").strip().lower()
@@ -4067,6 +4088,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
+        self._builder_project_import_retry_pending = False
         self._builder_project_sample_suggestions: dict[str, tuple[str, ...]] = {}
         self._builder_project_import_timer = QtCore.QTimer(self)
         self._builder_project_import_timer.setSingleShot(True)
@@ -9615,6 +9637,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._builder_project_import_worker = None
             self._builder_project_import_request_key = None
             self._builder_import_in_progress = False
+            self._run_pending_builder_project_auto_import_if_needed()
         thread.deleteLater()
 
     def _stop_builder_project_import_thread(self) -> None:
@@ -9705,6 +9728,8 @@ class MainWindow(QtWidgets.QMainWindow):
         async_load: bool = False,
     ) -> bool:
         if self._builder_import_in_progress:
+            if not update_identity:
+                self._builder_project_import_retry_pending = True
             return False
         path_text = self.edit_project_path.text().strip()
         if not path_text:
@@ -9717,6 +9742,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_project_status.setText("Builder project path is saved, but the file was not found.")
             return False
         if async_load and not update_identity:
+            self._builder_project_import_retry_pending = False
             return self._start_saved_builder_project_auto_import(path, quiet=quiet)
         try:
             payload = self._read_builder_project_payload(path)
@@ -9746,6 +9772,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _schedule_builder_project_auto_import(self) -> None:
         if self._builder_import_in_progress:
+            self._builder_project_import_retry_pending = True
+            return
+        if not self.edit_project_path.text().strip():
+            self._mark_diameter_imported(False)
+            self._builder_project_import_retry_pending = False
+            return
+        self._builder_project_import_timer.start()
+
+    def _run_pending_builder_project_auto_import_if_needed(self) -> None:
+        if not self._builder_project_import_retry_pending:
+            return
+        self._builder_project_import_retry_pending = False
+        if self._builder_import_in_progress:
+            self._builder_project_import_retry_pending = True
             return
         if not self.edit_project_path.text().strip():
             self._mark_diameter_imported(False)
