@@ -15570,11 +15570,9 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> str:
         commanded_delta_mm = float(delta_tic_units) / max(float(steps_per_mm), 1.0)
         direction = "tension" if commanded_delta_mm * self._tension_motion_sign() > 0.0 else "relax"
-        delta_unit_label = "Tic unit" if abs(delta_tic_units) == 1 else "Tic units"
         target_unit_label = "Tic unit" if abs(target_steps) == 1 else "Tic units"
         return (
-            f"Motor command {delta_tic_units:+d} {delta_unit_label} "
-            f"(~{commanded_delta_mm * 1000.0:+.2f} um commanded, {direction}) at "
+            f"Motor command {commanded_delta_mm * 1000.0:+.2f} um ({direction}) at "
             f"{_format_compact_unit(speed_mm_s, 'mm/s', decimals=3)} -> "
             f"target {_format_compact_unit(target_mm, 'mm')} ({target_steps} {target_unit_label})."
         )
