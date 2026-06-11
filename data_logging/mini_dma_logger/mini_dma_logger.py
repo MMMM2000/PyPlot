@@ -69,6 +69,7 @@ SESSION_MEASUREMENT_TX = "measurement.txt"
 SESSION_MEASUREMENT_CSV = "measurement.csv"
 SESSION_METADATA_JSON = "metadata.json"
 SESSION_RAW_SCALE_CSV = "scale_raw.csv"
+SESSION_IR_TEMPERATURE_CSV = "ir_temperature.csv"
 SESSION_CONTROL_TRACE_CSV = "control_trace.csv"
 SESSION_SETUP_TX = "setup.txt"
 RUNTIME_LOCKED_SPINBOX_STYLE = (
@@ -218,6 +219,32 @@ MEASUREMENT_CSV_FIELDNAMES = [
     "voltage_V",
     "resistance_ohm",
     "power_W",
+    "ir_object_c_apparent",
+    "ir_ambient_c",
+    "ir_delta_c",
+    "ir_sample_age_s",
+    "ir_raw_object",
+    "ir_raw_ambient",
+    "ir_read_us",
+    "ir_flags",
+    "ir_sample_rate_hz",
+    "ir_config1",
+]
+IR_TEMPERATURE_CSV_FIELDNAMES = [
+    "elapsed_s",
+    "timestamp_utc",
+    "host_time_s",
+    "device_elapsed_ms",
+    "sequence",
+    "ambient_c",
+    "object_c_apparent",
+    "delta_c",
+    "raw_ambient",
+    "raw_object",
+    "read_us",
+    "flags",
+    "sample_rate_hz",
+    "config1",
 ]
 FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)?)")
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
@@ -1159,6 +1186,47 @@ class ScaleSignalBuffer:
 
 
 @dataclass
+class IrTemperatureSample:
+    timestamp_s: float
+    raw_text: str
+    sequence: int
+    device_elapsed_ms: int
+    read_us: int
+    ambient_c: float
+    object_c_apparent: float
+    raw_ambient: int
+    raw_object: int
+    flags: int
+    config1: str = ""
+
+
+class IrTemperatureBuffer:
+    def __init__(self, maxlen: int = 2000) -> None:
+        self._samples: deque[IrTemperatureSample] = deque(maxlen=maxlen)
+
+    def add_sample(self, sample: IrTemperatureSample) -> None:
+        self._samples.append(sample)
+
+    def latest(self) -> IrTemperatureSample | None:
+        if not self._samples:
+            return None
+        return self._samples[-1]
+
+    def sample_rate_hz(self, *, now_s: float | None = None, window_s: float = 2.0) -> float | None:
+        if len(self._samples) < 2:
+            return None
+        end_s = self._samples[-1].timestamp_s if now_s is None else float(now_s)
+        cutoff_s = end_s - max(0.05, float(window_s))
+        samples = [sample for sample in self._samples if sample.timestamp_s >= cutoff_s]
+        if len(samples) < 2:
+            return None
+        duration_s = samples[-1].timestamp_s - samples[0].timestamp_s
+        if duration_s <= 0.0:
+            return None
+        return (len(samples) - 1) / duration_s
+
+
+@dataclass
 class MeasurementPoint:
     elapsed_s: float
     timestamp_utc: str
@@ -1190,6 +1258,16 @@ class MeasurementPoint:
     current_l0_mm: float | None = None
     current_relative_position_mm: float | None = None
     current_relative_strain_pct: float | None = None
+    ir_object_c_apparent: float | None = None
+    ir_ambient_c: float | None = None
+    ir_delta_c: float | None = None
+    ir_sample_age_s: float | None = None
+    ir_raw_object: int | None = None
+    ir_raw_ambient: int | None = None
+    ir_read_us: int | None = None
+    ir_flags: int | None = None
+    ir_sample_rate_hz: float | None = None
+    ir_config1: str = ""
     plot_gap_before: bool = False
 
 
@@ -2241,6 +2319,115 @@ class ScaleWorker(QtCore.QObject):
             self.error_occurred.emit(f"Scale connection failed: {exc}")
         except Exception as exc:
             self.error_occurred.emit(f"Scale worker failed: {exc}")
+        finally:
+            if port is not None:
+                try:
+                    port.close()
+                except Exception:
+                    pass
+            self.finished.emit()
+
+    @QtCore.pyqtSlot()
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+def _parse_mlx90614_probe_line(raw_text: str, *, timestamp_s: float) -> IrTemperatureSample | None:
+    text = raw_text.strip()
+    parts = text.split(",")
+    if len(parts) < 9 or parts[0] != "MLX90614":
+        return None
+    try:
+        sequence = int(parts[1])
+        device_elapsed_ms = int(parts[2])
+        read_us = int(parts[3])
+        ambient_c = float(parts[4])
+        object_c = float(parts[5])
+        raw_ambient = int(parts[6])
+        raw_object = int(parts[7])
+        flags = int(parts[8])
+    except (TypeError, ValueError):
+        return None
+    return IrTemperatureSample(
+        timestamp_s=timestamp_s,
+        raw_text=text,
+        sequence=sequence,
+        device_elapsed_ms=device_elapsed_ms,
+        read_us=read_us,
+        ambient_c=ambient_c,
+        object_c_apparent=object_c,
+        raw_ambient=raw_ambient,
+        raw_object=raw_object,
+        flags=flags,
+    )
+
+
+class Mlx90614Worker(QtCore.QObject):
+    sample_received = QtCore.pyqtSignal(object)
+    status_changed = QtCore.pyqtSignal(str)
+    error_occurred = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(
+        self,
+        *,
+        port_name: str,
+        baudrate: int,
+        interval_code: int,
+    ) -> None:
+        super().__init__()
+        self.port_name = port_name
+        self.baudrate = int(baudrate)
+        self.interval_code = max(1, min(7, int(interval_code)))
+        self._stop_event = Event()
+        self._last_config1 = ""
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        if serial is None:
+            self.error_occurred.emit("pyserial is not available.")
+            self.finished.emit()
+            return
+
+        port: Any = None
+        try:
+            port = serial.Serial(
+                self.port_name,
+                self.baudrate,
+                timeout=0.05,
+                write_timeout=0.2,
+            )
+            try:
+                port.reset_input_buffer()
+                port.write(f"{self.interval_code}\nC\n".encode("ascii"))
+                port.flush()
+            except Exception:
+                pass
+            self.status_changed.emit(
+                f"IR thermometer connected on {self.port_name} at {self.baudrate} baud."
+            )
+            while not self._stop_event.is_set():
+                raw_bytes = port.readline()
+                if not raw_bytes:
+                    continue
+                raw_text = raw_bytes.decode("ascii", errors="ignore").strip()
+                if not raw_text:
+                    continue
+                timestamp_s = time.time()
+                sample = _parse_mlx90614_probe_line(raw_text, timestamp_s=timestamp_s)
+                if sample is not None:
+                    sample.config1 = self._last_config1
+                    self.sample_received.emit(sample)
+                    continue
+                if raw_text.startswith("MLX90614_CONFIG1,"):
+                    fields = raw_text.split(",", 2)
+                    self._last_config1 = fields[1] if len(fields) > 1 else ""
+                if raw_text.startswith("MLX90614_"):
+                    self.status_changed.emit(raw_text)
+        except SerialException as exc:
+            self.error_occurred.emit(f"IR thermometer connection failed: {exc}")
+        except Exception as exc:
+            self.error_occurred.emit(f"IR thermometer worker failed: {exc}")
         finally:
             if port is not None:
                 try:
@@ -4320,6 +4507,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._restored_log_dir = ""
         self._scale_thread: QtCore.QThread | None = None
         self._scale_worker: ScaleWorker | None = None
+        self._ir_thread: QtCore.QThread | None = None
+        self._ir_worker: Mlx90614Worker | None = None
         self._tic_controller: TicController | None = None
         self._tic_controller_key: tuple[str, str, bool] | None = None
         self._tic_command_dispatcher: TicCommandDispatcher | None = None
@@ -4334,6 +4523,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_connected_at_s: float | None = None
         self._scale_no_data_hint_emitted = False
         self._scale_signal_buffer = ScaleSignalBuffer()
+        self._ir_state_lock = RLock()
+        self._latest_ir_sample: IrTemperatureSample | None = None
+        self._ir_temperature_buffer = IrTemperatureBuffer()
+        self._ir_baseline_object_c: float | None = None
         self._current_position_steps = 0
         self._current_position_mm = 0.0
         self._last_move_target_mm = 0.0
@@ -4389,6 +4582,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_writer: csv.DictWriter[str] | None = None
         self._session_raw_scale_handle: Any = None
         self._session_raw_scale_writer: csv.DictWriter[str] | None = None
+        self._session_ir_temperature_handle: Any = None
+        self._session_ir_temperature_writer: csv.DictWriter[str] | None = None
+        self._session_ir_temperature_path: Path | None = None
         self._session_control_trace_handle: Any = None
         self._session_control_trace_writer: csv.DictWriter[str] | None = None
         self._session_ui_telemetry_handle: Any = None
@@ -4412,6 +4608,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_detail: str | None = None
         self._session_stop_recorded_utc: str | None = None
         self._session_raw_scale_count = 0
+        self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s: float | None = None
         self._last_session_data_flush_s = 0.0
@@ -4667,6 +4864,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
         self._restore_settings()
         self._refresh_scale_ports()
+        self._refresh_ir_ports()
         self._refresh_live_labels()
 
     def _menu_by_text(self, text: str) -> QtWidgets.QMenu | None:
@@ -5737,6 +5935,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_hardware_provisioning_status.setWordWrap(True)
         supply_form.addRow("", self.label_hardware_provisioning_status)
         hardware_layout.addWidget(supply_box)
+
+        ir_box = self._group_box("IR Thermometer")
+        ir_form = QtWidgets.QFormLayout(ir_box)
+        self.combo_ir_port = QtWidgets.QComboBox(ir_box)
+        refresh_ir_button = QtWidgets.QPushButton("Refresh ports", ir_box)
+        refresh_ir_button.clicked.connect(self._refresh_ir_ports)
+        ir_port_row = QtWidgets.QHBoxLayout()
+        ir_port_row.addWidget(self.combo_ir_port, stretch=1)
+        ir_port_row.addWidget(refresh_ir_button)
+        ir_form.addRow("Port", ir_port_row)
+
+        self.combo_ir_baud = QtWidgets.QComboBox(ir_box)
+        for baud in ("115200", "921600", "2000000"):
+            self.combo_ir_baud.addItem(baud)
+        self.combo_ir_baud.setCurrentText("2000000")
+        ir_form.addRow("Baud", self.combo_ir_baud)
+
+        self.combo_ir_rate = QtWidgets.QComboBox(ir_box)
+        for label, code in (
+            ("10 Hz", 3),
+            ("50 Hz", 5),
+            ("100 Hz", 6),
+            ("Max stream", 7),
+        ):
+            self.combo_ir_rate.addItem(label, code)
+        self.combo_ir_rate.setCurrentIndex(self.combo_ir_rate.findData(7))
+        ir_form.addRow("Rate", self.combo_ir_rate)
+
+        ir_buttons = QtWidgets.QHBoxLayout()
+        self.button_ir_connect = QtWidgets.QPushButton("Connect IR", ir_box)
+        self.button_ir_connect.clicked.connect(self._toggle_ir_connection)
+        ir_buttons.addWidget(self.button_ir_connect)
+        zero_ir_button = QtWidgets.QPushButton("Zero delta", ir_box)
+        zero_ir_button.clicked.connect(self._zero_ir_temperature_delta)
+        ir_buttons.addWidget(zero_ir_button)
+        ir_form.addRow("", ir_buttons)
+
+        self.label_ir_live = QtWidgets.QLabel("IR disconnected.")
+        self.label_ir_live.setWordWrap(True)
+        ir_form.addRow("", self.label_ir_live)
+        self.label_ir_status = QtWidgets.QLabel("Passive apparent-temperature logging; not used for control.")
+        self.label_ir_status.setWordWrap(True)
+        self.label_ir_status.setStyleSheet("color: #a3a3a3;")
+        ir_form.addRow("", self.label_ir_status)
+        hardware_layout.addWidget(ir_box)
 
         hardware_layout.addStretch(1)
 
@@ -7612,6 +7855,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._plot_resistance_ohm,
             ),
             PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
+            PlotChannel(
+                "ir_object_c_apparent",
+                "IR apparent temp (C)",
+                "#38bdf8",
+                lambda point: point.ir_object_c_apparent,
+            ),
+            PlotChannel(
+                "ir_delta_c",
+                "IR delta temp (C)",
+                "#06b6d4",
+                lambda point: point.ir_delta_c,
+            ),
+            PlotChannel(
+                "ir_ambient_c",
+                "IR ambient temp (C)",
+                "#67e8f9",
+                lambda point: point.ir_ambient_c,
+            ),
+            PlotChannel(
+                "ir_sample_age_s",
+                "IR sample age (s)",
+                "#64748b",
+                lambda point: point.ir_sample_age_s,
+            ),
         ]
 
     def _plot_channel_color(self, key: str, fallback: str = "#38bdf8") -> str:
@@ -8126,6 +8393,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_port.setCurrentIndex(preferred_index)
         elif self.combo_scale_port.count():
             self.combo_scale_port.setCurrentIndex(0)
+
+    def _refresh_ir_ports(self) -> None:
+        current = self.combo_ir_port.currentData() or self.settings.value("ir_port", "", type=str)
+        self.combo_ir_port.clear()
+        if list_ports is None:
+            self.combo_ir_port.addItem("pyserial unavailable", "")
+            return
+        seen = False
+        preferred_index = -1
+        for port in list_ports.comports():
+            label = f"{port.device} - {port.description}"
+            self.combo_ir_port.addItem(label, port.device)
+            if current and port.device == current:
+                seen = True
+            description = str(port.description or "").lower()
+            if "stlink" in description or "st-link" in description:
+                preferred_index = self.combo_ir_port.count() - 1
+        if current and seen:
+            index = self.combo_ir_port.findData(current)
+            if index >= 0:
+                self.combo_ir_port.setCurrentIndex(index)
+        elif preferred_index >= 0:
+            self.combo_ir_port.setCurrentIndex(preferred_index)
+        elif self.combo_ir_port.count():
+            self.combo_ir_port.setCurrentIndex(0)
 
     def _auto_detect_tic(self) -> bool:
         candidates: list[str] = []
@@ -10353,6 +10645,94 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_scale_error(self, message: str) -> None:
         self._log(message)
         self.label_scale_raw.setText(f"Raw line: {message}")
+        self._refresh_live_labels()
+
+    def _toggle_ir_connection(self) -> None:
+        if self._ir_thread is not None:
+            self._disconnect_ir_thermometer()
+        else:
+            self._connect_ir_thermometer()
+
+    def _connect_ir_thermometer(self, checked: bool = False, *, show_errors: bool = True) -> bool:
+        port_name = str(self.combo_ir_port.currentData() or "").strip()
+        if not port_name:
+            if show_errors:
+                QtWidgets.QMessageBox.warning(self, APP_NAME, "Select an IR thermometer serial port first.")
+            return False
+        baudrate = int(self.combo_ir_baud.currentText())
+        interval_code = int(self.combo_ir_rate.currentData() or 7)
+        worker = Mlx90614Worker(
+            port_name=port_name,
+            baudrate=baudrate,
+            interval_code=interval_code,
+        )
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.sample_received.connect(
+            self._handle_ir_sample,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        worker.status_changed.connect(self._handle_ir_status)
+        worker.error_occurred.connect(self._handle_ir_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._handle_ir_thread_finished)
+        self._ir_worker = worker
+        self._ir_thread = thread
+        thread.start()
+        self.button_ir_connect.setText("Disconnect IR")
+        return True
+
+    def _disconnect_ir_thermometer(self) -> None:
+        worker = self._ir_worker
+        thread = self._ir_thread
+        self._ir_worker = None
+        self._ir_thread = None
+        if worker is not None:
+            worker.stop()
+        if thread is not None:
+            thread.quit()
+            thread.wait(1500)
+        self.button_ir_connect.setText("Connect IR")
+
+    def _handle_ir_thread_finished(self) -> None:
+        self.button_ir_connect.setText("Connect IR")
+        self._refresh_live_labels()
+
+    def _handle_ir_sample(self, sample: IrTemperatureSample) -> None:
+        with self._ir_state_lock:
+            self._latest_ir_sample = sample
+            self._ir_temperature_buffer.add_sample(sample)
+            if self._ir_baseline_object_c is None:
+                self._ir_baseline_object_c = sample.object_c_apparent
+            self._write_ir_temperature_sample(sample)
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._refresh_live_labels)
+            return
+        self._refresh_live_labels()
+
+    def _handle_ir_status(self, message: str) -> None:
+        self._log(message)
+        if hasattr(self, "label_ir_status"):
+            self.label_ir_status.setText(message)
+
+    def _handle_ir_error(self, message: str) -> None:
+        self._log(message)
+        if hasattr(self, "label_ir_status"):
+            self.label_ir_status.setText(message)
+        self._refresh_live_labels()
+
+    def _zero_ir_temperature_delta(self) -> None:
+        with self._ir_state_lock:
+            sample = self._latest_ir_sample
+            if sample is None:
+                self._ir_baseline_object_c = None
+                self.label_ir_status.setText("IR delta baseline cleared; no sample is available yet.")
+                return
+            self._ir_baseline_object_c = sample.object_c_apparent
+        self.label_ir_status.setText(f"IR delta baseline set to {sample.object_c_apparent:.2f} C apparent.")
         self._refresh_live_labels()
 
     def _query_scale_now(
@@ -16502,8 +16882,11 @@ class MainWindow(QtWidgets.QMainWindow):
         Any,
         csv.DictWriter[str],
         Any,
+        csv.DictWriter[str],
+        Any,
         Any,
         csv.DictWriter[str],
+        Path,
         Path,
         Path,
         Path,
@@ -16516,10 +16899,12 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_path, csv_path, json_path, raw_scale_path = self._resolve_session_base_paths()
         txt_path.parent.mkdir(parents=True, exist_ok=True)
         setup_txt_path, setup_csv_path = _session_setup_paths_for_measurement(txt_path)
+        ir_temperature_path = txt_path.parent / SESSION_IR_TEMPERATURE_CSV
 
         txt_handle = txt_path.open("w", encoding="utf-8", newline="")
         csv_handle = csv_path.open("w", encoding="utf-8", newline="")
         raw_scale_handle = raw_scale_path.open("w", encoding="utf-8", newline="")
+        ir_temperature_handle = ir_temperature_path.open("w", encoding="utf-8", newline="")
         setup_txt_handle = setup_txt_path.open("w", encoding="utf-8", newline="")
         setup_csv_handle = setup_csv_path.open("w", encoding="utf-8", newline="")
         control_trace_path = txt_path.parent / SESSION_CONTROL_TRACE_CSV
@@ -16579,6 +16964,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         raw_scale_writer.writeheader()
         raw_scale_handle.flush()
+        ir_temperature_writer = csv.DictWriter(
+            ir_temperature_handle,
+            fieldnames=IR_TEMPERATURE_CSV_FIELDNAMES,
+        )
+        ir_temperature_writer.writeheader()
+        ir_temperature_handle.flush()
         control_trace_writer = csv.DictWriter(control_trace_handle, fieldnames=CONTROL_TRACE_FIELDNAMES)
         control_trace_writer.writeheader()
         control_trace_handle.flush()
@@ -16591,6 +16982,8 @@ class MainWindow(QtWidgets.QMainWindow):
             writer,
             raw_scale_handle,
             raw_scale_writer,
+            ir_temperature_handle,
+            ir_temperature_writer,
             control_trace_handle,
             control_trace_writer,
             ui_telemetry_handle,
@@ -16602,6 +16995,7 @@ class MainWindow(QtWidgets.QMainWindow):
             csv_path,
             json_path,
             raw_scale_path,
+            ir_temperature_path,
             control_trace_path,
             ui_telemetry_path,
             setup_txt_path,
@@ -16691,6 +17085,52 @@ class MainWindow(QtWidgets.QMainWindow):
         if elapsed_s <= 0.0 or self._session_raw_scale_count <= 0:
             return None
         return self._session_raw_scale_count / elapsed_s
+
+    def _session_ir_temperature_rate_hz(self) -> float | None:
+        started_s = self._session_start_wall_s
+        if started_s <= 0.0:
+            return None
+        elapsed_s = max(0.0, time.time() - started_s)
+        if elapsed_s <= 0.0 or self._session_ir_temperature_count <= 0:
+            return None
+        return self._session_ir_temperature_count / elapsed_s
+
+    def _latest_ir_config1(self) -> str:
+        sample = self._latest_ir_sample
+        return "" if sample is None else sample.config1
+
+    def _latest_ir_snapshot(self, *, now_s: float | None = None) -> dict[str, object]:
+        with self._ir_state_lock:
+            sample = self._latest_ir_sample
+            baseline_c = self._ir_baseline_object_c
+            sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=now_s or time.time())
+        if sample is None:
+            return {
+                "object_c_apparent": None,
+                "ambient_c": None,
+                "delta_c": None,
+                "sample_age_s": None,
+                "raw_object": None,
+                "raw_ambient": None,
+                "read_us": None,
+                "flags": None,
+                "sample_rate_hz": sample_rate_hz,
+                "config1": "",
+            }
+        current_time_s = time.time() if now_s is None else float(now_s)
+        delta_c = None if baseline_c is None else sample.object_c_apparent - baseline_c
+        return {
+            "object_c_apparent": sample.object_c_apparent,
+            "ambient_c": sample.ambient_c,
+            "delta_c": delta_c,
+            "sample_age_s": max(0.0, current_time_s - sample.timestamp_s),
+            "raw_object": sample.raw_object,
+            "raw_ambient": sample.raw_ambient,
+            "read_us": sample.read_us,
+            "flags": sample.flags,
+            "sample_rate_hz": sample_rate_hz,
+            "config1": sample.config1,
+        }
 
     def _source_control_metadata(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]
@@ -16921,6 +17361,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 "line_ending": self.edit_scale_terminator.text(),
                 "recent_sample_rate_hz": self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
             },
+            "ir_thermometer": {
+                "enabled": self._ir_thread is not None,
+                "port": str(self.combo_ir_port.currentData() or ""),
+                "baud": int(self.combo_ir_baud.currentText()),
+                "rate_label": self.combo_ir_rate.currentText(),
+                "interval_code": int(self.combo_ir_rate.currentData() or 0),
+                "config1": self._latest_ir_config1(),
+                "baseline_object_c_apparent": self._ir_baseline_object_c,
+                "recent_sample_rate_hz": self._ir_temperature_buffer.sample_rate_hz(now_s=time.time()),
+            },
             "logging": {
                 "output_folder": None if self._session_base_path is None else self._session_base_path.parent.name,
                 "measurement_txt": None if self._session_base_path is None else self._session_base_path.name,
@@ -16930,6 +17380,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "raw_scale_sidecar": None
                 if self._session_raw_scale_path is None
                 else self._session_raw_scale_path.name,
+                "ir_temperature_sidecar": None
+                if self._session_ir_temperature_path is None
+                else self._session_ir_temperature_path.name,
                 "control_trace_csv": None
                 if self._session_control_trace_path is None
                 else self._session_control_trace_path.name,
@@ -16940,6 +17393,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_csv": None if self._session_setup_csv_path is None else self._session_setup_csv_path.name,
                 "raw_scale_sample_count": int(self._session_raw_scale_count),
                 "raw_scale_session_rate_hz": self._session_raw_scale_rate_hz(),
+                "ir_temperature_sample_count": int(self._session_ir_temperature_count),
+                "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
             },
             "control": {
@@ -17180,6 +17635,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 csv_writer,
                 raw_scale_handle,
                 raw_scale_writer,
+                ir_temperature_handle,
+                ir_temperature_writer,
                 control_trace_handle,
                 control_trace_writer,
                 ui_telemetry_handle,
@@ -17191,6 +17648,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 csv_path,
                 json_path,
                 raw_scale_path,
+                ir_temperature_path,
                 control_trace_path,
                 ui_telemetry_path,
                 setup_txt_path,
@@ -17215,6 +17673,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 txt_handle,
                 csv_handle,
                 raw_scale_handle,
+                ir_temperature_handle,
                 control_trace_handle,
                 ui_telemetry_handle,
                 setup_txt_handle,
@@ -17229,6 +17688,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 csv_path,
                 json_path,
                 raw_scale_path,
+                ir_temperature_path,
                 control_trace_path,
                 ui_telemetry_path,
                 setup_txt_path,
@@ -17268,6 +17728,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_recorded_utc = None
         self._session_recovery_path = None
         self._session_raw_scale_count = 0
+        self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s = None
         self._last_session_data_flush_s = 0.0
@@ -17279,6 +17740,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_writer = csv_writer
         self._session_raw_scale_handle = raw_scale_handle
         self._session_raw_scale_writer = raw_scale_writer
+        self._session_ir_temperature_handle = ir_temperature_handle
+        self._session_ir_temperature_writer = ir_temperature_writer
+        self._session_ir_temperature_path = ir_temperature_path
         self._session_control_trace_handle = control_trace_handle
         self._session_control_trace_writer = control_trace_writer
         self._session_ui_telemetry_handle = ui_telemetry_handle
@@ -17290,6 +17754,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_path = csv_path
         self._session_json_path = json_path
         self._session_raw_scale_path = raw_scale_path
+        self._session_ir_temperature_path = ir_temperature_path
         self._session_control_trace_path = control_trace_path
         self._session_ui_telemetry_path = ui_telemetry_path
         self._session_setup_txt_path = setup_txt_path
@@ -17373,6 +17838,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_raw_scale_handle.close()
             self._session_raw_scale_handle = None
         self._session_raw_scale_writer = None
+        if self._session_ir_temperature_handle is not None:
+            self._session_ir_temperature_handle.close()
+            self._session_ir_temperature_handle = None
+        self._session_ir_temperature_writer = None
         if self._session_control_trace_handle is not None:
             self._session_control_trace_handle.close()
             self._session_control_trace_handle = None
@@ -17522,6 +17991,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_count += 1
         self._session_raw_scale_handle.flush()
 
+    def _write_ir_temperature_sample(self, sample: IrTemperatureSample) -> None:
+        if (
+            not self._session_active
+            or self._session_ir_temperature_writer is None
+            or self._session_ir_temperature_handle is None
+            or self._session_start_wall_s <= 0.0
+        ):
+            return
+        elapsed_s = max(0.0, sample.timestamp_s - self._session_start_wall_s)
+        baseline_c = self._ir_baseline_object_c
+        delta_c = None if baseline_c is None else sample.object_c_apparent - baseline_c
+        sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=sample.timestamp_s)
+        self._session_ir_temperature_writer.writerow(
+            {
+                "elapsed_s": f"{elapsed_s:.6f}",
+                "timestamp_utc": _utc_timestamp_from_epoch(sample.timestamp_s),
+                "host_time_s": f"{sample.timestamp_s:.6f}",
+                "device_elapsed_ms": sample.device_elapsed_ms,
+                "sequence": sample.sequence,
+                "ambient_c": f"{sample.ambient_c:.6f}",
+                "object_c_apparent": f"{sample.object_c_apparent:.6f}",
+                "delta_c": "" if delta_c is None else f"{delta_c:.6f}",
+                "raw_ambient": sample.raw_ambient,
+                "raw_object": sample.raw_object,
+                "read_us": sample.read_us,
+                "flags": sample.flags,
+                "sample_rate_hz": "" if sample_rate_hz is None else f"{sample_rate_hz:.6f}",
+                "config1": sample.config1,
+            }
+        )
+        self._session_ir_temperature_count += 1
+        if self._session_ir_temperature_count % 10 == 0:
+            self._session_ir_temperature_handle.flush()
+
     def _scale_reading_age_s(self) -> float | None:
         with self._scale_state_lock:
             timestamp_s = self._latest_scale_timestamp
@@ -17628,6 +18131,7 @@ class MainWindow(QtWidgets.QMainWindow):
             or abs(current_measured_mA) < MIN_RESISTANCE_CURRENT_MA
         ):
             resistance_ohm = None
+        ir_snapshot = self._latest_ir_snapshot()
         return MeasurementPoint(
             elapsed_s=elapsed_s,
             timestamp_utc=_utc_timestamp(),
@@ -17647,6 +18151,16 @@ class MainWindow(QtWidgets.QMainWindow):
             voltage_V=snapshot.get("voltage_V"),
             resistance_ohm=resistance_ohm,
             power_W=snapshot.get("power_W"),
+            ir_object_c_apparent=ir_snapshot["object_c_apparent"],  # type: ignore[arg-type]
+            ir_ambient_c=ir_snapshot["ambient_c"],  # type: ignore[arg-type]
+            ir_delta_c=ir_snapshot["delta_c"],  # type: ignore[arg-type]
+            ir_sample_age_s=ir_snapshot["sample_age_s"],  # type: ignore[arg-type]
+            ir_raw_object=ir_snapshot["raw_object"],  # type: ignore[arg-type]
+            ir_raw_ambient=ir_snapshot["raw_ambient"],  # type: ignore[arg-type]
+            ir_read_us=ir_snapshot["read_us"],  # type: ignore[arg-type]
+            ir_flags=ir_snapshot["flags"],  # type: ignore[arg-type]
+            ir_sample_rate_hz=ir_snapshot["sample_rate_hz"],  # type: ignore[arg-type]
+            ir_config1=str(ir_snapshot["config1"]),
             automation_phase=self._automation_phase,
             automation_basis=self._automation_basis,
             automation_target_value=self._automation_target_value,
@@ -17697,6 +18211,7 @@ class MainWindow(QtWidgets.QMainWindow):
             or abs(current_measured_mA) < MIN_RESISTANCE_CURRENT_MA
         ):
             resistance_ohm = None
+        ir_snapshot = self._latest_ir_snapshot()
         return MeasurementPoint(
             elapsed_s=elapsed_s,
             timestamp_utc=_utc_timestamp(),
@@ -17716,6 +18231,16 @@ class MainWindow(QtWidgets.QMainWindow):
             voltage_V=self._supply_snapshot.get("voltage_V"),
             resistance_ohm=resistance_ohm,
             power_W=self._supply_snapshot.get("power_W"),
+            ir_object_c_apparent=ir_snapshot["object_c_apparent"],  # type: ignore[arg-type]
+            ir_ambient_c=ir_snapshot["ambient_c"],  # type: ignore[arg-type]
+            ir_delta_c=ir_snapshot["delta_c"],  # type: ignore[arg-type]
+            ir_sample_age_s=ir_snapshot["sample_age_s"],  # type: ignore[arg-type]
+            ir_raw_object=ir_snapshot["raw_object"],  # type: ignore[arg-type]
+            ir_raw_ambient=ir_snapshot["raw_ambient"],  # type: ignore[arg-type]
+            ir_read_us=ir_snapshot["read_us"],  # type: ignore[arg-type]
+            ir_flags=ir_snapshot["flags"],  # type: ignore[arg-type]
+            ir_sample_rate_hz=ir_snapshot["sample_rate_hz"],  # type: ignore[arg-type]
+            ir_config1=str(ir_snapshot["config1"]),
             automation_phase=self._automation_phase,
             automation_basis=self._automation_basis,
             automation_target_value=self._automation_target_value,
@@ -17950,6 +18475,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 "voltage_V": "" if point.voltage_V is None else f"{point.voltage_V:.6f}",
                 "resistance_ohm": "" if point.resistance_ohm is None else f"{point.resistance_ohm:.6f}",
                 "power_W": "" if point.power_W is None else f"{point.power_W:.6f}",
+                "ir_object_c_apparent": ""
+                if point.ir_object_c_apparent is None
+                else f"{point.ir_object_c_apparent:.6f}",
+                "ir_ambient_c": "" if point.ir_ambient_c is None else f"{point.ir_ambient_c:.6f}",
+                "ir_delta_c": "" if point.ir_delta_c is None else f"{point.ir_delta_c:.6f}",
+                "ir_sample_age_s": "" if point.ir_sample_age_s is None else f"{point.ir_sample_age_s:.6f}",
+                "ir_raw_object": "" if point.ir_raw_object is None else point.ir_raw_object,
+                "ir_raw_ambient": "" if point.ir_raw_ambient is None else point.ir_raw_ambient,
+                "ir_read_us": "" if point.ir_read_us is None else point.ir_read_us,
+                "ir_flags": "" if point.ir_flags is None else point.ir_flags,
+                "ir_sample_rate_hz": ""
+                if point.ir_sample_rate_hz is None
+                else f"{point.ir_sample_rate_hz:.6f}",
+                "ir_config1": point.ir_config1,
             }
         )
         if flush:
@@ -22800,6 +23339,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Scale: {rate_text}, {noise_text}"
             )
         self.label_scale_raw.setText(f"Raw line: {self._latest_scale_text or '-'}")
+        ir_snapshot = self._latest_ir_snapshot()
+        ir_object = ir_snapshot["object_c_apparent"]
+        if ir_object is None:
+            self.label_ir_live.setText("IR disconnected or no samples yet.")
+        else:
+            ir_delta = ir_snapshot["delta_c"]
+            ir_ambient = ir_snapshot["ambient_c"]
+            ir_age = ir_snapshot["sample_age_s"]
+            ir_rate = ir_snapshot["sample_rate_hz"]
+            delta_text = "-" if ir_delta is None else f"{float(ir_delta):+.2f} C"
+            ambient_text = "-" if ir_ambient is None else f"{float(ir_ambient):.2f} C"
+            age_text = "-" if ir_age is None else f"{float(ir_age):.2f} s"
+            rate_text = "-" if ir_rate is None else f"{float(ir_rate):.1f} Hz"
+            self.label_ir_live.setText(
+                f"Object apparent: {float(ir_object):.2f} C | "
+                f"Delta: {delta_text} | Ambient: {ambient_text} | Age: {age_text} | {rate_text}"
+            )
         self.label_tic_position.setText(
             f"Raw position: {self._current_position_mm:.4f} mm ({self._current_position_steps} steps) | "
             f"Tensile displacement: {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm"
@@ -23110,6 +23666,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("scale_interval_ms", self.spin_scale_interval.value())
         self.settings.setValue("scale_request", self.edit_scale_request.text())
         self.settings.setValue("scale_terminator", self.edit_scale_terminator.text())
+        self.settings.setValue("ir_port", self.combo_ir_port.currentData() or "")
+        self.settings.setValue("ir_baud", self.combo_ir_baud.currentText())
+        self.settings.setValue("ir_interval_code", self.combo_ir_rate.currentData() or 7)
         self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
         self.settings.setValue("supply_baud", self.combo_supply_baud.currentText())
         self.settings.setValue("supply_profile", self.combo_supply_profile.currentData() or "hmp4030")
@@ -23364,6 +23923,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_scale_interval.setValue(saved_scale_interval_ms)
         self.edit_scale_request.setText(scale_request)
         self.edit_scale_terminator.setText(scale_terminator)
+        ir_baud = self.settings.value("ir_baud", "2000000", type=str)
+        if self.combo_ir_baud.findText(ir_baud) >= 0:
+            self.combo_ir_baud.setCurrentText(ir_baud)
+        ir_interval_code = int(self.settings.value("ir_interval_code", 7, type=int))
+        ir_rate_index = self.combo_ir_rate.findData(ir_interval_code)
+        if ir_rate_index >= 0:
+            self.combo_ir_rate.setCurrentIndex(ir_rate_index)
         supply_profile = self.settings.value("supply_profile", "hmp4030", type=str)
         supply_profile_index = self.combo_supply_profile.findData(supply_profile)
         if supply_profile_index >= 0:
@@ -24049,6 +24615,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_builder_project_import_thread()
         self._cancel_fabrication_folder_load()
         self._disconnect_scale()
+        self._disconnect_ir_thermometer()
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
         self._release_experiment_sleep_guard()
         self._disconnect_supply()
