@@ -16510,10 +16510,7 @@ def test_move_log_distinguishes_tic_unit_from_commanded_micrometers(tmp_path: Pa
 
         assert controller.targets == [-1]
         log_text = window.log_output.toPlainText()
-        assert (
-            "Motor command -1 Tic unit (~-1.25 um commanded, relax) at "
-            "5 mm/s -> target -0.0013 mm (-1 Tic unit)."
-        ) in log_text
+        assert "Motor command -1.25 um (relax) at 5 mm/s -> target -0.0013 mm (-1 Tic unit)." in log_text
         assert "Motor step -1 um" not in log_text
         assert "Move command sent to" not in log_text
     finally:
