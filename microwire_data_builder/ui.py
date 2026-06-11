@@ -35,6 +35,7 @@ import pandas as pd
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
 try:
@@ -5550,6 +5551,380 @@ class _GraphGalleryDialog(QtWidgets.QDialog):
         button_box.rejected.connect(self.reject)
         button_box.accepted.connect(self.accept)
         layout.addWidget(button_box)
+
+
+@dataclass
+class _MiniDmaTransitionReviewEntry:
+    sample: str
+    run_label: str
+    target_label: str
+    status: str
+    record: MiniDmaRecord
+    run: Any
+    group: pd.DataFrame
+    target_summary: Any
+
+
+def _mini_dma_transition_status(target: object) -> str:
+    values = [
+        getattr(target, "as_current_mA", None),
+        getattr(target, "af_current_mA", None),
+        getattr(target, "ms_current_mA", None),
+        getattr(target, "mf_current_mA", None),
+    ]
+    accepted = [
+        value is not None
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        for value in values
+    ]
+    if all(accepted):
+        return "accepted"
+    if any(accepted):
+        return "partial"
+    return "rejected"
+
+
+def _mini_dma_transition_review_entries(
+    records: Sequence[MiniDmaRecord],
+    logger: logging.Logger,
+) -> List[_MiniDmaTransitionReviewEntry]:
+    entries: List[_MiniDmaTransitionReviewEntry] = []
+    if mini_dma_core is None:
+        return entries
+    for record in records:
+        path = getattr(record, "path", None)
+        if not isinstance(path, Path):
+            continue
+        try:
+            run = mini_dma_core.load_run(path)
+            groups = mini_dma_core.current_sweep_groups(
+                run.frame,
+                phases=mini_dma_core.SUMMARY_PHASES,
+            )
+            summary = mini_dma_core.summarize_current_sweep(run)
+        except Exception:
+            logger.exception("Failed to prepare Mini DMA transition review for %s", path)
+            continue
+        sample = str(getattr(record, "sample", "") or getattr(run, "sample_name", "") or path.name)
+        run_label = str(getattr(record, "label", "") or path.name)
+        for (target, group), target_summary in zip(groups, summary.targets, strict=False):
+            target_label = mini_dma_core._format_target_label(run, float(target))
+            entries.append(
+                _MiniDmaTransitionReviewEntry(
+                    sample=sample,
+                    run_label=run_label,
+                    target_label=target_label,
+                    status=_mini_dma_transition_status(target_summary),
+                    record=record,
+                    run=run,
+                    group=group,
+                    target_summary=target_summary,
+                )
+            )
+    return entries
+
+
+class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        records: Sequence[MiniDmaRecord],
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Mini DMA transition review")
+        self.resize(1280, 820)
+        self._logger = logger
+        self._entries = _mini_dma_transition_review_entries(records, logger)
+        self._visible_indices: List[int] = []
+        self._current_index: Optional[int] = None
+        self._tree_items: Dict[int, QtWidgets.QTreeWidgetItem] = {}
+
+        main_layout = QtWidgets.QVBoxLayout(self)
+        controls = QtWidgets.QHBoxLayout()
+        self.accepted_only_check = QtWidgets.QCheckBox("Accepted only")
+        self.rejected_only_check = QtWidgets.QCheckBox("Rejected only")
+        self.show_resistance_check = QtWidgets.QCheckBox("Resistance")
+        self.show_resistance_check.setChecked(True)
+        self.show_fit_lines_check = QtWidgets.QCheckBox("Fit lines")
+        self.show_fit_lines_check.setChecked(True)
+        self.show_markers_check = QtWidgets.QCheckBox("Markers")
+        self.show_markers_check.setChecked(True)
+        self.next_rejected_button = QtWidgets.QPushButton("Next rejected")
+        self.next_questionable_button = QtWidgets.QPushButton("Next partial")
+        for widget in (
+            self.accepted_only_check,
+            self.rejected_only_check,
+            self.show_resistance_check,
+            self.show_fit_lines_check,
+            self.show_markers_check,
+            self.next_rejected_button,
+            self.next_questionable_button,
+        ):
+            controls.addWidget(widget)
+        controls.addStretch(1)
+        main_layout.addLayout(controls)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        self.tree = QtWidgets.QTreeWidget(splitter)
+        self.tree.setHeaderLabels(["Sample / run / stress", "Status"])
+        self.tree.setMinimumWidth(320)
+        plot_panel = QtWidgets.QWidget(splitter)
+        plot_layout = QtWidgets.QVBoxLayout(plot_panel)
+        self.figure = Figure(figsize=(8, 6))
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        self.empty_label = QtWidgets.QLabel("No Mini DMA transition review targets are available.", plot_panel)
+        self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas, 1)
+        plot_layout.addWidget(self.empty_label, 1)
+        splitter.addWidget(self.tree)
+        splitter.addWidget(plot_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        main_layout.addWidget(splitter, 1)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close,
+            self,
+        )
+        button_box.rejected.connect(self.reject)
+        main_layout.addWidget(button_box)
+
+        self.accepted_only_check.toggled.connect(self._handle_accepted_filter_toggled)
+        self.rejected_only_check.toggled.connect(self._handle_rejected_filter_toggled)
+        self.show_resistance_check.toggled.connect(lambda *_args: self._redraw_current())
+        self.show_fit_lines_check.toggled.connect(lambda *_args: self._redraw_current())
+        self.show_markers_check.toggled.connect(lambda *_args: self._redraw_current())
+        self.next_rejected_button.clicked.connect(lambda: self._select_next_status({"rejected"}))
+        self.next_questionable_button.clicked.connect(lambda: self._select_next_status({"partial"}))
+        self.tree.currentItemChanged.connect(self._handle_tree_selection)
+        self._refresh_tree()
+
+    def _handle_accepted_filter_toggled(self, checked: bool) -> None:
+        if checked and self.rejected_only_check.isChecked():
+            self.rejected_only_check.setChecked(False)
+            return
+        self._refresh_tree()
+
+    def _handle_rejected_filter_toggled(self, checked: bool) -> None:
+        if checked and self.accepted_only_check.isChecked():
+            self.accepted_only_check.setChecked(False)
+            return
+        self._refresh_tree()
+
+    def _entry_allowed(self, entry: _MiniDmaTransitionReviewEntry) -> bool:
+        if self.accepted_only_check.isChecked() and entry.status != "accepted":
+            return False
+        if self.rejected_only_check.isChecked() and entry.status != "rejected":
+            return False
+        return True
+
+    def _refresh_tree(self) -> None:
+        self.tree.clear()
+        self._tree_items = {}
+        self._visible_indices = []
+        parents: Dict[Tuple[str, str], QtWidgets.QTreeWidgetItem] = {}
+        sample_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+        for index, entry in enumerate(self._entries):
+            if not self._entry_allowed(entry):
+                continue
+            self._visible_indices.append(index)
+            sample_item = sample_items.get(entry.sample)
+            if sample_item is None:
+                sample_item = QtWidgets.QTreeWidgetItem([entry.sample, ""])
+                self.tree.addTopLevelItem(sample_item)
+                sample_items[entry.sample] = sample_item
+            run_key = (entry.sample, entry.run_label)
+            run_item = parents.get(run_key)
+            if run_item is None:
+                run_item = QtWidgets.QTreeWidgetItem([entry.run_label, ""])
+                sample_item.addChild(run_item)
+                parents[run_key] = run_item
+            leaf = QtWidgets.QTreeWidgetItem([entry.target_label, entry.status])
+            leaf.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
+            run_item.addChild(leaf)
+            self._tree_items[index] = leaf
+        self.tree.expandAll()
+        first_item = self._tree_items.get(self._visible_indices[0]) if self._visible_indices else None
+        if first_item is not None:
+            self.tree.setCurrentItem(first_item)
+        else:
+            self._current_index = None
+            self._show_empty()
+
+    def _handle_tree_selection(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            return
+        value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(value, int):
+            return
+        self._current_index = value
+        self._plot_entry(self._entries[value])
+
+    def _redraw_current(self) -> None:
+        if self._current_index is None or self._current_index >= len(self._entries):
+            return
+        self._plot_entry(self._entries[self._current_index])
+
+    def _select_next_status(self, statuses: Set[str]) -> None:
+        if not self._visible_indices:
+            return
+        start_position = 0
+        if self._current_index in self._visible_indices:
+            start_position = self._visible_indices.index(cast(int, self._current_index)) + 1
+        ordered = self._visible_indices[start_position:] + self._visible_indices[:start_position]
+        for index in ordered:
+            if self._entries[index].status in statuses:
+                item = self._tree_items.get(index)
+                if item is not None:
+                    self.tree.setCurrentItem(item)
+                return
+
+    def _show_empty(self) -> None:
+        self.figure.clear()
+        self.canvas.hide()
+        self.toolbar.hide()
+        self.empty_label.show()
+
+    def _plot_entry(self, entry: _MiniDmaTransitionReviewEntry) -> None:
+        self.empty_label.hide()
+        self.canvas.show()
+        self.toolbar.show()
+        self.figure.clear()
+        if self.show_resistance_check.isChecked():
+            strain_ax, resistance_ax = self.figure.subplots(2, 1, sharex=True)
+        else:
+            strain_ax = self.figure.add_subplot(111)
+            resistance_ax = None
+        self._plot_strain(entry, strain_ax)
+        if resistance_ax is not None:
+            self._plot_resistance(entry, resistance_ax)
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def _plot_strain(
+        self,
+        entry: _MiniDmaTransitionReviewEntry,
+        ax: Any,
+    ) -> None:
+        group = entry.group
+        try:
+            strain = mini_dma_core.strain_from_trace_minimum_length(entry.run, group)
+        except Exception:
+            strain = pd.to_numeric(group.get("strain_pct"), errors="coerce")
+        ax.plot(
+            pd.to_numeric(group["current_mA"], errors="coerce"),
+            strain,
+            marker="o",
+            markersize=3,
+            linewidth=1.2,
+            label=entry.target_label,
+        )
+        if self.show_markers_check.isChecked():
+            self._draw_transition_markers(ax, entry.target_summary)
+        if self.show_fit_lines_check.isChecked():
+            self._draw_transition_fit_lines(ax, entry, strain)
+        ax.set_title(
+            f"{entry.sample} - {entry.run_label} - {entry.target_label} ({entry.status})"
+        )
+        ax.set_ylabel("Strain [%]")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=8, loc="best")
+
+    def _plot_resistance(
+        self,
+        entry: _MiniDmaTransitionReviewEntry,
+        ax: Any,
+    ) -> None:
+        group = entry.group
+        ax.plot(
+            pd.to_numeric(group["current_mA"], errors="coerce"),
+            pd.to_numeric(group["resistance_ohm"], errors="coerce"),
+            marker=".",
+            markersize=3,
+            linewidth=1.0,
+            color="tab:blue",
+            label=entry.target_label,
+        )
+        if self.show_markers_check.isChecked():
+            self._draw_transition_markers(ax, entry.target_summary, labels=False, alpha=0.45)
+        ax.set_ylabel("Resistance [ohm]")
+        ax.set_xlabel("Current [mA]")
+        ax.grid(True, alpha=0.25)
+
+    def _draw_transition_markers(
+        self,
+        ax: Any,
+        target_summary: object,
+        *,
+        labels: bool = True,
+        alpha: float = 0.7,
+    ) -> None:
+        specs = (
+            ("As", "as_current_mA", "tab:red"),
+            ("Af", "af_current_mA", "tab:green"),
+            ("Ms", "ms_current_mA", "tab:olive"),
+            ("Mf", "mf_current_mA", "tab:purple"),
+        )
+        for name, attr, color in specs:
+            value = getattr(target_summary, attr, None)
+            if value is None or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            ax.axvline(float(value), color=color, linestyle="--", alpha=alpha)
+            if labels:
+                ax.text(
+                    float(value),
+                    0.98,
+                    f"{name} {float(value):.0f} mA",
+                    transform=ax.get_xaxis_transform(),
+                    rotation=90,
+                    va="top",
+                    ha="right",
+                    fontsize=8,
+                    color=color,
+                )
+
+    def _draw_transition_fit_lines(
+        self,
+        ax: Any,
+        entry: _MiniDmaTransitionReviewEntry,
+        strain: pd.Series,
+    ) -> None:
+        heating, cooling = mini_dma_core._split_current_sweep_legs(entry.group)
+        for leg_name, leg_group, linestyle in (
+            ("heating", heating, "-"),
+            ("cooling", cooling, "--"),
+        ):
+            fit = mini_dma_core._fit_current_transition(leg_group, strain)
+            if fit is None:
+                continue
+            for segment_name, color in (
+                ("before", "tab:green"),
+                ("transition", "tab:orange"),
+                ("after", "tab:purple"),
+            ):
+                segment = getattr(fit, segment_name)
+                x_values = [segment.start_x, segment.end_x]
+                y_values = [
+                    segment.slope * segment.start_x + segment.intercept,
+                    segment.slope * segment.end_x + segment.intercept,
+                ]
+                ax.plot(
+                    x_values,
+                    y_values,
+                    color=color,
+                    linestyle=linestyle,
+                    linewidth=2.2,
+                    alpha=0.95,
+                    label=f"{leg_name} {segment_name} fit",
+                )
 
 
 _VSM_TEMP_PROCESSOR: VSMTemperatureScanProcessor | None = None
@@ -18196,6 +18571,12 @@ class MiniDmaSection(MiniDatabaseSection):
         self.open_origin_button.setToolTip("Send the selected Mini DMA runs to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.review_transitions_button = QtWidgets.QPushButton("Review transitions")
+        self.review_transitions_button.setToolTip(
+            "Review Mini DMA transition fits by sample, run, and stress/load."
+        )
+        self.review_transitions_button.clicked.connect(self._open_transition_review)
+        self.controls_layout.addWidget(self.review_transitions_button)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
@@ -18374,6 +18755,33 @@ class MiniDmaSection(MiniDatabaseSection):
 
     def _open_selected_in_origin(self) -> None:
         self._open_selected(open_origin=True)
+
+    def _all_records(self) -> List[MiniDmaRecord]:
+        records: List[MiniDmaRecord] = []
+        seen: Set[str] = set()
+        for grouped_records in self._record_groups.values():
+            for record in grouped_records:
+                path = getattr(record, "path", None)
+                key = str(path) if isinstance(path, Path) else repr(record)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(record)
+        return records
+
+    def _open_transition_review(self) -> None:
+        records = self._selected_records()
+        if not records:
+            records = self._all_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No Mini DMA runs are available to review.",
+            )
+            return
+        dialog = _MiniDmaTransitionReviewDialog(records, self.logger, self)
+        dialog.exec()
 
     def _open_selected(self, *, open_origin: bool) -> None:
         records = self._selected_records()

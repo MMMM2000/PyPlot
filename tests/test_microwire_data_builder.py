@@ -1304,6 +1304,89 @@ def test_mini_dma_section_process_reports_gated_skip_reason(tmp_path: Path) -> N
     assert all("newest active run is unfinished" in row["skip_reason"] for row in reportability)
 
 
+def _sample_mini_dma_record() -> MiniDmaRecord:
+    run_path = Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32")
+    return MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label=run_path.name,
+    )
+
+
+def test_mini_dma_transition_review_entries_use_real_stress_targets() -> None:
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+    )
+
+    assert len(entries) >= 9
+    labels = {entry.target_label for entry in entries}
+    assert "50 MPa / 1.46 g" in labels
+    assert "350 MPa / 10.23 g" in labels
+    assert {entry.status for entry in entries} >= {"accepted", "rejected"}
+
+
+def test_mini_dma_transition_review_dialog_filters_and_plots() -> None:
+    _ensure_qapp()
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+    )
+    try:
+        assert dialog.tree.topLevelItemCount() == 1
+        assert dialog._visible_indices  # noqa: SLF001
+        dialog.rejected_only_check.setChecked(True)
+        assert dialog.rejected_only_check.isChecked()
+        assert not dialog.accepted_only_check.isChecked()
+        assert all(
+            dialog._entries[index].status == "rejected"  # noqa: SLF001
+            for index in dialog._visible_indices  # noqa: SLF001
+        )
+        dialog.show_fit_lines_check.setChecked(False)
+        dialog.show_markers_check.setChecked(False)
+        dialog._redraw_current()  # noqa: SLF001
+        assert dialog.canvas is not None
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_section_opens_transition_review_for_all_records_without_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    opened: list[MiniDmaRecord] = []
+
+    class FakeReviewDialog:
+        def __init__(
+            self,
+            records: list[MiniDmaRecord],
+            _logger: logging.Logger,
+            _parent: QtWidgets.QWidget | None = None,
+        ) -> None:
+            opened.extend(records)
+
+        def exec(self) -> int:
+            return int(QtWidgets.QDialog.DialogCode.Accepted)
+
+    try:
+        record = _sample_mini_dma_record()
+        section._record_groups = {record.sample: [record]}  # noqa: SLF001
+        monkeypatch.setattr(builder_ui, "_MiniDmaTransitionReviewDialog", FakeReviewDialog)
+
+        section._open_transition_review()  # noqa: SLF001
+
+        assert opened == [record]
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
     anneal_path = tmp_path / "Ni50Fe27Ga23 5-4 1000mA.txt"
     anneal_path.write_text("placeholder", encoding="utf-8")
