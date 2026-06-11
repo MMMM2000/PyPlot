@@ -181,6 +181,8 @@ UI_TELEMETRY_FIELDNAMES = [
     "session_points",
     "live_plot_points",
 ]
+RUN_LOG_FLUSH_INTERVAL_MS = 100
+RUN_LOG_MAX_BATCH_LINES = 80
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
 UNITS = ("mm", "g", "%", "MPa")
@@ -4565,6 +4567,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._calibrated_load_noise_g: float | None = None
         self._run_log_mirror_enabled = False
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
+        self._pending_run_log_lines: list[str] = []
+        self._run_log_flush_queued = False
         self._owned_shared_broker_server: Any | None = None
         self._owned_shared_broker_thread: Thread | None = None
         self._owned_shared_broker_driver: HmpSerialDriver | None = None
@@ -4627,6 +4631,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_heartbeat_last_s: float | None = None
         self._ui_heartbeat_interval_ms: float | None = None
         self._ui_heartbeat_fps: float | None = None
+        self._live_label_refresh_queued = False
+        self._recipe_progress_update_queued = False
+        self._recipe_progress_pending_complete = False
         self._window_closing = False
         self.action_timing_settings: QtGui.QAction | None = None
         self.action_current_sweep_advanced_settings: QtGui.QAction | None = None
@@ -4652,6 +4659,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_heartbeat_timer.start()
         self._auto_ramp_timer = QtCore.QTimer(self)
         self._auto_ramp_timer.timeout.connect(self._handle_auto_ramp_tick)
+        self._run_log_flush_timer = QtCore.QTimer(self)
+        self._run_log_flush_timer.setSingleShot(True)
+        self._run_log_flush_timer.timeout.connect(self._flush_pending_run_log_lines)
         self._scale_hint_timer = QtCore.QTimer(self)
         self._scale_hint_timer.setSingleShot(True)
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
@@ -7985,7 +7995,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
-        self.log_output.appendPlainText(line)
+        self._pending_run_log_lines.append(line)
+        batch_live_run_log = (
+            self._automation_control_loop is not None
+            and self._automation_control_loop.is_running()
+        )
+        if not batch_live_run_log:
+            self._flush_pending_run_log_lines()
+        elif len(self._pending_run_log_lines) >= RUN_LOG_MAX_BATCH_LINES:
+            self._flush_pending_run_log_lines()
+        else:
+            self._schedule_run_log_flush()
         if self._run_log_mirror_enabled:
             try:
                 append_text_with_rotation(self._run_log_mirror_path, line + "\n")
@@ -7995,9 +8015,35 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.action_mirror_run_log.blockSignals(True)
                     self.action_mirror_run_log.setChecked(False)
                     self.action_mirror_run_log.blockSignals(False)
-                self.log_output.appendPlainText(
+                self._pending_run_log_lines.append(
                     f"[{timestamp}] Run-log file mirror disabled because writing {self._run_log_mirror_path} failed."
                 )
+                self._schedule_run_log_flush()
+
+    def _schedule_run_log_flush(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._schedule_run_log_flush)
+            return
+        if self._run_log_flush_queued:
+            return
+        self._run_log_flush_queued = True
+        if hasattr(self, "_run_log_flush_timer"):
+            self._run_log_flush_timer.start(RUN_LOG_FLUSH_INTERVAL_MS)
+        else:
+            QtCore.QTimer.singleShot(RUN_LOG_FLUSH_INTERVAL_MS, self._flush_pending_run_log_lines)
+
+    def _flush_pending_run_log_lines(self) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(self._flush_pending_run_log_lines)
+            return
+        self._run_log_flush_queued = False
+        if not self._pending_run_log_lines:
+            return
+        batch = self._pending_run_log_lines[:RUN_LOG_MAX_BATCH_LINES]
+        del self._pending_run_log_lines[:RUN_LOG_MAX_BATCH_LINES]
+        self.log_output.appendPlainText("\n".join(batch))
+        if self._pending_run_log_lines:
+            self._schedule_run_log_flush()
 
     def _set_run_status(self, message: str) -> None:
         self.label_recipe_banner.setText(message)
@@ -12608,7 +12654,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _sample_effective_linear_speed(self, now_s: float | None = None) -> None:
-        now = time.monotonic() if now_s is None else float(now_s)
+        now = perf_counter() if now_s is None else float(now_s)
         position_mm = float(self._measurement_effective_position_mm())
         if (
             self._effective_speed_sample_time_s is None
@@ -12631,7 +12677,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._effective_speed_sample_position_mm = position_mm
 
     def _reset_effective_linear_speed_sample(self, now_s: float | None = None) -> None:
-        self._effective_speed_sample_time_s = time.monotonic() if now_s is None else float(now_s)
+        self._effective_speed_sample_time_s = perf_counter() if now_s is None else float(now_s)
         self._effective_speed_sample_position_mm = float(self._measurement_effective_position_mm())
         self._effective_average_speed_mm_s = 0.0
 
@@ -18581,8 +18627,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if not self._is_ui_thread():
-            self._run_on_ui_thread(lambda complete=complete: self._update_recipe_progress(complete=complete))
+            self._recipe_progress_pending_complete = self._recipe_progress_pending_complete or bool(complete)
+            if self._recipe_progress_update_queued:
+                return
+            self._recipe_progress_update_queued = True
+
+            def _apply() -> None:
+                pending_complete = self._recipe_progress_pending_complete
+                self._recipe_progress_update_queued = False
+                self._recipe_progress_pending_complete = False
+                self._update_recipe_progress(complete=pending_complete)
+
+            self._run_on_ui_thread(_apply)
             return
+        self._recipe_progress_update_queued = False
+        if complete:
+            self._recipe_progress_pending_complete = False
         total = max(1, self._automation_total_steps or len(self._automation_steps))
         if self._automation_active and not complete and self._automation_completed_ticks >= total:
             total = self._automation_completed_ticks + 1
@@ -19666,8 +19726,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._automation_control_loop.stop()
             self._automation_control_loop = None
         self._auto_ramp_timer.stop()
-        self._auto_ramp_timer.setInterval(max(1, int(interval_ms)))
-        self._auto_ramp_timer.start()
+        self._automation_control_loop = AutomationControlLoop(
+            self._run_automation_control_tick,
+            error_callback=self._handle_automation_control_loop_error,
+        )
+        self._automation_control_loop.start(max(1, int(interval_ms)))
 
     def _pause_automation_control_loop(self) -> None:
         if self._automation_control_loop is not None:
@@ -19675,11 +19738,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_ramp_timer.stop()
 
     def _resume_automation_control_loop(self) -> None:
+        self._auto_ramp_timer.stop()
         if self._automation_control_loop is not None:
-            self._automation_control_loop.stop()
-            self._automation_control_loop = None
-        self._auto_ramp_timer.setInterval(max(1, int(self._automation_interval_ms)))
-        self._auto_ramp_timer.start()
+            self._automation_control_loop.resume()
+            return
+        self._start_automation_control_loop(self._automation_interval_ms)
 
     def _stop_automation_control_loop(self) -> None:
         if self._automation_control_loop is not None:
@@ -22701,8 +22764,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_live_labels(self) -> None:
         if not self._is_ui_thread():
-            self._run_on_ui_thread(self._refresh_live_labels)
+            if self._live_label_refresh_queued:
+                return
+            self._live_label_refresh_queued = True
+
+            def _apply() -> None:
+                self._live_label_refresh_queued = False
+                self._refresh_live_labels()
+
+            self._run_on_ui_thread(_apply)
             return
+        self._live_label_refresh_queued = False
         scale_age_s = self._scale_reading_age_s()
         scale_missing = self._latest_scale_timestamp is None
         scale_stale = scale_age_s is not None and scale_age_s > STALE_SCALE_AFTER_S

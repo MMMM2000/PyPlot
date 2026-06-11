@@ -139,7 +139,7 @@ def test_automation_control_loop_pause_resume_and_stop() -> None:
         loop.stop()
 
 
-def test_main_window_automation_control_loop_ticks_on_ui_thread(tmp_path: Path, qtbot) -> None:
+def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_events(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     main_thread_id = threading.get_ident()
     tick_thread_ids: list[int] = []
@@ -150,13 +150,14 @@ def test_main_window_automation_control_loop_ticks_on_ui_thread(tmp_path: Path, 
             window._stop_automation_control_loop()
 
     try:
-        window._auto_ramp_timer.timeout.disconnect()
-        window._auto_ramp_timer.timeout.connect(fake_tick)
+        window._run_automation_control_tick = fake_tick  # type: ignore[method-assign]
         window._start_automation_control_loop(20)
-        qtbot.waitUntil(lambda: len(tick_thread_ids) >= 3, timeout=500)
+        deadline = time.monotonic() + 0.5
+        while len(tick_thread_ids) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
 
         assert len(tick_thread_ids) >= 3
-        assert all(thread_id == main_thread_id for thread_id in tick_thread_ids)
+        assert all(thread_id != main_thread_id for thread_id in tick_thread_ids)
         assert window._auto_ramp_timer.isActive() is False
     finally:
         window._stop_automation_control_loop()
@@ -177,6 +178,93 @@ def test_main_window_automation_tick_delegates_to_controller(tmp_path: Path, qtb
 
         assert calls == ["tick"]
     finally:
+        _close_test_window(window)
+
+
+def test_background_control_loop_advances_recipe_without_ui_events(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    calls: list[int] = []
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("sweep_current", note="background-loop"),
+            mini_dma_mod.AutomationStep("sweep_current", note="background-loop"),
+            mini_dma_mod.AutomationStep("sweep_current", note="background-loop"),
+        ]
+        window._automation_index = 0
+        window._automation_total_steps = len(window._automation_steps)
+        window._handle_current_sweep_step = lambda _step, index: calls.append(index) or True  # type: ignore[method-assign]
+        window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
+        window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+        window._start_automation_control_loop(20)
+        deadline = time.monotonic() + 0.5
+        while len(calls) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert calls == [0, 1, 2]
+        assert window._automation_index >= 3
+        assert window._auto_ramp_timer.isActive() is False
+    finally:
+        window._stop_automation_control_loop()
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_run_log_batches_during_active_session(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._session_active = True
+        window._automation_active = True
+        window._automation_control_loop = mini_dma_mod.AutomationControlLoop(lambda: None)
+        window._automation_control_loop.start(1000)
+
+        window._log("first")
+        window._log("second")
+
+        assert "first" not in window.log_output.toPlainText()
+        assert "second" not in window.log_output.toPlainText()
+        assert len(window._pending_run_log_lines) == 2
+
+        window._flush_pending_run_log_lines()
+
+        text = window.log_output.toPlainText()
+        assert "first" in text
+        assert "second" in text
+        assert window._pending_run_log_lines == []
+    finally:
+        if window._automation_control_loop is not None:
+            window._automation_control_loop.stop()
+            window._automation_control_loop = None
+        window._session_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_worker_visual_updates_are_coalesced(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    callbacks: list[object] = []
+    original_ui_thread_id = window._ui_thread_id
+
+    try:
+        window._ui_thread_id = -1
+        window._run_on_ui_thread = lambda callback: callbacks.append(callback)  # type: ignore[method-assign]
+
+        window._refresh_live_labels()
+        window._refresh_live_labels()
+        window._update_recipe_progress()
+        window._update_recipe_progress()
+        window._update_recipe_progress(complete=True)
+
+        assert len(callbacks) == 2
+        assert window._live_label_refresh_queued is True
+        assert window._recipe_progress_update_queued is True
+        assert window._recipe_progress_pending_complete is True
+    finally:
+        window._ui_thread_id = original_ui_thread_id
         _close_test_window(window)
 
 
