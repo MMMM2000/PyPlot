@@ -1,0 +1,25 @@
+{
+  "kind": "builder",
+  "version": 1,
+  "database_dir": "G:/My Drive/1 Projects/Praha/microwire_database",
+  "database_name": "microwire_database",
+  "working_copy_dir": "G:/My Drive/1 Projects/Praha/microwire_database/_working",
+  "commands": [
+    {
+      "action": "update_section",
+      "section": "mini_dma",
+      "paths": [
+        "G:/My Drive/1 Projects/Praha/mini DMA"
+      ],
+      "exclude_dir_names": [
+        "archive",
+        "automation_history",
+        "automated_control_tests",
+        "automated"
+      ]
+    },
+    {
+      "action": "rebuild_assemble"
+    }
+  ]
+}
