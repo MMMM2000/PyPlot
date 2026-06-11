@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import hashlib
 import json
 import math
@@ -120,6 +121,7 @@ CONTROL_LOGIC_FEATURES = [
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
+    "automation_controller_boundary",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -239,6 +241,7 @@ GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
+TIC_MOTOR_POWER_STALE_GRACE_S = 30.0
 MANUAL_JOG_TIC_STATUS_FRESH_S = 2.0
 TIC_USB_VENDOR_ID = 0x1FFB
 TIC_USB_TRANSPORT_NATIVE = "native-usb"
@@ -263,6 +266,8 @@ DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 16
 DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 500
+SESSION_DATA_FLUSH_INTERVAL_S = 2.0
+SESSION_METADATA_WRITE_INTERVAL_S = 5.0
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
 DISPLAY_PLOT_MAX_POINTS = 1500
@@ -475,6 +480,7 @@ SERVO_CURRENT_SWEEP_MIN_COMMAND_SPEED_MM_S = 0.05
 SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION = 0.20
 SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION = 0.60
 SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
+SERVO_CURRENT_SWEEP_TARGET_RAMP_TRUST_FRACTION = 0.15
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
@@ -502,6 +508,8 @@ CURRENT_SWEEP_HOLD_ESTIMATE_MAX_S = 60.0
 CURRENT_SWEEP_ETA_MEASURED_WEIGHT_START = 0.05
 CURRENT_SWEEP_ETA_MEASURED_WEIGHT_FULL = 0.25
 SERVO_FULL_SPEED_ERROR_RATIO = 8.0
+LIVE_LINEAR_SPEED_SAMPLE_INTERVAL_S = 1.0
+CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S = 15.0
 SERVO_CRUISE_FEEDBACK_SAFETY_FACTOR = 1.25
 SERVO_MOTION_SETTLE_AFTER_MOVE_S = 0.05
 SERVO_AUTO_TOLERANCE_LOAD_G = 0.005
@@ -629,6 +637,90 @@ def _next_run_session_paths(directory: Path, basename: str) -> tuple[str, tuple[
         if not _session_paths_exist(candidate_paths):
             return candidate, candidate_paths
     raise RuntimeError(f"Could not find a free run filename for {clean_basename!r}.")
+
+
+def _legacy_session_paths_for_run_dir(run_dir: Path) -> tuple[Path, Path, Path, Path]:
+    base_dir = run_dir.parent
+    basename = run_dir.name
+    return (
+        base_dir / f"{basename}.txt",
+        base_dir / f"{basename}.csv",
+        base_dir / f"{basename}.json",
+        base_dir / f"{basename}.scale_raw.csv",
+    )
+
+
+def _unique_replaced_output_path(path: Path, *, timestamp: str) -> Path:
+    candidate = path.with_name(f"{path.name}_replaced_{timestamp}")
+    if not candidate.exists():
+        return candidate
+    for suffix in range(2, 10000):
+        numbered = path.with_name(f"{path.name}_replaced_{timestamp}_{suffix:02d}")
+        if not numbered.exists():
+            return numbered
+    raise RuntimeError(f"Could not choose a safe replacement backup path for {path}.")
+
+
+def _move_path_to_trash(path: Path) -> None:
+    if os.name == "nt":
+        class _SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", ctypes.c_void_p),
+                ("wFunc", ctypes.c_uint),
+                ("pFrom", ctypes.c_wchar_p),
+                ("pTo", ctypes.c_wchar_p),
+                ("fFlags", ctypes.c_ushort),
+                ("fAnyOperationsAborted", ctypes.c_bool),
+                ("hNameMappings", ctypes.c_void_p),
+                ("lpszProgressTitle", ctypes.c_wchar_p),
+            ]
+
+        operation = _SHFILEOPSTRUCTW()
+        operation.wFunc = 3  # FO_DELETE
+        operation.pFrom = str(path) + "\0\0"
+        operation.fFlags = 0x0040 | 0x0010 | 0x0004 | 0x0400  # recycle, no confirm, silent, no UI
+        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))  # type: ignore[attr-defined]
+        if result != 0 or operation.fAnyOperationsAborted:
+            raise OSError(f"Windows Recycle Bin move failed for {path} (code {result}).")
+        return
+    qt_file = getattr(QtCore.QFile, "moveToTrash", None)
+    if qt_file is None or not qt_file(str(path)):
+        raise OSError(f"Could not move {path} to Trash.")
+
+
+def _evacuate_path_for_replacement(path: Path, *, timestamp: str) -> str:
+    try:
+        _move_path_to_trash(path)
+        return f"moved to Trash/Recycling Bin: {path}"
+    except Exception as exc:
+        backup_path = _unique_replaced_output_path(path, timestamp=timestamp)
+        shutil.move(str(path), str(backup_path))
+        return f"Trash unavailable ({exc}); preserved as {backup_path}"
+
+
+def _evacuate_session_outputs_for_replacement(paths: Sequence[Path]) -> list[str]:
+    if not paths:
+        return []
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = paths[0].parent
+    messages: list[str] = []
+    if run_dir.exists():
+        messages.append(_evacuate_path_for_replacement(run_dir, timestamp=timestamp))
+        return messages
+    legacy_paths = [path for path in _legacy_session_paths_for_run_dir(run_dir) if path.exists()]
+    if not legacy_paths:
+        return messages
+    for legacy_path in legacy_paths:
+        try:
+            _move_path_to_trash(legacy_path)
+            messages.append(f"moved to Trash/Recycling Bin: {legacy_path}")
+        except Exception as exc:
+            backup_dir = _unique_replaced_output_path(run_dir, timestamp=timestamp)
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            destination = backup_dir / legacy_path.name
+            shutil.move(str(legacy_path), str(destination))
+            messages.append(f"Trash unavailable ({exc}); preserved legacy output as {destination}")
+    return messages
 
 
 def _utc_timestamp() -> str:
@@ -1676,6 +1768,27 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
         self.setPlaceholderText("e.g. 156/2")
         self.textEdited.connect(self._normalize_on_edit)
 
+    def _show_available_completions(self) -> None:
+        completer = self.completer()
+        if completer is None:
+            return
+        model = completer.model()
+        if model is None or model.rowCount() <= 0:
+            return
+        popup = completer.popup()
+        if popup is not None and popup.isVisible():
+            return
+        completer.setCompletionPrefix("")
+        completer.complete()
+
+    def focusInEvent(self, event: QtGui.QFocusEvent) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        QtCore.QTimer.singleShot(0, self._show_available_completions)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        super().mousePressEvent(event)
+        QtCore.QTimer.singleShot(0, self._show_available_completions)
+
     @staticmethod
     def _split_parts(value: object) -> tuple[str, str]:
         text = str(value or "").strip().lower()
@@ -1735,6 +1848,54 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
         self.setText(normalized)
         self.setCursorPosition(cursor)
         self._normalizing = False
+
+
+def _microwire_sort_key(value: object) -> tuple[int, int, str]:
+    left, right = MicrowireLineEdit._split_parts(value)
+    fallback = str(value or "").strip().lower()
+    left_int = int(left) if left else -1
+    right_int = int(right) if right else -1
+    return left_int, right_int, fallback
+
+
+def _iter_project_rows(payload: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(payload, Mapping):
+        sections = payload.get("sections", {})
+        if isinstance(sections, Mapping):
+            for section_payload in sections.values():
+                if not isinstance(section_payload, Mapping):
+                    continue
+                rows = section_payload.get("rows")
+                if isinstance(rows, list):
+                    for row in rows:
+                        if isinstance(row, Mapping):
+                            yield row
+        rows = payload.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, Mapping):
+                    yield row
+    elif isinstance(payload, list):
+        for row in payload:
+            if isinstance(row, Mapping):
+                yield row
+
+
+def _project_sample_suggestions_from_payload(payload: Any) -> dict[str, tuple[str, ...]]:
+    records: dict[str, set[str]] = {}
+    for row in _iter_project_rows(payload):
+        composition = str(row.get("Composition") or "").strip()
+        if not composition:
+            continue
+        wires = records.setdefault(composition, set())
+        microwire = _project_row_value(row, PROJECT_ROW_MICROWIRE_KEYS)
+        wire_display = MicrowireLineEdit.to_display_text(microwire) or str(microwire or "").strip()
+        if wire_display:
+            wires.add(wire_display)
+    return {
+        composition: tuple(sorted(wires, key=_microwire_sort_key))
+        for composition, wires in sorted(records.items(), key=lambda item: item[0].lower())
+    }
 
 
 def _fabrication_records_from_index(index: Any) -> dict[str, list[FabricationSampleRecord]]:
@@ -2388,6 +2549,7 @@ class FabricationSuggestionWorker(QtCore.QObject):
 
 
 class BuilderProjectImportWorker(QtCore.QObject):
+    suggestions = QtCore.pyqtSignal(object, object, object)
     succeeded = QtCore.pyqtSignal(object, object, object)
     failed = QtCore.pyqtSignal(object, object, str)
     no_match = QtCore.pyqtSignal(object, object)
@@ -2421,6 +2583,7 @@ class BuilderProjectImportWorker(QtCore.QObject):
             except Exception as exc:
                 self.failed.emit(path, self.request_key, f"Failed to read saved project file: {exc}")
                 return
+            self.suggestions.emit(path, self.request_key, _project_sample_suggestions_from_payload(payload))
             try:
                 match = _find_project_sample_in_payload(
                     payload,
@@ -2528,6 +2691,242 @@ class AutomationControlLoop:
                     self._error_callback(exc)
                 return
             next_tick_s = max(next_tick_s + interval_s, time.monotonic())
+
+
+class MiniDmaAutomationController:
+    """Own recipe step dispatch outside the Qt window.
+
+    The host still provides the hardware, logging, and UI adapters. Keeping the
+    step scheduler here prevents new automation state from being embedded
+    directly in MainWindow and gives the later process worker a single boundary
+    to replace with IPC.
+    """
+
+    def __init__(self, host: Any) -> None:
+        self._host = host
+        self._tick_running = False
+
+    def tick(self) -> None:
+        host = self._host
+        if not host._automation_active or host._automation_paused:
+            return
+        if self._tick_running:
+            return
+        self._tick_running = True
+        host._automation_tick_running = True
+        try:
+            self.execute_next_tick()
+        finally:
+            host._automation_tick_running = False
+            self._tick_running = False
+
+    def execute_next_tick(self) -> None:
+        host = self._host
+        if host._automation_index >= len(host._automation_steps):
+            if not host._is_ui_thread():
+                host._call_on_ui_thread_sync(self.execute_next_tick)
+                return
+            is_recovery = host._is_recovery_mode()
+            is_calibration = host._is_calibration_mode(host._automation_name)
+            if is_calibration and host._session_active:
+                host._finalize_calibration_report()
+            recovery_return_duration_s = host._setup_return_duration_s() if is_calibration else None
+            config = host._control_config()
+            return_to_origin = config.return_to_origin if config is not None else host.check_return_to_origin.isChecked()
+            if host._is_constant_current_strain_sweep_mode(host._automation_name):
+                return_to_origin = False
+            host._update_recipe_progress(complete=True)
+            host._stop_auto_ramp(log_completion=False, keep_progress=True)
+            host._log("Recovery completed." if is_recovery else "Recipe completed.")
+            if not is_recovery and host._session_active:
+                host._stop_session(reason="recipe_completed", detail="Recipe completed.")
+            if not is_recovery and return_to_origin:
+                host._pending_recovery_return_duration_s = recovery_return_duration_s
+                host._start_recovery_position_origin()
+                return
+            host._restore_main_window_focus_soon()
+            return
+        step_index = host._automation_index
+        step = host._automation_steps[step_index]
+        host._automation_index += 1
+        if step.action == "move":
+            finished = host._handle_move_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "ramp_target":
+            finished = host._handle_target_ramp_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "seek_target":
+            if step.target_value is None or not step.basis:
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+            if step.note == "setup_return_zero" and host._automation_step_note != "setup_return_zero":
+                host._setup_return_zero_speed_mm_s_value = None
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            host._set_automation_context(
+                phase="seek",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+                note=step.note,
+            )
+            tolerance = host._automation_tolerance_for_step(step)
+            if tolerance <= 0.0:
+                host._log("Recipe stopped because the target tolerance is zero.")
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+            try:
+                reached = host._seek_distribution_target(step.basis, step.target_value, tolerance)
+            except Exception as exc:
+                host._log(f"Recipe stopped: {exc}")
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+            if reached:
+                current_value = host._current_distribution_value(step.basis)
+                if current_value is None:
+                    current_value = 0.0
+                label = HSW_BASIS_LABELS.get(step.basis, step.basis)
+                host._log(
+                    f"Reached {label} plateau {step.target_value:.4f} "
+                    f"(live {current_value:.4f})."
+                )
+            else:
+                host._automation_index -= 1
+        elif step.action == "set_current":
+            plateau_index = int(step.note) if step.note.isdigit() else None
+            host._set_automation_context(
+                phase="current",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=plateau_index,
+            )
+            if step.current_mA is None or not host._set_recipe_current_mA(float(step.current_mA), measure_after=False):
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            elif not host._record_scheduled_recipe_point(step):
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        elif step.action == "mark_current_zero":
+            if not host._handle_current_zero_mark_step(step):
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+        elif step.action == "sweep_current":
+            finished = host._handle_current_sweep_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "mechanical_scan":
+            finished = host._handle_mechanical_scan_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "starting_length_prompt":
+            host._set_automation_context(phase="starting_length", note=step.note)
+            host._handle_starting_length_prompt_step()
+        elif step.action == "measure_length_prompt":
+            host._set_automation_context(
+                phase="length_prompt",
+                basis=step.basis,
+                target_value=step.target_value,
+                note=step.note,
+            )
+            host._handle_measure_length_prompt_step()
+        elif step.action == "mark_setup_return_zero":
+            host._set_automation_context(
+                phase="return_zero_start",
+                basis=step.basis,
+                target_value=step.target_value,
+                note=step.note,
+            )
+            host._handle_mark_setup_return_zero_step()
+        elif step.action == "apply_length_setup":
+            host._set_automation_context(phase="apply_l0", note=step.note)
+            host._handle_apply_length_setup_step()
+        elif step.action == "start_session":
+            host._begin_recipe_logging()
+            host._close_length_setup_dialog()
+        elif step.action == "calibration_move":
+            finished = host._handle_calibration_move_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "calibration_record":
+            finished = host._handle_timed_record_step(step, step_index, calibration=True)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        elif step.action == "settle":
+            self._handle_settle_step(step, step_index)
+        elif step.action == "record":
+            finished = host._handle_timed_record_step(step, step_index)
+            if not finished and host._automation_active:
+                host._automation_index -= 1
+        if host._automation_active:
+            host._automation_completed_ticks = min(
+                max(1, host._automation_total_steps or len(host._automation_steps)),
+                host._automation_completed_ticks + 1,
+            )
+        host._update_recipe_progress()
+        host._refresh_live_labels()
+
+    def _handle_settle_step(self, step: AutomationStep, step_index: int) -> None:
+        host = self._host
+        if step.note == "setup_preload" and host._setup_preload_ramp_skipped:
+            host._set_automation_context(
+                phase="settle",
+                basis=step.basis,
+                target_value=step.target_value,
+                plateau_index=int(step.note) if step.note.isdigit() else None,
+                note=step.note,
+            )
+            host._record_length_setup_point()
+            host._log("Skipping setup preload settle because the run started above preload.")
+            if host._automation_active:
+                host._automation_completed_ticks = min(
+                    max(1, host._automation_total_steps or len(host._automation_steps)),
+                    host._automation_completed_ticks + 1,
+                )
+            host._update_recipe_progress()
+            host._refresh_live_labels()
+            return
+        host._timed_step_elapsed_s(step_index)
+        plateau_index = int(step.note) if step.note.isdigit() else None
+        setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}
+        host._set_automation_context(
+            phase="settle",
+            basis=step.basis,
+            target_value=step.target_value,
+            plateau_index=plateau_index,
+            note=step.note,
+        )
+        settle_target_reached = True
+        setup_points_before = len(host._length_setup_points) if setup_settle_phase else None
+        if (
+            step.basis
+            and step.target_value is not None
+            and not host._is_recovery_mode()
+        ):
+            tolerance = host._automation_tolerance_for_step(step)
+            try:
+                settle_target_reached = host._seek_distribution_target(step.basis, step.target_value, tolerance)
+            except Exception as exc:
+                host._log(f"Recipe stopped: {exc}")
+                host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+                return
+        elif host._is_recovery_mode():
+            host._record_recovery_point()
+        elif not host._record_scheduled_recipe_point(step):
+            host._stop_auto_ramp(log_completion=False, offer_recovery=True)
+            return
+        if setup_settle_phase and setup_points_before == len(host._length_setup_points):
+            host._record_length_setup_point()
+        current_sweep_timed_settle = host._is_current_sweep_mode(host._automation_name)
+        if setup_settle_phase:
+            current_sweep_timed_settle = False
+        if not settle_target_reached and not current_sweep_timed_settle:
+            host._reset_timed_step_state()
+        if (
+            (
+                (not settle_target_reached and not current_sweep_timed_settle)
+                or not host._timed_step_finished(step, step_index)
+            )
+            and host._automation_active
+        ):
+            host._automation_index -= 1
 
 
 @dataclass(slots=True)
@@ -3628,6 +4027,13 @@ class SharedBrokerSupplyController:
         resolution_mA = self.current_resolution_mA()
         return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
 
+    def set_current_limit_mA(self, current_limit_mA: float) -> None:
+        self.current_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
+        channel = self.selected_channel()
+        if channel <= 0:
+            return
+        self._ensure_confirmed_role(channel)
+
     def configure_channel(
         self,
         *,
@@ -3792,6 +4198,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._effective_average_speed_mm_s: float | None = None
         self._last_commanded_position_steps: int | None = 0
         self._last_tic_vin_v: float | None = None
+        self._last_tic_power_good_time_s: float | None = None
+        self._tic_power_unknown_since_s: float | None = None
         self._last_tic_status_error: str | None = None
         self._tic_motor_power_ok: bool | None = None
         self._tic_motor_power_warning_active = False
@@ -3863,6 +4271,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s: float | None = None
+        self._last_session_data_flush_s = 0.0
+        self._last_session_metadata_write_s = 0.0
+        self._session_metadata_dirty = False
         self._session_logging_enabled = True
         self._load_offset_g = 0.0
         self._position_reference_mm = 0.0
@@ -3870,14 +4281,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preload_trigger_elapsed_s: float | None = None
         self._builder_project_path: Path | None = None
         self._builder_project_match: ProjectImportResult | None = None
+        self._diameter_import_sample_key: tuple[str, str, str] | None = None
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
+        self._builder_project_import_retry_pending = False
+        self._builder_project_sample_suggestions: dict[str, tuple[str, ...]] = {}
+        self._builder_project_import_timer = QtCore.QTimer(self)
+        self._builder_project_import_timer.setSingleShot(True)
+        self._builder_project_import_timer.setInterval(350)
+        self._builder_project_import_timer.timeout.connect(self._run_scheduled_builder_project_auto_import)
         self._fabrication_folder_path: Path | None = None
         self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
         self._fabrication_composition_lookup: dict[str, str] = {}
         self._fabrication_record_lookup: dict[tuple[str, str], FabricationSampleRecord] = {}
         self._fabrication_completer_compositions: tuple[str, ...] = ()
+        self._fabrication_failed_composition_loads: set[tuple[str, str]] = set()
         self._fabrication_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
         self._fabrication_composition_model: QtCore.QStringListModel | None = None
         self._fabrication_microwire_model: QtCore.QStringListModel | None = None
@@ -3900,7 +4319,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._supply_last_setpoint_mA: float | None = None
         self._heating_program_current_mA: float | None = None
         self._heating_program_direction = 1.0
+        self._automation_controller = MiniDmaAutomationController(self)
         self._automation_active = False
+        self._automation_tick_running = False
         self._automation_steps: list[AutomationStep] = []
         self._automation_index = 0
         self._automation_interval_ms = DEFAULT_CONTROL_INTERVAL_MS
@@ -7725,16 +8146,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         return True
 
+    def _planned_current_sweep_limit_mA(self) -> float:
+        return max(
+            float(self.spin_supply_manual_current.value()),
+            float(self.spin_current_sweep_start_mA.value()),
+            float(self.spin_current_sweep_end_mA.value()),
+            float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
+            1.0,
+        )
+
     def _build_supply_controller(self) -> PowerSupplyController:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         if self._using_shared_broker_supply():
-            current_limit_mA = max(
-                float(self.spin_supply_manual_current.value()),
-                float(self.spin_current_sweep_start_mA.value()),
-                float(self.spin_current_sweep_end_mA.value()),
-                float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
-                1.0,
-            )
+            current_limit_mA = self._planned_current_sweep_limit_mA()
             return SharedBrokerSupplyController(  # type: ignore[return-value]
                 host=self.edit_shared_broker_host.text().strip(),
                 port=int(self.spin_shared_broker_port.value()),
@@ -7833,13 +8257,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if driver.profile is None:
                 raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
             broker = SharedPowerSupplyBroker(driver, driver.profile)
-            current_limit_mA = max(
-                float(self.spin_supply_manual_current.value()),
-                float(self.spin_current_sweep_start_mA.value()),
-                float(self.spin_current_sweep_end_mA.value()),
-                float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
-                1.0,
-            )
+            current_limit_mA = self._planned_current_sweep_limit_mA()
             broker.assign_role(
                 channel=current_channel,
                 role=ROLE_MINI_DMA_CURRENT,
@@ -8038,6 +8456,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         current_mA = float(self.spin_supply_manual_current.value())
         try:
+            self._ensure_current_sweep_channel_limit()
             self._supply_controller.configure_channel(
                 channel=channel,
                 voltage_v=float(self.spin_supply_voltage_limit.value()),
@@ -8055,6 +8474,26 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Current-sweep CH{channel} prepared at "
             f"{_format_compact_unit(self.spin_supply_voltage_limit.value(), 'V', decimals=2)} / "
             f"{_format_compact_unit(current_mA, 'mA', decimals=2)} with output off."
+        )
+        return True
+
+    def _ensure_current_sweep_channel_limit(self) -> bool:
+        if self._supply_controller is None:
+            return False
+        method = getattr(self._supply_controller, "set_current_limit_mA", None)
+        if not callable(method):
+            return True
+        limit_mA = self._planned_current_sweep_limit_mA()
+        try:
+            method(limit_mA)
+        except Exception as exc:
+            self._log(f"Current-sweep channel limit update failed: {exc}")
+            return False
+        channel = self._current_sweep_supply_channel()
+        channel_text = "-" if channel is None else f"CH{channel}"
+        self._log(
+            f"Current-sweep {channel_text} limit checked for "
+            f"{_format_compact_unit(limit_mA, 'mA', decimals=2)} recipe maximum."
         )
         return True
 
@@ -8212,6 +8651,44 @@ class MainWindow(QtWidgets.QMainWindow):
     def _recipe_current_setpoint_mA(self, current_mA: float) -> float:
         return max(self._minimum_recipe_current_mA(), self._quantize_supply_current_mA(current_mA))
 
+    def _ensure_current_sweep_output_enabled_after_command(self, *, channel: int | None = None) -> bool:
+        if self._supply_controller is None:
+            return False
+        method = getattr(self._supply_controller, "output_state", None)
+        if not callable(method):
+            self._supply_output_enabled = True
+            return True
+        current_channel = self._current_sweep_supply_channel() if channel is None else int(channel)
+        if current_channel is None:
+            selected_channel = getattr(self._supply_controller, "selected_channel", None)
+            if callable(selected_channel):
+                try:
+                    selected = int(selected_channel())
+                except Exception:
+                    selected = 0
+                current_channel = selected if selected > 0 else None
+        if current_channel is None:
+            self._supply_output_enabled = True
+            return True
+        output_state = self._supply_channel_output_state(current_channel)
+        if output_state is not False:
+            self._supply_output_enabled = True
+            return True
+        try:
+            self._log(f"Current-sweep CH{current_channel} output readback is OFF; retrying output enable.")
+            self._supply_controller.output_on()
+        except Exception as exc:
+            self._log(f"Current-sweep CH{current_channel} output enable retry failed: {exc}")
+            self._supply_output_enabled = False
+            return False
+        output_state = self._supply_channel_output_state(current_channel)
+        if output_state is False:
+            self._log(f"Recipe stopped because current-sweep CH{current_channel} output did not report ON.")
+            self._supply_output_enabled = False
+            return False
+        self._supply_output_enabled = True
+        return True
+
     def _quantize_ramp_current_mA(self, current_mA: float, direction: float, end_mA: float) -> float:
         resolution_mA = self._supply_current_resolution_mA()
         if direction >= 0.0:
@@ -8224,6 +8701,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_controller is None or not self._supply_controller.is_connected():
             self._log("Recipe stopped because the power supply is not connected.")
             return False
+        current_channel = self._current_sweep_supply_channel()
         current_mA = self._quantize_supply_current_mA(current_mA)
         if self._automation_active or self._session_active:
             current_mA = max(self._minimum_recipe_current_mA(), current_mA)
@@ -8236,9 +8714,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         and not self._motor_supply_enabled()
                     ),
                 )
-                self._supply_output_enabled = True
             else:
                 self._supply_controller.set_current_mA(current_mA)
+            if not self._ensure_current_sweep_output_enabled_after_command(channel=current_channel):
+                return False
             self._supply_last_setpoint_mA = current_mA
             self._heating_program_current_mA = current_mA
             if measure_after:
@@ -8643,6 +9122,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_folder_path = None
             self._fabrication_records_by_composition = {}
             self._fabrication_loaded_compositions = set()
+            self._fabrication_failed_composition_loads.clear()
             self._fabrication_loading_composition = None
             self._refresh_fabrication_completers()
             self.label_fabrication_status.setText(
@@ -8656,12 +9136,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_fabrication_folder_load(self, root: Path, *, composition: str | None = None) -> None:
         self._cancel_fabrication_folder_load()
+        if self._fabrication_folder_path != root:
+            self._fabrication_failed_composition_loads.clear()
         self._fabrication_folder_path = root
         self._fabrication_loading_composition = composition
         if composition:
             self.label_fabrication_status.setText(f"Loading fabrication data for {composition}...")
         else:
             self._fabrication_loaded_compositions = set()
+            self._fabrication_failed_composition_loads.clear()
             self.label_fabrication_status.setText(f"Scanning fabrication folder: {root}")
         self._set_fabrication_loading_ui(True)
         thread = QtCore.QThread(self)
@@ -8712,6 +9195,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         composition = str(composition_obj).strip() if composition_obj else None
         if composition:
+            normalized_composition = _normalized_token(composition)
+            if normalized_composition:
+                self._fabrication_failed_composition_loads.discard((str(root), normalized_composition))
             merged_records = dict(self._fabrication_records_by_composition)
             for name, records in records_by_composition.items():
                 merged_records[name] = records
@@ -8741,6 +9227,11 @@ class MainWindow(QtWidgets.QMainWindow):
         root = Path(root_obj)
         if self._fabrication_folder_path != root:
             return
+        if self._fabrication_loading_composition is not None:
+            normalized = _normalized_token(self._fabrication_loading_composition)
+            if normalized:
+                self._fabrication_failed_composition_loads.add((str(root), normalized))
+                self._fabrication_loaded_compositions.add(normalized)
         if self._fabrication_loading_composition is None:
             self._fabrication_records_by_composition = {}
             self._fabrication_loaded_compositions = set()
@@ -8750,11 +9241,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_fabrication_load_cancelled(self, root_obj: object) -> None:
         root = Path(root_obj)
         if self._fabrication_folder_path == root:
+            if self._fabrication_loading_composition is not None:
+                normalized = _normalized_token(self._fabrication_loading_composition)
+                if normalized:
+                    self._fabrication_failed_composition_loads.add((str(root), normalized))
             self.label_fabrication_status.setText("Fabrication suggestion loading cancelled.")
 
     def _load_fabrication_folder_sync(self, root: Path) -> bool:
         self._fabrication_folder_path = root
         self._fabrication_loaded_compositions = set()
+        self._fabrication_failed_composition_loads.clear()
         self._fabrication_loading_composition = None
         if not root.exists() or not root.is_dir():
             self._fabrication_records_by_composition = {}
@@ -8802,7 +9298,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_fabrication_completers(self) -> None:
         self._rebuild_fabrication_lookup_cache()
-        compositions = tuple(self._fabrication_records_by_composition)
+        self._fabrication_microwire_completer_key = None
+        compositions = tuple(
+            sorted(
+                set(self._fabrication_records_by_composition) | set(self._builder_project_sample_suggestions),
+                key=str.lower,
+            )
+        )
         if self._fabrication_composition_model is None:
             self._fabrication_composition_model = QtCore.QStringListModel(self.edit_name_composition)
         if self._fabrication_composition_completer is None:
@@ -8818,16 +9320,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if compositions != self._fabrication_completer_compositions:
             self._fabrication_composition_model.setStringList(list(compositions))
             self._fabrication_completer_compositions = compositions
-            self._fabrication_microwire_completer_key = None
         self._update_fabrication_microwire_completer()
 
     def _update_fabrication_microwire_completer(self) -> None:
         composition = self._matching_fabrication_composition()
-        labels_tuple = tuple(
-            record.label
-            for record in self._fabrication_records_by_composition.get(composition or "", [])
-        )
         composition_key = _normalized_token(composition)
+        if (
+            self._fabrication_microwire_completer_key is not None
+            and self._fabrication_microwire_completer_key[0] == composition_key
+        ):
+            self._ensure_fabrication_composition_loaded()
+            return
+        labels_tuple = tuple(
+            sorted(
+                {
+                    record.label
+                    for record in self._fabrication_records_by_composition.get(composition or "", [])
+                }
+                | set(self._builder_project_sample_suggestions.get(composition or "", ())),
+                key=_microwire_sort_key,
+            )
+        )
         completer_key = (composition_key, labels_tuple)
         if self._fabrication_microwire_model is None:
             self._fabrication_microwire_model = QtCore.QStringListModel(self.edit_name_wire)
@@ -8849,7 +9362,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _rebuild_fabrication_lookup_cache(self) -> None:
         self._fabrication_composition_lookup = {
             normalized: composition
-            for composition in self._fabrication_records_by_composition
+            for composition in (
+                set(self._fabrication_records_by_composition) | set(self._builder_project_sample_suggestions)
+            )
             if (normalized := _normalized_token(composition))
         }
         record_lookup: dict[tuple[str, str], FabricationSampleRecord] = {}
@@ -8896,6 +9411,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if normalized in self._fabrication_loaded_compositions:
             return
+        failed_key = (str(root), normalized)
+        if failed_key in self._fabrication_failed_composition_loads:
+            return
         if self._fabrication_loading_composition and _normalized_token(self._fabrication_loading_composition) == normalized:
             return
         if self._fabrication_load_active():
@@ -8921,8 +9439,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._fabrication_record_lookup.get((_normalized_token(composition), current_wire))
 
-    def _apply_fabrication_sample_if_possible(self) -> bool:
-        if self._diameter_imported:
+    def _apply_fabrication_sample_if_possible(self, *, force: bool = False) -> bool:
+        if self._diameter_imported and not force:
             return False
         try:
             record = self._matching_fabrication_record()
@@ -8948,20 +9466,44 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _refresh_diameter_import_state(self) -> None:
-        self._mark_diameter_imported(self._diameter_imported)
+        self._mark_diameter_imported(
+            self._diameter_imported
+            and self._diameter_import_sample_key == self._current_diameter_import_sample_key()
+        )
+
+    def _current_diameter_import_sample_key(self) -> tuple[str, str, str]:
+        return (
+            _normalized_token(self.edit_name_composition.text()),
+            _normalized_microwire_token(self.edit_name_wire.text()),
+            _normalized_token(self.edit_name_specimen.text()),
+        )
+
+    def _invalidate_imported_diameter_if_sample_changed(self) -> None:
+        if not self._diameter_imported:
+            return
+        if self._diameter_import_sample_key == self._current_diameter_import_sample_key():
+            return
+        self._mark_diameter_imported(False)
 
     def _mark_diameter_imported(self, imported: bool) -> None:
         self._diameter_imported = bool(imported)
+        self._diameter_import_sample_key = self._current_diameter_import_sample_key() if self._diameter_imported else None
         if not hasattr(self, "spin_diameter"):
             return
         if self._diameter_imported:
-            self.spin_diameter.setStyleSheet("")
-            self.spin_diameter.setToolTip("Wire diameter imported from the Microwire Data Builder project or fabrication folder; manual edits are allowed.")
+            self.spin_diameter.setStyleSheet(
+                "QDoubleSpinBox { background-color: rgba(22, 163, 74, 0.12); }"
+            )
+            self.spin_diameter.setToolTip(
+                "Wire diameter imported for the current sample from the Microwire Data Builder project or fabrication folder; manual edits are allowed."
+            )
         else:
             self.spin_diameter.setStyleSheet(
                 "QDoubleSpinBox { border: 1px solid #dc2626; background-color: rgba(220, 38, 38, 0.10); }"
             )
-            self.spin_diameter.setToolTip("Wire diameter has not been imported from the Builder project or fabrication folder; manual edits are allowed.")
+            self.spin_diameter.setToolTip(
+                "Wire diameter has not been imported for the current sample from the Builder project or fabrication folder; manual edits are allowed."
+            )
 
     def _read_builder_project_payload(self, path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -9313,7 +9855,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.spin_diameter.setValue(match.diameter_mm)
                 self._mark_diameter_imported(True)
             else:
-                self._mark_diameter_imported(False)
+                if not self._apply_fabrication_sample_if_possible(force=True):
+                    self._mark_diameter_imported(False)
             if match.current_mA is not None:
                 self.spin_current_sweep_end_mA.setValue(match.current_mA)
         finally:
@@ -9356,6 +9899,7 @@ class MainWindow(QtWidgets.QMainWindow):
             request_key=request_key,
         )
         worker.moveToThread(thread)
+        worker.suggestions.connect(self._handle_builder_project_suggestions)
         worker.succeeded.connect(
             lambda path_obj, key_obj, match_obj, quiet=quiet: self._handle_builder_project_auto_import_success(
                 path_obj,
@@ -9385,6 +9929,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._builder_project_import_worker = None
             self._builder_project_import_request_key = None
             self._builder_import_in_progress = False
+            self._run_pending_builder_project_auto_import_if_needed()
         thread.deleteLater()
 
     def _stop_builder_project_import_thread(self) -> None:
@@ -9442,10 +9987,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._mark_diameter_imported(False)
         self.label_project_status.setText(message)
 
+    def _handle_builder_project_suggestions(
+        self,
+        path_obj: object,
+        key_obj: object,
+        suggestions_obj: object,
+    ) -> None:
+        if not self._builder_project_auto_import_is_current(path_obj, key_obj):
+            return
+        suggestions = suggestions_obj if isinstance(suggestions_obj, dict) else {}
+        self._builder_project_sample_suggestions = {
+            str(composition).strip(): tuple(str(wire).strip() for wire in wires if str(wire).strip())
+            for composition, wires in suggestions.items()
+            if str(composition).strip() and isinstance(wires, Sequence) and not isinstance(wires, (str, bytes))
+        }
+        self._refresh_fabrication_completers()
+
     def _handle_builder_project_auto_import_no_match(self, path_obj: object, key_obj: object) -> None:
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
             return
-        self._mark_diameter_imported(False)
+        if not self._apply_fabrication_sample_if_possible(force=True):
+            self._mark_diameter_imported(False)
         self.label_project_status.setText(
             "Project loaded, but no matching sample row was found from the current naming fields."
         )
@@ -9458,6 +10020,8 @@ class MainWindow(QtWidgets.QMainWindow):
         async_load: bool = False,
     ) -> bool:
         if self._builder_import_in_progress:
+            if not update_identity:
+                self._builder_project_import_retry_pending = True
             return False
         path_text = self.edit_project_path.text().strip()
         if not path_text:
@@ -9470,6 +10034,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_project_status.setText("Builder project path is saved, but the file was not found.")
             return False
         if async_load and not update_identity:
+            self._builder_project_import_retry_pending = False
             return self._start_saved_builder_project_auto_import(path, quiet=quiet)
         try:
             payload = self._read_builder_project_payload(path)
@@ -9496,6 +10061,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return False
         return True
+
+    def _schedule_builder_project_auto_import(self) -> None:
+        if self._builder_import_in_progress:
+            self._builder_project_import_retry_pending = True
+            return
+        if not self.edit_project_path.text().strip():
+            self._mark_diameter_imported(False)
+            self._builder_project_import_retry_pending = False
+            return
+        self._builder_project_import_timer.start()
+
+    def _run_pending_builder_project_auto_import_if_needed(self) -> None:
+        if not self._builder_project_import_retry_pending:
+            return
+        self._builder_project_import_retry_pending = False
+        if self._builder_import_in_progress:
+            self._builder_project_import_retry_pending = True
+            return
+        if not self.edit_project_path.text().strip():
+            self._mark_diameter_imported(False)
+            return
+        self._builder_project_import_timer.start()
+
+    def _run_scheduled_builder_project_auto_import(self) -> None:
+        self._auto_import_builder_project_if_possible(
+            update_identity=False,
+            quiet=True,
+            async_load=True,
+        )
 
     def _import_builder_project(self) -> None:
         path = Path(self.edit_project_path.text().strip())
@@ -9920,11 +10514,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_log_name.setText(safe_name or DEFAULT_LOG_BASENAME)
             self._log(f"Applied naming fields: {built}")
 
+    @staticmethod
+    def _sample_name_looks_auto_generated(sample_name: str) -> bool:
+        parts = sample_name.strip().split()
+        if len(parts) < 2:
+            return False
+        composition = parts[0]
+        wire = MicrowireLineEdit.to_display_text(parts[1]) or parts[1].replace("_", "/")
+        return bool(re.fullmatch(r"[A-Z][A-Za-z0-9]*", composition) and re.fullmatch(r"\d+/\d+", wire))
+
     def _sync_auto_name_fields(self) -> None:
         if self._sync_name_fields_in_progress:
             return
         self._sync_name_fields_in_progress = True
         try:
+            self._invalidate_imported_diameter_if_sample_changed()
             built = self._build_sample_name()
             if built:
                 log_label = self._log_name_with_recipe_token(self._build_log_name_label(built))
@@ -9932,7 +10536,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 safe_name = safe_name or DEFAULT_LOG_BASENAME
                 current_sample_name = self.edit_sample_name.text().strip()
                 current_log_name = self.edit_log_name.text().strip()
-                if not current_sample_name or current_sample_name == self._last_auto_sample_name:
+                sample_name_is_stale_auto_label = (
+                    current_sample_name != built
+                    and current_sample_name != self._last_auto_sample_name
+                    and self._sample_name_looks_auto_generated(current_sample_name)
+                )
+                if (
+                    not current_sample_name
+                    or current_sample_name == self._last_auto_sample_name
+                    or sample_name_is_stale_auto_label
+                ):
                     self.edit_sample_name.setText(built)
                     current_sample_name = built
                 if (
@@ -9946,7 +10559,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_auto_log_name = safe_name
             self._refresh_recipe_sample_label()
             self._update_fabrication_microwire_completer()
-            self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+            self._schedule_builder_project_auto_import()
             try:
                 self._apply_fabrication_sample_if_possible()
             except Exception as exc:
@@ -11234,6 +11847,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
             if max_cap is not None and max_cap > 0.0:
+                if self._automation_phase == "target_ramp":
+                    cap_value = min(
+                        max_cap,
+                        max(
+                            near_threshold,
+                            error_abs * SERVO_CURRENT_SWEEP_TARGET_RAMP_TRUST_FRACTION,
+                        ),
+                    )
+                    return max(self._motor_step_mm(), cap_value / sensitivity)
                 error_over_near = max(0.0, error_abs - near_threshold)
                 scale = max(1e-9, SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA)
                 fraction = SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION + (
@@ -11247,6 +11869,30 @@ class MainWindow(QtWidgets.QMainWindow):
         if cap_value is None:
             return None
         return max(self._motor_step_mm(), cap_value / sensitivity)
+
+    def _current_sweep_target_ramp_probe_correction_mm(
+        self,
+        basis: str,
+        sensitivity_per_mm: float | None,
+    ) -> float | None:
+        if (
+            not self._is_current_sweep_mode(self._automation_name)
+            or self._automation_phase != "target_ramp"
+            or self._automation_step_note == "setup_preload"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or sensitivity_per_mm is None
+        ):
+            return None
+        sensitivity = abs(float(sensitivity_per_mm))
+        if not math.isfinite(sensitivity) or sensitivity <= 0.0:
+            return None
+        cap_value = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            self._current_sweep_near_correction_stress_mpa(),
+        )
+        if cap_value is None:
+            return None
+        return max(self._motor_step_mm(), abs(float(cap_value)) / sensitivity)
 
     def _current_sweep_hold_adaptive_command_cap_mm(self) -> float:
         strain_cap_mm = self._strain_pct_to_stage_mm(
@@ -11893,6 +12539,8 @@ class MainWindow(QtWidgets.QMainWindow):
         elapsed_s = now - float(self._effective_speed_sample_time_s)
         if elapsed_s <= 0.0 or not math.isfinite(elapsed_s):
             return
+        if elapsed_s < LIVE_LINEAR_SPEED_SAMPLE_INTERVAL_S:
+            return
         distance_mm = abs(position_mm - float(self._effective_speed_sample_position_mm))
         self._effective_average_speed_mm_s = distance_mm / elapsed_s
         self._effective_speed_sample_time_s = now
@@ -12053,6 +12701,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_current_sweep_mode(self._automation_name)
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
         )
+
+    def _current_sweep_blocks_live_seek_stiffness_learning(self) -> bool:
+        if not self._is_current_sweep_mode(self._automation_name):
+            return False
+        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            return False
+        # The mechanical ramp to the requested stress/load target happens before
+        # heating, so it is the right place to relearn local sample stiffness.
+        if self._automation_phase == "target_ramp":
+            return False
+        return True
 
     def _basis_sensitivity_per_mm(
         self,
@@ -12331,7 +12990,7 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str,
         current_value: float,
     ) -> None:
-        if self._current_sweep_freezes_live_stiffness():
+        if self._current_sweep_blocks_live_seek_stiffness_learning():
             self._update_current_sweep_hold_response_stiffness(
                 seek_key,
                 basis,
@@ -13528,9 +14187,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
-            raise RuntimeError(
-                "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
+            age_s = self._scale_reading_age_s()
+            if age_s is None or age_s > CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S:
+                raise RuntimeError(
+                    "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
+                )
+            self._log_waiting_for_feedback(
+                "Scale feedback is temporarily stale; waiting for fresh scale data before the next "
+                "load/stress correction."
             )
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="stale_scale_grace",
+            )
+            return False
         seek_key = self._seek_error_key(basis, target_value)
         if self._setup_zero_fallback_is_pending():
             return self._handle_pending_setup_zero_fallback()
@@ -13994,16 +14668,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             ):
                 sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
-                stress_cap_mm = (
-                    None
-                    if sensitivity is None
-                    else self._current_sweep_max_stress_correction_mm(
+                stress_cap_mm = self._current_sweep_target_ramp_probe_correction_mm(
+                    basis,
+                    sensitivity,
+                )
+                if stress_cap_mm is None and sensitivity is not None:
+                    stress_cap_mm = self._current_sweep_max_stress_correction_mm(
                         basis,
                         sensitivity,
                         error_value=delta_value,
                         seek_key=seek_key,
                     )
-                )
                 if stress_cap_mm is not None:
                     nudge_mm = max(self._motor_step_mm(), min(nudge_mm, stress_cap_mm))
             else:
@@ -14815,32 +15490,80 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return None
 
+    def _tic_recent_good_power_status(self, *, now_s: float | None = None) -> bool:
+        if self._last_tic_power_good_time_s is None:
+            return False
+        if now_s is None:
+            now_s = time.time()
+        return now_s - self._last_tic_power_good_time_s <= TIC_MOTOR_POWER_STALE_GRACE_S
+
+    def _tic_vin_text(self, vin_v: float | None = None) -> str:
+        if vin_v is not None:
+            return f"{vin_v:.2f} V"
+        if self._last_tic_vin_v is None:
+            return "-"
+        age_s = 0.0
+        if self._last_tic_power_good_time_s is not None:
+            age_s = max(0.0, time.time() - self._last_tic_power_good_time_s)
+        return f"{self._last_tic_vin_v:.2f} V stale {age_s:.1f} s"
+
+    def _mark_tic_power_unknown(self, reason: str) -> bool:
+        now_s = time.time()
+        if self._tic_power_unknown_since_s is None:
+            self._tic_power_unknown_since_s = now_s
+        if self._tic_recent_good_power_status(now_s=now_s):
+            self._tic_motor_power_ok = None
+            self.label_card_motion.setText(f"Tic VIN stale | {self._tic_vin_text()}")
+            if not self._tic_motor_power_warning_active:
+                self._log(
+                    f"{reason}; using recent known-good Tic VIN for up to "
+                    f"{TIC_MOTOR_POWER_STALE_GRACE_S:.0f} s ({self._tic_vin_text()})."
+                )
+                self._tic_motor_power_warning_active = True
+            return True
+        self._tic_motor_power_ok = False
+        if not self._tic_motor_power_warning_active:
+            self._log(reason)
+            self._tic_motor_power_warning_active = True
+        return False
+
     def _refresh_tic_status(self) -> bool:
         controller = self._build_tic_controller()
         try:
             status_text = controller.get_status()
         except Exception as exc:
             self._last_tic_status_error = str(exc)
-            self._log(f"Tic status failed: {exc}")
+            reason = f"Tic status failed: {exc}"
             self.label_tic_summary.setText(str(exc))
-            self.label_card_motion.setText("Tic unavailable")
-            self._status_timer.stop()
-            self._last_tic_vin_v = None
-            self._tic_motor_power_ok = False
-            return False
+            recent_ok = self._mark_tic_power_unknown(reason)
+            if not recent_ok:
+                self.label_card_motion.setText("Tic unavailable")
+                self._status_timer.stop()
+                return False
+            self._refresh_live_labels()
+            self._status_timer.start(self._tic_status_interval_ms())
+            return True
         self._last_tic_status_error = None
         self._tic_status_text = status_text
         step_mode_text = _extract_status_value(status_text, "Step mode")
         if step_mode_text is not None and self._set_tic_step_mode_combo(step_mode_text):
             self._sync_tic_units_per_mm_from_full_steps(persist=False)
         vin_v = _extract_status_float(status_text, "VIN voltage")
-        self._last_tic_vin_v = vin_v
         power_warning = self._tic_motor_power_warning(vin_v)
-        self._tic_motor_power_ok = power_warning is None
+        if vin_v is not None:
+            self._last_tic_vin_v = vin_v
+            self._tic_motor_power_ok = power_warning is None
+            self._tic_power_unknown_since_s = None
+            if self._tic_motor_power_ok:
+                self._last_tic_power_good_time_s = time.time()
+        elif self._mark_tic_power_unknown(power_warning or "Tic VIN voltage is unknown; motor power could not be verified."):
+            power_warning = None
+        else:
+            self._last_tic_vin_v = None
         if power_warning and not self._tic_motor_power_warning_active:
             self._log(power_warning)
             self._tic_motor_power_warning_active = True
-        elif power_warning is None:
+        elif power_warning is None and vin_v is not None:
             self._tic_motor_power_warning_active = False
         current_position_text = _extract_status_value(status_text, "Current position")
         if current_position_text is not None:
@@ -14857,11 +15580,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_commanded_position_steps = current_position
         operation_state = _extract_status_value(status_text, "Operation state") or "unknown"
         errors = _extract_status_value(status_text, "Errors currently stopping the motor") or "none"
-        vin_text = "-" if vin_v is None else f"{vin_v:.2f} V"
+        vin_text = self._tic_vin_text(vin_v)
         summary = f"Operation state: {operation_state}\nVIN: {vin_text}\nErrors: {errors}"
         if power_warning:
             summary += f"\nWarning: {power_warning}"
             self.label_card_motion.setText(f"Motor power low/off | {vin_text}")
+        elif vin_v is None:
+            summary += "\nWarning: Tic VIN status is stale; using recent known-good motor-power state."
+            self.label_card_motion.setText(f"Tic VIN stale | {vin_text}")
         else:
             self.label_card_motion.setText(
                 f"{operation_state} | {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile | VIN {vin_text}"
@@ -15356,7 +16082,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _move_relative_raw_tic_steps(self, delta_steps: int, *, speed_steps_per_s: float) -> bool:
         if self._tic_motor_power_ok is False:
-            vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+            vin_text = self._tic_vin_text()
             self._log(
                 "Raw-step move cancelled because Tic motor power is not ready "
                 f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V)."
@@ -15439,7 +16165,7 @@ class MainWindow(QtWidgets.QMainWindow):
         speed_mm_s: float | None = None,
     ) -> bool:
         if self._tic_motor_power_ok is False:
-            vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+            vin_text = self._tic_vin_text()
             self._log(
                 "Move cancelled because Tic motor power is not ready "
                 f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V)."
@@ -15563,10 +16289,12 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setInformativeText(
             f"{self._current_session_identity_text(paths)}\n\n"
             f"Existing file(s): {existing_names or paths[0].name}\n\n"
-            "Save as next run keeps the existing data and creates a new _run02, _run03, and so on folder."
+            "Save as next run keeps the existing data and creates a new _run02, _run03, and so on folder.\n"
+            "Replace existing first moves the old output to Trash/Recycling Bin when the platform allows it; "
+            "if not, it preserves the old output as a timestamped replacement folder."
         )
         next_button = box.addButton("Save as next run", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-        replace_button = box.addButton("Replace existing", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        replace_button = box.addButton("Move old to Trash, then replace", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
         cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(next_button)
         box.exec()
@@ -15585,6 +16313,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return paths
         action = self._ask_existing_output_action(paths)
         if action == OUTPUT_COLLISION_REPLACE:
+            for message in _evacuate_session_outputs_for_replacement(paths):
+                self._log(f"Existing output {message}.")
             return paths
         if action == OUTPUT_COLLISION_NEXT:
             directory = paths[0].parent.parent
@@ -15769,6 +16499,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_sweep_log_interval_ms(self) -> int:
         return self._log_interval_ms()
+
+    def _session_data_flush_due(self, *, now_s: float | None = None) -> bool:
+        now = time.monotonic() if now_s is None else float(now_s)
+        if self._last_session_data_flush_s <= 0.0:
+            self._last_session_data_flush_s = now
+            return True
+        return now - self._last_session_data_flush_s >= SESSION_DATA_FLUSH_INTERVAL_S
+
+    def _flush_session_data_handles(self) -> None:
+        for handle in (
+            self._session_txt_handle,
+            self._session_csv_handle,
+            self._session_setup_txt_handle,
+            self._session_setup_csv_handle,
+        ):
+            if handle is not None:
+                handle.flush()
+        self._last_session_data_flush_s = time.monotonic()
 
     def _apply_ui_refresh_interval(self) -> None:
         if hasattr(self, "_ui_refresh_timer"):
@@ -16222,9 +16970,17 @@ class MainWindow(QtWidgets.QMainWindow):
             "builder_project": None if self._builder_project_path is None else str(self._builder_project_path),
         }
 
-    def _write_session_metadata(self, *, finished_utc: str | None = None) -> None:
+    def _write_session_metadata(self, *, finished_utc: str | None = None, throttle: bool = False) -> None:
         if self._session_json_path is None:
             return
+        if throttle and finished_utc is None:
+            now_s = time.monotonic()
+            if (
+                self._last_session_metadata_write_s > 0.0
+                and now_s - self._last_session_metadata_write_s < SESSION_METADATA_WRITE_INTERVAL_S
+            ):
+                self._session_metadata_dirty = True
+                return
         payload = self._session_metadata()
         payload["point_count"] = len(self._session_points)
         if self._session_active:
@@ -16236,6 +16992,8 @@ class MainWindow(QtWidgets.QMainWindow):
             payload["finished_utc"] = finished_utc
         try:
             self._session_json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self._last_session_metadata_write_s = time.monotonic()
+            self._session_metadata_dirty = False
         except OSError as exc:
             self._write_emergency_session_snapshot(
                 payload,
@@ -16431,6 +17189,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s = None
+        self._last_session_data_flush_s = 0.0
+        self._last_session_metadata_write_s = 0.0
+        self._session_metadata_dirty = False
         self._acquire_experiment_sleep_guard()
         self._session_txt_handle = txt_handle
         self._session_csv_handle = csv_handle
@@ -16488,6 +17249,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_start_wall_s = time.time()
         self._last_session_log_timestamp_s = self._session_start_wall_s
         self._ui_refresh_last_monotonic_s = None
+        self._last_session_data_flush_s = 0.0
+        self._last_session_metadata_write_s = 0.0
+        self._session_metadata_dirty = False
         self._set_automation_context(phase="start")
         self._write_session_metadata()
         self._refresh_plots()
@@ -16520,6 +17284,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self._session_active = False
         self._session_logging_enabled = False
+        self._flush_session_data_handles()
         if self._session_txt_handle is not None:
             self._session_txt_handle.close()
             self._session_txt_handle = None
@@ -17030,10 +17795,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if live_point.elapsed_s < point.elapsed_s
             and not math.isclose(live_point.elapsed_s, point.elapsed_s, rel_tol=0.0, abs_tol=1e-6)
         ]
-        self._write_point(point)
+        now_monotonic_s = time.monotonic()
+        flush_now = (not self._automation_active) or self._session_data_flush_due(now_s=now_monotonic_s)
+        self._write_point(point, flush=flush_now)
+        if flush_now:
+            self._last_session_data_flush_s = now_monotonic_s
         self._last_session_log_timestamp_s = record_wall_s
-        self._write_session_metadata()
-        self._refresh_plots()
+        self._write_session_metadata(throttle=self._automation_active)
+        if self._dashboard_graph_refresh_due(now_s=now_monotonic_s):
+            self._refresh_plots()
+            self._last_dashboard_plot_refresh_s = now_monotonic_s
         self._refresh_live_labels()
         if not quiet:
             self._log(
@@ -17107,6 +17878,7 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_handle: Any,
         csv_writer: csv.DictWriter[str],
         csv_handle: Any,
+        flush: bool = True,
     ) -> None:
         if txt_handle is None or csv_writer is None:
             return
@@ -17117,7 +17889,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "" if point.stress_mpa is None else f"{point.stress_mpa:.6f}",
         )
         txt_handle.write("\t".join(txt_values) + "\n")
-        txt_handle.flush()
 
         csv_writer.writerow(
             {
@@ -17178,10 +17949,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ir_config1": point.ir_config1,
             }
         )
-        if csv_handle is not None:
+        if flush:
+            txt_handle.flush()
+        if flush and csv_handle is not None:
             csv_handle.flush()
 
-    def _write_point(self, point: MeasurementPoint) -> None:
+    def _write_point(self, point: MeasurementPoint, *, flush: bool = True) -> None:
         if self._session_txt_handle is None or self._session_csv_writer is None:
             return
         self._write_point_to_handles(
@@ -17189,9 +17962,10 @@ class MainWindow(QtWidgets.QMainWindow):
             txt_handle=self._session_txt_handle,
             csv_writer=self._session_csv_writer,
             csv_handle=self._session_csv_handle,
+            flush=flush,
         )
 
-    def _write_setup_point(self, point: MeasurementPoint) -> None:
+    def _write_setup_point(self, point: MeasurementPoint, *, flush: bool = True) -> None:
         if self._session_setup_txt_handle is None or self._session_setup_csv_writer is None:
             return
         self._write_point_to_handles(
@@ -17199,6 +17973,7 @@ class MainWindow(QtWidgets.QMainWindow):
             txt_handle=self._session_setup_txt_handle,
             csv_writer=self._session_setup_csv_writer,
             csv_handle=self._session_setup_csv_handle,
+            flush=flush,
         )
 
     def _recipe_requires_tic(self, steps: Sequence[AutomationStep]) -> bool:
@@ -17277,6 +18052,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_manual_auto_connect_progress("Checking power supply...", 0, preflight_steps)
             if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
                 issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
+            if not issues and self._recipe_uses_explicit_current(steps) and not self._ensure_current_sweep_channel_limit():
+                issues.append("Current-sweep channel limit could not be updated for the active recipe current range.")
             self._set_manual_auto_connect_progress("Checking motor supply...", 1, preflight_steps)
             if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
                 issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
@@ -18134,6 +18911,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         return changed_steps
 
+    def _runtime_active_reverse_step(
+        self,
+        active_step: AutomationStep,
+        values: Mapping[str, float | bool],
+        *,
+        active_index: int,
+    ) -> AutomationStep | None:
+        return_index = active_index + 1
+        if return_index >= len(self._automation_steps):
+            return None
+        old_return_step = self._automation_steps[return_index]
+        if not self._is_voltage_limited_return_pair(return_index, old_return_step):
+            return None
+        if active_step.current_start_mA is None or active_step.current_end_mA is None:
+            return None
+        return replace(
+            old_return_step,
+            current_start_mA=float(active_step.current_end_mA),
+            current_end_mA=float(active_step.current_start_mA),
+            current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+            current_hold_enabled=bool(values["current_hold_enabled"]),
+            current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+            current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+            current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+        )
+
     def _current_sweep_pending_update_preview(
         self,
         values: Mapping[str, float | bool] | None = None,
@@ -18155,6 +18958,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if active_sweep_index is not None and 0 <= active_sweep_index < len(self._automation_steps):
             active_index = active_sweep_index
         basis = self._current_sweep_runtime_basis(active_index)
+        active_update, active_step_message = self._active_current_sweep_step_update(update_values, active_index)
         replacement_tail = self._build_runtime_current_sweep_tail(
             update_values,
             basis=basis,
@@ -18163,6 +18967,14 @@ class MainWindow(QtWidgets.QMainWindow):
         tail_replanned = replacement_tail is not None
         if replacement_tail is not None:
             old_tail = self._automation_steps[active_index + 1 :]
+            active_step_for_tail = active_update or self._automation_steps[active_index]
+            active_reverse_step = self._runtime_active_reverse_step(
+                active_step_for_tail,
+                update_values,
+                active_index=active_index,
+            )
+            if active_reverse_step is not None:
+                replacement_tail = [active_reverse_step, *replacement_tail]
             updated_steps = [
                 *self._automation_steps[: active_index + 1],
                 *replacement_tail,
@@ -18222,7 +19034,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         )
 
         active_step_updated = False
-        active_update, active_step_message = self._active_current_sweep_step_update(update_values, active_index)
         if active_update is not None:
             old_active_summary = self._current_sweep_step_override_summary(self._automation_steps[active_index])
             new_active_summary = self._current_sweep_step_override_summary(active_update)
@@ -18273,22 +19084,80 @@ class MainWindow(QtWidgets.QMainWindow):
             if old_direction >= 0.0
             else self._recipe_current_setpoint_mA(float(values["current_start_mA"]))
         )
-        if math.isclose(new_end, old_end, rel_tol=1e-9, abs_tol=1e-9):
-            return None, "the active current target is already current"
-        if (new_end - old_start) * old_direction < -1e-9:
+        new_ramp_rate = max(1e-9, abs(float(values["current_ramp_rate_mA_s"])))
+        new_hold_enabled = bool(values["current_hold_enabled"])
+        new_pause_factor = float(values["current_hold_pause_tolerance_factor"])
+        new_resume_factor = float(values["current_hold_resume_tolerance_factor"])
+        new_resume_stable_s = float(values["current_hold_resume_stable_s"])
+        target_changed = not math.isclose(new_end, old_end, rel_tol=1e-9, abs_tol=1e-9)
+        runtime_candidate = replace(
+            step,
+            current_end_mA=new_end,
+            current_ramp_rate_mA_s=new_ramp_rate,
+            current_hold_enabled=new_hold_enabled,
+            current_hold_pause_tolerance_factor=new_pause_factor,
+            current_hold_resume_tolerance_factor=new_resume_factor,
+            current_hold_resume_stable_s=new_resume_stable_s,
+        )
+        if self._current_sweep_step_override_summary(runtime_candidate) == self._current_sweep_step_override_summary(step):
+            return None, "the active current ramp settings are already current"
+        if target_changed and (new_end - old_start) * old_direction < -1e-9:
             return None, "the edited current target reverses the active ramp direction"
 
         active_setpoint = self._active_current_sweep_last_setpoint_mA
         if active_setpoint is None:
             active_setpoint = old_start
         active_setpoint = self._recipe_current_setpoint_mA(float(active_setpoint))
-        if (new_end - active_setpoint) * old_direction < -1e-9:
+        if target_changed and (new_end - active_setpoint) * old_direction < -1e-9:
             return None, (
                 f"the active setpoint {_format_compact_unit(active_setpoint, 'mA')} "
                 f"is already beyond {_format_compact_unit(new_end, 'mA')}"
             )
 
-        return replace(step, current_end_mA=new_end), "active current target updated"
+        if target_changed:
+            message = "active current target and ramp settings updated"
+        else:
+            message = "active current ramp settings updated"
+        return runtime_candidate, message
+
+    def _apply_active_current_sweep_step_update_state(
+        self,
+        old_step: AutomationStep,
+        new_step: AutomationStep,
+        active_index: int,
+    ) -> None:
+        if old_step.action != "sweep_current" or new_step.action != "sweep_current":
+            return
+        now_s = time.monotonic()
+        if (
+            bool(old_step.current_hold_enabled)
+            and not bool(new_step.current_hold_enabled)
+            and self._current_sweep_ramp_hold_step_index == active_index
+        ):
+            self._resume_current_sweep_ramp_from_hold(
+                now_s=now_s,
+                reason="current hold was disabled by a runtime recipe update",
+            )
+
+        old_rate = None if old_step.current_ramp_rate_mA_s is None else abs(float(old_step.current_ramp_rate_mA_s))
+        new_rate = None if new_step.current_ramp_rate_mA_s is None else abs(float(new_step.current_ramp_rate_mA_s))
+        if old_rate is None or new_rate is None or math.isclose(old_rate, new_rate, rel_tol=1e-9, abs_tol=1e-9):
+            return
+        if new_step.current_start_mA is None:
+            return
+        active_setpoint = self._active_current_sweep_last_setpoint_mA
+        if active_setpoint is None:
+            return
+        start_mA = self._recipe_current_setpoint_mA(float(new_step.current_start_mA))
+        active_setpoint = self._recipe_current_setpoint_mA(float(active_setpoint))
+        elapsed_for_setpoint_s = abs(active_setpoint - start_mA) / max(1e-9, float(new_rate))
+        self._active_current_sweep_started_s = max(0.0, now_s - elapsed_for_setpoint_s)
+        self._active_current_sweep_last_schedule_update_s = now_s
+        self._current_sweep_post_hold_throttle_until_s = 0.0
+        self._log(
+            "Updated active current ramp rate to "
+            f"{new_rate:.4f} mA/s while preserving the current setpoint schedule."
+        )
 
     def _apply_current_sweep_pending_overrides(
         self,
@@ -18327,7 +19196,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             return False
 
+        old_active_step = self._automation_steps[active_index] if 0 <= active_index < len(self._automation_steps) else None
+        new_active_step = updated_steps[active_index] if 0 <= active_index < len(updated_steps) else None
         self._automation_steps = updated_steps
+        if active_step_updated and old_active_step is not None and new_active_step is not None:
+            self._apply_active_current_sweep_step_update_state(old_active_step, new_active_step, active_index)
         self._recipe_estimated_points, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
             self._automation_steps,
             self._automation_interval_ms,
@@ -18831,14 +19704,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_on_ui_thread(lambda: self._log(f"Recipe control worker stopped: {self._automation_control_error}"))
 
     def _start_automation_control_loop(self, interval_ms: int) -> None:
-        self._auto_ramp_timer.stop()
-        if self._automation_control_loop is None:
-            self._automation_control_loop = AutomationControlLoop(
-                self._run_automation_control_tick,
-                error_callback=self._handle_automation_control_loop_error,
-            )
         self._automation_control_error = None
-        self._automation_control_loop.start(interval_ms)
+        if self._automation_control_loop is not None:
+            self._automation_control_loop.stop()
+            self._automation_control_loop = None
+        self._auto_ramp_timer.stop()
+        self._auto_ramp_timer.setInterval(max(1, int(interval_ms)))
+        self._auto_ramp_timer.start()
 
     def _pause_automation_control_loop(self) -> None:
         if self._automation_control_loop is not None:
@@ -18846,15 +19718,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._auto_ramp_timer.stop()
 
     def _resume_automation_control_loop(self) -> None:
-        if self._automation_control_loop is None:
-            self._start_automation_control_loop(self._automation_interval_ms)
-            return
-        self._auto_ramp_timer.stop()
-        self._automation_control_loop.resume()
+        if self._automation_control_loop is not None:
+            self._automation_control_loop.stop()
+            self._automation_control_loop = None
+        self._auto_ramp_timer.setInterval(max(1, int(self._automation_interval_ms)))
+        self._auto_ramp_timer.start()
 
     def _stop_automation_control_loop(self) -> None:
         if self._automation_control_loop is not None:
             self._automation_control_loop.stop()
+            self._automation_control_loop = None
         self._auto_ramp_timer.stop()
 
     def _start_auto_ramp(self) -> None:
@@ -19284,10 +20157,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._length_setup_points.append(point)
         self._length_setup_last_record_scale_timestamp = self._latest_scale_timestamp
-        self._write_setup_point(point)
+        now_s = time.monotonic()
+        flush_now = self._session_data_flush_due(now_s=now_s)
+        self._write_setup_point(point, flush=flush_now)
+        if flush_now:
+            self._last_session_data_flush_s = now_s
         if len(self._length_setup_points) > 1000:
             self._length_setup_points = self._length_setup_points[-1000:]
-        now_s = time.monotonic()
         if self._dialog_plot_refresh_due(self._last_length_setup_plot_refresh_s, now_s=now_s):
             self._last_length_setup_plot_refresh_s = now_s
             self._refresh_length_setup_plot()
@@ -21709,209 +22585,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._finalize_calibration_report()
 
     def _handle_auto_ramp_tick(self) -> None:
-        if not self._automation_active or self._automation_paused:
-            return
-        if self._automation_index >= len(self._automation_steps):
-            if not self._is_ui_thread():
-                self._call_on_ui_thread_sync(self._handle_auto_ramp_tick)
-                return
-            is_recovery = self._is_recovery_mode()
-            is_calibration = self._is_calibration_mode(self._automation_name)
-            if is_calibration and self._session_active:
-                self._finalize_calibration_report()
-            recovery_return_duration_s = self._setup_return_duration_s() if is_calibration else None
-            config = self._control_config()
-            return_to_origin = config.return_to_origin if config is not None else self.check_return_to_origin.isChecked()
-            if self._is_constant_current_strain_sweep_mode(self._automation_name):
-                return_to_origin = False
-            self._update_recipe_progress(complete=True)
-            self._stop_auto_ramp(log_completion=False, keep_progress=True)
-            self._log("Recovery completed." if is_recovery else "Recipe completed.")
-            if not is_recovery and self._session_active:
-                self._stop_session(reason="recipe_completed", detail="Recipe completed.")
-            if not is_recovery and return_to_origin:
-                self._pending_recovery_return_duration_s = recovery_return_duration_s
-                self._start_recovery_position_origin()
-                return
-            self._restore_main_window_focus_soon()
-            return
-        step_index = self._automation_index
-        step = self._automation_steps[step_index]
-        self._automation_index += 1
-        if step.action == "move":
-            finished = self._handle_move_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "ramp_target":
-            finished = self._handle_target_ramp_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "seek_target":
-            if step.target_value is None or not step.basis:
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            if step.note == "setup_return_zero" and self._automation_step_note != "setup_return_zero":
-                self._setup_return_zero_speed_mm_s_value = None
-            plateau_index = int(step.note) if step.note.isdigit() else None
-            self._set_automation_context(
-                phase="seek",
-                basis=step.basis,
-                target_value=step.target_value,
-                plateau_index=plateau_index,
-                note=step.note,
-            )
-            tolerance = self._automation_tolerance_for_step(step)
-            if tolerance <= 0.0:
-                self._log("Recipe stopped because the target tolerance is zero.")
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            try:
-                reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
-            except Exception as exc:
-                self._log(f"Recipe stopped: {exc}")
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            if reached:
-                current_value = self._current_distribution_value(step.basis)
-                if current_value is None:
-                    current_value = 0.0
-                label = HSW_BASIS_LABELS.get(step.basis, step.basis)
-                self._log(
-                    f"Reached {label} plateau {step.target_value:.4f} "
-                    f"(live {current_value:.4f})."
-                )
-            else:
-                self._automation_index -= 1
-        elif step.action == "set_current":
-            plateau_index = int(step.note) if step.note.isdigit() else None
-            self._set_automation_context(
-                phase="current",
-                basis=step.basis,
-                target_value=step.target_value,
-                plateau_index=plateau_index,
-            )
-            if step.current_mA is None or not self._set_recipe_current_mA(float(step.current_mA), measure_after=False):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-            elif not self._record_scheduled_recipe_point(step):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-        elif step.action == "mark_current_zero":
-            if not self._handle_current_zero_mark_step(step):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-        elif step.action == "sweep_current":
-            finished = self._handle_current_sweep_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "mechanical_scan":
-            finished = self._handle_mechanical_scan_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "starting_length_prompt":
-            self._set_automation_context(phase="starting_length", note=step.note)
-            self._handle_starting_length_prompt_step()
-        elif step.action == "measure_length_prompt":
-            self._set_automation_context(
-                phase="length_prompt",
-                basis=step.basis,
-                target_value=step.target_value,
-                note=step.note,
-            )
-            self._handle_measure_length_prompt_step()
-        elif step.action == "mark_setup_return_zero":
-            self._set_automation_context(
-                phase="return_zero_start",
-                basis=step.basis,
-                target_value=step.target_value,
-                note=step.note,
-            )
-            self._handle_mark_setup_return_zero_step()
-        elif step.action == "apply_length_setup":
-            self._set_automation_context(phase="apply_l0", note=step.note)
-            self._handle_apply_length_setup_step()
-        elif step.action == "start_session":
-            self._begin_recipe_logging()
-            self._close_length_setup_dialog()
-        elif step.action == "calibration_move":
-            finished = self._handle_calibration_move_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "calibration_record":
-            finished = self._handle_timed_record_step(step, step_index, calibration=True)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        elif step.action == "settle":
-            if step.note == "setup_preload" and self._setup_preload_ramp_skipped:
-                self._set_automation_context(
-                    phase="settle",
-                    basis=step.basis,
-                    target_value=step.target_value,
-                    plateau_index=int(step.note) if step.note.isdigit() else None,
-                    note=step.note,
-                )
-                self._record_length_setup_point()
-                self._log("Skipping setup preload settle because the run started above preload.")
-                if self._automation_active:
-                    self._automation_completed_ticks = min(
-                        max(1, self._automation_total_steps or len(self._automation_steps)),
-                        self._automation_completed_ticks + 1,
-                    )
-                self._update_recipe_progress()
-                self._refresh_live_labels()
-                return
-            self._timed_step_elapsed_s(step_index)
-            plateau_index = int(step.note) if step.note.isdigit() else None
-            setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}
-            self._set_automation_context(
-                phase="settle",
-                basis=step.basis,
-                target_value=step.target_value,
-                plateau_index=plateau_index,
-                note=step.note,
-            )
-            settle_target_reached = True
-            setup_points_before = len(self._length_setup_points) if setup_settle_phase else None
-            if (
-                step.basis
-                and step.target_value is not None
-                and not self._is_recovery_mode()
-            ):
-                tolerance = self._automation_tolerance_for_step(step)
-                try:
-                    settle_target_reached = self._seek_distribution_target(step.basis, step.target_value, tolerance)
-                except Exception as exc:
-                    self._log(f"Recipe stopped: {exc}")
-                    self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                    return
-            elif self._is_recovery_mode():
-                self._record_recovery_point()
-            elif not self._record_scheduled_recipe_point(step):
-                self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-                return
-            if setup_settle_phase and setup_points_before == len(self._length_setup_points):
-                self._record_length_setup_point()
-            current_sweep_timed_settle = self._is_current_sweep_mode(self._automation_name)
-            if setup_settle_phase:
-                current_sweep_timed_settle = False
-            if not settle_target_reached and not current_sweep_timed_settle:
-                self._reset_timed_step_state()
-            if (
-                (
-                    (not settle_target_reached and not current_sweep_timed_settle)
-                    or not self._timed_step_finished(step, step_index)
-                )
-                and self._automation_active
-            ):
-                self._automation_index -= 1
-        elif step.action == "record":
-            finished = self._handle_timed_record_step(step, step_index)
-            if not finished and self._automation_active:
-                self._automation_index -= 1
-        if self._automation_active:
-            self._automation_completed_ticks = min(
-                max(1, self._automation_total_steps or len(self._automation_steps)),
-                self._automation_completed_ticks + 1,
-            )
-        self._update_recipe_progress()
-        self._refresh_live_labels()
+        self._automation_controller.tick()
+
+    def _handle_auto_ramp_tick_inner(self) -> None:
+        self._automation_controller.execute_next_tick()
 
     def _handle_status_timer(self) -> None:
         if self._automation_active or self._session_active:
@@ -22067,8 +22744,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._refresh_live_labels)
             return
+        scale_age_s = self._scale_reading_age_s()
+        scale_missing = self._latest_scale_timestamp is None
+        scale_stale = scale_age_s is not None and scale_age_s > STALE_SCALE_AFTER_S
         effective_load = self._current_effective_load_g()
-        if self._latest_scale_timestamp is None:
+        if scale_missing:
             self.label_scale_value.setText("Raw scale: no readings yet | Applied tensile load: -")
         else:
             now_s = time.time()
@@ -22119,9 +22799,11 @@ class MainWindow(QtWidgets.QMainWindow):
         preload_state = self._current_preload_state(effective_load)
         if preload_state == PRELOAD_PENDING:
             strain = None
-            stress = None
         else:
             strain = self._strain_percent_for_position(self._effective_position_mm)
+        if scale_missing or scale_stale:
+            stress = None
+        else:
             stress = stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
         self.label_live_summary.setText(
             f"Live strain: {'-' if strain is None else f'{strain:.4f} %'} | "
@@ -22132,10 +22814,19 @@ class MainWindow(QtWidgets.QMainWindow):
         live_speed_text = self._live_speed_summary_text()
         self.label_live_speed.setText(live_speed_text)
         session_value = "Running" if self._session_active else "Idle"
-        self._set_dashboard_value("load_g", f"{effective_load:.3f} g")
+        if scale_missing:
+            load_text = "-"
+            stress_text = "-"
+        elif scale_stale:
+            load_text = f"stale {scale_age_s or 0.0:.1f} s"
+            stress_text = load_text
+        else:
+            load_text = f"{effective_load:.3f} g"
+            stress_text = "-" if stress is None else f"{stress:.1f} MPa"
+        self._set_dashboard_value("load_g", load_text)
         self._set_dashboard_value(
             "stress_mpa",
-            "-" if stress is None else f"{stress:.1f} MPa",
+            stress_text,
         )
         self._set_dashboard_value(
             "strain_pct",
@@ -22156,9 +22847,14 @@ class MainWindow(QtWidgets.QMainWindow):
             rate_suffix = "" if recent_rate is None else f" | {recent_rate:.1f} Hz"
             scale_value = f"{effective_load:.4f} g | {freshness} {age_s:.1f} s{rate_suffix}"
         self.label_card_scale.setText(scale_value)
-        vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
+        vin_text = self._tic_vin_text()
         if self._tic_motor_power_ok is False:
             motion_state = f"Motor power low/off | VIN {vin_text}"
+        elif self._tic_motor_power_ok is None and self._last_tic_vin_v is not None:
+            motion_state = (
+                f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile"
+                f" | VIN {vin_text}"
+            )
         else:
             motion_state = f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile"
             if self._last_tic_vin_v is not None:
@@ -23345,6 +24041,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail="Application window closed while automation was active.",
         )
         self._stop_tic_dispatcher()
+        self._builder_project_import_timer.stop()
         self._stop_builder_project_import_thread()
         self._cancel_fabrication_folder_load()
         self._disconnect_scale()
