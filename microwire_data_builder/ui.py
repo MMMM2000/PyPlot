@@ -7080,10 +7080,14 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
     )
     if MINI_DMA_STRAIN_COLUMN not in frame.columns:
         frame[MINI_DMA_STRAIN_COLUMN] = [[] for _ in range(len(frame.index))]
+    frame[MINI_DMA_STRAIN_COLUMN] = frame[MINI_DMA_STRAIN_COLUMN].astype(object)
     if MINI_DMA_TRANSITION_COLUMN not in frame.columns:
         frame[MINI_DMA_TRANSITION_COLUMN] = [[] for _ in range(len(frame.index))]
+    frame[MINI_DMA_TRANSITION_COLUMN] = frame[MINI_DMA_TRANSITION_COLUMN].astype(object)
     if MINI_DMA_BREAK_COLUMN not in frame.columns:
-        frame[MINI_DMA_BREAK_COLUMN] = ""
+        frame[MINI_DMA_BREAK_COLUMN] = pd.Series([""] * len(frame.index), dtype=object)
+    else:
+        frame[MINI_DMA_BREAK_COLUMN] = frame[MINI_DMA_BREAK_COLUMN].astype(object)
     if not records or frame.empty:
         return frame
 
@@ -17895,6 +17899,11 @@ class MiniDmaSection(MiniDatabaseSection):
     section_key = "mini_dma"
     section_title = "Mini DMA"
     supported_suffixes = (".csv",)
+    excluded_refresh_dirs = {
+        "archive",
+        "automation_history",
+        "automated_control_tests",
+    }
 
     def __init__(
         self,
@@ -17916,6 +17925,30 @@ class MiniDmaSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
+    def _collect_candidates(self) -> List[Path]:
+        candidates: Dict[str, Path] = {}
+        for source in self.data.sources:
+            root = Path(source).expanduser()
+            if not root.exists():
+                continue
+            if root.is_file():
+                paths: Iterable[Path] = (root,)
+            else:
+                paths = root.rglob(mini_dma_core.MEASUREMENT_FILE if mini_dma_core else "measurement.csv")
+            for path in paths:
+                if not path.is_file():
+                    continue
+                if path.name.casefold() != "measurement.csv":
+                    continue
+                if any(part.casefold() in self.excluded_refresh_dirs for part in path.parts):
+                    continue
+                try:
+                    resolved = str(path.resolve())
+                except Exception:
+                    resolved = str(path)
+                candidates.setdefault(resolved, path)
+        return sorted(candidates.values())
+
     def process(
         self,
         paths: List[Path],
@@ -17929,12 +17962,13 @@ class MiniDmaSection(MiniDatabaseSection):
         for idx, path in enumerate(paths, start=1):
             self._check_cancelled()
             path = Path(path)
+            progress_name = path.parent.name if path.name.casefold() == "measurement.csv" else path.name
             try:
                 measurement_path = mini_dma_core.resolve_measurement_path(path)
             except Exception:
                 if progress is not None:
                     try:
-                        progress(idx, total, f"Skipped {path.name}")
+                        progress(idx, total, f"Skipped {progress_name}")
                     except Exception:
                         pass
                 continue
@@ -17944,7 +17978,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 self.logger.exception("Failed to parse Mini DMA run %s", path)
                 if progress is not None:
                     try:
-                        progress(idx, total, f"Skipped {path.name}")
+                        progress(idx, total, f"Skipped {progress_name}")
                     except Exception:
                         pass
                 continue

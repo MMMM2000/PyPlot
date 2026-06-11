@@ -4930,6 +4930,17 @@ def _word_run(text: str, *, bold: bool = False, size: int | None = None) -> str:
     return f"<w:r>{prop_xml}<w:t>{_word_xml_escape(text)}</w:t></w:r>"
 
 
+def _word_field_run(field_name: str) -> str:
+    safe_field = re.sub(r"[^A-Z0-9_ ]", "", str(field_name or "").upper()).strip()
+    return (
+        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r>"
+        f"<w:r><w:instrText xml:space=\"preserve\"> {safe_field} </w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>"
+        "<w:r><w:t>1</w:t></w:r>"
+        "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+    )
+
+
 def _word_paragraph(
     text: str = "",
     *,
@@ -4953,6 +4964,33 @@ def _word_paragraph(
 
 def _word_page_break() -> str:
     return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+
+
+def _word_header_xml(title: str) -> str:
+    paragraph = (
+        '<w:p><w:pPr><w:pStyle w:val="Header"/>'
+        '<w:jc w:val="right"/></w:pPr>'
+        f'{_word_run(title, size=18)}</w:p>'
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"{paragraph}</w:hdr>"
+    )
+
+
+def _word_footer_xml() -> str:
+    paragraph = (
+        '<w:p><w:pPr><w:pStyle w:val="Footer"/>'
+        '<w:jc w:val="center"/></w:pPr>'
+        f'{_word_run("Page ", size=18)}{_word_field_run("PAGE")}'
+        f'{_word_run(" of ", size=18)}{_word_field_run("NUMPAGES")}</w:p>'
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"{paragraph}</w:ftr>"
+    )
 
 
 def _word_table(rows: Sequence[Tuple[str, str]]) -> str:
@@ -5311,19 +5349,22 @@ def _word_document_xml(
     origin_xml, origin_insertions, _ = _word_graph_sections(row, origin_artifacts, bookmark_id)
     body.append(origin_xml)
     body.append(
-        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:sectPr><w:headerReference w:type="default" r:id="rId3"/>'
+        '<w:footerReference w:type="default" r:id="rId4"/>'
+        '<w:pgSz w:w="11906" w:h="16838"/>'
         '<w:pgMar w:top="900" w:right="900" w:bottom="900" w:left="900" '
         'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
     )
     xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         f"<w:body>{''.join(body)}</w:body></w:document>"
     )
     return xml, origin_insertions, picture_insertions
 
 
-def _write_word_docx(path: Path, document_xml: str) -> None:
+def _write_word_docx(path: Path, document_xml: str, *, sample_title: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -5336,6 +5377,10 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
         '<Override PartName="/word/settings.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
+        '<Override PartName="/word/header1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+        '<Override PartName="/word/footer1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>'
         '<Override PartName="/docProps/core.xml" '
         'ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
         '<Override PartName="/docProps/app.xml" '
@@ -5365,6 +5410,12 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         '<Relationship Id="rId2" '
         'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" '
         'Target="settings.xml"/>'
+        '<Relationship Id="rId3" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" '
+        'Target="header1.xml"/>'
+        '<Relationship Id="rId4" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" '
+        'Target="footer1.xml"/>'
         "</Relationships>"
     )
     styles = (
@@ -5372,6 +5423,14 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
         '<w:name w:val="Normal"/><w:qFormat/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Header">'
+        '<w:name w:val="header"/><w:basedOn w:val="Normal"/>'
+        '<w:pPr><w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs>'
+        '<w:spacing w:after="0"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Footer">'
+        '<w:name w:val="footer"/><w:basedOn w:val="Normal"/>'
+        '<w:pPr><w:tabs><w:tab w:val="center" w:pos="4680"/></w:tabs>'
+        '<w:spacing w:after="0"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Title">'
         '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
         '<w:qFormat/><w:pPr><w:spacing w:after="220"/></w:pPr>'
@@ -5420,6 +5479,8 @@ def _write_word_docx(path: Path, document_xml: str) -> None:
         archive.writestr("word/_rels/document.xml.rels", document_rels)
         archive.writestr("word/styles.xml", styles)
         archive.writestr("word/settings.xml", settings)
+        archive.writestr("word/header1.xml", _word_header_xml(sample_title))
+        archive.writestr("word/footer1.xml", _word_footer_xml())
         archive.writestr("docProps/core.xml", core_props)
         archive.writestr("docProps/app.xml", app_props)
 
@@ -5896,7 +5957,11 @@ def _export_word_reports(
             used_live_origin_clipboard = used_live_origin_clipboard or any(
                 insertion.clipboard_fallback for insertion in origin_insertions
             )
-            _write_word_docx(report_path, document_xml)
+            _write_word_docx(
+                report_path,
+                document_xml,
+                sample_title=_word_sample_title(row, index),
+            )
             try:
                 _embed_pictures_with_word(report_path, picture_insertions, log)
             except Exception:

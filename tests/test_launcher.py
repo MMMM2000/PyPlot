@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import pickle
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -506,6 +509,160 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["Mini DMA graphs"] == mini_dma_path.parent.name
 
 
+def test_microwire_word_report_project_replaces_stale_mini_dma_sources_with_active_runs(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    active_a = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 heat shield iso-stress_run03"
+    active_b = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 baseline-50mpa-01"
+    archived = data_root / "mini DMA" / "archive" / "Ni50Fe27Ga23 12_2 old_run01"
+    for path in (active_a, active_b, archived):
+        path.mkdir(parents=True)
+        (path / "measurement.csv").write_text(
+            "\n".join(
+                [
+                    "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,resistance_ohm,current_measured_mA",
+                    "0.1,current,50,1,0.0,100.0,1.0",
+                    "0.2,current,50,1,0.1,101.0,2.0",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "mini_dma": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Mini DMA graphs": ["stale archived run"],
+                                "_sources": [str(archived)],
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, _origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert set(row["_word_mini_dma_sources"]) == {str(active_a), str(active_b)}
+    mini_dma_graphs = row["Mini DMA graphs"]
+    assert set(mini_dma_graphs) == {active_a.name, active_b.name}
+    assert archived.name not in mini_dma_graphs
+    assert "stale archived run" not in mini_dma_graphs
+
+
+def test_microwire_word_report_project_uses_shape_memory_payload_sources(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    manual_root = data_root / "manual stress-strain"
+    first_path = manual_root / "Ni50Fe27Ga23 12_2 0mA.txt"
+    second_path = manual_root / "Ni50Fe27Ga23 12_2 50mA fracture.txt"
+    manual_root.mkdir(parents=True)
+    for path in (first_path, second_path):
+        path.write_text("0.1 0.01\n0.2 0.02\n", encoding="utf-8")
+    records = [
+        SimpleNamespace(
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            sample="Ni50Fe27Ga23 12-2",
+            label="0mA - Ni50Fe27Ga23 12_2 0mA",
+            path=first_path,
+        ),
+        SimpleNamespace(
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            sample="Ni50Fe27Ga23 12-2",
+            label="50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+            path=second_path,
+        ),
+    ]
+    encoded_records = {
+        "encoding": "pickle-base64",
+        "value": base64.b64encode(pickle.dumps(records)).decode("ascii"),
+    }
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "shape_memory_stress_strain": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Manual stress/strain graphs": "0mA - Ni50Fe27Ga23 12_2 0mA",
+                                "_sources": [str(first_path)],
+                            }
+                        ],
+                        "payloads": {
+                            "shape_memory_stress_strain_records": encoded_records,
+                        },
+                    },
+                    "assemble": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Manual stress/strain graphs": [
+                                    "0mA - Ni50Fe27Ga23 12_2 0mA",
+                                    "50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+                                ],
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert origin_artifacts == {}
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["Manual stress/strain graphs"] == [
+        "0mA - Ni50Fe27Ga23 12_2 0mA",
+        "50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+    ]
+    assert row["_word_shape_memory_stress_strain_sources"] == [
+        str(first_path),
+        str(second_path),
+    ]
+
+
 def test_microwire_word_report_project_exports_rvst_through_pyplot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -929,6 +1086,83 @@ def test_builder_automation_recipe_updates_annealing_copy(
     assert update_command["updated_count"] == 1
     assert update_command["skipped_count"] == 1
     assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+
+
+def test_builder_automation_recipe_updates_microscope_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    core_image = tmp_path / "Ni50Fe27Ga23 12_2 core.jpg"
+    glass_image = tmp_path / "Ni50Fe27Ga23 12_2 glass.jpg"
+    core_image.write_bytes(b"core image")
+    glass_image.write_bytes(b"glass image")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "microscope",
+                        "paths": [str(core_image), str(glass_image)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["microscope"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["microscope"]
+    assert section_payload["payloads"]["microscope_index"]["encoding"] == "pickle-base64"
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row["_core_image"] == str(core_image)
+    assert row["_glass_image"] == str(glass_image)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "microscope"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 2
     assemble_rows = output_payload["sections"]["assemble"]["rows"]
     assert assemble_rows
     assemble_row = assemble_rows[0]
