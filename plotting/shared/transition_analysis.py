@@ -41,6 +41,8 @@ def fit_tangent_transition(
     max_points: int = 240,
     min_slope_gain_ratio: float = 1.5,
     min_transition_width_fraction: float = 0.03,
+    max_intersection_boundary_fraction: float = 0.08,
+    transition_slope_sign: int | None = None,
 ) -> TangentTransitionFit | None:
     """Fit before/transition/after tangents and return their intersections."""
 
@@ -57,10 +59,16 @@ def fit_tangent_transition(
     n = len(x)
     for left_end in range(min_points, n - (min_points * 2) + 1):
         for right_start in range(left_end + min_points, n - min_points + 1):
-            before = _fit_segment(x[:left_end], y[:left_end])
             transition = _fit_segment(x[left_end:right_start], y[left_end:right_start])
+            if transition is None:
+                continue
+            if transition_slope_sign is not None:
+                expected_sign = 1 if transition_slope_sign > 0 else -1
+                if math.copysign(1.0, transition.slope) != expected_sign:
+                    continue
+            before = _fit_segment(x[:left_end], y[:left_end])
             after = _fit_segment(x[right_start:], y[right_start:])
-            if before is None or transition is None or after is None:
+            if before is None or after is None:
                 continue
             baseline_slope = max(abs(before.slope), abs(after.slope))
             slope_gain = abs(transition.slope) - baseline_slope
@@ -95,10 +103,25 @@ def fit_tangent_transition(
     finish_x = min(max(finish_x, lower), upper)
     if finish_x < start_x:
         start_x, finish_x = finish_x, start_x
-    width = finish_x - start_x
     scan_width = upper - lower
     if scan_width <= 0.0:
         return None
+    boundary_slack = scan_width * max(0.0, float(max_intersection_boundary_fraction))
+    if not _intersection_near_boundary(
+        start_x,
+        before.end_x,
+        transition.start_x,
+        boundary_slack,
+    ):
+        return None
+    if not _intersection_near_boundary(
+        finish_x,
+        transition.end_x,
+        after.start_x,
+        boundary_slack,
+    ):
+        return None
+    width = finish_x - start_x
     if width < scan_width * min_transition_width_fraction:
         return None
     return TangentTransitionFit(
@@ -219,6 +242,17 @@ def _line_intersection_x(left: LinearSegmentFit, right: LinearSegmentFit) -> flo
         return None
     value = (right.intercept - left.intercept) / denominator
     return float(value) if math.isfinite(float(value)) else None
+
+
+def _intersection_near_boundary(
+    intersection_x: float,
+    left_end_x: float,
+    right_start_x: float,
+    slack: float,
+) -> bool:
+    lower = min(float(left_end_x), float(right_start_x)) - slack
+    upper = max(float(left_end_x), float(right_start_x)) + slack
+    return lower <= float(intersection_x) <= upper
 
 
 def _combined_rmse(

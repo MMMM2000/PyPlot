@@ -187,6 +187,7 @@ ESTIMATED_TRANSITION_COLUMN = "Tt est (°C)"
 GLASS_PULL_COLUMN = "Glass pull-off"
 VIDEO_END_LENGTH_COLUMN = "Video end length (m)"
 VIDEO_MW_LENGTH_COLUMN = "Video wire range (m)"
+ANNEALING_TRANSITION_COLUMN = "Current annealing transition currents"
 
 OUTPUT_COLUMNS = [
     "Composition",
@@ -222,6 +223,7 @@ OUTPUT_COLUMNS = [
     "Data source",
     "File 1000 mA",
     "Other annealing files",
+    ANNEALING_TRANSITION_COLUMN,
     "Figure — 1000 mA",
     "Figure — other annealing",
     "Figure — 1000 mA (Origin)",
@@ -3494,6 +3496,7 @@ class MeasurementRecord:
     dataframe: pd.DataFrame
     sanity_ok: bool
     sanity_error: Optional[float]
+    transition_summary: Tuple[str, ...] = ()
 
 
 def _hash_file(path: Path) -> str:
@@ -3587,6 +3590,19 @@ def _load_annealing(
         df.loc[:, "R_ohm"] = trimmed_resistances
         df = df.reset_index(drop=True)
     return df
+
+
+def _annealing_transition_summary(df: pd.DataFrame, *, label: str | None = None) -> Tuple[str, ...]:
+    try:
+        from plotting.plugins.current_annealing import core as annealing_core
+
+        summary = annealing_core.summarize_transition_currents(df)
+        text = annealing_core.format_transition_summary(summary, label=label)
+    except Exception:
+        return ()
+    if not text:
+        return ()
+    return (text,)
 
 
 def _series_to_mA(series: pd.Series) -> pd.Series:
@@ -4767,6 +4783,7 @@ _WORD_FUNCTIONAL_COLUMNS: Tuple[str, ...] = (
     "Ms (mA)",
     *CURRENT_DENSITY_EXTRA_COLUMNS,
     *TRANSITION_TEMP_COLUMNS,
+    ANNEALING_TRANSITION_COLUMN,
     *STRAIN_EXTRA_COLUMNS,
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
@@ -7120,6 +7137,7 @@ def build_database(
                 dataframe=df,
                 sanity_ok=ok,
                 sanity_error=mean_error,
+                transition_summary=_annealing_transition_summary(df, label=metadata.file_name),
             )
             grouped.setdefault(key, []).append(record)
             stats.parsed += 1
@@ -7659,6 +7677,21 @@ def build_database(
                 for record in other_records
                 if getattr(record.metadata, "file_name", None)
             ]
+        transition_lines: List[str] = []
+        for record in [high_record, *other_records]:
+            if record is None:
+                continue
+            lines = getattr(record, "transition_summary", ()) or ()
+            if not lines:
+                lines = _annealing_transition_summary(
+                    record.dataframe,
+                    label=getattr(record.metadata, "file_name", None),
+                )
+            for line in lines:
+                if line and line not in transition_lines:
+                    transition_lines.append(str(line))
+        if transition_lines:
+            row[ANNEALING_TRANSITION_COLUMN] = transition_lines
         if wants_matplotlib:
             if high_record:
                 high_cache_key = _measurement_cache_key(high_record)

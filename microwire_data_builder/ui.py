@@ -42,7 +42,10 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     openpyxl = None  # type: ignore[assignment]
 
-from plotting.plugins.current_annealing.core import plot_one as plot_annealing_curve
+from plotting.plugins.current_annealing.core import (
+    plot_one as plot_annealing_curve,
+    summarize_transition_currents as summarize_annealing_transition_currents,
+)
 from plotting.pyplot.window import _DockSwitcherWidget
 from plotting.shared.utils import (
     ensure_app_theme,
@@ -80,6 +83,7 @@ from .core import (
     OUTPUT_COLUMNS,
     FIGURE_COLUMNS,
     ORIGIN_FIGURE_COLUMNS,
+    ANNEALING_TRANSITION_COLUMN,
     VSM_HYSTERESIS_COLUMN,
     VSM_TEMPERATURE_SCAN_COLUMN,
     DMA_ISOSTRESS_COLUMN,
@@ -107,6 +111,7 @@ from .core import (
     _microscope_is_brittle,
     _draw_key,
     _load_annealing,
+    _annealing_transition_summary,
     _resistance_sanity_check,
     _group_microscope_measurements,
     _collect_video_metrics,
@@ -4648,6 +4653,7 @@ def _annealing_records_to_frame(
         "Microwire",
         ANNEALING_HIGH_GRAPH_COLUMN,
         ANNEALING_OTHER_GRAPH_COLUMN,
+        ANNEALING_TRANSITION_COLUMN,
         "_group_key",
         "_sources",
     ]
@@ -4706,12 +4712,26 @@ def _annealing_records_to_frame(
                 source_paths.append(str(Path(path)))
         if source_paths:
             source_paths = list(dict.fromkeys(source_paths))
+        transition_lines: List[str] = []
+        for entry in [high_record, *other_records]:
+            if entry is None:
+                continue
+            lines = getattr(entry, "transition_summary", ()) or ()
+            if not lines:
+                lines = _annealing_transition_summary(
+                    entry.dataframe,
+                    label=getattr(entry.metadata, "file_name", None),
+                )
+            for line in lines:
+                if line and line not in transition_lines:
+                    transition_lines.append(str(line))
         rows.append(
             {
                 "Composition": composition,
                 "Microwire": microwire,
                 ANNEALING_HIGH_GRAPH_COLUMN: None,
                 ANNEALING_OTHER_GRAPH_COLUMN: None,
+                ANNEALING_TRANSITION_COLUMN: transition_lines or None,
                 "_group_key": group_key,
                 "_sources": source_paths,
             }
@@ -9912,6 +9932,7 @@ class AnnealingSection(MiniDatabaseSection):
                 dataframe=df,
                 sanity_ok=ok,
                 sanity_error=mean_error,
+                transition_summary=_annealing_transition_summary(df, label=path.name),
             )
             records.append(record)
             try:
@@ -13740,7 +13761,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         return result
 
     def _collect_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
-        result: Dict[MicrowireKey, Dict[str, float]] = {}
+        result = self._collect_auto_annealing_phase_points()
         snapshot_provider = getattr(self._annealing_section, "phase_points_snapshot", None)
         if callable(snapshot_provider):
             raw = snapshot_provider()
@@ -13778,7 +13799,60 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
                     cleaned["Ms1"] = float(numeric)
             if cleaned:
-                result[(composition, draw, piece, suffix)] = cleaned
+                key_tuple = (composition, draw, piece, suffix)
+                combined = dict(result.get(key_tuple, {}))
+                combined.update(cleaned)
+                result[key_tuple] = combined
+        return result
+
+    def _collect_auto_annealing_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
+        result: Dict[MicrowireKey, Dict[str, float]] = {}
+        groups = getattr(self._annealing_section, "_record_groups", {})
+        if not isinstance(groups, dict):
+            return result
+        for key_text, records in groups.items():
+            if not isinstance(records, list):
+                continue
+            key = _microwire_key_from_string(str(key_text))
+            if key is None:
+                continue
+            candidates: List[Tuple[Tuple[int, float, str], Dict[str, float]]] = []
+            for record in records:
+                dataframe = getattr(record, "dataframe", None)
+                if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+                    continue
+                try:
+                    summary = summarize_annealing_transition_currents(dataframe)
+                except Exception:
+                    continue
+                values = {
+                    "As1": summary.as_current_mA,
+                    "Af1": summary.af_current_mA,
+                    "Ms1": summary.ms_current_mA,
+                    "Mf1": summary.mf_current_mA,
+                }
+                cleaned: Dict[str, float] = {}
+                for label, value in values.items():
+                    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                        cleaned[label] = float(value)
+                if set(cleaned) != {"As1", "Af1", "Ms1", "Mf1"}:
+                    continue
+                metadata = getattr(record, "metadata", None)
+                setpoint = getattr(metadata, "setpoint_mA", None)
+                try:
+                    setpoint_value = float(setpoint)
+                except (TypeError, ValueError):
+                    setpoint_value = float("inf")
+                high_anchor = 1 if math.isfinite(setpoint_value) and setpoint_value >= 900.0 else 0
+                filename = str(getattr(metadata, "file_name", "") or getattr(record, "path", ""))
+                candidates.append(((high_anchor, setpoint_value, filename), cleaned))
+            if not candidates:
+                continue
+            _sort_key, selected = min(candidates, key=lambda item: item[0])
+            selected = dict(selected)
+            selected["As"] = selected["As1"]
+            selected["Ms"] = selected["Ms1"]
+            result[key] = selected
         return result
 
     @staticmethod
@@ -26641,6 +26715,7 @@ class AssemblySection(QtWidgets.QWidget):
             [
                 "File 1000 mA",
                 "Other annealing files",
+                ANNEALING_TRANSITION_COLUMN,
                 *FIGURE_COLUMNS,
                 *ORIGIN_FIGURE_COLUMNS,
             ],

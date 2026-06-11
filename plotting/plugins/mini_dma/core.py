@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Collection, Iterable, Sequence
 
 import pandas as pd
 from matplotlib.figure import Figure
@@ -14,6 +14,7 @@ from plotting.shared.transition_analysis import TangentTransitionFit, fit_tangen
 
 MEASUREMENT_FILE = "measurement.csv"
 PLOT_PHASES = {"current"}
+SUMMARY_PHASES = {"current", "current_hold"}
 REQUIRED_COLUMNS = {
     "elapsed_s",
     "automation_phase",
@@ -134,8 +135,13 @@ def load_run(path: Path) -> MiniDmaRun:
     )
 
 
-def current_sweep_groups(frame: pd.DataFrame) -> list[tuple[float, pd.DataFrame]]:
-    filtered = frame[frame["automation_phase"].isin(PLOT_PHASES)].copy()
+def current_sweep_groups(
+    frame: pd.DataFrame,
+    *,
+    phases: Collection[str] | None = None,
+) -> list[tuple[float, pd.DataFrame]]:
+    phase_filter = PLOT_PHASES if phases is None else set(phases)
+    filtered = frame[frame["automation_phase"].isin(phase_filter)].copy()
     if filtered.empty:
         filtered = frame.copy()
     filtered = filtered.dropna(
@@ -367,7 +373,7 @@ def summarize_current_sweep(
     voltage_limit_v: float | None = None,
 ) -> CurrentSweepSummary:
     target_summaries: list[CurrentSweepTargetSummary] = []
-    for target, group in current_sweep_groups(run.frame):
+    for target, group in current_sweep_groups(run.frame, phases=SUMMARY_PHASES):
         strain = _strain_from_trace_minimum_length(run, group)
         current = pd.to_numeric(group["current_mA"], errors="coerce")
         max_current_mA: float | None = None

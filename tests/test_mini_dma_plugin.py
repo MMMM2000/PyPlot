@@ -86,6 +86,44 @@ def test_current_sweep_groups_preserve_return_leg_duplicate_states() -> None:
     assert group["current_mA"].tolist() == [10.0, 20.0, 10.0]
 
 
+def test_current_sweep_summary_groups_include_current_hold_rows() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0, 3.0],
+            "automation_phase": ["current", "current_hold", "current_hold", "current"],
+            "automation_target_value": [50.0] * 4,
+            "plateau_index": [1] * 4,
+            "strain_pct": [0.0, 0.4, 1.2, 0.1],
+            "resistance_ohm": [100.0] * 4,
+            "current_mA": [30.0, 30.0, 30.0, 31.0],
+            "position_mm": [0.0, 0.04, 0.12, 0.01],
+        }
+    )
+
+    plot_groups = core.current_sweep_groups(frame)
+    summary_groups = core.current_sweep_groups(frame, phases=core.SUMMARY_PHASES)
+
+    assert len(plot_groups) == 1
+    assert plot_groups[0][1]["automation_phase"].tolist() == ["current", "current"]
+    assert len(summary_groups) == 1
+    assert summary_groups[0][1]["automation_phase"].tolist() == [
+        "current",
+        "current_hold",
+        "current_hold",
+        "current",
+    ]
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+        initial_length_mm=10.0,
+    )
+    summary = core.summarize_current_sweep(run)
+
+    assert summary.targets[0].max_strain_pct == pytest.approx(1.2)
+
+
 def test_make_figures_create_one_line_per_target() -> None:
     run = core.load_run(SAMPLE_RUN)
 

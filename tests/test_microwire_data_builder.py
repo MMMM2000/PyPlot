@@ -52,6 +52,7 @@ MINI_DMA_COLUMN = core.MINI_DMA_COLUMN
 MINI_DMA_STRAIN_COLUMN = core.MINI_DMA_STRAIN_COLUMN
 MINI_DMA_TRANSITION_COLUMN = core.MINI_DMA_TRANSITION_COLUMN
 MINI_DMA_BREAK_COLUMN = core.MINI_DMA_BREAK_COLUMN
+ANNEALING_TRANSITION_COLUMN = core.ANNEALING_TRANSITION_COLUMN
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = core.SHAPE_MEMORY_DISPLACEMENT_COLUMN
 SHAPE_MEMORY_LOAD_COLUMN = core.SHAPE_MEMORY_LOAD_COLUMN
 SHAPE_MEMORY_STRAIN_COLUMN = core.SHAPE_MEMORY_STRAIN_COLUMN
@@ -4480,6 +4481,7 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
         *,
         setpoint: int,
         alt_variant: bool,
+        transition_summary: tuple[str, ...] = (),
     ) -> MeasurementRecord:
         return MeasurementRecord(
             path=path,
@@ -4499,6 +4501,7 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
             ),
             sanity_ok=True,
             sanity_error=0.0,
+            transition_summary=transition_summary,
         )
 
     result = build_database(
@@ -4510,9 +4513,24 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
             export_formats=(),
         ),
         measurement_records=[
-            measurement(base_path, setpoint=1000, alt_variant=False),
-            measurement(variant_path, setpoint=1000, alt_variant=True),
-            measurement(follow_up_path, setpoint=140, alt_variant=False),
+            measurement(
+                base_path,
+                setpoint=1000,
+                alt_variant=False,
+                transition_summary=("1000mA: As 35 mA, Af 50 mA, Ms 55 mA, Mf 30 mA",),
+            ),
+            measurement(
+                variant_path,
+                setpoint=1000,
+                alt_variant=True,
+                transition_summary=("1000mA: As 35 mA, Af 50 mA, Ms 55 mA, Mf 30 mA",),
+            ),
+            measurement(
+                follow_up_path,
+                setpoint=140,
+                alt_variant=False,
+                transition_summary=("140mA: As 40 mA, Af 52 mA, Ms 58 mA, Mf 33 mA",),
+            ),
         ],
         fabrication_index=FabricationIndex(),
         skip_exports=True,
@@ -4521,6 +4539,10 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
     row = result.dataframe.iloc[0]
     assert row["File 1000 mA"] == base_path.name
     assert row["Other annealing files"] == [follow_up_path.name, variant_path.name]
+    assert row[ANNEALING_TRANSITION_COLUMN] == [
+        "1000mA: As 35 mA, Af 50 mA, Ms 55 mA, Mf 30 mA",
+        "140mA: As 40 mA, Af 52 mA, Ms 58 mA, Mf 33 mA",
+    ]
 
 
 def test_build_database_merges_current_density_and_transition_entries(tmp_path: Path) -> None:
@@ -5130,6 +5152,72 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         window._dirty = False
         window.hide()
         window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_current_density_collects_auto_annealing_transition_points() -> None:
+    _ensure_qapp()
+    annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    microscope_section = MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        up_current = np.linspace(1.0, 100.0, 160)
+        down_current = np.linspace(100.0, 1.0, 160)
+        up_drop = np.clip(1.0 - np.abs(up_current - 42.5) / 7.5, 0.0, 1.0)
+        down_rise = np.clip((7.0 - down_current) / 3.0, 0.0, 1.0)
+        frame = pd.DataFrame(
+            {
+                "I_mA": np.r_[up_current, down_current],
+                "R_Ohm": np.r_[
+                    100.0 + (0.12 * up_current) - (12.0 * up_drop),
+                    80.0 + (10.0 * down_rise),
+                ],
+            }
+        )
+        metadata = MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=10,
+            piece_y=4,
+            setpoint_mA=80,
+            alt_variant=False,
+            measurement_id="auto-transition",
+            file_name="Ni50Fe27Ga23 10_4 s2a 80mA.txt",
+            relpath="Ni50Fe27Ga23 10_4 s2a 80mA.txt",
+            timestamp_mtime_utc="2026-06-08T00:00:00+00:00",
+        )
+        record = MeasurementRecord(
+            path=Path(metadata.file_name),
+            metadata=metadata,
+            dataframe=frame,
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+        key_text = "Ni50Fe27Ga23|10|4"
+        annealing_section._record_groups = {key_text: [record]}  # noqa: SLF001
+
+        auto_points = section._collect_phase_points()  # noqa: SLF001
+
+        key = ("Ni50Fe27Ga23", 10, 4, None)
+        assert auto_points[key]["As1"] == pytest.approx(35.0, abs=1.0)
+        assert auto_points[key]["Af1"] == pytest.approx(42.5, abs=1.0)
+        assert auto_points[key]["Ms1"] == pytest.approx(7.2, abs=1.0)
+        assert auto_points[key]["Mf1"] == pytest.approx(3.0, abs=1.0)
+
+        annealing_section._phase_points = {key_text: {"As1": 11.0, "Ms1": 5.0}}  # noqa: SLF001
+        merged_points = section._collect_phase_points()  # noqa: SLF001
+        assert merged_points[key]["As1"] == pytest.approx(11.0)
+        assert merged_points[key]["Ms1"] == pytest.approx(5.0)
+        assert merged_points[key]["Af1"] == pytest.approx(auto_points[key]["Af1"])
+        assert merged_points[key]["Mf1"] == pytest.approx(auto_points[key]["Mf1"])
+    finally:
+        for widget in (section, annealing_section, microscope_section):
+            widget.hide()
+            widget.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 

@@ -2451,6 +2451,20 @@ def _load_project_word_report_frame(
     for section_name, section in sections.items():
         if section_name in {"compare"}:
             continue
+        if section_name == "mini_dma" and isinstance(section, Mapping):
+            for item in _word_project_value_items(section.get("sources")):
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                path = Path(text)
+                try:
+                    if not path.exists():
+                        continue
+                except OSError:
+                    continue
+                search_root = path.parent if path.name.casefold() in {"mini dma", "mini_dma"} else path
+                if search_root not in rvt_search_roots:
+                    rvt_search_roots.append(search_root)
         for source_row in _project_section_rows(section):
             if section_name == "shape_memory_stress_strain":
                 source_row = _word_project_enrich_shape_memory_row(source_row)
@@ -2578,6 +2592,9 @@ def _load_project_word_report_frame(
             if not mini_root.exists():
                 continue
             for path in mini_root.rglob("measurement.csv"):
+                excluded_parts = {"archive", "automated", "automated_control_tests", "automation_history"}
+                if any(part.casefold() in excluded_parts for part in path.relative_to(mini_root).parts[:-1]):
+                    continue
                 try:
                     resolved = path.resolve()
                 except OSError:
