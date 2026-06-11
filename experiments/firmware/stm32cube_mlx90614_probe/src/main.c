@@ -459,41 +459,7 @@ static void report_config(void)
 
 static void write_fast_filter_config(void)
 {
-    uint16_t config1 = 0;
-    HAL_StatusTypeDef status = mlx_read_eeprom(MLX90614_EEPROM_CONFIG1, &config1);
-    if (status != HAL_OK) {
-        uart_write_text("MLX90614_FAST_CONFIG_ERROR,read\r\n");
-        return;
-    }
-
-    const uint16_t fast_config = (uint16_t)(
-        (config1 & (uint16_t)~(MLX_CONFIG1_IIR_MASK | MLX_CONFIG1_FIR_MASK)) |
-        MLX_CONFIG1_FAST_FILTER);
-    char line[120];
-    if (fast_config == config1) {
-        (void)snprintf(line, sizeof(line), "MLX90614_FAST_CONFIG_ALREADY,0x%04X\r\n", (unsigned int)config1);
-        uart_write_text(line);
-        return;
-    }
-
-    status = mlx_write_eeprom(MLX90614_EEPROM_CONFIG1, fast_config);
-    if (status == HAL_OK) {
-        (void)snprintf(
-            line,
-            sizeof(line),
-            "MLX90614_FAST_CONFIG_WRITTEN,old=0x%04X,new=0x%04X,power_cycle_required\r\n",
-            (unsigned int)config1,
-            (unsigned int)fast_config);
-    } else {
-        (void)snprintf(
-            line,
-            sizeof(line),
-            "MLX90614_FAST_CONFIG_ERROR,write,old=0x%04X,new=0x%04X,status=%d\r\n",
-            (unsigned int)config1,
-            (unsigned int)fast_config,
-            (int)status);
-    }
-    uart_write_text(line);
+    uart_write_text("MLX90614_FAST_CONFIG_DISABLED,restore_with_R_if_needed\r\n");
 }
 
 static void restore_observed_dci_config(void)
