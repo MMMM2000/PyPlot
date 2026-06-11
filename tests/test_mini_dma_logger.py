@@ -1922,6 +1922,29 @@ def test_parse_mlx90614_probe_line_returns_temperature_sample() -> None:
     assert sample.flags == 2
 
 
+def test_parse_mlx90640_text_frame_returns_max_temperature_sample() -> None:
+    lines = ["FRAME_BEGIN,1234,22.50"]
+    for row in range(24):
+        values = [20.0 + row * 0.1 + col * 0.01 for col in range(32)]
+        lines.append("ROW," + str(row) + "," + ",".join(f"{value:.2f}" for value in values))
+    lines.append("FRAME_END")
+    lines[6] = lines[6].replace("20.81", "45.50", 1)
+
+    sample = mini_dma_mod._parse_mlx90640_text_frame(lines, timestamp_s=100.5)
+
+    assert sample is not None
+    assert sample.sensor_type == "mlx90640"
+    assert sample.device_elapsed_ms == 1234
+    assert sample.ambient_c == pytest.approx(22.5)
+    assert sample.object_c_apparent == pytest.approx(45.5)
+    assert sample.frame_max_c == pytest.approx(45.5)
+    assert sample.frame_min_c == pytest.approx(20.0)
+    assert sample.frame_width == 32
+    assert sample.frame_height == 24
+    assert sample.frame_hotspot_row == 5
+    assert sample.frame_hotspot_col == 31
+
+
 def test_mini_dma_plot_channels_include_ir_temperature(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
@@ -1974,12 +1997,21 @@ def test_session_logs_ir_temperature_sidecar_and_measurement_columns(tmp_path: P
             {
                 "elapsed_s": "0.250000",
                 "timestamp_utc": ir_rows[0]["timestamp_utc"],
+                "sensor_type": "mlx90614",
                 "host_time_s": f"{sample.timestamp_s:.6f}",
                 "device_elapsed_ms": "900",
                 "sequence": "7",
                 "ambient_c": "23.100000",
                 "object_c_apparent": "41.500000",
                 "delta_c": "0.000000",
+                "frame_min_c": "",
+                "frame_mean_c": "",
+                "frame_max_c": "",
+                "frame_center_c": "",
+                "frame_hotspot_row": "",
+                "frame_hotspot_col": "",
+                "frame_width": "",
+                "frame_height": "",
                 "raw_ambient": "14813",
                 "raw_object": "15733",
                 "read_us": "2370",
@@ -1991,6 +2023,58 @@ def test_session_logs_ir_temperature_sidecar_and_measurement_columns(tmp_path: P
         assert metadata["logging"]["ir_temperature_sidecar"] == "ir_temperature.csv"
         assert metadata["logging"]["ir_temperature_sample_count"] == 1
         assert metadata["ir_thermometer"]["baseline_object_c_apparent"] == pytest.approx(41.5)
+    finally:
+        _close_test_window(window)
+
+
+def test_session_logs_mlx90640_frame_summary_as_ir_temperature(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.edit_log_name.setText("mlx90640_session")
+        window._start_session(enable_logging=True, record_initial_point=False)
+        assert window._session_active is True
+        sample = mini_dma_mod.IrTemperatureSample(
+            timestamp_s=window._session_start_wall_s + 0.25,
+            raw_text="FRAME_BEGIN,1000,24.00\n...",
+            sequence=0,
+            device_elapsed_ms=1000,
+            read_us=0,
+            ambient_c=24.0,
+            object_c_apparent=47.25,
+            raw_ambient=0,
+            raw_object=0,
+            flags=0,
+            sensor_type="mlx90640",
+            frame_min_c=22.0,
+            frame_mean_c=24.5,
+            frame_max_c=47.25,
+            frame_center_c=25.0,
+            frame_hotspot_row=11,
+            frame_hotspot_col=16,
+            frame_width=32,
+            frame_height=24,
+        )
+
+        window._handle_ir_sample(sample)
+        assert window._record_current_point(quiet=True) is True
+        window._stop_session(reason="test_complete", detail="IR logging test complete.")
+
+        run_dir = tmp_path / "mlx90640_session"
+        measurement_rows = list(csv.DictReader((run_dir / "measurement.csv").open(encoding="utf-8", newline="")))
+        ir_rows = list(csv.DictReader((run_dir / "ir_temperature.csv").open(encoding="utf-8", newline="")))
+
+        assert measurement_rows[-1]["ir_object_c_apparent"] == "47.250000"
+        assert measurement_rows[-1]["ir_ambient_c"] == "24.000000"
+        assert ir_rows[-1]["sensor_type"] == "mlx90640"
+        assert ir_rows[-1]["object_c_apparent"] == "47.250000"
+        assert ir_rows[-1]["frame_min_c"] == "22.000000"
+        assert ir_rows[-1]["frame_mean_c"] == "24.500000"
+        assert ir_rows[-1]["frame_max_c"] == "47.250000"
+        assert ir_rows[-1]["frame_center_c"] == "25.000000"
+        assert ir_rows[-1]["frame_hotspot_row"] == "11"
+        assert ir_rows[-1]["frame_hotspot_col"] == "16"
+        assert ir_rows[-1]["frame_width"] == "32"
+        assert ir_rows[-1]["frame_height"] == "24"
     finally:
         _close_test_window(window)
 
