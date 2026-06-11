@@ -15559,6 +15559,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return delta_mm * self._tension_motion_sign() > 0.0
 
+    def _format_motor_step_log(
+        self,
+        *,
+        delta_mm: float,
+        speed_mm_s: float,
+        target_mm: float,
+        target_steps: int,
+    ) -> str:
+        direction = "tension" if delta_mm * self._tension_motion_sign() > 0.0 else "relax"
+        return (
+            f"Motor step {delta_mm * 1000.0:+.0f} um ({direction}) at "
+            f"{_format_compact_unit(speed_mm_s, 'mm/s', decimals=3)} -> "
+            f"target {_format_compact_unit(target_mm, 'mm')} ({target_steps} steps)."
+        )
+
     def _move_relative_raw_tic_steps(self, delta_steps: int, *, speed_steps_per_s: float) -> bool:
         if self._tic_motor_power_ok is False:
             vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
@@ -15715,9 +15730,14 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self._log(f"Failed to move Tic: {exc}")
             return False
+        delta_mm = position_mm - command_base_mm
         self._log(
-            f"Move command sent to {_format_compact_unit(position_mm, 'mm')} "
-            f"({target_steps} steps) at {_format_compact_unit(selected_speed_mm_s, 'mm/s', decimals=3)}."
+            self._format_motor_step_log(
+                delta_mm=delta_mm,
+                speed_mm_s=selected_speed_mm_s,
+                target_mm=position_mm,
+                target_steps=target_steps,
+            )
         )
         command_time_s = time.time()
         self._last_motion_command_time_s = command_time_s
@@ -15730,7 +15750,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_effective_move_target_mm = (
             float(position_mm) if effective_position_mm is None else float(effective_position_mm)
         )
-        delta_mm = position_mm - self._relative_motion_base_mm()
         if abs(delta_mm) >= 1e-12:
             self._last_move_direction = math.copysign(1.0, delta_mm)
         self._last_move_target_mm = position_mm
