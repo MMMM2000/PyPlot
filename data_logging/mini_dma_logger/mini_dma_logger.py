@@ -15562,16 +15562,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def _format_motor_step_log(
         self,
         *,
-        delta_mm: float,
+        delta_tic_units: int,
+        steps_per_mm: float,
         speed_mm_s: float,
         target_mm: float,
         target_steps: int,
     ) -> str:
-        direction = "tension" if delta_mm * self._tension_motion_sign() > 0.0 else "relax"
+        commanded_delta_mm = float(delta_tic_units) / max(float(steps_per_mm), 1.0)
+        direction = "tension" if commanded_delta_mm * self._tension_motion_sign() > 0.0 else "relax"
+        delta_unit_label = "Tic unit" if abs(delta_tic_units) == 1 else "Tic units"
+        target_unit_label = "Tic unit" if abs(target_steps) == 1 else "Tic units"
         return (
-            f"Motor step {delta_mm * 1000.0:+.0f} um ({direction}) at "
+            f"Motor command {delta_tic_units:+d} {delta_unit_label} "
+            f"(~{commanded_delta_mm * 1000.0:+.2f} um commanded, {direction}) at "
             f"{_format_compact_unit(speed_mm_s, 'mm/s', decimals=3)} -> "
-            f"target {_format_compact_unit(target_mm, 'mm')} ({target_steps} steps)."
+            f"target {_format_compact_unit(target_mm, 'mm')} ({target_steps} {target_unit_label})."
         )
 
     def _move_relative_raw_tic_steps(self, delta_steps: int, *, speed_steps_per_s: float) -> bool:
@@ -15707,7 +15712,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False
         steps_per_mm = config.steps_per_mm if config is not None else float(self.spin_steps_per_mm.value())
         target_steps = int(round(position_mm * steps_per_mm))
-        if target_steps == self._commanded_position_steps():
+        current_steps = self._commanded_position_steps()
+        if target_steps == current_steps:
             min_step_mm = 1.0 / max(1.0, steps_per_mm)
             self._log(
                 "Move skipped because the requested displacement rounds to the current motor step. "
@@ -15733,7 +15739,8 @@ class MainWindow(QtWidgets.QMainWindow):
         delta_mm = position_mm - command_base_mm
         self._log(
             self._format_motor_step_log(
-                delta_mm=delta_mm,
+                delta_tic_units=target_steps - current_steps,
+                steps_per_mm=steps_per_mm,
                 speed_mm_s=selected_speed_mm_s,
                 target_mm=position_mm,
                 target_steps=target_steps,
