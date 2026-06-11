@@ -52,6 +52,7 @@ MINI_DMA_COLUMN = core.MINI_DMA_COLUMN
 MINI_DMA_STRAIN_COLUMN = core.MINI_DMA_STRAIN_COLUMN
 MINI_DMA_TRANSITION_COLUMN = core.MINI_DMA_TRANSITION_COLUMN
 MINI_DMA_BREAK_COLUMN = core.MINI_DMA_BREAK_COLUMN
+ANNEALING_TRANSITION_COLUMN = core.ANNEALING_TRANSITION_COLUMN
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = core.SHAPE_MEMORY_DISPLACEMENT_COLUMN
 SHAPE_MEMORY_LOAD_COLUMN = core.SHAPE_MEMORY_LOAD_COLUMN
 SHAPE_MEMORY_STRAIN_COLUMN = core.SHAPE_MEMORY_STRAIN_COLUMN
@@ -1102,6 +1103,288 @@ def test_build_database_includes_mini_dma_strain_and_break_summary(tmp_path: Pat
         "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
     ]
     assert row[MINI_DMA_BREAK_COLUMN] == ["400 MPa / 11.69 g @ 35 mA"]
+
+
+def test_mini_dma_section_frame_accepts_multiple_break_summaries(tmp_path: Path) -> None:
+    first = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 run01",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="run01",
+        break_summary="400 MPa / 11.69 g @ 35 mA",
+    )
+    second = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 5_4 run02",
+        sample="Ni50Fe27Ga23 5_4",
+        data=pd.DataFrame({"current_mA": [30.0]}),
+        key=("Ni50Fe27Ga23", 5, 4, None),
+        label="run02",
+        break_summary="450 MPa / 13.15 g @ 42 mA",
+    )
+
+    frame = builder_ui._mini_dma_records_to_frame([first, second])
+
+    assert len(frame) == 1
+    assert frame.iloc[0][MINI_DMA_BREAK_COLUMN] == [
+        "400 MPa / 11.69 g @ 35 mA",
+        "450 MPa / 13.15 g @ 42 mA",
+    ]
+
+
+def test_mini_dma_section_collect_candidates_uses_only_report_measurements(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    good = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "measurement.csv"
+    sidecar = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "control_trace_replay.csv"
+    archived = tmp_path / "archive" / "Ni50Fe27Ga23 12_2 old_run" / "measurement.csv"
+    automated = tmp_path / "automated" / "Ni50Fe27Ga23 12_2 draft_run" / "measurement.csv"
+    control_test = tmp_path / "automated_control_tests" / "probe_run" / "measurement.csv"
+    history = tmp_path / "automation_history" / "campaign" / "history_run" / "measurement.csv"
+    for path in (good, sidecar, archived, automated, control_test, history):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("placeholder", encoding="utf-8")
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section.data = MiniDatabaseData(sources=[str(tmp_path)])
+
+        candidates = section._collect_candidates()
+    finally:
+        section.close()
+        section.deleteLater()
+
+    assert candidates == [good]
+
+
+def _write_reportable_mini_dma_measurement(
+    path: Path,
+    *,
+    sample_name: str,
+    created_utc: str,
+    session_state: str = "finished",
+    finished_utc: str | None = "2026-06-01 00:10:00",
+) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "sample_name": sample_name,
+        "created_utc": created_utc,
+        "session_state": session_state,
+        "initial_length_mm": 10.0,
+    }
+    if finished_utc is not None:
+        metadata["finished_utc"] = finished_utc
+    (path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (path / "measurement.csv").write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,stress_mpa,resistance_ohm,current_set_mA,current_measured_mA,position_mm",
+                "0,current,50,1,0.0,50,100,1,1,0.0",
+                "1,current,50,1,0.1,50,101,20,20,0.1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path / "measurement.csv"
+
+
+def test_mini_dma_reportable_gating_skips_older_finished_when_newest_unfinished(
+    tmp_path: Path,
+) -> None:
+    old_finished = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    newest_running = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        session_state="running",
+        finished_utc=None,
+    )
+
+    accepted, audit = builder_ui.MiniDmaSection.reportable_measurements(
+        [old_finished, newest_running],
+        sources=[str(tmp_path)],
+    )
+
+    assert accepted == []
+    assert len(audit) == 2
+    assert all(not row["reportable"] for row in audit)
+    assert all("newest active run is unfinished" in row["skip_reason"] for row in audit)
+
+
+def test_mini_dma_reportable_gating_imports_finished_group_when_newest_finished(
+    tmp_path: Path,
+) -> None:
+    first = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    newest = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        finished_utc="2026-06-01 10:20:00",
+    )
+
+    accepted, audit = builder_ui.MiniDmaSection.reportable_measurements(
+        [first, newest],
+        sources=[str(tmp_path)],
+    )
+
+    assert accepted == [first, newest]
+    assert {row["reportable"] for row in audit} == {True}
+
+
+def test_mini_dma_reportable_gating_keeps_variant_groups_separate(tmp_path: Path) -> None:
+    base_old = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    base_running = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        session_state="running",
+        finished_utc=None,
+    )
+    glass_finished = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 glass run01",
+        sample_name="Ni50Fe27Ga23 12/2 glass",
+        created_utc="2026-06-01 09:30:00",
+        finished_utc="2026-06-01 09:50:00",
+    )
+
+    accepted, audit = builder_ui.MiniDmaSection.reportable_measurements(
+        [base_old, base_running, glass_finished],
+        sources=[str(tmp_path)],
+    )
+
+    assert accepted == [glass_finished]
+    blocked = [row for row in audit if row["sample"] == "Ni50Fe27Ga23 12_2"]
+    assert blocked and all("newest active run is unfinished" in row["skip_reason"] for row in blocked)
+    glass = [row for row in audit if row["sample"] == "Ni50Fe27Ga23 12_2 glass"]
+    assert len(glass) == 1 and glass[0]["reportable"] is True
+
+
+def test_mini_dma_section_process_reports_gated_skip_reason(tmp_path: Path) -> None:
+    _ensure_qapp()
+    old_finished = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run01",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 09:00:00",
+        finished_utc="2026-06-01 09:20:00",
+    )
+    newest_running = _write_reportable_mini_dma_measurement(
+        tmp_path / "Ni50Fe27Ga23 12_2 run02",
+        sample_name="Ni50Fe27Ga23 12/2",
+        created_utc="2026-06-01 10:00:00",
+        session_state="running",
+        finished_utc=None,
+    )
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section.data = MiniDatabaseData(sources=[str(tmp_path)])
+
+        result = section.process([old_finished, newest_running])
+    finally:
+        section.close()
+        section.deleteLater()
+
+    assert result.table.empty
+    reportability = result.extra["mini_dma_reportability"]
+    assert len(reportability) == 2
+    assert all("newest active run is unfinished" in row["skip_reason"] for row in reportability)
+
+
+def _sample_mini_dma_record() -> MiniDmaRecord:
+    run_path = Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32")
+    return MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label=run_path.name,
+    )
+
+
+def test_mini_dma_transition_review_entries_use_real_stress_targets() -> None:
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+    )
+
+    assert len(entries) >= 9
+    labels = {entry.target_label for entry in entries}
+    assert "50 MPa / 1.46 g" in labels
+    assert "350 MPa / 10.23 g" in labels
+    assert {entry.status for entry in entries} >= {"accepted", "rejected"}
+
+
+def test_mini_dma_transition_review_dialog_filters_and_plots() -> None:
+    _ensure_qapp()
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+    )
+    try:
+        assert dialog.tree.topLevelItemCount() == 1
+        assert dialog._visible_indices  # noqa: SLF001
+        dialog.rejected_only_check.setChecked(True)
+        assert dialog.rejected_only_check.isChecked()
+        assert not dialog.accepted_only_check.isChecked()
+        assert all(
+            dialog._entries[index].status == "rejected"  # noqa: SLF001
+            for index in dialog._visible_indices  # noqa: SLF001
+        )
+        dialog.show_fit_lines_check.setChecked(False)
+        dialog.show_markers_check.setChecked(False)
+        dialog._redraw_current()  # noqa: SLF001
+        assert dialog.canvas is not None
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_section_opens_transition_review_for_all_records_without_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    opened: list[MiniDmaRecord] = []
+
+    class FakeReviewDialog:
+        def __init__(
+            self,
+            records: list[MiniDmaRecord],
+            _logger: logging.Logger,
+            _parent: QtWidgets.QWidget | None = None,
+        ) -> None:
+            opened.extend(records)
+
+        def exec(self) -> int:
+            return int(QtWidgets.QDialog.DialogCode.Accepted)
+
+    try:
+        record = _sample_mini_dma_record()
+        section._record_groups = {record.sample: [record]}  # noqa: SLF001
+        monkeypatch.setattr(builder_ui, "_MiniDmaTransitionReviewDialog", FakeReviewDialog)
+
+        section._open_transition_review()  # noqa: SLF001
+
+        assert opened == [record]
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:
@@ -4033,6 +4316,48 @@ def test_word_report_export_embeds_available_origin_objects(
     assert "Origin object placeholder" in document_xml
 
 
+def test_word_report_export_writes_sample_header_and_page_footer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(core, "_embed_pictures_with_word", lambda *args, **kwargs: None)
+    monkeypatch.setattr(core, "_embed_origin_objects_with_word", lambda *args, **kwargs: None)
+
+    reports = core.export_word_reports(
+        pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                }
+            ]
+        ),
+        tmp_path / "reports",
+        origin_artifacts={},
+    )
+
+    assert len(reports) == 1
+    from zipfile import ZipFile
+
+    with ZipFile(reports[0], "r") as archive:
+        names = set(archive.namelist())
+        assert "word/header1.xml" in names
+        assert "word/footer1.xml" in names
+        assert "word/_rels/document.xml.rels" in names
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+        header_xml = archive.read("word/header1.xml").decode("utf-8")
+        footer_xml = archive.read("word/footer1.xml").decode("utf-8")
+        rels_xml = archive.read("word/_rels/document.xml.rels").decode("utf-8")
+
+    assert 'w:headerReference w:type="default" r:id="rId3"' in document_xml
+    assert 'w:footerReference w:type="default" r:id="rId4"' in document_xml
+    assert "Ni50Fe27Ga23 12/2" in header_xml
+    assert 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"' in rels_xml
+    assert 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer"' in rels_xml
+    assert "PAGE" in footer_xml
+    assert "NUMPAGES" in footer_xml
+
+
 def test_word_report_export_accepts_clipboard_only_origin_objects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4387,6 +4712,7 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
         *,
         setpoint: int,
         alt_variant: bool,
+        transition_summary: tuple[str, ...] = (),
     ) -> MeasurementRecord:
         return MeasurementRecord(
             path=path,
@@ -4406,6 +4732,7 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
             ),
             sanity_ok=True,
             sanity_error=0.0,
+            transition_summary=transition_summary,
         )
 
     result = build_database(
@@ -4417,9 +4744,24 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
             export_formats=(),
         ),
         measurement_records=[
-            measurement(base_path, setpoint=1000, alt_variant=False),
-            measurement(variant_path, setpoint=1000, alt_variant=True),
-            measurement(follow_up_path, setpoint=140, alt_variant=False),
+            measurement(
+                base_path,
+                setpoint=1000,
+                alt_variant=False,
+                transition_summary=("1000mA: As 35 mA, Af 50 mA, Ms 55 mA, Mf 30 mA",),
+            ),
+            measurement(
+                variant_path,
+                setpoint=1000,
+                alt_variant=True,
+                transition_summary=("1000mA: As 35 mA, Af 50 mA, Ms 55 mA, Mf 30 mA",),
+            ),
+            measurement(
+                follow_up_path,
+                setpoint=140,
+                alt_variant=False,
+                transition_summary=("140mA: As 40 mA, Af 52 mA, Ms 58 mA, Mf 33 mA",),
+            ),
         ],
         fabrication_index=FabricationIndex(),
         skip_exports=True,
@@ -4428,6 +4770,10 @@ def test_build_database_prefers_non_variant_exact_1000_as_anchor(tmp_path: Path)
     row = result.dataframe.iloc[0]
     assert row["File 1000 mA"] == base_path.name
     assert row["Other annealing files"] == [follow_up_path.name, variant_path.name]
+    assert row[ANNEALING_TRANSITION_COLUMN] == [
+        "1000mA: As 35 mA, Af 50 mA, Ms 55 mA, Mf 30 mA",
+        "140mA: As 40 mA, Af 52 mA, Ms 58 mA, Mf 33 mA",
+    ]
 
 
 def test_build_database_merges_current_density_and_transition_entries(tmp_path: Path) -> None:
@@ -5037,6 +5383,72 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         window._dirty = False
         window.hide()
         window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_current_density_collects_auto_annealing_transition_points() -> None:
+    _ensure_qapp()
+    annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    microscope_section = MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        up_current = np.linspace(1.0, 100.0, 160)
+        down_current = np.linspace(100.0, 1.0, 160)
+        up_drop = np.clip(1.0 - np.abs(up_current - 42.5) / 7.5, 0.0, 1.0)
+        down_rise = np.clip((7.0 - down_current) / 3.0, 0.0, 1.0)
+        frame = pd.DataFrame(
+            {
+                "I_mA": np.r_[up_current, down_current],
+                "R_Ohm": np.r_[
+                    100.0 + (0.12 * up_current) - (12.0 * up_drop),
+                    80.0 + (10.0 * down_rise),
+                ],
+            }
+        )
+        metadata = MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=10,
+            piece_y=4,
+            setpoint_mA=80,
+            alt_variant=False,
+            measurement_id="auto-transition",
+            file_name="Ni50Fe27Ga23 10_4 s2a 80mA.txt",
+            relpath="Ni50Fe27Ga23 10_4 s2a 80mA.txt",
+            timestamp_mtime_utc="2026-06-08T00:00:00+00:00",
+        )
+        record = MeasurementRecord(
+            path=Path(metadata.file_name),
+            metadata=metadata,
+            dataframe=frame,
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+        key_text = "Ni50Fe27Ga23|10|4"
+        annealing_section._record_groups = {key_text: [record]}  # noqa: SLF001
+
+        auto_points = section._collect_phase_points()  # noqa: SLF001
+
+        key = ("Ni50Fe27Ga23", 10, 4, None)
+        assert auto_points[key]["As1"] == pytest.approx(35.0, abs=1.0)
+        assert auto_points[key]["Af1"] == pytest.approx(42.5, abs=1.0)
+        assert auto_points[key]["Ms1"] == pytest.approx(7.2, abs=1.0)
+        assert auto_points[key]["Mf1"] == pytest.approx(3.0, abs=1.0)
+
+        annealing_section._phase_points = {key_text: {"As1": 11.0, "Ms1": 5.0}}  # noqa: SLF001
+        merged_points = section._collect_phase_points()  # noqa: SLF001
+        assert merged_points[key]["As1"] == pytest.approx(11.0)
+        assert merged_points[key]["Ms1"] == pytest.approx(5.0)
+        assert merged_points[key]["Af1"] == pytest.approx(auto_points[key]["Af1"])
+        assert merged_points[key]["Mf1"] == pytest.approx(auto_points[key]["Mf1"])
+    finally:
+        for widget in (section, annealing_section, microscope_section):
+            widget.hide()
+            widget.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 

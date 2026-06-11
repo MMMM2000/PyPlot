@@ -40,6 +40,23 @@ def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
     assert "current_mA" in run.frame.columns
 
 
+def test_iter_measurement_paths_discovers_run_folders_under_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "mini_dma_runs"
+    first_run = parent / "sample_run01"
+    second_run = parent / "sample_run02"
+    first_run.mkdir(parents=True)
+    second_run.mkdir(parents=True)
+    first_measurement = first_run / "measurement.csv"
+    second_measurement = second_run / "measurement.csv"
+    first_measurement.write_text("", encoding="utf-8")
+    second_measurement.write_text("", encoding="utf-8")
+    (parent / "notes.txt").write_text("not a run", encoding="utf-8")
+
+    paths = core.iter_measurement_paths([parent, first_run, second_measurement])
+
+    assert paths == [first_measurement.resolve(), second_measurement.resolve()]
+
+
 def test_current_sweep_groups_by_target_mpa() -> None:
     run = core.load_run(SAMPLE_RUN / "measurement.csv")
     groups = core.current_sweep_groups(run.frame)
@@ -67,6 +84,44 @@ def test_current_sweep_groups_preserve_return_leg_duplicate_states() -> None:
     assert len(groups) == 1
     _target, group = groups[0]
     assert group["current_mA"].tolist() == [10.0, 20.0, 10.0]
+
+
+def test_current_sweep_summary_groups_include_current_hold_rows() -> None:
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0, 3.0],
+            "automation_phase": ["current", "current_hold", "current_hold", "current"],
+            "automation_target_value": [50.0] * 4,
+            "plateau_index": [1] * 4,
+            "strain_pct": [0.0, 0.4, 1.2, 0.1],
+            "resistance_ohm": [100.0] * 4,
+            "current_mA": [30.0, 30.0, 30.0, 31.0],
+            "position_mm": [0.0, 0.04, 0.12, 0.01],
+        }
+    )
+
+    plot_groups = core.current_sweep_groups(frame)
+    summary_groups = core.current_sweep_groups(frame, phases=core.SUMMARY_PHASES)
+
+    assert len(plot_groups) == 1
+    assert plot_groups[0][1]["automation_phase"].tolist() == ["current", "current"]
+    assert len(summary_groups) == 1
+    assert summary_groups[0][1]["automation_phase"].tolist() == [
+        "current",
+        "current_hold",
+        "current_hold",
+        "current",
+    ]
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+        initial_length_mm=10.0,
+    )
+    summary = core.summarize_current_sweep(run)
+
+    assert summary.targets[0].max_strain_pct == pytest.approx(1.2)
 
 
 def test_make_figures_create_one_line_per_target() -> None:
@@ -134,7 +189,7 @@ def test_resistance_current_figure_can_show_power_top_axis() -> None:
     try:
         assert len(fig.axes) == 2
         top_ax = fig.axes[1]
-        assert top_ax.get_xlabel() == "Power [mW]"
+        assert top_ax.get_xlabel() == "Power/cm [mW/cm]"
         assert top_ax.get_xlim() == pytest.approx(fig.axes[0].get_xlim())
         assert any(label.get_text() for label in top_ax.get_xticklabels())
     finally:
@@ -148,11 +203,134 @@ def test_strain_current_figure_can_show_power_top_axis() -> None:
     try:
         assert len(fig.axes) == 2
         top_ax = fig.axes[1]
-        assert top_ax.get_xlabel() == "Power [mW]"
+        assert top_ax.get_xlabel() == "Power/cm [mW/cm]"
         assert top_ax.get_xlim() == pytest.approx(fig.axes[0].get_xlim())
         assert any(label.get_text() for label in top_ax.get_xticklabels())
     finally:
         plt.close(fig)
+
+
+def test_strain_current_figure_can_show_absolute_power_top_axis() -> None:
+    run = core.load_run(SAMPLE_RUN)
+
+    fig = core.make_strain_current_figure(
+        run,
+        show_power_top_axis=True,
+        power_axis_mode=core.POWER_AXIS_ABSOLUTE_MW,
+    )
+    try:
+        assert len(fig.axes) == 2
+        assert fig.axes[1].get_xlabel() == "Power [mW]"
+    finally:
+        plt.close(fig)
+
+
+def test_strain_current_figure_marks_first_overheating_target(tmp_path: Path) -> None:
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    measurement_path = run_path / "measurement.csv"
+    metadata_path = run_path / "metadata.json"
+    metadata_path.write_text(
+        '{"controlled_current_sweep": {"first_overheating": true, '
+        '"first_overheating_target_mpa": 20.0}}',
+        encoding="utf-8",
+    )
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0, 3.0],
+            "automation_phase": ["current"] * 4,
+            "automation_target_value": [20.0, 20.0, 50.0, 50.0],
+            "plateau_index": [None, None, 1, 1],
+            "strain_pct": [0.0, 0.2, 0.1, 0.3],
+            "resistance_ohm": [100.0, 101.0, 102.0, 103.0],
+            "current_measured_mA": [10.0, 20.0, 10.0, 20.0],
+            "current_set_mA": [10.0, 20.0, 10.0, 20.0],
+        }
+    )
+    frame.to_csv(measurement_path, index=False)
+    run = core.load_run(run_path)
+
+    fig = core.make_strain_current_figure(run)
+    try:
+        lines = fig.axes[0].lines
+        assert [line.get_label() for line in lines] == [
+            "1st: 20MPa",
+            "50 MPa",
+        ]
+        assert lines[0].get_linestyle() == "--"
+        assert lines[0].get_marker() == "D"
+        assert lines[1].get_linestyle() == "-"
+        assert lines[1].get_marker() == "o"
+    finally:
+        plt.close(fig)
+
+
+def test_first_overheating_does_not_replace_normal_same_target(tmp_path: Path) -> None:
+    run_path = tmp_path / "run"
+    run_path.mkdir()
+    measurement_path = run_path / "measurement.csv"
+    (run_path / "metadata.json").write_text(
+        '{"controlled_current_sweep": {"first_overheating": true, '
+        '"first_overheating_target_mpa": 50.0}}',
+        encoding="utf-8",
+    )
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": [0.0, 1.0, 2.0, 3.0],
+            "automation_phase": ["current"] * 4,
+            "automation_target_value": [50.0, 50.0, 50.0, 50.0],
+            "plateau_index": [None, None, 1, 1],
+            "strain_pct": [0.0, 0.2, 0.1, 0.3],
+            "resistance_ohm": [100.0, 101.0, 102.0, 103.0],
+            "current_measured_mA": [10.0, 20.0, 10.0, 20.0],
+            "current_set_mA": [10.0, 20.0, 10.0, 20.0],
+        }
+    )
+    frame.to_csv(measurement_path, index=False)
+    run = core.load_run(run_path)
+
+    groups = core.current_sweep_groups(run.frame)
+    assert [target for target, _group in groups] == [50.0, 50.0]
+
+    fig = core.make_strain_current_figure(run)
+    try:
+        lines = fig.axes[0].lines
+        assert [line.get_label() for line in lines] == [
+            "1st: 50MPa",
+            "50 MPa",
+        ]
+        assert lines[0].get_linestyle() == "--"
+        assert lines[1].get_linestyle() == "-"
+    finally:
+        plt.close(fig)
+
+
+def test_first_overheating_target_mpa_reads_recipe_metadata(tmp_path: Path) -> None:
+    run = core.MiniDmaRun(
+        path=tmp_path,
+        measurement_path=tmp_path / "measurement.csv",
+        frame=pd.DataFrame(),
+        sample_name="sample",
+    )
+    (tmp_path / "metadata.json").write_text(
+        '{"recipe": {"current_sweep": {"first_overheating": "true", '
+        '"first_overheating_target_mpa": 25.0}}}',
+        encoding="utf-8",
+    )
+
+    assert core.first_overheating_target_mpa(run) == pytest.approx(25.0)
+
+
+def test_power_axis_label_and_scale_uses_initial_length_for_mw_per_cm() -> None:
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=pd.DataFrame(),
+        sample_name="sample",
+        initial_length_mm=25.0,
+    )
+
+    assert core.power_axis_label_and_scale(run) == ("Power/cm [mW/cm]", pytest.approx(0.4))
 
 
 def test_strain_current_figure_can_use_each_trace_minimum_as_l0() -> None:
@@ -349,6 +527,9 @@ def test_plugin_defaults_to_global_strain_baseline_and_power_axis() -> None:
         plugin.settings_widget()
         assert plugin._strain_baseline_mode() == core.STRAIN_BASELINE_GLOBAL_MINIMUM
         assert plugin._show_power_top_axis_enabled() is True
+        assert plugin._power_axis_mode() == core.POWER_AXIS_NORMALIZED_MW_PER_CM
+        plugin._set_power_axis_mode(core.POWER_AXIS_ABSOLUTE_MW)
+        assert plugin._power_axis_mode() == core.POWER_AXIS_ABSOLUTE_MW
         plugin._set_strain_baseline_mode(core.STRAIN_BASELINE_PER_TARGET_MINIMUM)
         assert plugin._strain_baseline_mode() == core.STRAIN_BASELINE_PER_TARGET_MINIMUM
     finally:

@@ -21,6 +21,7 @@ class MiniDmaPlugin(PyPlotPlugin):
     """Plot Mini DMA current-sweep logger output inside PyPlot."""
 
     requires_imported_data = True
+    supports_import_folders = True
     auto_load_on_import = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
@@ -30,6 +31,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         self._summary_label: QtWidgets.QLabel | None = None
         self._strain_baseline_combo: QtWidgets.QComboBox | None = None
         self._show_power_top_axis_checkbox: QtWidgets.QCheckBox | None = None
+        self._power_axis_mode_combo: QtWidgets.QComboBox | None = None
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
         container = QtWidgets.QWidget(self.host)
@@ -90,6 +92,20 @@ class MiniDmaPlugin(PyPlotPlugin):
         show_power.setChecked(True)
         section_layout.addWidget(show_power)
         self._show_power_top_axis_checkbox = show_power
+        power_axis_label = QtWidgets.QLabel("Power axis:")
+        section_layout.addWidget(power_axis_label)
+        power_axis_combo = QtWidgets.QComboBox()
+        power_axis_combo.setToolTip(
+            "Choose whether the top power axis shows absolute electrical power "
+            "or power normalized by the Mini DMA initial wire length."
+        )
+        power_axis_combo.addItem(
+            "Normalized by length (mW/cm)",
+            core.POWER_AXIS_NORMALIZED_MW_PER_CM,
+        )
+        power_axis_combo.addItem("Absolute power (mW)", core.POWER_AXIS_ABSOLUTE_MW)
+        section_layout.addWidget(power_axis_combo)
+        self._power_axis_mode_combo = power_axis_combo
         layout.addWidget(section)
         layout.addStretch(1)
 
@@ -159,6 +175,7 @@ class MiniDmaPlugin(PyPlotPlugin):
                         current_run,
                         strain_baseline_mode=strain_baseline_mode,
                         show_power_top_axis=self._show_power_top_axis_enabled(),
+                        power_axis_mode=self._power_axis_mode(),
                     ),
                 ),
                 (
@@ -166,6 +183,7 @@ class MiniDmaPlugin(PyPlotPlugin):
                     lambda current_run: core.make_resistance_current_figure(
                         current_run,
                         show_power_top_axis=self._show_power_top_axis_enabled(),
+                        power_axis_mode=self._power_axis_mode(),
                     ),
                 ),
             )
@@ -254,11 +272,17 @@ class MiniDmaPlugin(PyPlotPlugin):
 
         power_axis_current_mA: list[float] = []
         power_axis_resistance_ohm: list[float] = []
+        power_axis_label = "Power [mW]"
+        power_axis_scale = 1.0
         if self._show_power_top_axis_enabled() and plot_kind in {
             "strain_current",
             "resistance_current",
         }:
             power_axis_current_mA, power_axis_resistance_ohm = core.power_axis_points(run)
+            power_axis_label, power_axis_scale = core.power_axis_label_and_scale(
+                run,
+                self._power_axis_mode(),
+            )
 
         descriptor = window_module.TabDescriptor(
             kind="mini_dma",
@@ -291,6 +315,8 @@ class MiniDmaPlugin(PyPlotPlugin):
                 ),
                 "power_axis_current_mA": power_axis_current_mA,
                 "power_axis_resistance_ohm": power_axis_resistance_ohm,
+                "power_axis_label": power_axis_label,
+                "power_axis_scale": power_axis_scale,
                 "origin_legend_position": (
                     "inside_upper_right"
                     if plot_kind == "strain_current"
@@ -309,6 +335,17 @@ class MiniDmaPlugin(PyPlotPlugin):
         checkbox = self._show_power_top_axis_checkbox
         return bool(checkbox is not None and checkbox.isChecked())
 
+    def _power_axis_mode(self) -> str:
+        combo = self._power_axis_mode_combo
+        if combo is None:
+            self.settings_widget()
+            combo = self._power_axis_mode_combo
+        if combo is not None:
+            value = combo.currentData()
+            if isinstance(value, str) and value in core.POWER_AXIS_MODES:
+                return value
+        return core.POWER_AXIS_NORMALIZED_MW_PER_CM
+
     def _strain_baseline_mode(self) -> str:
         combo = self._strain_baseline_combo
         if combo is None:
@@ -325,6 +362,16 @@ class MiniDmaPlugin(PyPlotPlugin):
             self.settings_widget()
         if self._show_power_top_axis_checkbox is not None:
             self._show_power_top_axis_checkbox.setChecked(bool(enabled))
+
+    def _set_power_axis_mode(self, mode: str) -> None:
+        if self._power_axis_mode_combo is None:
+            self.settings_widget()
+        combo = self._power_axis_mode_combo
+        if combo is None:
+            return
+        index = combo.findData(mode)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     def _set_zero_minimum_strain(self, enabled: bool) -> None:
         self._set_strain_baseline_mode(

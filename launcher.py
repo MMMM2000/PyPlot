@@ -11,6 +11,8 @@ import csv
 import math
 import re
 import shutil
+import base64
+import pickle
 import secrets
 import socket
 import socketserver
@@ -455,6 +457,15 @@ def _record_path_key(record: object) -> str:
 
 def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
     return {
+        "microscope": {
+            "class": builder_ui.MicroscopeSection,
+            "payload": "microscope_index",
+            "payload_kind": "mapping",
+            "table_builder": lambda records, extra: builder_ui._microscope_index_to_frame(
+                records,
+                extra.get("overrides", {}) if isinstance(extra, Mapping) else {},
+            ),
+        },
         "annealing": {
             "class": builder_ui.AnnealingSection,
             "payload": "annealing_records",
@@ -581,11 +592,22 @@ def _run_builder_update_section_command(
             if candidate_key not in processed_keys:
                 skipped_sources.append(str(candidate))
 
-        new_payload = result.payloads.get(payload_name, [])
-        new_records = list(new_payload) if isinstance(new_payload, list) else []
-        merged_records = _merge_builder_records(existing_records, new_records)
+        payload_kind = spec.get("payload_kind", "sequence")
+        if payload_kind == "mapping":
+            existing_mapping = dict(existing_payload) if isinstance(existing_payload, Mapping) else {}
+            new_payload = result.payloads.get(payload_name, {})
+            new_mapping = dict(new_payload) if isinstance(new_payload, Mapping) else {}
+            merged_records = {**existing_mapping, **new_mapping}
+        else:
+            new_payload = result.payloads.get(payload_name, [])
+            new_records = list(new_payload) if isinstance(new_payload, list) else []
+            merged_records = _merge_builder_records(existing_records, new_records)
+
         if callable(table_builder):
-            section.data.table = table_builder(merged_records)
+            try:
+                section.data.table = table_builder(merged_records, result.extra)
+            except TypeError:
+                section.data.table = table_builder(merged_records)
         else:
             section.data.table = builder_ui._graph_records_to_frame(
                 merged_records,
@@ -1665,6 +1687,12 @@ _MINI_DMA_REQUIRED_COLUMNS = {
     "strain_pct",
     "resistance_ohm",
 }
+_MINI_DMA_EXCLUDED_SCAN_DIRS = {
+    "archive",
+    "automation_history",
+    "automated_control_tests",
+    "automated",
+}
 
 
 def _parse_microwire_word_sample(sample: object) -> tuple[str | None, str | None]:
@@ -1712,6 +1740,12 @@ def _looks_like_mini_dma_measurement(path: Path) -> bool:
         return False
     columns = {column.strip().casefold() for column in header.split(",")}
     return _MINI_DMA_REQUIRED_COLUMNS.issubset(columns)
+
+
+def _is_active_mini_dma_measurement(path: Path) -> bool:
+    if any(part.casefold() in _MINI_DMA_EXCLUDED_SCAN_DIRS for part in path.parts):
+        return False
+    return path.is_file() and _looks_like_mini_dma_measurement(path)
 
 
 def _infer_rvst_word_sample(path: Path, sample_override: object) -> tuple[str, str]:
@@ -1977,6 +2011,87 @@ def _project_section_rows(section: object) -> list[dict[str, Any]]:
                 converted.append(dict(zip(column_names, row)))
         return converted
     return []
+
+
+def _decode_word_project_payload(payload: object) -> object:
+    if not isinstance(payload, Mapping):
+        return None
+    if payload.get("encoding") != "pickle-base64":
+        return None
+    value = payload.get("value")
+    if not isinstance(value, str):
+        return None
+    try:
+        raw = base64.b64decode(value.encode("ascii"), validate=True)
+        return pickle.loads(raw)
+    except Exception:
+        return None
+
+
+def _word_project_section_payload(section: object, payload_name: str) -> object:
+    if not isinstance(section, Mapping):
+        return None
+    payloads = section.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return None
+    return _decode_word_project_payload(payloads.get(payload_name))
+
+
+def _word_project_record_sample(record: object) -> tuple[str, str]:
+    key = getattr(record, "key", None)
+    if isinstance(key, (list, tuple)) and len(key) >= 3:
+        composition = str(key[0] or "").strip()
+        draw = str(key[1] or "").strip()
+        piece = str(key[2] or "").strip()
+        suffix = str(key[3] or "").strip() if len(key) >= 4 and key[3] is not None else ""
+        if composition and draw and piece:
+            microwire = f"{draw}/{piece}"
+            if suffix:
+                microwire = f"{microwire} {suffix}"
+            return composition, microwire
+    sample = getattr(record, "sample", "")
+    composition, microwire = _parse_microwire_word_sample(sample)
+    return composition or "", microwire or ""
+
+
+def _word_project_record_path(record: object) -> Path | None:
+    for attr in ("path", "source_path"):
+        value = getattr(record, attr, None)
+        if value:
+            return Path(value)
+    if isinstance(record, Mapping):
+        for key in ("path", "source_path", "Source path", "Path"):
+            value = record.get(key)
+            if value:
+                return Path(str(value))
+    return None
+
+
+def _word_project_shape_memory_payload_sources(
+    section: object,
+) -> dict[tuple[str, str], list[str]]:
+    records = _word_project_section_payload(
+        section,
+        "shape_memory_stress_strain_records",
+    )
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
+        return {}
+    sources_by_key: dict[tuple[str, str], list[str]] = {}
+    for record in records:
+        composition, microwire = _word_project_record_sample(record)
+        path = _word_project_record_path(record)
+        if not composition or not microwire or path is None:
+            continue
+        key = (
+            _normalise_microwire_word_part(composition),
+            _normalise_microwire_word_key(microwire),
+        )
+        sources_by_key.setdefault(key, []).append(str(path))
+    return {
+        key: list(dict.fromkeys(paths))
+        for key, paths in sources_by_key.items()
+        if paths
+    }
 
 
 def _word_project_row_sample(row: dict[str, Any]) -> tuple[str, str]:
@@ -2297,6 +2412,7 @@ def _load_project_word_report_frame(
         _plot_measurement_origin,
         _safe_plot_stem,
     )
+    from microwire_data_builder import ui as builder_ui
     from plotting.plugins.r_vs_t.core import load_file
 
     payload = json.loads(source_path.read_text(encoding="utf-8"))
@@ -2311,6 +2427,9 @@ def _load_project_word_report_frame(
     for root in extra_search_roots or ():
         if root not in rvt_search_roots:
             rvt_search_roots.append(root)
+    shape_memory_payload_sources = _word_project_shape_memory_payload_sources(
+        sections.get("shape_memory_stress_strain")
+    )
 
     def _remember_rvt_search_root(value: object) -> None:
         for item in _word_project_value_items(value):
@@ -2334,6 +2453,20 @@ def _load_project_word_report_frame(
     for section_name, section in sections.items():
         if section_name in {"compare"}:
             continue
+        if section_name == "mini_dma" and isinstance(section, Mapping):
+            for item in _word_project_value_items(section.get("sources")):
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                path = Path(text)
+                try:
+                    if not path.exists():
+                        continue
+                except OSError:
+                    continue
+                search_root = path.parent if path.name.casefold() in {"mini dma", "mini_dma"} else path
+                if search_root not in rvt_search_roots:
+                    rvt_search_roots.append(search_root)
         for source_row in _project_section_rows(section):
             if section_name == "shape_memory_stress_strain":
                 source_row = _word_project_enrich_shape_memory_row(source_row)
@@ -2392,6 +2525,15 @@ def _load_project_word_report_frame(
             if column in assemble_row:
                 target[column] = assemble_row.get(column)
 
+    for key, sources in shape_memory_payload_sources.items():
+        target = rows_by_key.get(key)
+        if target is None:
+            continue
+        target["_word_shape_memory_stress_strain_sources"] = _word_project_merge_value(
+            target.get("_word_shape_memory_stress_strain_sources"),
+            sources,
+        )
+
     frame = pd.DataFrame(list(rows_by_key.values()))
     for index, row in frame.iterrows():
         diameter = row.get(DIAMETER_COLUMN)
@@ -2444,7 +2586,7 @@ def _load_project_word_report_frame(
         else:
             frame[column] = frame[column].astype(object)
 
-    mini_dma_paths: list[Path] = []
+    mini_dma_candidates: list[Path] = []
     seen_mini_dma_paths: set[Path] = set()
     for root in rvt_search_roots:
         for mini_root_name in ("mini DMA", "Mini DMA", "mini_dma"):
@@ -2452,23 +2594,39 @@ def _load_project_word_report_frame(
             if not mini_root.exists():
                 continue
             for path in mini_root.rglob("measurement.csv"):
+                excluded_parts = {"archive", "automated", "automated_control_tests", "automation_history"}
+                if any(part.casefold() in excluded_parts for part in path.relative_to(mini_root).parts[:-1]):
+                    continue
                 try:
                     resolved = path.resolve()
                 except OSError:
                     resolved = path
                 if resolved in seen_mini_dma_paths or not path.is_file():
                     continue
-                if not _looks_like_mini_dma_measurement(path):
+                if not _is_active_mini_dma_measurement(path):
                     continue
                 seen_mini_dma_paths.add(resolved)
-                mini_dma_paths.append(path)
+                mini_dma_candidates.append(path)
 
-    if mini_dma_paths:
+    mini_dma_paths: list[Path] = []
+    mini_dma_reportability: list[dict[str, Any]] = []
+    if mini_dma_candidates:
+        mini_dma_paths, mini_dma_reportability = builder_ui._reportable_mini_dma_measurements(
+            mini_dma_candidates,
+            sources=[str(path) for path in rvt_search_roots],
+            excluded_dirs=_MINI_DMA_EXCLUDED_SCAN_DIRS,
+        )
+
+    if mini_dma_paths or mini_dma_reportability:
         source_column = "_word_mini_dma_sources"
         if source_column not in frame.columns:
             frame[source_column] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[source_column] = frame[source_column].astype(object)
         if MINI_DMA_COLUMN not in frame.columns:
             frame[MINI_DMA_COLUMN] = pd.Series([None] * len(frame), dtype=object)
+        else:
+            frame[MINI_DMA_COLUMN] = frame[MINI_DMA_COLUMN].astype(object)
         for index, row in frame.iterrows():
             composition = row.get("Composition")
             microwire = row.get("Microwire")
@@ -2484,14 +2642,31 @@ def _load_project_word_report_frame(
                     matching_mini_dma.append(path.parent)
             if matching_mini_dma:
                 values = [str(path) for path in dict.fromkeys(matching_mini_dma)]
-                frame.at[index, source_column] = _word_project_merge_value(
-                    row.get(source_column),
-                    values,
+                frame.at[index, source_column] = values if len(values) > 1 else values[0]
+                graph_values = [path.name for path in dict.fromkeys(matching_mini_dma)]
+                frame.at[index, MINI_DMA_COLUMN] = (
+                    graph_values if len(graph_values) > 1 else graph_values[0]
                 )
-                frame.at[index, MINI_DMA_COLUMN] = _word_project_merge_value(
-                    row.get(MINI_DMA_COLUMN),
-                    [path.name for path in dict.fromkeys(matching_mini_dma)],
-                )
+                continue
+            blocked_mini_dma = []
+            for entry in mini_dma_reportability:
+                if bool(entry.get("reportable")):
+                    continue
+                measurement = entry.get("measurement")
+                if not isinstance(measurement, str) or not measurement:
+                    continue
+                path = Path(measurement)
+                inferred_composition, inferred_microwire = _infer_mini_dma_word_sample(path)
+                if (
+                    _normalise_microwire_word_part(inferred_composition)
+                    == _normalise_microwire_word_part(composition)
+                    and _normalise_microwire_word_key(inferred_microwire)
+                    == _normalise_microwire_word_key(microwire)
+                ):
+                    blocked_mini_dma.append(entry)
+            if blocked_mini_dma:
+                frame.at[index, source_column] = None
+                frame.at[index, MINI_DMA_COLUMN] = None
 
     if include_origin:
         origin_dir = output_dir / "_origin_objects"

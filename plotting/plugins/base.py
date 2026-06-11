@@ -11,6 +11,7 @@ class PyPlotPlugin:
     """Base plugin contract for PyPlot script integrations."""
 
     requires_imported_data: bool = False
+    supports_import_folders: bool = False
     exposes_load_data: bool = True
     auto_load_on_import: bool = False
     # Default to shared plot->workbook registration; plug-ins with custom

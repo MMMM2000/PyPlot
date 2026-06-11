@@ -4,6 +4,7 @@ from pathlib import Path
 import importlib
 
 import matplotlib
+import numpy as np
 import pytest
 
 pytest.importorskip("PyQt6.QtWidgets", reason="Qt widgets backend is unavailable", exc_type=ImportError)
@@ -66,6 +67,100 @@ def test_load_file_rejects_currents_above_expected_annealing_ceiling(tmp_path: P
     path.write_text("1200 0.1 100\n1500 0.2 110\n")
     with pytest.raises(ValueError, match="1000 mA ceiling"):
         anneal_core.load_file(path)
+
+
+def test_summarize_transition_currents_detects_paired_annealing_transition() -> None:
+    up_current = np.linspace(1.0, 100.0, 160)
+    down_current = np.linspace(100.0, 1.0, 160)
+    up_drop = np.clip(1.0 - np.abs(up_current - 42.5) / 7.5, 0.0, 1.0)
+    down_rise = np.clip((7.0 - down_current) / 3.0, 0.0, 1.0)
+    up_resistance = 100.0 + (0.12 * up_current) - (12.0 * up_drop)
+    down_resistance = (
+        80.0
+        + (10.0 * down_rise)
+    )
+    df = pd.DataFrame(
+        {
+            "I_mA": np.r_[up_current, down_current],
+            "R_Ohm": np.r_[up_resistance, down_resistance],
+        }
+    )
+
+    summary = anneal_core.summarize_transition_currents(df)
+
+    assert summary.as_current_mA == pytest.approx(35.0, abs=1.0)
+    assert summary.af_current_mA == pytest.approx(42.5, abs=1.0)
+    assert summary.ms_current_mA == pytest.approx(7.2, abs=1.0)
+    assert summary.mf_current_mA == pytest.approx(4.1, abs=1.0)
+    assert summary.ms_current_mA < summary.af_current_mA
+    assert summary.mf_current_mA < summary.af_current_mA
+    assert anneal_core.format_transition_summary(summary) == (
+        "As 35 mA, Af 43 mA, Ms 7 mA, Mf 3 mA"
+    )
+
+
+def test_summarize_transition_currents_requires_paired_transition() -> None:
+    up_current = np.linspace(1.0, 100.0, 160)
+    down_current = np.linspace(100.0, 1.0, 160)
+    resistance = np.r_[
+        100.0 + 0.05 * up_current,
+        100.0 + 0.05 * down_current,
+    ]
+    df = pd.DataFrame(
+        {
+            "I_mA": np.r_[up_current, down_current],
+            "R_ohm": resistance,
+        }
+    )
+
+    summary = anneal_core.summarize_transition_currents(df)
+
+    assert anneal_core.format_transition_summary(summary) == ""
+
+
+def test_summarize_transition_currents_rejects_upward_heating_kink() -> None:
+    up_current = np.linspace(1.0, 100.0, 160)
+    down_current = np.linspace(100.0, 1.0, 160)
+    up_fraction = np.clip((up_current - 35.0) / 15.0, 0.0, 1.0)
+    down_fraction = np.clip((down_current - 30.0) / 25.0, 0.0, 1.0)
+    up_resistance = (
+        (80.0 + 0.02 * up_current) * (1.0 - up_fraction)
+        + (120.0 + 0.04 * up_current) * up_fraction
+    )
+    down_resistance = (
+        (120.0 - 0.01 * down_current) * (1.0 - down_fraction)
+        + (80.0 + 0.004 * down_current) * down_fraction
+    )
+    df = pd.DataFrame(
+        {
+            "I_mA": np.r_[up_current, down_current],
+            "R_Ohm": np.r_[up_resistance, down_resistance],
+        }
+    )
+
+    summary = anneal_core.summarize_transition_currents(df)
+
+    assert anneal_core.format_transition_summary(summary) == ""
+
+
+def test_summarize_transition_currents_detects_real_local_heating_drop() -> None:
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "sample_data"
+        / "database_builder"
+        / "current annealing data"
+        / "Ni50Fe27Ga23 10_4 s2a 80mA.txt"
+    )
+    df = anneal_core.load_file(path)
+
+    summary = anneal_core.summarize_transition_currents(df)
+
+    assert summary.as_current_mA == pytest.approx(22.8, abs=0.6)
+    assert summary.af_current_mA == pytest.approx(25.7, abs=0.6)
+    assert summary.ms_current_mA == pytest.approx(6.7, abs=0.8)
+    assert summary.mf_current_mA == pytest.approx(4.7, abs=0.8)
+    assert summary.ms_current_mA < summary.af_current_mA
+    assert summary.mf_current_mA < summary.af_current_mA
 
 
 def test_plot_one_bridges_increasing_to_decreasing_segment() -> None:

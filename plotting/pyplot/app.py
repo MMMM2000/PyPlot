@@ -1406,22 +1406,32 @@ class PyPlotWorkbench(PyPlotWindow):
         *,
         warn_on_missing: bool = False,
     ) -> list[Path]:
+        allow_directories = self._plugin_accepts_directory_selection(plugin)
+
+        def _usable_paths(paths: Iterable[Path]) -> list[Path]:
+            return [
+                path
+                for path in paths
+                if isinstance(path, Path)
+                and (path.is_file() or (allow_directories and path.is_dir()))
+            ]
+
         request_paths = getattr(self, "_plot_request_paths", None)
         if callable(request_paths):
             try:
-                requested = [path for path in request_paths() if isinstance(path, Path) and path.is_file()]
+                requested = _usable_paths(request_paths())
             except Exception:
                 requested = []
             if requested:
                 return requested
-        selection = [path for path in self._selected_paths() if path.is_file()]
+        selection = _usable_paths(self._selected_paths())
         if selection:
             if len(selection) != len(self._selected_path_entries):
                 self._commit_selected_paths(selection)
             return selection
 
-        self._sync_selected_paths_with_imports()
-        selection = [path for path in self._selected_paths() if path.is_file()]
+        self._sync_selected_paths_with_imports(plugin=plugin)
+        selection = _usable_paths(self._selected_paths())
         if selection:
             return selection
 
@@ -1620,8 +1630,18 @@ class PyPlotWorkbench(PyPlotWindow):
             return True
         requires = bool(getattr(plugin, "requires_imported_data", False))
         if requires:
+            if self._plugin_accepts_directory_selection(plugin):
+                return any(
+                    path.is_file() or path.is_dir()
+                    for path in self._selected_paths()
+                    if isinstance(path, Path)
+                )
             return False
         return bool(self._selected_paths())
+
+    def _plugin_accepts_directory_selection(self, plugin: PyPlotPlugin | None = None) -> bool:
+        target = plugin if plugin is not None else self._current_plugin
+        return bool(getattr(target, "supports_import_folders", False))
 
     def _run_with_shared_progress(
         self,
@@ -1649,7 +1669,14 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         path_list = [Path(p) for p in paths]
-        super()._import_paths(path_list)
+        plugin_handles_directories = self._plugin_accepts_directory_selection()
+        workbook_import_paths = [
+            path
+            for path in path_list
+            if not (plugin_handles_directories and path.is_dir())
+        ]
+        if workbook_import_paths:
+            super()._import_paths(workbook_import_paths)
         if path_list:
             self._commit_selected_paths(path_list)
             self._session_has_imports = True
@@ -4630,16 +4657,19 @@ class PyPlotWorkbench(PyPlotWindow):
                 self._plugin_last_directories[plugin_name] = last
                 self._sync_plugin_directory_settings()
 
-    def _sync_selected_paths_with_imports(self) -> None:
+    def _sync_selected_paths_with_imports(self, plugin: PyPlotPlugin | None = None) -> None:
         ordered: list[Path] = []
         seen: set[str] = set()
+        allow_directories = self._plugin_accepts_directory_selection(plugin)
 
         def _push(candidate: Path | None) -> None:
             if not isinstance(candidate, Path):
                 return
             if not candidate.exists():
                 return
-            if candidate.is_dir():
+            if candidate.is_dir() and not allow_directories:
+                return
+            if not candidate.is_dir() and not candidate.is_file():
                 return
             try:
                 resolved = candidate.resolve()
