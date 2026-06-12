@@ -6521,15 +6521,14 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
         _close_test_window(window)
 
 
-def test_mini_dma_ir_auto_mode_uses_safe_mlx90614_interval(tmp_path: Path, qtbot) -> None:
+def test_mini_dma_ir_auto_mode_preserves_selected_rate(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
         assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_AUTO
         window.combo_ir_rate.setCurrentIndex(window.combo_ir_rate.findData(7))
 
-        assert window._effective_ir_interval_code() == 3
-        assert window.combo_ir_rate.currentData() == 3
+        assert window.combo_ir_rate.currentData() == 7
     finally:
         _close_test_window(window)
 
@@ -6547,7 +6546,7 @@ def test_mini_dma_ir_sensor_selection_updates_rate_defaults(tmp_path: Path, qtbo
             window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90614)
         )
         assert window.combo_ir_rate.currentData() == 3
-        assert "avoid Max stream" in window.label_ir_status.text()
+        assert "thermometer firmware" in window.label_ir_status.text()
     finally:
         _close_test_window(window)
 

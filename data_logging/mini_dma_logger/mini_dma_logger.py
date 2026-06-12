@@ -2555,7 +2555,7 @@ class Mlx90614Worker(QtCore.QObject):
                 if sample is not None:
                     if self.sensor_mode == IR_SENSOR_MLX90640:
                         self.status_changed.emit(
-                            "Ignored MLX90614 sample because the selected IR sensor is MLX90640."
+                            "Nucleo is streaming MLX90614 thermometer firmware; flash MLX90640 firmware/bridge for the connected MLX90640 camera."
                         )
                         continue
                     sample.config1 = self._last_config1
@@ -2565,7 +2565,12 @@ class Mlx90614Worker(QtCore.QObject):
                     fields = raw_text.split(",", 2)
                     self._last_config1 = fields[1] if len(fields) > 1 else ""
                 if raw_text.startswith("MLX90614_"):
-                    self.status_changed.emit(raw_text)
+                    if self.sensor_mode == IR_SENSOR_MLX90640:
+                        self.status_changed.emit(
+                            f"Wrong firmware for MLX90640: received {raw_text}. Flash MLX90640 firmware/bridge."
+                        )
+                    else:
+                        self.status_changed.emit(raw_text)
         except SerialException as exc:
             self.error_occurred.emit(f"IR thermometer connection failed: {exc}")
         except Exception as exc:
@@ -10783,22 +10788,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             elif sensor_mode == IR_SENSOR_MLX90614:
                 self.label_ir_status.setText(
-                    "MLX90614 mode uses a safe 10 Hz default; avoid Max stream for this thermometer."
+                    "MLX90614 mode expects thermometer firmware at address 0x5A."
                 )
             else:
                 self.label_ir_status.setText(
-                    "Auto-detects supported streams; uses a safe MLX90614 interval unless MLX90640 is selected."
+                    "Auto-detects supported streams, but the Nucleo firmware must match the connected sensor."
                 )
-
-    def _effective_ir_interval_code(self) -> int:
-        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
-        interval_code = int(self.combo_ir_rate.currentData() or 7)
-        if sensor_mode in {IR_SENSOR_AUTO, IR_SENSOR_MLX90614} and interval_code == 7:
-            safe_index = self.combo_ir_rate.findData(3)
-            if safe_index >= 0:
-                self.combo_ir_rate.setCurrentIndex(safe_index)
-            return 3
-        return interval_code
 
     def _connect_ir_thermometer(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         port_name = str(self.combo_ir_port.currentData() or "").strip()
@@ -10807,7 +10802,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, APP_NAME, "Select an IR thermometer serial port first.")
             return False
         baudrate = int(self.combo_ir_baud.currentText())
-        interval_code = self._effective_ir_interval_code()
+        interval_code = int(self.combo_ir_rate.currentData() or 7)
         sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
         worker = Mlx90614Worker(
             port_name=port_name,
