@@ -103,6 +103,35 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Thermal camera viewer",
         "body": dedent(
             """
+            ### NUCLEO-H753ZI wiring
+            Power the Nucleo from its ST-LINK USB connector and turn power off before
+            rewiring the sensor. Connect only one thermal module to the checked-in
+            firmware at a time.
+
+            **Dratek MLX90614ESF-DCI spot thermometer module** (`0x5A`,
+            STM32Cube MLX90614 probe firmware):
+
+            * Nucleo **3V3** -> module **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> module **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> module **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> module **SCL**
+
+            **MLX90640 110 degree, 32 x 24 thermal camera module** (`0x33`,
+            STM32Cube MLX90640 raw-stream firmware):
+
+            * Nucleo **3V3** -> camera **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> camera **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> camera **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> camera **SCL**
+            * Leave **INT**, **AD**, or other optional breakout pins unconnected unless
+              you are using a different firmware that explicitly needs them.
+
+            Do not power these modules from **5V** or add 5 V I2C pullups unless a
+            level shifter is installed. The firmware enables weak internal pullups on
+            PB8/PB9, and most breakouts already include suitable 3.3 V I2C pullups.
+            The PC serial connection is the Nucleo ST-LINK virtual COM port; no module
+            UART pins need to be connected.
+
             ### Live MLX90640 view
             1. Keep the Nucleo running the STM32Cube MLX90640 raw-stream firmware for the
                fastest live diagnostic view, or the older Arduino firmware for calibrated
