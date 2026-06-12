@@ -2729,7 +2729,6 @@ class Mlx90614Worker(QtCore.QObject):
         waiting_for_calibration_reported = False
         waiting_for_celsius_reported = False
         try:
-            port.reset_input_buffer()
             port.write(f"{self.interval_code}\n".encode("ascii"))
             port.flush()
             self.status_changed.emit(f"Requested MLX90640 refresh code {self.interval_code}.")
@@ -11253,6 +11252,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
 
     def _connect_ir_thermometer(self, checked: bool = False, *, show_errors: bool = True) -> bool:
+        if self._ir_thread is not None:
+            self.label_ir_status.setText("IR logging is already connected.")
+            return True
         port_name = str(self.combo_ir_port.currentData() or "").strip()
         if not port_name:
             if show_errors:

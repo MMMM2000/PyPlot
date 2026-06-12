@@ -7149,6 +7149,65 @@ def test_ir_worker_records_selected_sensor_mode() -> None:
     assert fallback.sensor_mode == mini_dma_mod.IR_SENSOR_MLX90640
 
 
+def test_mlx90640_cube_worker_does_not_flush_pending_camera_packets() -> None:
+    class _FakePort:
+        def __init__(self, worker: mini_dma_mod.Mlx90614Worker) -> None:
+            self.worker = worker
+            self.events: list[tuple[str, bytes | None]] = []
+
+        def reset_input_buffer(self) -> None:
+            self.events.append(("reset_input_buffer", None))
+
+        def write(self, data: bytes) -> int:
+            self.events.append(("write", data))
+            return len(data)
+
+        def flush(self) -> None:
+            self.events.append(("flush", None))
+
+        def read(self, _size: int) -> bytes:
+            self.worker.stop()
+            return b""
+
+    worker = mini_dma_mod.Mlx90614Worker(
+        port_name="COM10",
+        baudrate=2000000,
+        interval_code=7,
+        sensor_mode=mini_dma_mod.IR_SENSOR_MLX90640,
+    )
+    port = _FakePort(worker)
+
+    worker._run_mlx90640_cube_raw(port)  # noqa: SLF001
+
+    assert ("reset_input_buffer", None) not in port.events
+    assert ("write", b"7\n") in port.events
+
+
+def test_connect_ir_thermometer_does_not_start_duplicate_reader(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    created: list[object] = []
+
+    class _UnexpectedWorker:
+        def __init__(self, *_args, **_kwargs) -> None:
+            created.append(self)
+
+    monkeypatch.setattr(mini_dma_mod, "Mlx90614Worker", _UnexpectedWorker)
+
+    try:
+        window._ir_thread = QtCore.QThread(window)
+
+        assert window._connect_ir_thermometer(show_errors=False)
+        assert not created
+        assert "already connected" in window.label_ir_status.text()
+    finally:
+        window._ir_thread = None
+        _close_test_window(window)
+
+
 def test_ir_sample_from_thermal_frame_records_camera_summary() -> None:
     frame = SimpleNamespace(
         unit="C",
