@@ -5565,6 +5565,21 @@ class _MiniDmaTransitionReviewEntry:
     target_summary: Any
 
 
+@dataclass
+class _MiniDmaTransitionReviewRunNode:
+    key: str
+    sample: str
+    run_label: str
+    record: MiniDmaRecord
+
+
+@dataclass
+class _MiniDmaTransitionReviewLoadResult:
+    key: str
+    entries: List[_MiniDmaTransitionReviewEntry]
+    error: str = ""
+
+
 def _mini_dma_transition_status(target: object) -> str:
     values = [
         getattr(target, "as_current_mA", None),
@@ -5625,6 +5640,30 @@ def _mini_dma_transition_review_entries(
     return entries
 
 
+class _MiniDmaTransitionReviewLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self,
+        key: str,
+        record: MiniDmaRecord,
+        logger: logging.Logger,
+    ) -> None:
+        super().__init__()
+        self._key = key
+        self._record = record
+        self._logger = logger
+
+    def run(self) -> None:
+        try:
+            entries = _mini_dma_transition_review_entries([self._record], self._logger)
+        except Exception as exc:
+            self._logger.exception("Failed to prepare Mini DMA transition review")
+            self.finished.emit(_MiniDmaTransitionReviewLoadResult(self._key, [], str(exc)))
+            return
+        self.finished.emit(_MiniDmaTransitionReviewLoadResult(self._key, entries))
+
+
 class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
     def __init__(
         self,
@@ -5636,10 +5675,18 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.setWindowTitle("Mini DMA transition review")
         self.resize(1280, 820)
         self._logger = logger
-        self._entries = _mini_dma_transition_review_entries(records, logger)
-        self._visible_indices: List[int] = []
-        self._current_index: Optional[int] = None
-        self._tree_items: Dict[int, QtWidgets.QTreeWidgetItem] = {}
+        self._runs = self._run_nodes(records)
+        self._entries_by_run: Dict[str, List[_MiniDmaTransitionReviewEntry]] = {}
+        self._entries: List[_MiniDmaTransitionReviewEntry] = []
+        self._visible_refs: List[Tuple[str, int]] = []
+        self._current_ref: Optional[Tuple[str, int]] = None
+        self._current_run_key: Optional[str] = None
+        self._run_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+        self._tree_items: Dict[Tuple[str, int], QtWidgets.QTreeWidgetItem] = {}
+        self._loading_keys: Set[str] = set()
+        self._workers: Dict[str, Tuple[QtCore.QThread, _MiniDmaTransitionReviewLoadWorker]] = {}
+        self._pending_select_key: Optional[str] = None
+        self._closing = False
 
         main_layout = QtWidgets.QVBoxLayout(self)
         controls = QtWidgets.QHBoxLayout()
@@ -5653,6 +5700,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.show_markers_check.setChecked(True)
         self.next_rejected_button = QtWidgets.QPushButton("Next rejected")
         self.next_questionable_button = QtWidgets.QPushButton("Next partial")
+        self.status_label = QtWidgets.QLabel("Select a run to load its transition fits.")
         for widget in (
             self.accepted_only_check,
             self.rejected_only_check,
@@ -5663,6 +5711,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             self.next_questionable_button,
         ):
             controls.addWidget(widget)
+        controls.addWidget(self.status_label, 1)
         controls.addStretch(1)
         main_layout.addLayout(controls)
 
@@ -5702,6 +5751,52 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.next_questionable_button.clicked.connect(lambda: self._select_next_status({"partial"}))
         self.tree.currentItemChanged.connect(self._handle_tree_selection)
         self._refresh_tree()
+        QtCore.QTimer.singleShot(0, self._select_initial_run)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._closing = True
+        for thread, _worker in list(self._workers.values()):
+            try:
+                thread.quit()
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    @staticmethod
+    def _run_key(record: MiniDmaRecord) -> str:
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            return str(path.resolve()) if path.exists() else str(path)
+        return repr(record)
+
+    @classmethod
+    def _run_nodes(
+        cls,
+        records: Sequence[MiniDmaRecord],
+    ) -> List[_MiniDmaTransitionReviewRunNode]:
+        nodes: List[_MiniDmaTransitionReviewRunNode] = []
+        seen: Set[str] = set()
+        for record in records:
+            key = cls._run_key(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            path = getattr(record, "path", None)
+            sample = str(getattr(record, "sample", "") or "")
+            if not sample and isinstance(path, Path):
+                sample = path.name
+            run_label = str(getattr(record, "label", "") or "")
+            if not run_label and isinstance(path, Path):
+                run_label = path.name
+            nodes.append(
+                _MiniDmaTransitionReviewRunNode(
+                    key=key,
+                    sample=sample or "Mini DMA",
+                    run_label=run_label or key,
+                    record=record,
+                )
+            )
+        return nodes
 
     def _handle_accepted_filter_toggled(self, checked: bool) -> None:
         if checked and self.rejected_only_check.isChecked():
@@ -5725,35 +5820,78 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
     def _refresh_tree(self) -> None:
         self.tree.clear()
         self._tree_items = {}
-        self._visible_indices = []
-        parents: Dict[Tuple[str, str], QtWidgets.QTreeWidgetItem] = {}
+        self._run_items = {}
+        self._visible_refs = []
         sample_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
-        for index, entry in enumerate(self._entries):
-            if not self._entry_allowed(entry):
-                continue
-            self._visible_indices.append(index)
-            sample_item = sample_items.get(entry.sample)
+        for run in self._runs:
+            sample_item = sample_items.get(run.sample)
             if sample_item is None:
-                sample_item = QtWidgets.QTreeWidgetItem([entry.sample, ""])
+                sample_item = QtWidgets.QTreeWidgetItem([run.sample, ""])
                 self.tree.addTopLevelItem(sample_item)
-                sample_items[entry.sample] = sample_item
-            run_key = (entry.sample, entry.run_label)
-            run_item = parents.get(run_key)
-            if run_item is None:
-                run_item = QtWidgets.QTreeWidgetItem([entry.run_label, ""])
-                sample_item.addChild(run_item)
-                parents[run_key] = run_item
-            leaf = QtWidgets.QTreeWidgetItem([entry.target_label, entry.status])
-            leaf.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
-            run_item.addChild(leaf)
-            self._tree_items[index] = leaf
+                sample_items[run.sample] = sample_item
+            entries = self._entries_by_run.get(run.key)
+            if run.key in self._loading_keys:
+                status = "loading"
+            elif entries is None:
+                status = "not loaded"
+            else:
+                status = f"{len(entries)} stresses"
+            run_item = QtWidgets.QTreeWidgetItem([run.run_label, status])
+            run_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("run", run.key))
+            sample_item.addChild(run_item)
+            self._run_items[run.key] = run_item
+            if run.key in self._loading_keys and not entries:
+                child = QtWidgets.QTreeWidgetItem(["Loading...", ""])
+                child.setFlags(child.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                run_item.addChild(child)
+                continue
+            if entries is None:
+                child = QtWidgets.QTreeWidgetItem(["Select to load", ""])
+                child.setFlags(child.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                run_item.addChild(child)
+                continue
+            shown = 0
+            for index, entry in enumerate(entries):
+                if not self._entry_allowed(entry):
+                    continue
+                ref = (run.key, index)
+                self._visible_refs.append(ref)
+                shown += 1
+                leaf = QtWidgets.QTreeWidgetItem([entry.target_label, entry.status])
+                leaf.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("entry", run.key, index))
+                run_item.addChild(leaf)
+                self._tree_items[ref] = leaf
+            if entries and shown == 0:
+                child = QtWidgets.QTreeWidgetItem(["No targets match the active filter", ""])
+                child.setFlags(child.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                run_item.addChild(child)
         self.tree.expandAll()
-        first_item = self._tree_items.get(self._visible_indices[0]) if self._visible_indices else None
-        if first_item is not None:
-            self.tree.setCurrentItem(first_item)
-        else:
-            self._current_index = None
+        if self._current_ref in self._tree_items:
+            self.tree.setCurrentItem(self._tree_items[cast(Tuple[str, int], self._current_ref)])
+        elif self._current_run_key in self._run_items:
+            self.tree.setCurrentItem(self._run_items[cast(str, self._current_run_key)])
+        elif not self._visible_refs and not self._runs:
+            self._current_ref = None
             self._show_empty()
+
+    def _select_initial_run(self) -> None:
+        if self._closing:
+            return
+        current = self.tree.currentItem()
+        if current is not None:
+            value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(value, tuple) and value:
+                if value[0] == "entry":
+                    return
+                if value[0] == "run":
+                    self._handle_tree_selection(current, None)
+                    return
+        if not self._runs:
+            self._show_empty("No Mini DMA transition review targets are available.")
+            return
+        item = self._run_items.get(self._runs[0].key)
+        if item is not None:
+            self.tree.setCurrentItem(item)
 
     def _handle_tree_selection(
         self,
@@ -5763,34 +5901,119 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         if current is None:
             return
         value = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not isinstance(value, int):
+        if not isinstance(value, tuple) or not value:
             return
-        self._current_index = value
-        self._plot_entry(self._entries[value])
+        kind = value[0]
+        if kind == "run" and len(value) >= 2 and isinstance(value[1], str):
+            key = value[1]
+            self._current_run_key = key
+            self._current_ref = None
+            self._ensure_run_loaded(key, select_first=True)
+            if key in self._loading_keys:
+                self._show_empty("Loading Mini DMA transition fits...")
+            elif key not in self._entries_by_run:
+                self._show_empty("Select a stress/load entry after the run is loaded.")
+            return
+        if kind == "entry" and len(value) >= 3 and isinstance(value[1], str) and isinstance(value[2], int):
+            key = value[1]
+            index = int(value[2])
+            entries = self._entries_by_run.get(key, [])
+            if index < 0 or index >= len(entries):
+                return
+            self._current_run_key = key
+            self._current_ref = (key, index)
+            self._plot_entry(entries[index])
 
     def _redraw_current(self) -> None:
-        if self._current_index is None or self._current_index >= len(self._entries):
+        if self._current_ref is None:
             return
-        self._plot_entry(self._entries[self._current_index])
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        self._plot_entry(entries[index])
 
     def _select_next_status(self, statuses: Set[str]) -> None:
-        if not self._visible_indices:
+        refs = [
+            ref
+            for ref in self._visible_refs
+            if self._entries_by_run.get(ref[0], [])[ref[1]].status in statuses
+        ]
+        if not refs:
             return
         start_position = 0
-        if self._current_index in self._visible_indices:
-            start_position = self._visible_indices.index(cast(int, self._current_index)) + 1
-        ordered = self._visible_indices[start_position:] + self._visible_indices[:start_position]
-        for index in ordered:
-            if self._entries[index].status in statuses:
-                item = self._tree_items.get(index)
-                if item is not None:
-                    self.tree.setCurrentItem(item)
+        if self._current_ref in refs:
+            start_position = refs.index(cast(Tuple[str, int], self._current_ref)) + 1
+        ordered = refs[start_position:] + refs[:start_position]
+        for ref in ordered:
+            item = self._tree_items.get(ref)
+            if item is not None:
+                self.tree.setCurrentItem(item)
                 return
 
-    def _show_empty(self) -> None:
+    def _ensure_run_loaded(self, key: str, *, select_first: bool = False) -> None:
+        if key in self._entries_by_run:
+            if select_first:
+                self._select_first_entry_for_run(key)
+            return
+        if key in self._loading_keys:
+            if select_first:
+                self._pending_select_key = key
+            return
+        run = next((candidate for candidate in self._runs if candidate.key == key), None)
+        if run is None:
+            return
+        self._pending_select_key = key if select_first else self._pending_select_key
+        self._loading_keys.add(key)
+        self.status_label.setText(f"Loading {run.run_label}...")
+        self._refresh_tree()
+        thread = QtCore.QThread(self)
+        worker = _MiniDmaTransitionReviewLoadWorker(key, run.record, self._logger)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_load_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda key=key: self._workers.pop(key, None))
+        self._workers[key] = (thread, worker)
+        thread.start()
+
+    def _handle_load_finished(self, result: object) -> None:
+        if self._closing or not isinstance(result, _MiniDmaTransitionReviewLoadResult):
+            return
+        self._loading_keys.discard(result.key)
+        self._entries_by_run[result.key] = result.entries
+        ordered_entries: List[_MiniDmaTransitionReviewEntry] = []
+        for run in self._runs:
+            ordered_entries.extend(self._entries_by_run.get(run.key, []))
+        self._entries = ordered_entries
+        if result.error:
+            self.status_label.setText(f"Failed to load run: {result.error}")
+        else:
+            self.status_label.setText(f"Loaded {len(result.entries)} stress/load targets.")
+        pending = self._pending_select_key == result.key
+        if pending:
+            self._pending_select_key = None
+        self._refresh_tree()
+        if pending:
+            self._select_first_entry_for_run(result.key)
+
+    def _select_first_entry_for_run(self, key: str) -> None:
+        entries = self._entries_by_run.get(key, [])
+        for index, entry in enumerate(entries):
+            if not self._entry_allowed(entry):
+                continue
+            item = self._tree_items.get((key, index))
+            if item is not None:
+                self.tree.setCurrentItem(item)
+                return
+
+    def _show_empty(self, message: str = "No Mini DMA transition review targets are available.") -> None:
         self.figure.clear()
         self.canvas.hide()
         self.toolbar.hide()
+        self.empty_label.setText(message)
         self.empty_label.show()
 
     def _plot_entry(self, entry: _MiniDmaTransitionReviewEntry) -> None:
@@ -6227,6 +6450,65 @@ def _dma_iso_stress_preview_items(
                     open_origin=True,
                 ),
                 tooltip="Send this DMA iso-stress file to Origin via PyPlot.",
+            ),
+        )
+        items.append(_GraphPreviewItem(title, pixmap, actions=actions))
+    return items
+
+
+def _mini_dma_preview_items(
+    records: Sequence[MiniDmaRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> List[_GraphPreviewItem]:
+    items: List[_GraphPreviewItem] = []
+    if mini_dma_core is None:
+        return items
+    for record in records:
+        path = getattr(record, "path", None)
+        if not isinstance(path, Path):
+            continue
+        try:
+            run = mini_dma_core.load_run(path)
+            figure = mini_dma_core.make_strain_current_figure(
+                run,
+                strain_baseline_mode=mini_dma_core.STRAIN_BASELINE_PER_TARGET_MINIMUM,
+                show_power_top_axis=False,
+            )
+        except Exception:
+            logger.exception("Failed to render Mini DMA preview for %s", path)
+            continue
+        pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
+        if pixmap is None:
+            continue
+        title = _record_label_for_display(record) or getattr(record, "sample", "") or path.name
+        paths = [path]
+        actions = (
+            _GraphPreviewAction(
+                "Open in PyPlot",
+                partial(
+                    _open_pyplot_for_paths,
+                    paths,
+                    "Mini DMA",
+                    logger,
+                    auto_plot=True,
+                    open_origin=False,
+                ),
+                tooltip="Open this Mini DMA run in PyPlot.",
+            ),
+            _GraphPreviewAction(
+                "Open in Origin",
+                partial(
+                    _open_pyplot_for_paths,
+                    paths,
+                    "Mini DMA",
+                    logger,
+                    auto_plot=True,
+                    open_origin=True,
+                ),
+                tooltip="Send this Mini DMA run to Origin via PyPlot.",
             ),
         )
         items.append(_GraphPreviewItem(title, pixmap, actions=actions))
@@ -18562,7 +18844,13 @@ class MiniDmaSection(MiniDatabaseSection):
     ) -> None:
         self._record_groups: Dict[str, List[MiniDmaRecord]] = {}
         self._record_groups_by_key: Dict[str, List[MiniDmaRecord]] = {}
+        self._all_mini_dma_records: List[MiniDmaRecord] = []
+        self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
+        self._preview_group_count = 1
+        self._preview_spacing = 6
         super().__init__(logger, log_callback, parent)
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
         self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
         self.open_pyplot_button.setToolTip("Open the selected Mini DMA runs in PyPlot.")
         self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
@@ -18579,6 +18867,65 @@ class MiniDmaSection(MiniDatabaseSection):
         self.controls_layout.addWidget(self.review_transitions_button)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
+
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        table = QtWidgets.QTableView(parent)
+        table.setModel(self.model)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        table.setSortingEnabled(True)
+        table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setIconSize(QtCore.QSize(self._preview_icon_width(), self._preview_icon_height()))
+        vertical_header = table.verticalHeader()
+        if vertical_header is not None:
+            default_height = self._preview_icon_height() + 24
+            vertical_header.setDefaultSectionSize(default_height)
+            vertical_header.setMinimumSectionSize(default_height)
+        self.table_view = table
+        return table
+
+    def _configure_table_view(self) -> None:  # type: ignore[override]
+        super()._configure_table_view()
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+
+    def _auto_fit_columns(self) -> None:  # type: ignore[override]
+        super()._auto_fit_columns()
+        QtCore.QTimer.singleShot(0, self._ensure_preview_columns_wide)
+
+    def _ensure_preview_columns_wide(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        if MINI_DMA_COLUMN not in frame.columns:
+            return
+        idx = frame.columns.get_loc(MINI_DMA_COLUMN)
+        minimum = self._preview_icon_width() + 80
+        if table.columnWidth(idx) < minimum:
+            table.setColumnWidth(idx, minimum)
 
     def _collect_candidates(self) -> List[Path]:
         candidates: Dict[str, Path] = {}
@@ -18725,12 +19072,89 @@ class MiniDmaSection(MiniDatabaseSection):
         except Exception:
             payload = None
         records = list(payload) if isinstance(payload, list) else []
+        self._all_mini_dma_records = records
         for record in records:
             sample = getattr(record, "sample", None)
             if isinstance(sample, str) and sample.strip():
                 grouped.setdefault(sample.strip(), []).append(record)
         self._record_groups = grouped
         self._record_groups_by_key = _group_graph_records_by_key(records)
+        max_groups = 1
+        for records_for_sample in grouped.values():
+            if len(records_for_sample) > max_groups:
+                max_groups = len(records_for_sample)
+        self._preview_group_count = max_groups
+        self._update_preview_icon_size()
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _preview_icon_width(self) -> int:
+        return ANNEALING_GRAPH_WIDTH
+
+    def _preview_icon_height(self) -> int:
+        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
+        return ANNEALING_GRAPH_HEIGHT * count + self._preview_spacing * (count - 1)
+
+    def _update_preview_icon_size(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        width = self._preview_icon_width()
+        height = self._preview_icon_height()
+        try:
+            table.setIconSize(
+                QtCore.QSize(max(width, ANNEALING_GRAPH_WIDTH), max(height, ANNEALING_GRAPH_HEIGHT))
+            )
+        except Exception:
+            pass
+        header = table.verticalHeader()
+        if header is not None:
+            try:
+                header.setDefaultSectionSize(max(height + 24, ANNEALING_GRAPH_HEIGHT + 24))
+            except Exception:
+                pass
+        self._auto_fit_columns()
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column != MINI_DMA_COLUMN:
+            return None
+        sample = _row_sample_value(row)
+        if not sample:
+            return None
+        row_key = _row_to_microwire_key(row)
+        cache_key = f"{sample}|{row_key}|{column}"
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(sample, [])
+        if not records and row_key:
+            records = self._record_groups_by_key.get(row_key, [])
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            items = _mini_dma_preview_items(
+                records,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            pixmaps = [item.pixmap for item in items if item.pixmap is not None]
+            if pixmaps:
+                pixmap = _combine_pixmaps_vertical(
+                    pixmaps,
+                    width_px=self._preview_icon_width(),
+                    height_px=self._preview_icon_height(),
+                    spacing=self._preview_spacing,
+                    scale_to_fit=True,
+                )
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
 
     def _selected_records(self) -> List[MiniDmaRecord]:
         rows = self._selected_rows()
