@@ -15639,6 +15639,53 @@ def test_current_sweep_step_halving_strategy_is_branch_default(
         _close_test_window(window)
 
 
+def test_current_sweep_step_halving_strategy_does_not_protective_shrink_before_overshoot(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True  # type: ignore[method-assign]
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_steps_per_mm.setValue(1000.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_max_correction_strain_pct.setValue(5.0)
+    window._calibrated_stiffness_g_per_mm = 1.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+    window._seek_last_error_by_key[seek_key] = 1.0
+    window._seek_step_halving_step_mm_by_key[seek_key] = 0.2
+    window._latest_scale_value_g = 3.5
+    window._latest_scale_timestamp = time.time()
+    window._last_move_target_mm = 0.0
+    window._last_effective_move_target_mm = 0.0
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=5.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        )
+
+        assert reached is False
+        assert moves
+        assert abs(moves[-1]) > window._motor_step_mm() * 10.0
+        assert "protective single-step" not in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_step_halving_strategy_stops_at_motor_step(
     tmp_path: Path,
     qtbot,

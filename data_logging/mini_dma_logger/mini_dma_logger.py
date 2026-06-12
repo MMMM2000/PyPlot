@@ -13800,6 +13800,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 filtered_signal is not None
                 and self._is_current_sweep_mode(self._automation_name)
                 and self._automation_phase in {"current", "current_hold"}
+                and not self._current_sweep_uses_step_halving_strategy()
             ):
                 reversal_sign = math.copysign(1.0, delta_value)
                 pending_sign, pending_timestamp_s = self._seek_pending_reversal_by_key.get(
@@ -13865,7 +13866,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     result="reversal_hold",
                 )
                 return True
-            if self._current_sweep_freezes_live_stiffness() or (
+            if self._current_sweep_uses_step_halving_strategy():
+                pass
+            elif self._current_sweep_freezes_live_stiffness() or (
                 self._automation_step_note == "setup_preload"
                 and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             ):
@@ -13911,6 +13914,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if (
             protective_single_step
+            and not self._current_sweep_uses_step_halving_strategy()
             and not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
             and not current_hold_moving_away_fast
         ):
