@@ -15465,6 +15465,7 @@ def test_current_sweep_stress_correction_is_capped_by_planned_mpa_change(
     window.spin_diameter.setValue(0.03)
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_current_sweep_max_correction_strain_pct.setValue(1.0)
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE
     window._calibrated_stiffness_g_per_mm = 72.0
     window._calibrated_stiffness_length_mm = 80.0
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -15500,6 +15501,7 @@ def test_current_sweep_current_phase_large_error_uses_fast_recovery_cap(
     window.spin_initial_length.setValue(80.0)
     window.spin_diameter.setValue(0.03)
     window.spin_steps_per_mm.setValue(800.0)
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE
     window._calibrated_stiffness_g_per_mm = 72.0
     window._calibrated_stiffness_length_mm = 80.0
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -15543,6 +15545,7 @@ def test_current_sweep_hold_phase_uses_faster_recovery_cap(
     window.spin_initial_length.setValue(80.0)
     window.spin_diameter.setValue(0.03)
     window.spin_steps_per_mm.setValue(800.0)
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE
     window._calibrated_stiffness_g_per_mm = 72.0
     window._calibrated_stiffness_length_mm = 80.0
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -15614,6 +15617,24 @@ def test_current_sweep_step_halving_strategy_halves_after_overshoot(
 
         assert same_side_step == pytest.approx(first_step)
         assert reversed_step == pytest.approx(max(window._motor_step_mm(), first_step * 0.5))
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_step_halving_strategy_is_branch_default(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        config = window._freeze_control_config()
+
+        assert config.current_sweep_control_strategy == mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+        assert (
+            window._control_logic_metadata()["current_sweep_control_strategy"]
+            == mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+        )
     finally:
         _close_test_window(window)
 

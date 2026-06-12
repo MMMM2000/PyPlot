@@ -81,6 +81,7 @@ CONTROL_LOGIC_NAME = "mini_dma_control"
 CONTROL_LOGIC_VERSION = "2026-05-29.2"
 CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE = "adaptive"
 CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING = "step_halving"
+CURRENT_SWEEP_CONTROL_STRATEGY_DEFAULT = CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
 CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -4136,10 +4137,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_sweep_nudge_mm=float(self.spin_current_sweep_nudge_mm.value()),
             current_sweep_balance_speed_mm_s=float(self.spin_current_sweep_balance_speed_mm_s.value()),
             current_sweep_max_seek_mm=self._current_sweep_config_max_seek_mm(),
-            current_sweep_control_strategy=str(
-                getattr(self, "_current_sweep_control_strategy", CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE)
-                or CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE
-            ),
+            current_sweep_control_strategy=self._current_sweep_control_strategy_name(),
             supply_profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
             supply_current_resolution_mA=supply_resolution,
             motor_supply_enabled=self.check_motor_supply_power.isChecked(),
@@ -4148,6 +4146,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _control_config(self) -> MiniDmaControlConfig | None:
         return self._active_control_config
+
+    def _current_sweep_control_strategy_name(self) -> str:
+        return str(
+            getattr(self, "_current_sweep_control_strategy", CURRENT_SWEEP_CONTROL_STRATEGY_DEFAULT)
+            or CURRENT_SWEEP_CONTROL_STRATEGY_DEFAULT
+        )
 
     def _current_sweep_config_max_seek_mm(self) -> float:
         value = float(self.spin_current_sweep_max_seek_mm.value())
@@ -12238,7 +12242,7 @@ class MainWindow(QtWidgets.QMainWindow):
         strategy = (
             config.current_sweep_control_strategy
             if config is not None
-            else str(getattr(self, "_current_sweep_control_strategy", CURRENT_SWEEP_CONTROL_STRATEGY_ADAPTIVE))
+            else self._current_sweep_control_strategy_name()
         )
         return (
             strategy == CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
@@ -15754,6 +15758,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
                 "max_correction_travel_mm": float(self.spin_current_sweep_max_seek_mm.value()),
+                "current_sweep_control_strategy": self._current_sweep_control_strategy_name(),
             },
         }
 
@@ -15766,6 +15771,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "version": CONTROL_LOGIC_VERSION,
             "profile": CONTROL_LOGIC_PROFILE,
             "features": list(CONTROL_LOGIC_FEATURES),
+            "current_sweep_control_strategy": self._current_sweep_control_strategy_name(),
             "fingerprint": fingerprint,
             "fingerprint_algorithm": "sha256-json-v1",
             "fingerprint_fields": [
