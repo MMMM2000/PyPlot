@@ -5,3 +5,5 @@
   Mini DMA Logger.
 - Enabled Mini DMA Logger help and added an explicit IR sensor selector with
   auto-detect, MLX90614, and MLX90640 text-frame options.
+- Added a Mini DMA IR-panel Live camera button that opens Thermal Camera Viewer
+  preconfigured for MLX90640 Cube raw on the selected Nucleo serial port.

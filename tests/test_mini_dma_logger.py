@@ -6551,6 +6551,78 @@ def test_mini_dma_ir_sensor_selection_updates_rate_defaults(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
+def test_mini_dma_live_camera_button_configures_thermal_viewer(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class FakeViewer(QtWidgets.QWidget):
+        def __init__(self) -> None:
+            super().__init__()
+            self.port_combo = QtWidgets.QComboBox(self)
+            self.port_combo.addItem("COM10", "COM10")
+            self.protocol_combo = QtWidgets.QComboBox(self)
+            self.protocol_combo.addItem("Cube raw", "cube_raw")
+            self.baudrate: int | None = None
+            self.refresh_rate_combo = QtWidgets.QComboBox(self)
+            self.refresh_rate_combo.addItem("16 Hz", 5)
+            self.refresh_rate_combo.addItem("32 Hz", 6)
+            self.refresh_rate_combo.addItem("64 Hz", 7)
+            self.connected = False
+
+        def refresh_ports(self) -> None:
+            pass
+
+        def _set_baudrate(self, baudrate: int) -> None:
+            self.baudrate = baudrate
+
+        def _toggle_connection(self) -> None:
+            self.connected = True
+
+    fake_viewer = FakeViewer()
+    qtbot.addWidget(fake_viewer)
+    window._create_thermal_camera_viewer = lambda: fake_viewer  # type: ignore[method-assign]
+
+    try:
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM10 - STLink", "COM10")
+        window.combo_ir_rate.setCurrentIndex(window.combo_ir_rate.findData(7))
+
+        window._open_live_thermal_camera_viewer()
+        QtWidgets.QApplication.processEvents()
+
+        assert fake_viewer.port_combo.currentData() == "COM10"
+        assert fake_viewer.protocol_combo.currentData() == "cube_raw"
+        assert fake_viewer.baudrate == 2000000
+        assert fake_viewer.refresh_rate_combo.currentData() == 7
+        assert fake_viewer.connected is True
+    finally:
+        _close_test_window(window)
+
+
+def test_mini_dma_live_camera_button_refuses_when_ir_connected(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, _title, text: messages.append(str(text)),
+    )
+
+    try:
+        window._ir_thread = QtCore.QThread(window)
+
+        window._open_live_thermal_camera_viewer()
+
+        assert messages
+        assert "Disconnect the Mini DMA IR logger first" in messages[-1]
+    finally:
+        window._ir_thread = None
+        _close_test_window(window)
+
+
 def test_ir_worker_records_selected_sensor_mode() -> None:
     worker = mini_dma_mod.Mlx90614Worker(
         port_name="COM10",

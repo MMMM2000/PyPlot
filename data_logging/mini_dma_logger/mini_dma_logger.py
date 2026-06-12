@@ -4978,6 +4978,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.action_show_recipe_file_controls: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
         self._current_sweep_advanced_dialog: QtWidgets.QDialog | None = None
+        self._thermal_camera_viewers: list[QtWidgets.QWidget] = []
         self._manual_jog_timer = QtCore.QTimer(self)
         self._manual_jog_timer.setInterval(50)
         self._manual_jog_timer.timeout.connect(self._handle_manual_jog_timer)
@@ -6121,10 +6122,16 @@ class MainWindow(QtWidgets.QMainWindow):
         zero_ir_button = QtWidgets.QPushButton("Zero delta", ir_box)
         zero_ir_button.clicked.connect(self._zero_ir_temperature_delta)
         ir_buttons.addWidget(zero_ir_button)
+        ir_form.addRow("", ir_buttons)
+
+        ir_aux_buttons = QtWidgets.QHBoxLayout()
         wiring_help_button = QtWidgets.QPushButton("Wiring", ir_box)
         wiring_help_button.clicked.connect(self._show_ir_wiring_help)
-        ir_buttons.addWidget(wiring_help_button)
-        ir_form.addRow("", ir_buttons)
+        ir_aux_buttons.addWidget(wiring_help_button)
+        self.button_ir_live_camera = QtWidgets.QPushButton("Live camera", ir_box)
+        self.button_ir_live_camera.clicked.connect(self._open_live_thermal_camera_viewer)
+        ir_aux_buttons.addWidget(self.button_ir_live_camera)
+        ir_form.addRow("", ir_aux_buttons)
 
         self.label_ir_live = QtWidgets.QLabel("IR disconnected.")
         self.label_ir_live.setWordWrap(True)
@@ -10855,6 +10862,71 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Cube raw MLX90640 heatmap stream."
             ),
         )
+
+    def _create_thermal_camera_viewer(self) -> QtWidgets.QWidget:
+        from experiments.thermal_camera_viewer import ThermalCameraViewer
+
+        return ThermalCameraViewer()
+
+    def _configure_thermal_camera_viewer(self, viewer: QtWidgets.QWidget) -> None:
+        port_name = str(self.combo_ir_port.currentData() or "").strip()
+        if hasattr(viewer, "refresh_ports"):
+            viewer.refresh_ports()  # type: ignore[attr-defined]
+        port_combo = getattr(viewer, "port_combo", None)
+        if isinstance(port_combo, QtWidgets.QComboBox) and port_name:
+            index = port_combo.findData(port_name)
+            if index >= 0:
+                port_combo.setCurrentIndex(index)
+        protocol_combo = getattr(viewer, "protocol_combo", None)
+        if isinstance(protocol_combo, QtWidgets.QComboBox):
+            index = protocol_combo.findData("cube_raw")
+            if index >= 0:
+                protocol_combo.setCurrentIndex(index)
+        set_baudrate = getattr(viewer, "_set_baudrate", None)
+        if callable(set_baudrate):
+            set_baudrate(2000000)
+        refresh_combo = getattr(viewer, "refresh_rate_combo", None)
+        if isinstance(refresh_combo, QtWidgets.QComboBox):
+            code = int(self.combo_ir_rate.currentData() or 7)
+            if code not in {5, 6, 7}:
+                code = 7
+            index = refresh_combo.findData(code)
+            if index >= 0:
+                refresh_combo.setCurrentIndex(index)
+
+    def _open_live_thermal_camera_viewer(self) -> None:
+        if self._ir_thread is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Live camera",
+                "Disconnect the Mini DMA IR logger first. The Nucleo serial port can be owned by only one window at a time.",
+            )
+            return
+        port_name = str(self.combo_ir_port.currentData() or "").strip()
+        if not port_name:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, "Select the Nucleo serial port first.")
+            return
+        try:
+            viewer = self._create_thermal_camera_viewer()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Could not open Thermal Camera Viewer: {exc}")
+            return
+        self._configure_thermal_camera_viewer(viewer)
+        viewer.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        viewer.destroyed.connect(lambda _obj=None, widget=viewer: self._forget_thermal_camera_viewer(widget))
+        self._thermal_camera_viewers.append(viewer)
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+        toggle = getattr(viewer, "_toggle_connection", None)
+        if callable(toggle):
+            QtCore.QTimer.singleShot(0, toggle)
+
+    def _forget_thermal_camera_viewer(self, viewer: QtWidgets.QWidget) -> None:
+        try:
+            self._thermal_camera_viewers.remove(viewer)
+        except ValueError:
+            pass
 
     def _disconnect_ir_thermometer(self) -> None:
         worker = self._ir_worker
