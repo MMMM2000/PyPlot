@@ -6477,6 +6477,12 @@ def _mini_dma_preview_items(
                 strain_baseline_mode=mini_dma_core.STRAIN_BASELINE_PER_TARGET_MINIMUM,
                 show_power_top_axis=False,
             )
+        except ValueError as exc:
+            if "No current-sweep target groups with enough points" in str(exc):
+                logger.debug("Skipping Mini DMA preview for %s: %s", path, exc)
+            else:
+                logger.exception("Failed to render Mini DMA preview for %s", path)
+            continue
         except Exception:
             logger.exception("Failed to render Mini DMA preview for %s", path)
             continue
@@ -19093,11 +19099,11 @@ class MiniDmaSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        return ANNEALING_GRAPH_WIDTH
+        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
-        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
-        return ANNEALING_GRAPH_HEIGHT * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_HEIGHT
 
     def _update_preview_icon_size(self) -> None:
         table = self.table_view
@@ -19146,7 +19152,7 @@ class MiniDmaSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_vertical(
+                pixmap = _combine_pixmaps_side_by_side(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),

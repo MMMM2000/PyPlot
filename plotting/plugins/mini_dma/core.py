@@ -803,6 +803,9 @@ def _fit_current_transition(
         pd.to_numeric(group["current_mA"], errors="coerce"),
         pd.to_numeric(strain, errors="coerce"),
         min_segment_points=6,
+        # The fitter sorts by current. Heating strain must drop as current rises,
+        # and cooling strain rises as current falls, so both are negative here.
+        transition_slope_sign=-1,
     )
 
 

@@ -1412,15 +1412,64 @@ def test_mini_dma_preview_items_render_real_thumbnail() -> None:
     assert items[0].pixmap.height() > 0
 
 
-def test_mini_dma_section_preview_decoration_uses_cached_graph_pixmap() -> None:
+def test_mini_dma_preview_items_skip_insufficient_sweeps_without_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _ensure_qapp()
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 short_run"
+    run_path.mkdir()
+    pd.DataFrame(
+        {
+            "elapsed_s": [0.0],
+            "automation_phase": ["current"],
+            "automation_target_value": [50.0],
+            "plateau_index": [1],
+            "strain_pct": [0.0],
+            "resistance_ohm": [100.0],
+            "current_measured_mA": [10.0],
+            "current_set_mA": [10.0],
+        }
+    ).to_csv(run_path / "measurement.csv", index=False)
+    record = MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label=run_path.name,
+    )
+    logger = logging.getLogger("test.mini_dma_preview")
+
+    with caplog.at_level(logging.ERROR, logger=logger.name):
+        items = builder_ui._mini_dma_preview_items(  # noqa: SLF001
+            [record],
+            logger,
+            width_px=builder_ui.ANNEALING_GRAPH_WIDTH,
+            height_px=builder_ui.ANNEALING_GRAPH_HEIGHT,
+        )
+
+    assert items == []
+    assert not caplog.records
+
+
+def test_mini_dma_section_preview_decoration_uses_side_by_side_cached_graph_pixmap() -> None:
     _ensure_qapp()
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
     try:
         record = _sample_mini_dma_record()
-        section._record_groups = {record.sample: [record]}  # noqa: SLF001
+        second = MiniDmaRecord(
+            path=record.path,
+            sample=record.sample,
+            data=record.data,
+            key=record.key,
+            label=f"{record.label} duplicate",
+        )
+        section._record_groups = {record.sample: [record, second]}  # noqa: SLF001
         section._record_groups_by_key = {  # noqa: SLF001
-            "Ni50Fe27Ga23|12|2": [record],
+            "Ni50Fe27Ga23|12|2": [record, second],
         }
+        section._preview_group_count = 2  # noqa: SLF001
+        section._update_preview_icon_size()  # noqa: SLF001
         row = pd.Series(
             {
                 "Composition": "Ni50Fe27Ga23",
@@ -1436,6 +1485,10 @@ def test_mini_dma_section_preview_decoration_uses_cached_graph_pixmap() -> None:
         assert pixmap is not None
         assert cached is pixmap
         assert not pixmap.isNull()
+        assert pixmap.width() == section._preview_icon_width()  # noqa: SLF001
+        assert pixmap.height() == section._preview_icon_height()  # noqa: SLF001
+        assert pixmap.width() > builder_ui.ANNEALING_GRAPH_WIDTH
+        assert pixmap.height() == builder_ui.ANNEALING_GRAPH_HEIGHT
     finally:
         section.close()
         section.deleteLater()
