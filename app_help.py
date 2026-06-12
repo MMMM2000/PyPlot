@@ -209,18 +209,18 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             the spot thermometer, or the MLX90640 firmware/bridge for the camera. A
             combined firmware is possible later, but that is not the current bench setup.
 
-            Use **Live camera** in the IR panel to open Thermal Camera Viewer on the same
-            Nucleo port, preconfigured for MLX90640 Cube raw at `2000000` baud. Disconnect
-            Mini DMA IR logging first, because the COM port can be owned by only one
-            window at a time.
+            Use **Live camera** in the IR panel to open a passive MLX90640 heatmap popup
+            inside Mini DMA. During a measurement it shows the calibrated frames already
+            being read by Mini DMA IR logging, so it does not open a second serial
+            connection or steal the COM port.
 
             Use **Flash firmware** after selecting **MLX90614 spot thermometer** or
             **MLX90640 Cube raw camera** to build and flash the matching STM32Cube
             firmware over SWD.
 
-            The high-speed STM32Cube MLX90640 raw-stream firmware is for the separate
-            Thermal Camera Viewer heatmap. Mini DMA logging intentionally stores a
-            compact temperature summary instead of every pixel.
+            Mini DMA logging intentionally stores a compact temperature summary instead
+            of every pixel, while the popup keeps the full live heatmap available for
+            alignment and sanity checks.
             """
         ).strip(),
     },

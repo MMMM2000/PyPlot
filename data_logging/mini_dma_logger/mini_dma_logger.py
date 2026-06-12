@@ -2556,6 +2556,7 @@ def _ir_sample_from_thermal_frame(frame: object, *, timestamp_s: float) -> IrTem
 
 class Mlx90614Worker(QtCore.QObject):
     sample_received = QtCore.pyqtSignal(object)
+    frame_received = QtCore.pyqtSignal(object)
     status_changed = QtCore.pyqtSignal(str)
     error_occurred = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal()
@@ -2731,6 +2732,7 @@ class Mlx90614Worker(QtCore.QObject):
                         self.status_changed.emit("Waiting for calibrated MLX90640 Celsius frames.")
                         waiting_for_celsius_reported = True
                     continue
+                self.frame_received.emit(converted)
                 sample = _ir_sample_from_thermal_frame(converted, timestamp_s=time.time())
                 if sample is not None:
                     self.sample_received.emit(sample)
@@ -4787,6 +4789,108 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
         return sanitize_archive_name(self.archive_name_edit.text())
 
 
+class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
+    """Passive MLX90640 view fed by the Mini DMA IR logger."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Mini DMA Thermal Camera")
+        self.resize(780, 620)
+        self._latest_frame: object | None = None
+        try:
+            from experiments.thermal_camera_viewer import FrameRateTracker
+
+            self._fps_tracker: Any | None = FrameRateTracker()
+        except Exception:
+            self._fps_tracker = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.auto_scale_cb = QtWidgets.QCheckBox("Auto scale", self)
+        self.auto_scale_cb.setChecked(True)
+        self.auto_scale_cb.toggled.connect(self._update_scale_controls)
+        controls.addWidget(self.auto_scale_cb)
+
+        self.min_spin = QtWidgets.QDoubleSpinBox(self)
+        self.min_spin.setDecimals(1)
+        self.min_spin.setRange(-100.0, 500.0)
+        self.min_spin.setValue(20.0)
+        self.min_spin.setSuffix(" C")
+        self.min_spin.valueChanged.connect(self._render_latest)
+        controls.addWidget(QtWidgets.QLabel("Min", self))
+        controls.addWidget(self.min_spin)
+
+        self.max_spin = QtWidgets.QDoubleSpinBox(self)
+        self.max_spin.setDecimals(1)
+        self.max_spin.setRange(-100.0, 500.0)
+        self.max_spin.setValue(60.0)
+        self.max_spin.setSuffix(" C")
+        self.max_spin.valueChanged.connect(self._render_latest)
+        controls.addWidget(QtWidgets.QLabel("Max", self))
+        controls.addWidget(self.max_spin)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.stats_label = QtWidgets.QLabel("Waiting for MLX90640 frames from Mini DMA IR logging.", self)
+        self.stats_label.setWordWrap(True)
+        layout.addWidget(self.stats_label)
+
+        self.image_label = QtWidgets.QLabel(self)
+        self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setMinimumSize(640, 480)
+        self.image_label.setStyleSheet("background: #0f172a; border: 1px solid #333;")
+        layout.addWidget(self.image_label, stretch=1)
+        self._update_scale_controls()
+
+    @QtCore.pyqtSlot(object)
+    def update_frame(self, frame: object) -> None:
+        self._latest_frame = frame
+        if self._fps_tracker is not None:
+            try:
+                self._fps_tracker.record(frame)
+            except Exception:
+                pass
+        self._render_latest()
+
+    def _update_scale_controls(self) -> None:
+        fixed = not self.auto_scale_cb.isChecked()
+        self.min_spin.setEnabled(fixed)
+        self.max_spin.setEnabled(fixed)
+        self._render_latest()
+
+    def _render_latest(self) -> None:
+        frame = self._latest_frame
+        if frame is None:
+            return
+        try:
+            from experiments.thermal_camera_viewer import RAW_FLAG_OVERRUN, render_frame_pixmap
+
+            minimum = None if self.auto_scale_cb.isChecked() else self.min_spin.value()
+            maximum = None if self.auto_scale_cb.isChecked() else self.max_spin.value()
+            pixmap = render_frame_pixmap(frame, minimum_c=minimum, maximum_c=maximum, scale=20)
+            self.image_label.setPixmap(pixmap)
+            fps = getattr(self._fps_tracker, "fps", None)
+            fps_text = "-" if fps is None else f"{float(fps):.2f} fps"
+            ambient = getattr(frame, "ambient_c", None)
+            ambient_text = "-" if ambient is None else f"{float(ambient):.2f} C"
+            read_us = getattr(frame, "raw_read_us", None)
+            read_text = "" if read_us is None else f" | Read {float(read_us) / 1000.0:.2f} ms"
+            flags = int(getattr(frame, "flags", 0) or 0)
+            overrun = " | Overrun" if flags & RAW_FLAG_OVERRUN else ""
+            unit = str(getattr(frame, "unit", "C") or "C")
+            self.stats_label.setText(
+                f"Min {float(frame.minimum_c):.2f} {unit} | "
+                f"Mean {float(frame.mean_c):.2f} {unit} | "
+                f"Max {float(frame.maximum_c):.2f} {unit} | "
+                f"Ambient {ambient_text} | {fps_text}{read_text}{overrun}"
+            )
+        except Exception as exc:
+            self.stats_label.setText(f"Could not render MLX90640 frame: {exc}")
+
+
 class MainWindow(QtWidgets.QMainWindow):
     _control_ui_event = QtCore.pyqtSignal(object)
 
@@ -4822,6 +4926,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_signal_buffer = ScaleSignalBuffer()
         self._ir_state_lock = RLock()
         self._latest_ir_sample: IrTemperatureSample | None = None
+        self._latest_ir_frame: object | None = None
         self._ir_temperature_buffer = IrTemperatureBuffer()
         self._ir_baseline_object_c: float | None = None
         self._current_position_steps = 0
@@ -5128,7 +5233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.action_show_recipe_file_controls: QtGui.QAction | None = None
         self.action_mirror_run_log: QtGui.QAction | None = None
         self._current_sweep_advanced_dialog: QtWidgets.QDialog | None = None
-        self._thermal_camera_viewers: list[QtWidgets.QWidget] = []
+        self._thermal_camera_dialog: MiniDmaThermalCameraDialog | None = None
         self._manual_jog_timer = QtCore.QTimer(self)
         self._manual_jog_timer.setInterval(50)
         self._manual_jog_timer.timeout.connect(self._handle_manual_jog_timer)
@@ -10986,6 +11091,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_ir_sample,
             QtCore.Qt.ConnectionType.DirectConnection,
         )
+        worker.frame_received.connect(self._handle_ir_camera_frame)
         worker.status_changed.connect(self._handle_ir_status)
         worker.error_occurred.connect(self._handle_ir_error)
         worker.finished.connect(thread.quit)
@@ -11020,74 +11126,39 @@ class MainWindow(QtWidgets.QMainWindow):
                 "checked-in firmware is sensor-specific: flash the MLX90614 probe firmware "
                 "for the spot thermometer, or the MLX90640 firmware/bridge for the camera.\n\n"
                 "Mini DMA logging accepts MLX90614 probe lines or MLX90640 Cube raw "
-                "camera frames. Use Live camera for the full heatmap view."
+                "camera frames. Use Live camera for a passive heatmap popup fed by "
+                "the same Mini DMA camera stream."
             ),
         )
 
-    def _create_thermal_camera_viewer(self) -> QtWidgets.QWidget:
-        from experiments.thermal_camera_viewer import ThermalCameraViewer
-
-        return ThermalCameraViewer()
-
-    def _configure_thermal_camera_viewer(self, viewer: QtWidgets.QWidget) -> None:
-        port_name = str(self.combo_ir_port.currentData() or "").strip()
-        if hasattr(viewer, "refresh_ports"):
-            viewer.refresh_ports()  # type: ignore[attr-defined]
-        port_combo = getattr(viewer, "port_combo", None)
-        if isinstance(port_combo, QtWidgets.QComboBox) and port_name:
-            index = port_combo.findData(port_name)
-            if index >= 0:
-                port_combo.setCurrentIndex(index)
-        protocol_combo = getattr(viewer, "protocol_combo", None)
-        if isinstance(protocol_combo, QtWidgets.QComboBox):
-            index = protocol_combo.findData("cube_raw")
-            if index >= 0:
-                protocol_combo.setCurrentIndex(index)
-        set_baudrate = getattr(viewer, "_set_baudrate", None)
-        if callable(set_baudrate):
-            set_baudrate(2000000)
-        refresh_combo = getattr(viewer, "refresh_rate_combo", None)
-        if isinstance(refresh_combo, QtWidgets.QComboBox):
-            code = int(self.combo_ir_rate.currentData() or 7)
-            if code not in {5, 6, 7}:
-                code = 7
-            index = refresh_combo.findData(code)
-            if index >= 0:
-                refresh_combo.setCurrentIndex(index)
-
     def _open_live_thermal_camera_viewer(self) -> None:
-        if self._ir_thread is not None:
+        if str(self.combo_ir_sensor.currentData() or "") != IR_SENSOR_MLX90640:
             QtWidgets.QMessageBox.information(
                 self,
                 "Live camera",
-                "Disconnect the Mini DMA IR logger first. The Nucleo serial port can be owned by only one window at a time.",
+                "Live camera view is available when the IR sensor is set to MLX90640 Cube raw camera.",
             )
             return
-        port_name = str(self.combo_ir_port.currentData() or "").strip()
-        if not port_name:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, "Select the Nucleo serial port first.")
-            return
-        try:
-            viewer = self._create_thermal_camera_viewer()
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Could not open Thermal Camera Viewer: {exc}")
-            return
-        self._configure_thermal_camera_viewer(viewer)
-        viewer.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        viewer.destroyed.connect(lambda _obj=None, widget=viewer: self._forget_thermal_camera_viewer(widget))
-        self._thermal_camera_viewers.append(viewer)
-        viewer.show()
-        viewer.raise_()
-        viewer.activateWindow()
-        toggle = getattr(viewer, "_toggle_connection", None)
-        if callable(toggle):
-            QtCore.QTimer.singleShot(0, toggle)
+        dialog = self._thermal_camera_dialog
+        if dialog is None:
+            dialog = MiniDmaThermalCameraDialog(self)
+            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            dialog.destroyed.connect(self._forget_thermal_camera_dialog)
+            self._thermal_camera_dialog = dialog
+        with self._ir_state_lock:
+            latest_frame = self._latest_ir_frame
+        if latest_frame is not None:
+            dialog.update_frame(latest_frame)
+        elif self._ir_thread is None:
+            dialog.stats_label.setText("Connect Mini DMA IR logging to the MLX90640 camera to see live frames.")
+        else:
+            dialog.stats_label.setText("Waiting for calibrated MLX90640 frames from Mini DMA IR logging.")
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
-    def _forget_thermal_camera_viewer(self, viewer: QtWidgets.QWidget) -> None:
-        try:
-            self._thermal_camera_viewers.remove(viewer)
-        except ValueError:
-            pass
+    def _forget_thermal_camera_dialog(self, _obj: object | None = None) -> None:
+        self._thermal_camera_dialog = None
 
     @staticmethod
     def _repo_root() -> Path:
@@ -11266,6 +11337,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_on_ui_thread(self._refresh_live_labels)
             return
         self._refresh_live_labels()
+
+    @QtCore.pyqtSlot(object)
+    def _handle_ir_camera_frame(self, frame: object) -> None:
+        with self._ir_state_lock:
+            self._latest_ir_frame = frame
+        dialog = self._thermal_camera_dialog
+        if dialog is not None:
+            dialog.update_frame(frame)
 
     def _handle_ir_status(self, message: str) -> None:
         self._log(message)
