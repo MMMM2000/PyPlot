@@ -255,13 +255,24 @@ IR_TEMPERATURE_CSV_FIELDNAMES = [
 ]
 MLX90640_FRAME_WIDTH = 32
 MLX90640_FRAME_HEIGHT = 24
-IR_SENSOR_AUTO = "auto"
 IR_SENSOR_MLX90614 = "mlx90614"
 IR_SENSOR_MLX90640 = "mlx90640"
 IR_SENSOR_LABELS = {
-    IR_SENSOR_AUTO: "Auto detect",
     IR_SENSOR_MLX90614: "MLX90614 spot thermometer",
-    IR_SENSOR_MLX90640: "MLX90640 text-frame camera",
+    IR_SENSOR_MLX90640: "MLX90640 Cube raw camera",
+}
+IR_RATE_OPTIONS_BY_SENSOR = {
+    IR_SENSOR_MLX90614: (
+        ("10 Hz", 3),
+        ("50 Hz", 5),
+        ("100 Hz", 6),
+        ("Max stream", 7),
+    ),
+    IR_SENSOR_MLX90640: (
+        ("16 Hz", 5),
+        ("32 Hz", 6),
+        ("64 Hz", 7),
+    ),
 }
 THERMAL_FIRMWARE_BY_SENSOR = {
     IR_SENSOR_MLX90614: {
@@ -2481,6 +2492,68 @@ def _parse_mlx90640_text_frame(lines: Sequence[str], *, timestamp_s: float) -> I
     )
 
 
+def _is_finite_number(value: object) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _ir_sample_from_thermal_frame(frame: object, *, timestamp_s: float) -> IrTemperatureSample | None:
+    if str(getattr(frame, "unit", "C") or "C").upper() != "C":
+        return None
+    raw_values = getattr(frame, "values", ())
+    try:
+        values = [float(value) for value in raw_values if math.isfinite(float(value))]
+    except (TypeError, ValueError):
+        return None
+    if not values:
+        return None
+    width = int(getattr(frame, "width", MLX90640_FRAME_WIDTH) or MLX90640_FRAME_WIDTH)
+    height = int(getattr(frame, "height", MLX90640_FRAME_HEIGHT) or MLX90640_FRAME_HEIGHT)
+    all_values = list(getattr(frame, "values", ()))
+    frame_min = min(values)
+    frame_max = max(values)
+    frame_mean = sum(values) / len(values)
+    center_row = max(0, min(height - 1, height // 2))
+    center_col = max(0, min(width - 1, width // 2))
+    center_index = center_row * width + center_col
+    try:
+        frame_center = float(all_values[center_index])
+    except (IndexError, TypeError, ValueError):
+        frame_center = math.nan
+    hotspot_index = max(
+        range(len(all_values)),
+        key=lambda index: (
+            float(all_values[index])
+            if _is_finite_number(all_values[index])
+            else -math.inf
+        ),
+    )
+    ambient = getattr(frame, "ambient_c", None)
+    return IrTemperatureSample(
+        timestamp_s=timestamp_s,
+        raw_text="MLX90640_CUBE_RAW",
+        sequence=int(getattr(frame, "sequence", 0) or 0),
+        device_elapsed_ms=int(getattr(frame, "elapsed_ms", 0) or 0),
+        read_us=int(getattr(frame, "raw_read_us", 0) or 0),
+        ambient_c=0.0 if ambient is None else float(ambient),
+        object_c_apparent=frame_max,
+        raw_ambient=0,
+        raw_object=0,
+        flags=int(getattr(frame, "flags", 0) or 0),
+        sensor_type="mlx90640",
+        frame_min_c=frame_min,
+        frame_mean_c=frame_mean,
+        frame_max_c=frame_max,
+        frame_center_c=frame_center,
+        frame_hotspot_row=hotspot_index // max(1, width),
+        frame_hotspot_col=hotspot_index % max(1, width),
+        frame_width=width,
+        frame_height=height,
+    )
+
+
 class Mlx90614Worker(QtCore.QObject):
     sample_received = QtCore.pyqtSignal(object)
     status_changed = QtCore.pyqtSignal(str)
@@ -2493,7 +2566,7 @@ class Mlx90614Worker(QtCore.QObject):
         port_name: str,
         baudrate: int,
         interval_code: int,
-        sensor_mode: str = IR_SENSOR_AUTO,
+        sensor_mode: str = IR_SENSOR_MLX90640,
     ) -> None:
         super().__init__()
         self.port_name = port_name
@@ -2501,8 +2574,8 @@ class Mlx90614Worker(QtCore.QObject):
         self.interval_code = max(1, min(7, int(interval_code)))
         self.sensor_mode = (
             sensor_mode
-            if sensor_mode in {IR_SENSOR_AUTO, IR_SENSOR_MLX90614, IR_SENSOR_MLX90640}
-            else IR_SENSOR_AUTO
+            if sensor_mode in {IR_SENSOR_MLX90614, IR_SENSOR_MLX90640}
+            else IR_SENSOR_MLX90640
         )
         self._stop_event = Event()
         self._last_config1 = ""
@@ -2522,16 +2595,19 @@ class Mlx90614Worker(QtCore.QObject):
                 timeout=0.05,
                 write_timeout=0.2,
             )
+            sensor_label = IR_SENSOR_LABELS.get(self.sensor_mode, IR_SENSOR_LABELS[IR_SENSOR_MLX90640])
+            self.status_changed.emit(
+                f"IR logging connected on {self.port_name} at {self.baudrate} baud; expecting {sensor_label}."
+            )
+            if self.sensor_mode == IR_SENSOR_MLX90640:
+                self._run_mlx90640_cube_raw(port)
+                return
             try:
                 port.reset_input_buffer()
                 port.write(f"{self.interval_code}\nC\n".encode("ascii"))
                 port.flush()
             except Exception:
                 pass
-            sensor_label = IR_SENSOR_LABELS.get(self.sensor_mode, IR_SENSOR_LABELS[IR_SENSOR_AUTO])
-            self.status_changed.emit(
-                f"IR logging connected on {self.port_name} at {self.baudrate} baud; expecting {sensor_label}."
-            )
             frame_lines: list[str] = []
             while not self._stop_event.is_set():
                 raw_bytes = port.readline()
@@ -2598,6 +2674,68 @@ class Mlx90614Worker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def stop(self) -> None:
         self._stop_event.set()
+
+    def _run_mlx90640_cube_raw(self, port: object) -> None:
+        try:
+            from experiments.mlx90640_calibration import MLX90640Calibration
+            from experiments.thermal_camera_viewer import CUBE_RAW, ThermalSerialWorker, pop_cube_packets
+        except Exception as exc:
+            self.error_occurred.emit(f"MLX90640 parser is unavailable: {exc}")
+            return
+        parser = ThermalSerialWorker(self.port_name, self.baudrate, CUBE_RAW, self.interval_code)
+        buffer = bytearray()
+        calibrator: Any | None = None
+        celsius_values: list[float] | None = None
+        waiting_for_calibration_reported = False
+        waiting_for_celsius_reported = False
+        try:
+            port.reset_input_buffer()
+            port.write(f"{self.interval_code}\n".encode("ascii"))
+            port.flush()
+            self.status_changed.emit(f"Requested MLX90640 refresh code {self.interval_code}.")
+        except Exception:
+            pass
+        while not self._stop_event.is_set():
+            chunk = port.read(4096)
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+            eeprom_packets, frames = pop_cube_packets(buffer)
+            for eeprom_words in eeprom_packets:
+                try:
+                    calibrator = MLX90640Calibration(eeprom_words)
+                    celsius_values = None
+                    self.status_changed.emit("Loaded MLX90640 EEPROM calibration.")
+                except Exception as exc:
+                    calibrator = None
+                    celsius_values = None
+                    self.status_changed.emit(f"Skipped invalid MLX90640 calibration: {exc}")
+            for frame in frames:
+                if calibrator is None:
+                    if not waiting_for_calibration_reported:
+                        self.status_changed.emit(
+                            "Waiting for MLX90640 EEPROM calibration before logging Celsius frames."
+                        )
+                        waiting_for_calibration_reported = True
+                    continue
+                converted = frame
+                converted, celsius_values = parser._convert_raw_frame(  # noqa: SLF001
+                    frame,
+                    calibrator,
+                    celsius_values,
+                )
+                if converted is None:
+                    continue
+                if str(getattr(converted, "unit", "C") or "C").upper() != "C":
+                    if not waiting_for_celsius_reported:
+                        self.status_changed.emit("Waiting for calibrated MLX90640 Celsius frames.")
+                        waiting_for_celsius_reported = True
+                    continue
+                sample = _ir_sample_from_thermal_frame(converted, timestamp_s=time.time())
+                if sample is not None:
+                    self.sample_received.emit(sample)
+            if len(buffer) > 4096 * 4:
+                del buffer[:-4096]
 
 
 class FabricationSuggestionWorker(QtCore.QObject):
@@ -6102,10 +6240,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ir_form.addRow("Port", ir_port_row)
 
         self.combo_ir_sensor = QtWidgets.QComboBox(ir_box)
-        for sensor_key in (IR_SENSOR_AUTO, IR_SENSOR_MLX90614, IR_SENSOR_MLX90640):
+        for sensor_key in (IR_SENSOR_MLX90640, IR_SENSOR_MLX90614):
             self.combo_ir_sensor.addItem(IR_SENSOR_LABELS[sensor_key], sensor_key)
         self.combo_ir_sensor.setToolTip(
-            "Auto detect accepts either MLX90614 probe lines or MLX90640 text-frame summaries."
+            "Choose the sensor that is physically connected and flash the matching Nucleo firmware."
         )
         self.combo_ir_sensor.currentIndexChanged.connect(self._handle_ir_sensor_changed)
         ir_form.addRow("Sensor", self.combo_ir_sensor)
@@ -6117,15 +6255,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ir_form.addRow("Baud", self.combo_ir_baud)
 
         self.combo_ir_rate = QtWidgets.QComboBox(ir_box)
-        for label, code in (
-            ("10 Hz", 3),
-            ("50 Hz", 5),
-            ("100 Hz", 6),
-            ("Max stream", 7),
-        ):
-            self.combo_ir_rate.addItem(label, code)
-        self.combo_ir_rate.setCurrentIndex(self.combo_ir_rate.findData(7))
-        ir_form.addRow("Rate", self.combo_ir_rate)
+        self.label_ir_rate = QtWidgets.QLabel("Camera refresh", ir_box)
+        self._populate_ir_rate_options(IR_SENSOR_MLX90640, selected_code=7)
+        ir_form.addRow(self.label_ir_rate, self.combo_ir_rate)
 
         ir_buttons = QtWidgets.QHBoxLayout()
         self.button_ir_connect = QtWidgets.QPushButton("Connect IR", ir_box)
@@ -6152,7 +6284,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_ir_live.setWordWrap(True)
         ir_form.addRow("", self.label_ir_live)
         self.label_ir_status = QtWidgets.QLabel(
-            "Auto-detects MLX90614 spot lines or MLX90640 text-frame camera summaries."
+            "MLX90640 mode expects Cube raw camera firmware at address 0x33."
         )
         self.label_ir_status.setWordWrap(True)
         self.label_ir_status.setStyleSheet("color: #a3a3a3;")
@@ -10795,18 +10927,33 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._connect_ir_thermometer()
 
+    def _populate_ir_rate_options(self, sensor_mode: str, *, selected_code: int | None = None) -> None:
+        options = IR_RATE_OPTIONS_BY_SENSOR.get(sensor_mode, IR_RATE_OPTIONS_BY_SENSOR[IR_SENSOR_MLX90640])
+        if selected_code is None:
+            selected_code = int(self.combo_ir_rate.currentData() or options[-1][1])
+        self.combo_ir_rate.blockSignals(True)
+        try:
+            self.combo_ir_rate.clear()
+            for label, code in options:
+                self.combo_ir_rate.addItem(label, code)
+            index = self.combo_ir_rate.findData(int(selected_code))
+            if index < 0:
+                index = self.combo_ir_rate.findData(options[-1][1])
+            self.combo_ir_rate.setCurrentIndex(max(0, index))
+        finally:
+            self.combo_ir_rate.blockSignals(False)
+        if hasattr(self, "label_ir_rate"):
+            self.label_ir_rate.setText("Sample interval" if sensor_mode == IR_SENSOR_MLX90614 else "Camera refresh")
+
     def _handle_ir_sensor_changed(self) -> None:
         if getattr(self, "_settings_restore_in_progress", False):
             return
-        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
-        target_code = 7 if sensor_mode == IR_SENSOR_MLX90640 else 3
-        target_index = self.combo_ir_rate.findData(target_code)
-        if target_index >= 0:
-            self.combo_ir_rate.setCurrentIndex(target_index)
+        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640)
+        self._populate_ir_rate_options(sensor_mode)
         if hasattr(self, "label_ir_status"):
             if sensor_mode == IR_SENSOR_MLX90640:
                 self.label_ir_status.setText(
-                    "MLX90640 mode logs text-frame summaries; use Thermal Camera Viewer for Cube raw heatmaps."
+                    "MLX90640 mode expects Cube raw camera firmware at address 0x33."
                 )
             elif sensor_mode == IR_SENSOR_MLX90614:
                 self.label_ir_status.setText(
@@ -10814,7 +10961,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self.label_ir_status.setText(
-                    "Auto-detects supported streams, but the Nucleo firmware must match the connected sensor."
+                    "Choose the connected sensor and flash the matching Nucleo firmware."
                 )
 
     def _connect_ir_thermometer(self, checked: bool = False, *, show_errors: bool = True) -> bool:
@@ -10825,7 +10972,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         baudrate = int(self.combo_ir_baud.currentText())
         interval_code = int(self.combo_ir_rate.currentData() or 7)
-        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
+        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640)
         worker = Mlx90614Worker(
             port_name=port_name,
             baudrate=baudrate,
@@ -10872,9 +11019,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "The same Nucleo hardware and pins can work with either module, but the "
                 "checked-in firmware is sensor-specific: flash the MLX90614 probe firmware "
                 "for the spot thermometer, or the MLX90640 firmware/bridge for the camera.\n\n"
-                "Mini DMA logging accepts MLX90614 probe lines or MLX90640 text-frame "
-                "summaries. Use the separate Thermal Camera Viewer for the high-speed "
-                "Cube raw MLX90640 heatmap stream."
+                "Mini DMA logging accepts MLX90614 probe lines or MLX90640 Cube raw "
+                "camera frames. Use Live camera for the full heatmap view."
             ),
         )
 
@@ -11047,14 +11193,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return True, text or "Firmware flashed and Nucleo reset."
 
     def _flash_selected_ir_firmware(self) -> None:
-        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
-        if sensor_mode == IR_SENSOR_AUTO:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Flash firmware",
-                "Choose MLX90614 or MLX90640 in the Sensor field first. Auto detect cannot decide which firmware to flash.",
-            )
-            return
+        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640)
         if self._ir_thread is not None:
             QtWidgets.QMessageBox.information(
                 self,
@@ -17442,6 +17581,7 @@ class MainWindow(QtWidgets.QMainWindow):
             sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=now_s or time.time())
         if sample is None:
             return {
+                "sensor_type": None,
                 "object_c_apparent": None,
                 "ambient_c": None,
                 "delta_c": None,
@@ -17452,10 +17592,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "flags": None,
                 "sample_rate_hz": sample_rate_hz,
                 "config1": "",
+                "frame_min_c": None,
+                "frame_mean_c": None,
+                "frame_max_c": None,
+                "frame_center_c": None,
+                "frame_hotspot_row": None,
+                "frame_hotspot_col": None,
+                "frame_width": None,
+                "frame_height": None,
             }
         current_time_s = time.time() if now_s is None else float(now_s)
         delta_c = None if baseline_c is None else sample.object_c_apparent - baseline_c
         return {
+            "sensor_type": sample.sensor_type,
             "object_c_apparent": sample.object_c_apparent,
             "ambient_c": sample.ambient_c,
             "delta_c": delta_c,
@@ -17466,6 +17615,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "flags": sample.flags,
             "sample_rate_hz": sample_rate_hz,
             "config1": sample.config1,
+            "frame_min_c": sample.frame_min_c,
+            "frame_mean_c": sample.frame_mean_c,
+            "frame_max_c": sample.frame_max_c,
+            "frame_center_c": sample.frame_center_c,
+            "frame_hotspot_row": sample.frame_hotspot_row,
+            "frame_hotspot_col": sample.frame_hotspot_col,
+            "frame_width": sample.frame_width,
+            "frame_height": sample.frame_height,
         }
 
     def _source_control_metadata(self) -> dict[str, Any]:
@@ -17700,7 +17857,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "ir_thermometer": {
                 "enabled": self._ir_thread is not None,
                 "port": str(self.combo_ir_port.currentData() or ""),
-                "sensor_mode": str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO),
+                "sensor_mode": str(self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640),
                 "baud": int(self.combo_ir_baud.currentText()),
                 "rate_label": self.combo_ir_rate.currentText(),
                 "interval_code": int(self.combo_ir_rate.currentData() or 0),
@@ -23662,6 +23819,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if ir_object is None:
             self.label_ir_live.setText("IR disconnected or no samples yet.")
         else:
+            ir_sensor_type = ir_snapshot["sensor_type"]
             ir_delta = ir_snapshot["delta_c"]
             ir_ambient = ir_snapshot["ambient_c"]
             ir_age = ir_snapshot["sample_age_s"]
@@ -23670,10 +23828,32 @@ class MainWindow(QtWidgets.QMainWindow):
             ambient_text = "-" if ir_ambient is None else f"{float(ir_ambient):.2f} C"
             age_text = "-" if ir_age is None else f"{float(ir_age):.2f} s"
             rate_text = "-" if ir_rate is None else f"{float(ir_rate):.1f} Hz"
-            self.label_ir_live.setText(
-                f"Object apparent: {float(ir_object):.2f} C | "
-                f"Delta: {delta_text} | Ambient: {ambient_text} | Age: {age_text} | {rate_text}"
-            )
+            if ir_sensor_type == IR_SENSOR_MLX90640:
+                frame_min = ir_snapshot["frame_min_c"]
+                frame_mean = ir_snapshot["frame_mean_c"]
+                frame_max = ir_snapshot["frame_max_c"]
+                frame_center = ir_snapshot["frame_center_c"]
+                hotspot_row = ir_snapshot["frame_hotspot_row"]
+                hotspot_col = ir_snapshot["frame_hotspot_col"]
+                min_text = "-" if frame_min is None else f"{float(frame_min):.2f} C"
+                mean_text = "-" if frame_mean is None else f"{float(frame_mean):.2f} C"
+                max_text = "-" if frame_max is None else f"{float(frame_max):.2f} C"
+                center_text = "-" if frame_center is None else f"{float(frame_center):.2f} C"
+                hotspot_text = (
+                    "-"
+                    if hotspot_row is None or hotspot_col is None
+                    else f"r{int(hotspot_row)} c{int(hotspot_col)}"
+                )
+                self.label_ir_live.setText(
+                    f"Camera max: {max_text} | Mean: {mean_text} | Min: {min_text} | "
+                    f"Center: {center_text} | Hotspot: {hotspot_text} | "
+                    f"Ambient: {ambient_text} | Age: {age_text} | {rate_text}"
+                )
+            else:
+                self.label_ir_live.setText(
+                    f"Object apparent: {float(ir_object):.2f} C | "
+                    f"Delta: {delta_text} | Ambient: {ambient_text} | Age: {age_text} | {rate_text}"
+                )
         self.label_tic_position.setText(
             f"Raw position: {self._current_position_mm:.4f} mm ({self._current_position_steps} steps) | "
             f"Tensile displacement: {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm"
@@ -23985,7 +24165,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("scale_request", self.edit_scale_request.text())
         self.settings.setValue("scale_terminator", self.edit_scale_terminator.text())
         self.settings.setValue("ir_port", self.combo_ir_port.currentData() or "")
-        self.settings.setValue("ir_sensor_mode", self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
+        self.settings.setValue("ir_sensor_mode", self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640)
         self.settings.setValue("ir_baud", self.combo_ir_baud.currentText())
         self.settings.setValue("ir_interval_code", self.combo_ir_rate.currentData() or 7)
         self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
@@ -24245,10 +24425,14 @@ class MainWindow(QtWidgets.QMainWindow):
         ir_baud = self.settings.value("ir_baud", "2000000", type=str)
         if self.combo_ir_baud.findText(ir_baud) >= 0:
             self.combo_ir_baud.setCurrentText(ir_baud)
-        ir_sensor_mode = self.settings.value("ir_sensor_mode", IR_SENSOR_AUTO, type=str)
+        ir_sensor_mode = self.settings.value("ir_sensor_mode", IR_SENSOR_MLX90640, type=str)
         ir_sensor_index = self.combo_ir_sensor.findData(ir_sensor_mode)
         if ir_sensor_index >= 0:
             self.combo_ir_sensor.setCurrentIndex(ir_sensor_index)
+        else:
+            ir_sensor_mode = IR_SENSOR_MLX90640
+            self.combo_ir_sensor.setCurrentIndex(self.combo_ir_sensor.findData(IR_SENSOR_MLX90640))
+        self._populate_ir_rate_options(str(ir_sensor_mode), selected_code=None)
         ir_interval_code = int(self.settings.value("ir_interval_code", 7, type=int))
         ir_rate_index = self.combo_ir_rate.findData(ir_interval_code)
         if ir_rate_index >= 0:
