@@ -2089,6 +2089,59 @@ def test_session_logs_mlx90640_frame_summary_as_ir_temperature(tmp_path: Path, q
         _close_test_window(window)
 
 
+def test_paused_recipe_does_not_append_session_temperature_telemetry_or_plot_samples(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.edit_log_name.setText("paused_recipe_logging")
+        window._latest_scale_value_g = 21.2
+        window._latest_scale_text = "21.200 g"
+        window._latest_scale_timestamp = time.time()
+        window._start_session(enable_logging=True, record_initial_point=False)
+        window._automation_active = True
+        window._automation_paused = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        sample = mini_dma_mod.IrTemperatureSample(
+            timestamp_s=window._session_start_wall_s + 0.25,
+            raw_text="MLX90614,7,900,2370,23.10,41.50,14813,15733,2",
+            sequence=7,
+            device_elapsed_ms=900,
+            read_us=2370,
+            ambient_c=23.10,
+            object_c_apparent=41.50,
+            raw_ambient=14813,
+            raw_object=15733,
+            flags=2,
+            config1="0x9795",
+        )
+
+        assert window._record_current_point(quiet=True) is True
+        window._handle_ir_sample(sample)
+        window._write_ui_telemetry_sample(
+            started_s=window._session_start_monotonic + 0.2,
+            finished_s=window._session_start_monotonic + 0.212,
+            previous_ui_s=window._session_start_monotonic,
+            scale_sample_changed=True,
+            dialog_sample_recorded=False,
+            live_plot_sample_recorded=False,
+            dashboard_plot_refreshed=False,
+        )
+        recorded, refreshed = window._record_live_plot_sample_from_ui_refresh()
+
+        assert recorded is False
+        assert refreshed is False
+        assert window._session_points == []
+        assert window._session_ir_temperature_count == 0
+        assert window._session_ui_telemetry_count == 0
+        assert window._live_plot_points == []
+    finally:
+        window._automation_paused = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_dashboard_plot_uses_secondary_axis_without_duplicate_equivalent_curve(
     tmp_path: Path,
     qtbot,
@@ -4271,6 +4324,63 @@ def test_recipe_current_command_retries_when_current_output_readback_is_off(tmp_
         assert window._supply_output_enabled is True
         assert window._supply_last_setpoint_mA == pytest.approx(10.0)
         assert "output readback is OFF; retrying output enable" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_recipe_current_command_refreshes_current_sweep_limit_before_setting_ch4(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.commands: list[tuple[str, float]] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def set_current_limit_mA(self, current_limit_mA: float) -> None:
+            self.commands.append(("limit", current_limit_mA))
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(("current", current_mA))
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    window._supply_controller = supply  # type: ignore[assignment]
+    window.combo_current_sweep_supply_channel.setCurrentIndex(
+        window.combo_current_sweep_supply_channel.findData(4)
+    )
+    window.spin_supply_manual_current.setValue(1.0)
+    window.spin_current_sweep_start_mA.setValue(1.0)
+    window.spin_current_sweep_end_mA.setValue(85.0)
+    window._supply_output_enabled = True
+    window._automation_active = True
+
+    try:
+        assert window._set_recipe_current_mA(50.0) is True
+        assert window._set_recipe_current_mA(51.0) is True
+        window.spin_current_sweep_end_mA.setValue(90.0)
+        assert window._set_recipe_current_mA(52.0) is True
+
+        assert [name for name, _value in supply.commands] == [
+            "limit",
+            "current",
+            "current",
+            "limit",
+            "current",
+        ]
+        assert [value for _name, value in supply.commands] == pytest.approx([85.0, 50.0, 51.0, 90.0, 52.0])
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -6675,6 +6785,12 @@ def test_mini_dma_live_camera_button_opens_embedded_frame_view(tmp_path: Path, q
 
         dialog = window._thermal_camera_dialog
         assert isinstance(dialog, mini_dma_mod.MiniDmaThermalCameraDialog)
+        assert dialog.windowFlags() & QtCore.Qt.WindowType.WindowMinimizeButtonHint
+        assert dialog.pause_button.text() == "Pause view"
+        assert [
+            dialog.refresh_combo.itemText(index)
+            for index in range(dialog.refresh_combo.count())
+        ] == ["5 fps", "10 fps", "20 fps", "Max"]
         assert dialog._latest_frame is frame
         assert dialog.image_label.pixmap() is not None
         assert "Max 31.00 C" in dialog.stats_label.text()
@@ -6710,6 +6826,60 @@ def test_mini_dma_live_camera_button_opens_while_ir_connected(
             window._thermal_camera_dialog.close()
         window._ir_thread = None
         _close_test_window(window)
+
+
+def test_mini_dma_live_camera_popup_pause_and_display_throttle(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from experiments.thermal_camera_viewer import ThermalFrame
+
+    now = {"s": 10.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now["s"])
+    dialog = mini_dma_mod.MiniDmaThermalCameraDialog()
+    qtbot.addWidget(dialog)
+    frame1 = ThermalFrame(
+        elapsed_ms=100,
+        ambient_c=24.0,
+        values=(20.0, 21.0, 22.0, 31.0),
+        unit="C",
+        raw_read_us=12000,
+        sequence=1,
+        width=2,
+        height=2,
+    )
+    frame2 = dataclasses.replace(frame1, elapsed_ms=150, sequence=2, values=(21.0, 22.0, 23.0, 32.0))
+    frame3 = dataclasses.replace(frame1, elapsed_ms=200, sequence=3, values=(22.0, 23.0, 24.0, 33.0))
+
+    try:
+        dialog.update_frame(frame1)
+        now["s"] += 0.05
+        dialog.update_frame(frame2)
+
+        assert dialog._latest_frame is frame1
+        assert dialog._pending_frame is frame2
+
+        dialog.pause_button.click()
+        assert dialog.pause_button.text() == "Resume view"
+        now["s"] += 1.0
+        dialog.update_frame(frame3)
+
+        assert dialog._latest_frame is frame1
+        assert dialog._pending_frame is frame3
+
+        dialog.pause_button.click()
+        assert dialog.pause_button.text() == "Pause view"
+        assert dialog._latest_frame is frame3
+
+        max_index = dialog.refresh_combo.findText("Max")
+        assert max_index >= 0
+        dialog.refresh_combo.setCurrentIndex(max_index)
+        now["s"] += 0.001
+        dialog.update_frame(frame2)
+
+        assert dialog._latest_frame is frame2
+    finally:
+        dialog.close()
 
 
 def test_mini_dma_flash_firmware_runs_programmer_for_selected_sensor(

@@ -4799,8 +4799,15 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Mini DMA Thermal Camera")
+        self.setWindowFlag(QtCore.Qt.WindowType.Window, True)
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowCloseButtonHint, True)
         self.resize(780, 620)
         self._latest_frame: object | None = None
+        self._pending_frame: object | None = None
+        self._display_paused = False
+        self._display_interval_ms = 100
+        self._last_display_monotonic_s = 0.0
         try:
             from experiments.thermal_camera_viewer import FrameRateTracker
 
@@ -4813,6 +4820,23 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
         layout.setSpacing(8)
 
         controls = QtWidgets.QHBoxLayout()
+        self.pause_button = QtWidgets.QPushButton("Pause view", self)
+        self.pause_button.clicked.connect(self._toggle_display_pause)
+        controls.addWidget(self.pause_button)
+
+        controls.addWidget(QtWidgets.QLabel("Display", self))
+        self.refresh_combo = QtWidgets.QComboBox(self)
+        for label, interval_ms in (
+            ("5 fps", 200),
+            ("10 fps", 100),
+            ("20 fps", 50),
+            ("Max", 0),
+        ):
+            self.refresh_combo.addItem(label, interval_ms)
+        self.refresh_combo.setCurrentIndex(self.refresh_combo.findData(self._display_interval_ms))
+        self.refresh_combo.currentIndexChanged.connect(self._handle_display_rate_changed)
+        controls.addWidget(self.refresh_combo)
+
         self.auto_scale_cb = QtWidgets.QCheckBox("Auto scale", self)
         self.auto_scale_cb.setChecked(True)
         self.auto_scale_cb.toggled.connect(self._update_scale_controls)
@@ -4851,6 +4875,17 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
 
     @QtCore.pyqtSlot(object)
     def update_frame(self, frame: object) -> None:
+        self._pending_frame = frame
+        if self._display_paused:
+            return
+        now_s = time.monotonic()
+        if (
+            self._display_interval_ms > 0
+            and self._last_display_monotonic_s > 0.0
+            and (now_s - self._last_display_monotonic_s) * 1000.0 < self._display_interval_ms
+        ):
+            return
+        self._last_display_monotonic_s = now_s
         self._latest_frame = frame
         if self._fps_tracker is not None:
             try:
@@ -4858,6 +4893,20 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
             except Exception:
                 pass
         self._render_latest()
+
+    def _toggle_display_pause(self) -> None:
+        self._display_paused = not self._display_paused
+        self.pause_button.setText("Resume view" if self._display_paused else "Pause view")
+        if not self._display_paused and self._pending_frame is not None:
+            self._last_display_monotonic_s = 0.0
+            self.update_frame(self._pending_frame)
+
+    def _handle_display_rate_changed(self) -> None:
+        value = self.refresh_combo.currentData()
+        self._display_interval_ms = int(value) if isinstance(value, int) else 100
+        self._last_display_monotonic_s = 0.0
+        if not self._display_paused and self._pending_frame is not None:
+            self.update_frame(self._pending_frame)
 
     def _update_scale_controls(self) -> None:
         fixed = not self.auto_scale_cb.isChecked()
@@ -5102,6 +5151,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_last_setpoint_mA: float | None = None
         self._active_current_sweep_display_target_mA: float | None = None
         self._active_current_sweep_display_direction = 0.0
+        self._current_sweep_channel_limit_checked: tuple[int | None, float] | None = None
         self._current_sweep_ramp_hold_step_index: int | None = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
@@ -9131,6 +9181,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_controller is not None:
             self._supply_controller.disconnect()
         self._supply_controller = None
+        self._current_sweep_channel_limit_checked = None
         self._supply_output_enabled = False
         self.label_supply_status.setText("Supply disconnected.")
         self._refresh_supply_live_label()
@@ -9289,19 +9340,25 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
-    def _ensure_current_sweep_channel_limit(self) -> bool:
+    def _ensure_current_sweep_channel_limit(self, *, log: bool = True) -> bool:
         if self._supply_controller is None:
             return False
         method = getattr(self._supply_controller, "set_current_limit_mA", None)
         if not callable(method):
             return True
         limit_mA = self._planned_current_sweep_limit_mA()
+        channel = self._current_sweep_supply_channel()
+        checked = self._current_sweep_channel_limit_checked
+        if checked is not None and checked[0] == channel and math.isclose(checked[1], limit_mA, abs_tol=1e-9):
+            return True
         try:
             method(limit_mA)
         except Exception as exc:
             self._log(f"Current-sweep channel limit update failed: {exc}")
             return False
-        channel = self._current_sweep_supply_channel()
+        self._current_sweep_channel_limit_checked = (channel, limit_mA)
+        if not log:
+            return True
         channel_text = "-" if channel is None else f"CH{channel}"
         self._log(
             f"Current-sweep {channel_text} limit checked for "
@@ -9518,6 +9575,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_active or self._session_active:
             current_mA = max(self._minimum_recipe_current_mA(), current_mA)
         try:
+            if self._current_sweep_supply_channel() is not None and not self._ensure_current_sweep_channel_limit(log=False):
+                return False
             if not self._supply_output_enabled:
                 self._supply_controller.initialize_output(
                     current_mA=current_mA,
@@ -18692,9 +18751,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_count += 1
         self._session_raw_scale_handle.flush()
 
+    def _session_accepts_recipe_log_samples(self) -> bool:
+        return (
+            bool(self._session_active)
+            and not (bool(self._automation_active) and bool(self._automation_paused))
+        )
+
     def _write_ir_temperature_sample(self, sample: IrTemperatureSample) -> None:
         if (
-            not self._session_active
+            not self._session_accepts_recipe_log_samples()
             or self._session_ir_temperature_writer is None
             or self._session_ir_temperature_handle is None
             or self._session_start_wall_s <= 0.0
@@ -19005,6 +19070,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     self._log("Point not recorded because recipe setup is running; normal logging has not started.")
             return True
+        if self._automation_active and self._automation_paused:
+            if not quiet:
+                self._log("Point not recorded because the recipe is paused.")
+            return True
         if self._handle_raw_scale_display_limit_status():
             return False
         if require_fresh_after_move is None:
@@ -19079,6 +19148,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._session_active:
             return True
         if not self._session_logging_enabled:
+            return True
+        if self._automation_active and self._automation_paused:
             return True
         now_s = time.time()
         last_s = self._last_session_log_timestamp_s
@@ -23924,7 +23995,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dashboard_plot_refreshed: bool,
     ) -> None:
         if (
-            not self._session_active
+            not self._session_accepts_recipe_log_samples()
             or self._session_ui_telemetry_writer is None
             or self._session_ui_telemetry_handle is None
         ):
@@ -23970,7 +24041,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _record_live_plot_sample_from_ui_refresh(self) -> tuple[bool, bool]:
         if (
-            not self._session_active
+            not self._session_accepts_recipe_log_samples()
             or self._latest_scale_timestamp is None
             or self._last_live_plot_scale_timestamp == self._latest_scale_timestamp
             or self._setup_dialog_visible()
