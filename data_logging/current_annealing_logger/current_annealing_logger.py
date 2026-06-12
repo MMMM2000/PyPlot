@@ -459,6 +459,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._metadata_completer_compositions: tuple[str, ...] = ()
         self._metadata_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
         self._metadata_diameter_imported = False
+        self._metadata_diameter_import_sample_key: tuple[str, str] | None = None
         self._fabrication_thread: QtCore.QThread | None = None
         self._fabrication_worker: FabricationFolderLoadWorker | None = None
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
@@ -1000,15 +1001,37 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         if not (math.isfinite(float(x_low)) and math.isfinite(float(x_high))) or math.isclose(float(x_low), float(x_high)):
             return
-        ticks: list[tuple[float, str]] = []
-        for idx in range(5):
-            position = float(x_low) + (float(x_high) - float(x_low)) * idx / 4.0
-            if position < 0:
-                continue
-            ticks.append((position, self._format_current_density(position)))
+        ticks = [
+            (position, self._format_current_density(position))
+            for position in self._current_axis_tick_positions(plot_item, float(x_low), float(x_high))
+        ]
         top_axis.setLabel("Current density", units="A/mm^2")
         top_axis.setTicks([ticks])
         top_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
+
+    def _current_axis_tick_positions(self, plot_item: Any, x_low: float, x_high: float) -> list[float]:
+        bottom_axis = plot_item.getAxis("bottom")
+        try:
+            view = plot_item.getViewBox()
+            width = max(1, int(view.width()))
+        except Exception:
+            try:
+                width = max(1, int(plot_item.width()))
+            except Exception:
+                width = 400
+        try:
+            levels = bottom_axis.tickValues(x_low, x_high, width)
+        except Exception:
+            levels = []
+        for _spacing, values in levels:
+            positions = [
+                float(value)
+                for value in values
+                if math.isfinite(float(value)) and x_low <= float(value) <= x_high
+            ]
+            if positions:
+                return positions
+        return [x_low + (x_high - x_low) * idx / 4.0 for idx in range(5)]
 
     def _add_live_plot_item(self, plot: Any, x_values: list[float], y_values: list[float], color: str) -> Any:
         if plot is None or pg is None:
@@ -1141,7 +1164,12 @@ class MainWindow(QtWidgets.QMainWindow):
         hint = getattr(self.ui, "label_current_density_hint", None)
         if isinstance(hint, QtWidgets.QLabel):
             diameter_um = self._diameter_um()
-            hint.setText("" if diameter_um is None else f"d = {diameter_um:.3g} um")
+            if diameter_um is None:
+                hint.setText("")
+            elif self._metadata_diameter_imported:
+                hint.setText(f"Imported d = {diameter_um:.3g} um")
+            else:
+                hint.setText(f"Manual/unchecked d = {diameter_um:.3g} um")
         self._refresh_density_labels()
         self._refresh_config_current_density_labels()
         self._refresh_current_density_axis()
@@ -1213,10 +1241,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.doubleSpinBox_wire_diameter_um.setValue(max(0.0, diameter))
         except Exception:
             pass
+        self._mark_metadata_diameter_imported(False)
         self._refresh_current_density_visibility()
 
     def _handle_diameter_changed(self, _value: float) -> None:
-        self._metadata_diameter_imported = False
+        self._mark_metadata_diameter_imported(False)
         self._store_microwire_metadata_settings()
         self._refresh_current_density_visibility()
 
@@ -1290,6 +1319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._store_microwire_metadata_settings()
         self._set_metadata_status(
             f"Loaded {len(records)} microwire suggestion(s) from {file_count} fabrication workbook(s)."
+            f"{self._metadata_import_status_suffix()}"
         )
 
     def _handle_fabrication_load_failure(self, root_obj: object, message: str) -> None:
@@ -1310,6 +1340,14 @@ class MainWindow(QtWidgets.QMainWindow):
         label = getattr(self.ui, "label_microwire_metadata_status", None)
         if isinstance(label, QtWidgets.QLabel):
             label.setText(text)
+
+    def _metadata_import_status_suffix(self) -> str:
+        record = self._matching_metadata_record()
+        if record is None:
+            return ""
+        if record.diameter_um is None:
+            return f" Exact match: {record.composition} {record.microwire}, but no diameter is available."
+        return f" Exact match: imported d = {float(record.diameter_um):.3g} um."
 
     def _read_builder_project_payload(self, path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -1402,7 +1440,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self._merge_metadata_records(records)
         self._store_microwire_metadata_settings()
-        self._set_metadata_status(f"Imported {len(records)} microwire suggestion(s) from {path.name}.")
+        self._set_metadata_status(
+            f"Imported {len(records)} microwire suggestion(s) from {path.name}."
+            f"{self._metadata_import_status_suffix()}"
+        )
         return True
 
     def _load_fabrication_folder_from_ui(self) -> bool:
@@ -1531,17 +1572,57 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._metadata_record_lookup.get((_normalized_token(composition), wire_key))
 
+    def _current_metadata_sample_key(self) -> tuple[str, str]:
+        return (
+            _normalized_token(self.ui.lineEdit_composition.text()),
+            _normalized_microwire_token(self.ui.lineEdit_microwire.text()),
+        )
+
+    def _refresh_metadata_diameter_import_state(self) -> None:
+        self._mark_metadata_diameter_imported(
+            self._metadata_diameter_imported
+            and self._metadata_diameter_import_sample_key == self._current_metadata_sample_key()
+        )
+
+    def _mark_metadata_diameter_imported(self, imported: bool) -> None:
+        self._metadata_diameter_imported = bool(imported)
+        self._metadata_diameter_import_sample_key = (
+            self._current_metadata_sample_key() if self._metadata_diameter_imported else None
+        )
+        spin = getattr(self.ui, "doubleSpinBox_wire_diameter_um", None)
+        if not isinstance(spin, QtWidgets.QDoubleSpinBox):
+            return
+        if self._metadata_diameter_imported:
+            spin.setStyleSheet(
+                "QDoubleSpinBox { border: 1px solid #16a34a; background-color: rgba(22, 163, 74, 0.10); }"
+            )
+            spin.setToolTip(
+                "Wire diameter was imported for the current composition and microwire from an exact metadata match; manual edits are allowed."
+            )
+        else:
+            spin.setStyleSheet(
+                "QDoubleSpinBox { border: 1px solid #dc2626; background-color: rgba(220, 38, 38, 0.10); }"
+            )
+            spin.setToolTip(
+                "Wire diameter is missing, manual, stale, or not verified against the current composition and microwire."
+            )
+
     def _apply_metadata_sample_if_possible(self) -> bool:
+        self._refresh_metadata_diameter_import_state()
         record = self._matching_metadata_record()
         if record is None:
+            self._mark_metadata_diameter_imported(False)
+            self._refresh_current_density_visibility()
             return False
         if record.diameter_um is None:
+            self._mark_metadata_diameter_imported(False)
+            self._refresh_current_density_visibility()
             self._set_metadata_status(f"Matched {record.composition} {record.microwire}; no diameter available.")
             return False
         try:
             with QtCore.QSignalBlocker(self.ui.doubleSpinBox_wire_diameter_um):
                 self.ui.doubleSpinBox_wire_diameter_um.setValue(float(record.diameter_um))
-            self._metadata_diameter_imported = True
+            self._mark_metadata_diameter_imported(True)
             self._store_microwire_metadata_settings()
             self._refresh_current_density_visibility()
             self._set_metadata_status(

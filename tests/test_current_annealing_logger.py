@@ -510,7 +510,56 @@ def test_current_annealing_imports_project_diameter_and_autocomplete(tmp_path, q
     assert window._current_density_a_mm2(60.0) == pytest.approx(209.43, rel=1e-3)
     assert window._metadata_composition_model.stringList() == ["Ni50Fe27Ga23"]
     assert window._metadata_microwire_model.stringList() == ["12/2"]
+    assert window._metadata_diameter_imported is True
+    assert "16a34a" in window.ui.doubleSpinBox_wire_diameter_um.styleSheet()
+    assert window.ui.label_current_density_hint.text() == "Imported d = 19.1 um"
     assert not window.label_live_set_density.isHidden()
+
+
+def test_current_annealing_imported_diameter_reverts_to_untrusted_on_manual_or_stale_sample(
+    tmp_path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    project = tmp_path / "microwire_project.pydpj"
+    project.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {"Composition": "Ni50Fe27Ga23", "Microwire": "12/2", "d (um)": 19.1},
+                            {"Composition": "Ni50Fe27Ga23", "Microwire": "12/3", "d (um)": None},
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window.ui.lineEdit_composition.setText("Ni50Fe27Ga23")
+    window.ui.lineEdit_microwire.setText("12/2")
+    window.ui.lineEdit_builder_project.setText(str(project))
+
+    assert window._import_builder_project_from_ui() is True
+    assert window._metadata_diameter_imported is True
+
+    window.ui.lineEdit_microwire.setText("12/4")
+    assert window._metadata_diameter_imported is False
+    assert "dc2626" in window.ui.doubleSpinBox_wire_diameter_um.styleSheet()
+    assert window.ui.label_current_density_hint.text() == "Manual/unchecked d = 19.1 um"
+
+    window.ui.lineEdit_microwire.setText("12/2")
+    assert window._metadata_diameter_imported is True
+
+    window.ui.doubleSpinBox_wire_diameter_um.setValue(20.0)
+    assert window._metadata_diameter_imported is False
+    assert "Manual/unchecked d = 20" in window.ui.label_current_density_hint.text()
+
+    window.ui.lineEdit_microwire.setText("12/3")
+    assert window._metadata_diameter_imported is False
+    assert "no diameter available" in window.ui.label_microwire_metadata_status.text()
 
 
 def test_current_annealing_fabrication_load_keeps_ui_responsive(
@@ -592,6 +641,30 @@ def test_current_annealing_top_axis_shows_density_when_diameter_known(qtbot) -> 
     assert top_axis.style["showValues"] is True
     assert top_axis.labelText == "Current density"
     assert "A/mm" in top_axis.labelUnits
+
+
+def test_current_annealing_density_top_axis_uses_bottom_tick_positions(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.doubleSpinBox_wire_diameter_um.setValue(20.0)
+    plot_item = window.pg_plot_resistance_vs_current.getPlotItem()
+    bottom_axis = plot_item.getAxis("bottom")
+    captured: dict[str, list[tuple[float, str]]] = {}
+
+    def fake_tick_values(_low: float, _high: float, _width: int) -> list[tuple[float, list[float]]]:
+        return [(10.0, [0.0, 10.0, 20.0, 30.0])]
+
+    def capture_ticks(levels: list[list[tuple[float, str]]]) -> None:
+        captured["ticks"] = levels[0]
+
+    bottom_axis.tickValues = fake_tick_values  # type: ignore[method-assign]
+    top_axis = plot_item.getAxis("top")
+    top_axis.setTicks = capture_ticks  # type: ignore[method-assign]
+
+    window._refresh_current_density_axis(x_low=0.0, x_high=30.0)
+
+    assert [position for position, _label in captured["ticks"]] == [0.0, 10.0, 20.0, 30.0]
 
 
 def test_current_annealing_voltage_limit_no_longer_holds_current(qtbot) -> None:
