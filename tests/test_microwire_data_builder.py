@@ -1328,7 +1328,7 @@ def test_mini_dma_transition_review_entries_use_real_stress_targets() -> None:
     assert {entry.status for entry in entries} >= {"accepted", "rejected"}
 
 
-def test_mini_dma_transition_review_dialog_filters_and_plots() -> None:
+def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
     _ensure_qapp()
     dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
         [_sample_mini_dma_record()],
@@ -1336,13 +1336,23 @@ def test_mini_dma_transition_review_dialog_filters_and_plots() -> None:
     )
     try:
         assert dialog.tree.topLevelItemCount() == 1
-        assert dialog._visible_indices  # noqa: SLF001
+        assert not dialog._entries_by_run  # noqa: SLF001
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+            [_sample_mini_dma_record()],
+            logging.getLogger("test"),
+        )
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, entries)  # noqa: SLF001
+        )
+        assert dialog._entries_by_run  # noqa: SLF001
+        assert dialog._visible_refs  # noqa: SLF001
         dialog.rejected_only_check.setChecked(True)
         assert dialog.rejected_only_check.isChecked()
         assert not dialog.accepted_only_check.isChecked()
         assert all(
-            dialog._entries[index].status == "rejected"  # noqa: SLF001
-            for index in dialog._visible_indices  # noqa: SLF001
+            dialog._entries_by_run[key][index].status == "rejected"  # noqa: SLF001
+            for key, index in dialog._visible_refs  # noqa: SLF001
         )
         dialog.show_fit_lines_check.setChecked(False)
         dialog.show_markers_check.setChecked(False)
@@ -1381,6 +1391,51 @@ def test_mini_dma_section_opens_transition_review_for_all_records_without_select
         section._open_transition_review()  # noqa: SLF001
 
         assert opened == [record]
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_preview_items_render_real_thumbnail() -> None:
+    _ensure_qapp()
+    items = builder_ui._mini_dma_preview_items(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+        width_px=builder_ui.ANNEALING_GRAPH_WIDTH,
+        height_px=builder_ui.ANNEALING_GRAPH_HEIGHT,
+    )
+
+    assert len(items) == 1
+    assert not items[0].pixmap.isNull()
+    assert items[0].pixmap.width() > 0
+    assert items[0].pixmap.height() > 0
+
+
+def test_mini_dma_section_preview_decoration_uses_cached_graph_pixmap() -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        record = _sample_mini_dma_record()
+        section._record_groups = {record.sample: [record]}  # noqa: SLF001
+        section._record_groups_by_key = {  # noqa: SLF001
+            "Ni50Fe27Ga23|12|2": [record],
+        }
+        row = pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "_sample": record.sample,
+                builder_ui.MINI_DMA_COLUMN: [record.label],
+            }
+        )
+
+        pixmap = section._preview_decoration(row, builder_ui.MINI_DMA_COLUMN)  # noqa: SLF001
+        cached = section._preview_decoration(row, builder_ui.MINI_DMA_COLUMN)  # noqa: SLF001
+
+        assert pixmap is not None
+        assert cached is pixmap
+        assert not pixmap.isNull()
     finally:
         section.close()
         section.deleteLater()
