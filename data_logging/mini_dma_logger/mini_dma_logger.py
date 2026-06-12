@@ -331,6 +331,7 @@ DISPLAY_PLOT_RECENT_POINTS = 600
 DISPLAY_PLOT_BRIDGE_POINTS = 200
 DISPLAY_PLOT_BASE_BUCKET_S = 1.0
 DISPLAY_PLOT_OLD_CACHE_GRANULARITY = 1000
+IR_DASHBOARD_TEMPERATURE_WINDOW_S = 0.25
 DISPLAY_PLOT_BREAK_GAP_S = 30.0
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
@@ -1125,9 +1126,11 @@ class ScaleSignalBuffer:
     def __init__(self, *, window_s: float = 10.0) -> None:
         self.window_s = max(1.0, float(window_s))
         self._samples: deque[ScaleSample] = deque()
+        self._lock = RLock()
 
     def clear(self) -> None:
-        self._samples.clear()
+        with self._lock:
+            self._samples.clear()
 
     def add_sample(
         self,
@@ -1143,12 +1146,14 @@ class ScaleSignalBuffer:
             applied_load_g=float(applied_load_g),
             raw_text=str(raw_text),
         )
-        self._samples.append(sample)
-        self._trim(timestamp_s=float(timestamp_s))
+        with self._lock:
+            self._samples.append(sample)
+            self._trim(timestamp_s=float(timestamp_s))
         return sample
 
     def latest(self) -> ScaleSample | None:
-        return self._samples[-1] if self._samples else None
+        with self._lock:
+            return self._samples[-1] if self._samples else None
 
     def interval_summary(
         self,
@@ -1185,8 +1190,10 @@ class ScaleSignalBuffer:
         since_s: float | None,
         until_s: float | None,
     ) -> list[ScaleSample]:
+        with self._lock:
+            samples_snapshot = tuple(self._samples)
         selected: list[ScaleSample] = []
-        for sample in self._samples:
+        for sample in samples_snapshot:
             if since_s is not None and sample.timestamp_s < since_s:
                 continue
             if until_s is not None and sample.timestamp_s > until_s:
@@ -1256,27 +1263,53 @@ class IrTemperatureSample:
 class IrTemperatureBuffer:
     def __init__(self, maxlen: int = 2000) -> None:
         self._samples: deque[IrTemperatureSample] = deque(maxlen=maxlen)
+        self._lock = RLock()
 
     def add_sample(self, sample: IrTemperatureSample) -> None:
-        self._samples.append(sample)
+        with self._lock:
+            self._samples.append(sample)
 
     def latest(self) -> IrTemperatureSample | None:
-        if not self._samples:
-            return None
-        return self._samples[-1]
+        with self._lock:
+            if not self._samples:
+                return None
+            return self._samples[-1]
 
     def sample_rate_hz(self, *, now_s: float | None = None, window_s: float = 2.0) -> float | None:
-        if len(self._samples) < 2:
+        with self._lock:
+            samples_snapshot = tuple(self._samples)
+        if len(samples_snapshot) < 2:
             return None
-        end_s = self._samples[-1].timestamp_s if now_s is None else float(now_s)
+        end_s = samples_snapshot[-1].timestamp_s if now_s is None else float(now_s)
         cutoff_s = end_s - max(0.05, float(window_s))
-        samples = [sample for sample in self._samples if sample.timestamp_s >= cutoff_s]
+        samples = [sample for sample in samples_snapshot if sample.timestamp_s >= cutoff_s]
         if len(samples) < 2:
             return None
         duration_s = samples[-1].timestamp_s - samples[0].timestamp_s
         if duration_s <= 0.0:
             return None
         return (len(samples) - 1) / duration_s
+
+    def recent_object_mean_c(
+        self,
+        *,
+        now_s: float | None = None,
+        window_s: float = IR_DASHBOARD_TEMPERATURE_WINDOW_S,
+    ) -> float | None:
+        with self._lock:
+            samples_snapshot = tuple(self._samples)
+        if not samples_snapshot:
+            return None
+        end_s = samples_snapshot[-1].timestamp_s if now_s is None else float(now_s)
+        cutoff_s = end_s - max(0.001, float(window_s))
+        values = [
+            float(sample.object_c_apparent)
+            for sample in samples_snapshot
+            if sample.timestamp_s >= cutoff_s and math.isfinite(float(sample.object_c_apparent))
+        ]
+        if not values:
+            return None
+        return sum(values) / len(values)
 
 
 @dataclass
@@ -1312,6 +1345,7 @@ class MeasurementPoint:
     current_relative_position_mm: float | None = None
     current_relative_strain_pct: float | None = None
     ir_object_c_apparent: float | None = None
+    ir_temperature_c: float | None = None
     ir_ambient_c: float | None = None
     ir_delta_c: float | None = None
     ir_sample_age_s: float | None = None
@@ -1677,6 +1711,7 @@ class PlotChannel:
     label: str
     color: str
     getter: Callable[[MeasurementPoint], float | None]
+    hidden_from_picker: bool = False
 
 
 @dataclass
@@ -4797,12 +4832,18 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
     """Passive MLX90640 view fed by the Mini DMA IR logger."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(
+            parent,
+            QtCore.Qt.WindowType.Window
+            | QtCore.Qt.WindowType.WindowTitleHint
+            | QtCore.Qt.WindowType.WindowSystemMenuHint
+            | QtCore.Qt.WindowType.WindowMinimizeButtonHint
+            | QtCore.Qt.WindowType.WindowMaximizeButtonHint
+            | QtCore.Qt.WindowType.WindowCloseButtonHint,
+        )
         self.setWindowTitle("Mini DMA Thermal Camera")
-        self.setWindowFlag(QtCore.Qt.WindowType.Window, True)
-        self.setWindowFlag(QtCore.Qt.WindowType.WindowMinimizeButtonHint, True)
-        self.setWindowFlag(QtCore.Qt.WindowType.WindowCloseButtonHint, True)
-        self.resize(780, 620)
+        self.setMinimumSize(430, 360)
+        self.resize(620, 520)
         self._latest_frame: object | None = None
         self._pending_frame: object | None = None
         self._display_paused = False
@@ -4827,6 +4868,7 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
         controls.addWidget(QtWidgets.QLabel("Display", self))
         self.refresh_combo = QtWidgets.QComboBox(self)
         for label, interval_ms in (
+            ("1 fps", 1000),
             ("5 fps", 200),
             ("10 fps", 100),
             ("20 fps", 50),
@@ -4868,7 +4910,11 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
 
         self.image_label = QtWidgets.QLabel(self)
         self.image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(640, 480)
+        self.image_label.setMinimumSize(320, 240)
+        self.image_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Ignored,
+        )
         self.image_label.setStyleSheet("background: #0f172a; border: 1px solid #333;")
         layout.addWidget(self.image_label, stretch=1)
         self._update_scale_controls()
@@ -7866,10 +7912,10 @@ class MainWindow(QtWidgets.QMainWindow):
             y_left_combo = QtWidgets.QComboBox(plot_config_box)
             y_right_combo = QtWidgets.QComboBox(plot_config_box)
             for combo in (x_combo, y_left_combo):
-                for channel in self._plot_channels():
+                for channel in self._plot_config_channels():
                     combo.addItem(channel.label, channel.key)
             y_right_combo.addItem("(none)", "")
-            for channel in self._plot_channels():
+            for channel in self._plot_config_channels():
                 y_right_combo.addItem(channel.label, channel.key)
             for widget in (visible, x_combo, y_left_combo, y_right_combo):
                 signal = (
@@ -8334,30 +8380,45 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             PlotChannel("power_W", "Power (W)", "#c084fc", lambda point: point.power_W),
             PlotChannel(
+                "temperature_c",
+                "Temperature (C)",
+                "#38bdf8",
+                lambda point: point.ir_temperature_c
+                if point.ir_temperature_c is not None
+                else point.ir_object_c_apparent,
+            ),
+            PlotChannel(
                 "ir_object_c_apparent",
                 "IR apparent temp (C)",
                 "#38bdf8",
                 lambda point: point.ir_object_c_apparent,
+                hidden_from_picker=True,
             ),
             PlotChannel(
                 "ir_delta_c",
                 "IR delta temp (C)",
                 "#06b6d4",
                 lambda point: point.ir_delta_c,
+                hidden_from_picker=True,
             ),
             PlotChannel(
                 "ir_ambient_c",
                 "IR ambient temp (C)",
                 "#67e8f9",
                 lambda point: point.ir_ambient_c,
+                hidden_from_picker=True,
             ),
             PlotChannel(
                 "ir_sample_age_s",
                 "IR sample age (s)",
                 "#64748b",
                 lambda point: point.ir_sample_age_s,
+                hidden_from_picker=True,
             ),
         ]
+
+    def _plot_config_channels(self) -> list[PlotChannel]:
+        return [channel for channel in self._plot_channels() if not channel.hidden_from_picker]
 
     def _plot_channel_color(self, key: str, fallback: str = "#38bdf8") -> str:
         channel = self._plot_channel(key)
@@ -8528,10 +8589,22 @@ class MainWindow(QtWidgets.QMainWindow):
         prefix = self._dashboard_plot_settings_prefix(index, mode)
         return {
             "visible": bool(self.settings.value(f"{prefix}_visible", defaults["visible"], type=bool)),
-            "x": self.settings.value(f"{prefix}_x", defaults["x"], type=str),
-            "y_left": self.settings.value(f"{prefix}_y_left", defaults["y_left"], type=str),
-            "y_right": self.settings.value(f"{prefix}_y_right", defaults["y_right"], type=str),
+            "x": self._normalize_dashboard_plot_channel_key(
+                self.settings.value(f"{prefix}_x", defaults["x"], type=str)
+            ),
+            "y_left": self._normalize_dashboard_plot_channel_key(
+                self.settings.value(f"{prefix}_y_left", defaults["y_left"], type=str)
+            ),
+            "y_right": self._normalize_dashboard_plot_channel_key(
+                self.settings.value(f"{prefix}_y_right", defaults["y_right"], type=str)
+            ),
         }
+
+    def _normalize_dashboard_plot_channel_key(self, key: object) -> str:
+        key_text = str(key or "")
+        if key_text in {"ir_object_c_apparent", "ir_delta_c", "ir_ambient_c", "ir_sample_age_s"}:
+            return "temperature_c"
+        return key_text
 
     def _write_dashboard_plot_settings(
         self,
@@ -8590,7 +8663,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         (tile.y_left_combo, "y_left"),
                         (tile.y_right_combo, "y_right"),
                     ):
-                        combo_index = combo.findData(str(values.get(key_name, "")))
+                        combo_index = combo.findData(
+                            self._normalize_dashboard_plot_channel_key(values.get(key_name, ""))
+                        )
                         if combo_index >= 0:
                             combo.setCurrentIndex(combo_index)
                 finally:
@@ -8608,8 +8683,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 ("elapsed_s", "resistance_ohm", ""),
             ],
             "heating": [
-                ("elapsed_s", "current_measured_mA", "voltage_V"),
-                ("elapsed_s", "resistance_ohm", "power_W"),
+                ("elapsed_s", "current_measured_mA", "temperature_c"),
+                ("elapsed_s", "voltage_V", "power_W"),
                 ("elapsed_s", "load_g", "position_mm"),
                 ("strain_pct", "stress_mpa", "current_measured_mA"),
             ],
@@ -11249,7 +11324,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         dialog = self._thermal_camera_dialog
         if dialog is None:
-            dialog = MiniDmaThermalCameraDialog(self)
+            dialog = MiniDmaThermalCameraDialog(None)
             dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dialog.destroyed.connect(self._forget_thermal_camera_dialog)
             self._thermal_camera_dialog = dialog
@@ -17040,7 +17115,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_manual_auto_connect_hardware(self) -> None:
         self._apply_shared_broker_bench_defaults_for_tic_preflight()
         connected = True
-        steps = 3 + (1 if self._motor_supply_enabled() else 0)
+        connect_ir = self._manual_auto_connect_should_connect_ir()
+        steps = 3 + (1 if self._motor_supply_enabled() else 0) + (1 if connect_ir else 0)
         completed_steps = 0
         try:
             self._set_manual_auto_connect_progress("Connecting scale...", completed_steps, steps)
@@ -17064,6 +17140,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._ensure_tic_ready_for_recipe():
                 connected = False
             completed_steps += 1
+            if connect_ir:
+                self._set_manual_auto_connect_progress("Connecting IR camera/thermometer...", completed_steps, steps)
+                if self._ir_thread is None and not self._connect_ir_thermometer(show_errors=False):
+                    connected = False
+                completed_steps += 1
             if connected:
                 self._set_manual_auto_connect_progress("Hardware auto-connect completed.", steps, steps)
                 self._log("Manual hardware auto-connect completed.")
@@ -17077,6 +17158,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "button_manual_auto_connect"):
                 self.button_manual_auto_connect.setEnabled(True)
                 self.button_manual_auto_connect.setText("Auto-connect hardware")
+
+    def _manual_auto_connect_should_connect_ir(self) -> bool:
+        if self._ir_thread is not None:
+            return True
+        if not hasattr(self, "combo_ir_sensor") or not hasattr(self, "combo_ir_port"):
+            return False
+        sensor_mode = str(self.combo_ir_sensor.currentData() or "").strip()
+        port_name = str(self.combo_ir_port.currentData() or "").strip()
+        return sensor_mode in {IR_SENSOR_MLX90614, IR_SENSOR_MLX90640} and bool(port_name)
 
     def _start_tic_keepalive(self) -> None:
         if not self._is_ui_thread():
@@ -17845,10 +17935,15 @@ class MainWindow(QtWidgets.QMainWindow):
             sample = self._latest_ir_sample
             baseline_c = self._ir_baseline_object_c
             sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=now_s or time.time())
+            dashboard_temperature_c = self._ir_temperature_buffer.recent_object_mean_c(
+                now_s=now_s,
+                window_s=IR_DASHBOARD_TEMPERATURE_WINDOW_S,
+            )
         if sample is None:
             return {
                 "sensor_type": None,
                 "object_c_apparent": None,
+                "dashboard_temperature_c": None,
                 "ambient_c": None,
                 "delta_c": None,
                 "sample_age_s": None,
@@ -17872,6 +17967,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return {
             "sensor_type": sample.sensor_type,
             "object_c_apparent": sample.object_c_apparent,
+            "dashboard_temperature_c": dashboard_temperature_c,
             "ambient_c": sample.ambient_c,
             "delta_c": delta_c,
             "sample_age_s": max(0.0, current_time_s - sample.timestamp_s),
@@ -18927,6 +19023,7 @@ class MainWindow(QtWidgets.QMainWindow):
             resistance_ohm=resistance_ohm,
             power_W=snapshot.get("power_W"),
             ir_object_c_apparent=ir_snapshot["object_c_apparent"],  # type: ignore[arg-type]
+            ir_temperature_c=ir_snapshot["dashboard_temperature_c"],  # type: ignore[arg-type]
             ir_ambient_c=ir_snapshot["ambient_c"],  # type: ignore[arg-type]
             ir_delta_c=ir_snapshot["delta_c"],  # type: ignore[arg-type]
             ir_sample_age_s=ir_snapshot["sample_age_s"],  # type: ignore[arg-type]
@@ -19007,6 +19104,7 @@ class MainWindow(QtWidgets.QMainWindow):
             resistance_ohm=resistance_ohm,
             power_W=self._supply_snapshot.get("power_W"),
             ir_object_c_apparent=ir_snapshot["object_c_apparent"],  # type: ignore[arg-type]
+            ir_temperature_c=ir_snapshot["dashboard_temperature_c"],  # type: ignore[arg-type]
             ir_ambient_c=ir_snapshot["ambient_c"],  # type: ignore[arg-type]
             ir_delta_c=ir_snapshot["delta_c"],  # type: ignore[arg-type]
             ir_sample_age_s=ir_snapshot["sample_age_s"],  # type: ignore[arg-type]
@@ -22080,7 +22178,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if log_completion:
             self._log("Recipe stopped.")
         self._close_length_setup_dialog()
-        if user_initiated and self._session_active:
+        if (user_initiated or offer_recovery) and self._session_active:
             self._stop_session()
         if not keep_progress:
             self._update_recipe_progress()

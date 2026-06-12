@@ -1958,14 +1958,148 @@ def test_parse_mlx90640_text_frame_returns_max_temperature_sample() -> None:
 def test_mini_dma_plot_channels_include_ir_temperature(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
-        keys = {channel.key for channel in window._plot_channels()}
+        visible_keys = {channel.key for channel in window._plot_config_channels()}
+        all_keys = {channel.key for channel in window._plot_channels()}
 
-        assert "ir_object_c_apparent" in keys
-        assert "ir_delta_c" in keys
-        assert "ir_ambient_c" in keys
-        assert "ir_sample_age_s" in keys
+        assert "temperature_c" in visible_keys
+        assert "ir_object_c_apparent" not in visible_keys
+        assert "ir_delta_c" not in visible_keys
+        assert "ir_ambient_c" not in visible_keys
+        assert "ir_sample_age_s" not in visible_keys
+        assert {"ir_object_c_apparent", "ir_delta_c", "ir_ambient_c", "ir_sample_age_s"} <= all_keys
     finally:
         _close_test_window(window)
+
+
+def test_legacy_ir_plot_settings_map_to_temperature_channel(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("plot_tile_0_x", "elapsed_s")
+    settings.setValue("plot_tile_0_y_left", "ir_object_c_apparent")
+    settings.setValue("plot_tile_0_y_right", "ir_delta_c")
+    settings.sync()
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        values = window._read_dashboard_plot_tile_settings(0, None)
+
+        assert values["y_left"] == "temperature_c"
+        assert values["y_right"] == "temperature_c"
+    finally:
+        _close_test_window(window)
+
+
+def test_dashboard_temperature_channel_uses_coalesced_ir_value(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    base_time = 1000.0
+    samples = [
+        mini_dma_mod.IrTemperatureSample(
+            timestamp_s=base_time + offset_s,
+            raw_text=f"sample {index}",
+            sequence=index,
+            device_elapsed_ms=index,
+            read_us=1000,
+            ambient_c=23.0,
+            object_c_apparent=value_c,
+            raw_ambient=0,
+            raw_object=0,
+            flags=0,
+            sensor_type=mini_dma_mod.IR_SENSOR_MLX90640,
+            frame_max_c=value_c,
+        )
+        for index, (offset_s, value_c) in enumerate(
+            [(-0.30, 20.0), (-0.20, 30.0), (-0.10, 40.0), (0.0, 50.0)]
+        )
+    ]
+
+    try:
+        with window._ir_state_lock:
+            for sample in samples:
+                window._latest_ir_sample = sample
+                window._ir_temperature_buffer.add_sample(sample)
+
+        snapshot = window._latest_ir_snapshot(now_s=base_time)
+        point = mini_dma_mod.MeasurementPoint(
+            elapsed_s=0.0,
+            timestamp_utc="2026-06-12 12:00:00",
+            raw_position_mm=0.0,
+            position_mm=0.0,
+            raw_load_g=0.0,
+            load_g=0.0,
+            preload_state="disabled",
+            strain_pct=0.0,
+            stress_mpa=0.0,
+            current_set_mA=1.0,
+            current_measured_mA=1.0,
+            voltage_V=0.1,
+            resistance_ohm=100.0,
+            power_W=0.0001,
+            automation_phase="manual",
+            automation_basis=None,
+            automation_target_value=None,
+            plateau_index=None,
+            plateau_label=None,
+            ir_object_c_apparent=snapshot["object_c_apparent"],  # type: ignore[arg-type]
+            ir_temperature_c=snapshot["dashboard_temperature_c"],  # type: ignore[arg-type]
+        )
+        channel = window._plot_channel("temperature_c")
+
+        assert snapshot["object_c_apparent"] == pytest.approx(50.0)
+        assert snapshot["dashboard_temperature_c"] == pytest.approx(40.0)
+        assert channel is not None
+        assert channel.getter(point) == pytest.approx(40.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_signal_buffers_snapshot_while_samples_are_appended() -> None:
+    scale_buffer = mini_dma_mod.ScaleSignalBuffer()
+    ir_buffer = mini_dma_mod.IrTemperatureBuffer(maxlen=4000)
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def _writer() -> None:
+        index = 0
+        try:
+            while not stop.is_set():
+                timestamp_s = 1000.0 + index * 0.001
+                scale_buffer.add_sample(
+                    timestamp_s=timestamp_s,
+                    raw_g=float(index),
+                    applied_load_g=float(index),
+                    raw_text=str(index),
+                )
+                ir_buffer.add_sample(
+                    mini_dma_mod.IrTemperatureSample(
+                        timestamp_s=timestamp_s,
+                        raw_text=str(index),
+                        sequence=index,
+                        device_elapsed_ms=index,
+                        read_us=1000,
+                        ambient_c=23.0,
+                        object_c_apparent=30.0 + (index % 5),
+                        raw_ambient=0,
+                        raw_object=0,
+                        flags=0,
+                    )
+                )
+                index += 1
+        except BaseException as exc:  # pragma: no cover - reported by assertion below
+            errors.append(exc)
+
+    writer = threading.Thread(target=_writer, daemon=True)
+    writer.start()
+    try:
+        for _index in range(500):
+            scale_buffer.recent_summary(window_s=0.5)
+            scale_buffer.recent_samples(window_s=0.5)
+            ir_buffer.sample_rate_hz(window_s=0.5)
+            ir_buffer.recent_object_mean_c(window_s=0.25)
+    finally:
+        stop.set()
+        writer.join(timeout=2.0)
+
+    assert errors == []
 
 
 def test_session_logs_ir_temperature_sidecar_and_measurement_columns(tmp_path: Path, qtbot) -> None:
@@ -3261,6 +3395,49 @@ def test_manual_auto_connect_enables_motor_supply_before_tic_status(tmp_path: Pa
         assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
         assert "Manual hardware auto-connect completed." in window.log_output.toPlainText()
     finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_connects_selected_ir_without_hardware_steal(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+
+    try:
+        window.combo_ir_port.addItem("Synthetic IR", "COM_IR")
+        window.combo_ir_port.setCurrentIndex(window.combo_ir_port.findData("COM_IR"))
+        window.combo_ir_sensor.setCurrentIndex(
+            window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90640)
+        )
+
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "tic", "ir"]
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_leaves_active_ir_connection_alone(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+
+    try:
+        window._ir_thread = QtCore.QThread(window)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "tic"]
+    finally:
+        window._ir_thread = None
         _close_test_window(window)
 
 
@@ -6790,7 +6967,9 @@ def test_mini_dma_live_camera_button_opens_embedded_frame_view(tmp_path: Path, q
         assert [
             dialog.refresh_combo.itemText(index)
             for index in range(dialog.refresh_combo.count())
-        ] == ["5 fps", "10 fps", "20 fps", "Max"]
+        ] == ["1 fps", "5 fps", "10 fps", "20 fps", "Max"]
+        assert dialog.minimumWidth() <= 430
+        assert dialog.parent() is None
         assert dialog._latest_frame is frame
         assert dialog.image_label.pixmap() is not None
         assert "Max 31.00 C" in dialog.stats_label.text()
@@ -17388,6 +17567,50 @@ def test_user_stop_stops_recipe_session_logging(tmp_path: Path, qtbot) -> None:
         assert window._session_active is False
         assert window._session_csv_handle is None
         assert "Recipe stopped" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_control_stop_with_recovery_closes_session_and_stops_dashboard_time_points(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recovery_prompts: list[bool] = []
+    window.edit_log_name.setText("control_stop_recovery")
+    window._latest_scale_value_g = 21.2
+    window._latest_scale_text = "21.200 g"
+    window._latest_scale_timestamp = time.time()
+    window._ask_recovery_after_stop = lambda: recovery_prompts.append(True)  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=True, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [mini_dma_mod.AutomationStep("record")]
+        window._automation_index = 0
+        window._automation_total_steps = 1
+        window._record_live_plot_sample_from_ui_refresh()
+        assert window._session_active is True
+        assert len(window._live_plot_points) == 1
+
+        window._stop_auto_ramp(
+            log_completion=False,
+            offer_recovery=True,
+            stop_reason="recipe_control_stop",
+            stop_detail="Synthetic control stop.",
+        )
+        window._latest_scale_timestamp = time.time()
+        recorded, refreshed = window._record_live_plot_sample_from_ui_refresh()
+
+        assert recovery_prompts == [True]
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert window._session_csv_handle is None
+        assert window._live_plot_points == []
+        assert recorded is False
+        assert refreshed is False
+        assert "Session stopped" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
