@@ -265,6 +265,18 @@ IR_SENSOR_LABELS = {
     IR_SENSOR_MLX90614: "MLX90614 spot thermometer",
     IR_SENSOR_MLX90640: "MLX90640 text-frame camera",
 }
+THERMAL_FIRMWARE_BY_SENSOR = {
+    IR_SENSOR_MLX90614: {
+        "label": "MLX90614 spot thermometer",
+        "folder": Path("experiments/firmware/stm32cube_mlx90614_probe"),
+        "binary": Path("build/stm32cube_mlx90614_probe.bin"),
+    },
+    IR_SENSOR_MLX90640: {
+        "label": "MLX90640 thermal camera",
+        "folder": Path("experiments/firmware/stm32cube_mlx90640_stream"),
+        "binary": Path("build/stm32cube_mlx90640_stream.bin"),
+    },
+}
 MLX90614_READ_ERROR_FLAG = 0x01
 MLX90614_MIN_VALID_C = -70.0
 FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)?)")
@@ -6144,6 +6156,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_ir_live_camera = QtWidgets.QPushButton("Live camera", ir_box)
         self.button_ir_live_camera.clicked.connect(self._open_live_thermal_camera_viewer)
         ir_aux_buttons.addWidget(self.button_ir_live_camera)
+        self.button_ir_flash_firmware = QtWidgets.QPushButton("Flash firmware", ir_box)
+        self.button_ir_flash_firmware.clicked.connect(self._flash_selected_ir_firmware)
+        ir_aux_buttons.addWidget(self.button_ir_flash_firmware)
         ir_form.addRow("", ir_aux_buttons)
 
         self.label_ir_live = QtWidgets.QLabel("IR disconnected.")
@@ -10976,6 +10991,163 @@ class MainWindow(QtWidgets.QMainWindow):
             self._thermal_camera_viewers.remove(viewer)
         except ValueError:
             pass
+
+    @staticmethod
+    def _repo_root() -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    @staticmethod
+    def _existing_file_from_candidates(candidates: Sequence[Path]) -> Path | None:
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    def _stm32_programmer_cli_path(self) -> Path | None:
+        env_path = os.environ.get("STM32_PROGRAMMER_CLI", "").strip()
+        candidates = []
+        if env_path:
+            candidates.append(Path(env_path))
+        candidates.append(Path(r"C:\ST\STM32CubeCLT_1.21.0\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe"))
+        path_text = shutil.which("STM32_Programmer_CLI")
+        if path_text:
+            candidates.append(Path(path_text))
+        return self._existing_file_from_candidates(candidates)
+
+    def _stm32_cmake_path(self) -> Path | None:
+        env_path = os.environ.get("STM32_CMAKE", "").strip()
+        candidates = []
+        if env_path:
+            candidates.append(Path(env_path))
+        candidates.append(Path(r"C:\ST\STM32CubeCLT_1.21.0\CMake\bin\cmake.exe"))
+        path_text = shutil.which("cmake")
+        if path_text:
+            candidates.append(Path(path_text))
+        return self._existing_file_from_candidates(candidates)
+
+    def _thermal_firmware_paths(self, sensor_mode: str) -> tuple[str, Path, Path]:
+        info = THERMAL_FIRMWARE_BY_SENSOR.get(sensor_mode)
+        if info is None:
+            raise ValueError("Choose MLX90614 or MLX90640 before flashing firmware.")
+        root = self._repo_root()
+        firmware_dir = root / info["folder"]
+        binary_path = firmware_dir / info["binary"]
+        return str(info["label"]), firmware_dir, binary_path
+
+    def _build_thermal_firmware_binary(self, firmware_dir: Path) -> tuple[bool, str]:
+        cmake = self._stm32_cmake_path()
+        if cmake is None:
+            return False, "STM32CubeCLT CMake was not found. Install STM32CubeCLT or set STM32_CMAKE."
+        build_dir = firmware_dir / "build"
+        commands = (
+            [str(cmake), "-S", ".", "-B", "build", "-G", "Ninja"],
+            [str(cmake), "--build", "build"],
+        )
+        outputs: list[str] = []
+        for command in commands:
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=str(firmware_dir),
+                    text=True,
+                    capture_output=True,
+                    timeout=180,
+                    **_hidden_subprocess_kwargs(),
+                )
+            except Exception as exc:
+                return False, f"Firmware build failed before completion: {exc}"
+            text = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+            if text:
+                outputs.append(text.strip())
+            if completed.returncode != 0:
+                return False, "Firmware build failed:\n" + "\n".join(outputs[-2:])
+        return True, f"Built firmware in {build_dir}."
+
+    def _flash_thermal_firmware_binary(self, binary_path: Path) -> tuple[bool, str]:
+        programmer = self._stm32_programmer_cli_path()
+        if programmer is None:
+            return False, "STM32CubeProgrammer CLI was not found. Install STM32CubeCLT or set STM32_PROGRAMMER_CLI."
+        command = [
+            str(programmer),
+            "-c",
+            "port=SWD",
+            "-w",
+            str(binary_path),
+            "0x08000000",
+            "-v",
+            "-rst",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                timeout=120,
+                **_hidden_subprocess_kwargs(),
+            )
+        except Exception as exc:
+            return False, f"Firmware flash failed before completion: {exc}"
+        text = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        if completed.returncode != 0:
+            return False, "Firmware flash failed:\n" + (text or f"Exit code {completed.returncode}")
+        return True, text or "Firmware flashed and Nucleo reset."
+
+    def _flash_selected_ir_firmware(self) -> None:
+        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
+        if sensor_mode == IR_SENSOR_AUTO:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Flash firmware",
+                "Choose MLX90614 or MLX90640 in the Sensor field first. Auto detect cannot decide which firmware to flash.",
+            )
+            return
+        if self._ir_thread is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Flash firmware",
+                "Disconnect IR logging before flashing firmware.",
+            )
+            return
+        try:
+            label, firmware_dir, binary_path = self._thermal_firmware_paths(sensor_mode)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        if not firmware_dir.exists():
+            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Firmware folder not found:\n{firmware_dir}")
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Flash firmware",
+            (
+                f"Flash {label} firmware to the connected NUCLEO-H753ZI over SWD?\n\n"
+                "This will build the firmware first if the .bin file is missing."
+            ),
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            if not binary_path.exists():
+                ok, message = self._build_thermal_firmware_binary(firmware_dir)
+                self._log(message)
+                if not ok:
+                    QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+                    return
+            ok, message = self._flash_thermal_firmware_binary(binary_path)
+            self._log(message)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if ok:
+            self.label_ir_status.setText(f"Flashed {label} firmware. Reconnect the serial port after reset.")
+            QtWidgets.QMessageBox.information(self, APP_NAME, f"Flashed {label} firmware.")
+        else:
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
 
     def _disconnect_ir_thermometer(self) -> None:
         worker = self._ir_worker
