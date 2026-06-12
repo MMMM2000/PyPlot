@@ -1491,6 +1491,14 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         ),
     )
     parser.add_argument(
+        "--microwire-word-job",
+        default=None,
+        help=(
+            "Run a Microwire Word export job request JSON and write machine-readable "
+            "status/progress artifacts."
+        ),
+    )
+    parser.add_argument(
         "--microwire-word-sample",
         default=None,
         help='Limit the Word export to one sample, e.g. "Ni50Fe27Ga23 12/2".',
@@ -1631,6 +1639,10 @@ def _is_microwire_eda_requested(args: argparse.Namespace) -> bool:
 
 def _is_microwire_word_report_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_word_report", None))
+
+
+def _is_microwire_word_job_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_word_job", None))
 
 
 def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
@@ -3227,6 +3239,147 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
         return 0
     finally:
         _disable_originpro_exit_detach()
+
+
+def _run_microwire_word_job_cli(args: argparse.Namespace) -> int:
+    from microwire_data_builder.jobs import (
+        JobRequestError,
+        append_progress,
+        error_payload,
+        load_microwire_word_job_request,
+        microwire_word_command,
+        write_manifest,
+        write_status,
+    )
+
+    job_path = Path(str(getattr(args, "microwire_word_job", "")).strip()).expanduser()
+    request = None
+    try:
+        request = load_microwire_word_job_request(job_path)
+        command = microwire_word_command(request)
+        request.paths.log.parent.mkdir(parents=True, exist_ok=True)
+        request.paths.log.write_text(
+            f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} loaded job {request.job_id}\n",
+            encoding="utf-8",
+        )
+        write_status(request, state="running", step="validate", message="Validating Microwire Word export job.")
+        append_progress(
+            request,
+            event="started",
+            step="validate",
+            message="Microwire Word export job accepted.",
+            fraction=0.0,
+        )
+        if request.paths.cancel.exists():
+            write_status(
+                request,
+                state="cancelled",
+                step="validate",
+                message="Job was cancelled before export started.",
+                exit_code=130,
+            )
+            append_progress(
+                request,
+                event="cancelled",
+                step="validate",
+                message="Cancel marker existed before export started.",
+                fraction=1.0,
+            )
+            write_manifest(request, state="cancelled", exit_code=130, command=command)
+            print(f"[microwire-word-job] status={request.paths.status}")
+            print(f"[microwire-word-job] manifest={request.paths.manifest}")
+            return 130
+        if not request.source.exists():
+            raise FileNotFoundError(request.source)
+        if request.dry_run:
+            append_progress(
+                request,
+                event="validated",
+                step="dry_run",
+                message="Dry run validated the request without generating DOCX files.",
+                fraction=1.0,
+            )
+            write_status(
+                request,
+                state="succeeded",
+                step="dry_run",
+                message="Dry run complete; no DOCX or Origin objects were generated.",
+                exit_code=0,
+            )
+            write_manifest(request, state="succeeded", exit_code=0, command=command)
+            print(f"[microwire-word-job] dry_run=true")
+            print(f"[microwire-word-job] status={request.paths.status}")
+            print(f"[microwire-word-job] progress={request.paths.progress}")
+            print(f"[microwire-word-job] manifest={request.paths.manifest}")
+            return 0
+
+        append_progress(
+            request,
+            event="export_started",
+            step="export",
+            message="Starting existing Microwire Word export path.",
+            fraction=0.1,
+        )
+        export_args = argparse.Namespace(
+            microwire_word_report=str(request.source),
+            microwire_word_sample=request.sample,
+            microwire_word_force_project_rebuild=request.force_project_rebuild,
+            microwire_word_origin=request.include_origin,
+            microwire_word_graphs_only=request.graphs_only,
+            out=str(request.output_dir) if request.output_dir is not None else None,
+        )
+        exit_code = _run_microwire_word_report_cli(export_args)
+        state = "succeeded" if exit_code == 0 else "failed"
+        append_progress(
+            request,
+            event="export_finished",
+            step="export",
+            message=f"Microwire Word export finished with exit code {exit_code}.",
+            fraction=1.0,
+        )
+        write_status(
+            request,
+            state=state,
+            step="export",
+            message=f"Microwire Word export finished with exit code {exit_code}.",
+            exit_code=exit_code,
+        )
+        write_manifest(request, state=state, exit_code=exit_code, command=command)
+        print(f"[microwire-word-job] status={request.paths.status}")
+        print(f"[microwire-word-job] progress={request.paths.progress}")
+        print(f"[microwire-word-job] manifest={request.paths.manifest}")
+        return exit_code
+    except (JobRequestError, FileNotFoundError) as exc:
+        print(f"[microwire-word-job] {exc}")
+        if request is not None:
+            payload = error_payload(exc, user_message=str(exc))
+            write_status(
+                request,
+                state="failed",
+                step="validate",
+                message=str(exc),
+                exit_code=2,
+                error=payload,
+            )
+            append_progress(request, event="failed", step="validate", message=str(exc), fraction=1.0)
+            write_manifest(request, state="failed", exit_code=2, command=microwire_word_command(request))
+        return 2
+    except Exception as exc:
+        LOGGER.exception("Microwire Word job failed")
+        print(f"[microwire-word-job] {type(exc).__name__}: {exc}")
+        if request is not None:
+            payload = error_payload(exc, user_message="Microwire Word job failed. See status JSON for details.")
+            write_status(
+                request,
+                state="failed",
+                step="export",
+                message=str(exc),
+                exit_code=1,
+                error=payload,
+            )
+            append_progress(request, event="failed", step="export", message=str(exc), fraction=1.0)
+            write_manifest(request, state="failed", exit_code=1, command=microwire_word_command(request))
+        return 1
 
 
 def _run_visual_check(args: argparse.Namespace) -> int:
@@ -4994,6 +5147,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_mini_dma_bench_plan(args, qt_args))
     if _is_experiment_process_requested(args):
         raise SystemExit(_run_experiment_process(args))
+    if _is_microwire_word_job_requested(args):
+        raise SystemExit(_run_microwire_word_job_cli(args))
     if _is_microwire_word_report_requested(args):
         raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):

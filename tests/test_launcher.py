@@ -357,6 +357,105 @@ def test_launcher_detects_microwire_word_report_cli_flags() -> None:
     assert args.out == "artifacts/word-report"
 
 
+def test_launcher_detects_microwire_word_job_flag() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--microwire-word-job",
+            "jobs/word-export.json",
+        ]
+    )
+
+    assert launcher_module._is_microwire_word_job_requested(args) is True  # noqa: SLF001
+    assert args.microwire_word_job == "jobs/word-export.json"
+
+
+def test_run_microwire_word_job_dry_run_writes_status_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "database.pydpj"
+    source.write_text('{"sections": {}}', encoding="utf-8")
+    job_path = tmp_path / "word-job.json"
+    job_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "job_type": "microwire_word_export",
+                "job_id": "dry_word",
+                "source": str(source),
+                "output_dir": str(tmp_path / "reports"),
+                "sample": "Ni50Fe27Ga23 12/2",
+                "include_origin": True,
+                "force_project_rebuild": True,
+                "graphs_only": True,
+                "dry_run": True,
+                "paths": {
+                    "status": str(tmp_path / "status.json"),
+                    "progress": str(tmp_path / "progress.json"),
+                    "manifest": str(tmp_path / "manifest.json"),
+                    "log": str(tmp_path / "job.log"),
+                    "cancel": str(tmp_path / "cancel.requested"),
+                },
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+    args = argparse.Namespace(microwire_word_job=str(job_path))
+
+    exit_code = launcher_module._run_microwire_word_job_cli(args)  # noqa: SLF001
+
+    assert exit_code == 0
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    progress = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert status["state"] == "succeeded"
+    assert status["dry_run"] is True
+    assert progress["events"][-1]["event"] == "validated"
+    assert manifest["job_type"] == "microwire_word_export"
+    assert manifest["dry_run"] is True
+    assert "--microwire-word-report" in manifest["equivalent_command"]
+    assert "--microwire-word-graphs-only" in manifest["equivalent_command"]
+    output = capsys.readouterr().out
+    assert "dry_run=true" in output
+    assert "manifest=" in output
+
+
+def test_run_microwire_word_job_honors_pre_start_cancel(tmp_path: Path) -> None:
+    source = tmp_path / "database.pydpj"
+    source.write_text('{"sections": {}}', encoding="utf-8")
+    cancel = tmp_path / "cancel.requested"
+    cancel.write_text("stop", encoding="utf-8")
+    job_path = tmp_path / "word-job.json"
+    job_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "job_type": "microwire_word_export",
+                "job_id": "cancelled_word",
+                "source": str(source),
+                "dry_run": True,
+                "paths": {
+                    "status": str(tmp_path / "status.json"),
+                    "progress": str(tmp_path / "progress.json"),
+                    "manifest": str(tmp_path / "manifest.json"),
+                    "log": str(tmp_path / "job.log"),
+                    "cancel": str(cancel),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(microwire_word_job=str(job_path))
+
+    exit_code = launcher_module._run_microwire_word_job_cli(args)  # noqa: SLF001
+
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert exit_code == 130
+    assert status["state"] == "cancelled"
+    assert manifest["state"] == "cancelled"
+
+
 def test_run_microwire_word_report_cli_accepts_rvst_csv(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
