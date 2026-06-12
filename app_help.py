@@ -213,6 +213,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             Mini DMA IR logging first, because the COM port can be owned by only one
             window at a time.
 
+            Use **Flash firmware** after selecting **MLX90614 spot thermometer** or
+            **MLX90640 text-frame camera** to build and flash the matching STM32Cube
+            firmware over SWD. Auto-detect cannot choose firmware for you; it only
+            interprets whatever stream the currently flashed firmware sends.
+
             The high-speed STM32Cube MLX90640 raw-stream firmware is for the separate
             Thermal Camera Viewer heatmap. Mini DMA logging intentionally stores a
             compact temperature summary instead of every pixel.

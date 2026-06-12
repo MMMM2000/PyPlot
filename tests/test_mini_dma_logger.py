@@ -6516,6 +6516,7 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
             "MLX90640 text-frame camera",
         ]
         assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_AUTO
+        assert window.button_ir_flash_firmware.text() == "Flash firmware"
         assert "Auto-detects MLX90614" in window.label_ir_status.text()
     finally:
         _close_test_window(window)
@@ -6620,6 +6621,98 @@ def test_mini_dma_live_camera_button_refuses_when_ir_connected(
         assert "Disconnect the Mini DMA IR logger first" in messages[-1]
     finally:
         window._ir_thread = None
+        _close_test_window(window)
+
+
+def test_mini_dma_flash_firmware_refuses_auto_sensor(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, _title, text: messages.append(str(text)),
+    )
+
+    try:
+        window.combo_ir_sensor.setCurrentIndex(window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_AUTO))
+
+        window._flash_selected_ir_firmware()
+
+        assert messages
+        assert "Choose MLX90614 or MLX90640" in messages[-1]
+    finally:
+        _close_test_window(window)
+
+
+def test_mini_dma_flash_firmware_runs_programmer_for_selected_sensor(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    firmware_dir = tmp_path / "firmware"
+    binary_path = firmware_dir / "build" / "stm32cube_mlx90640_stream.bin"
+    binary_path.parent.mkdir(parents=True)
+    binary_path.write_bytes(b"firmware")
+    programmer_path = tmp_path / "STM32_Programmer_CLI.exe"
+    programmer_path.write_text("", encoding="utf-8")
+    commands: list[list[str]] = []
+    infos: list[str] = []
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: mini_dma_mod.QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, _title, text: infos.append(str(text)),
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, text: warnings.append(str(text)),
+    )
+    window._thermal_firmware_paths = lambda _sensor: (  # type: ignore[method-assign]
+        "MLX90640 thermal camera",
+        firmware_dir,
+        binary_path,
+    )
+    window._stm32_programmer_cli_path = lambda: programmer_path  # type: ignore[method-assign]
+
+    def _fake_run(command, **_kwargs):
+        commands.append([str(part) for part in command])
+        return SimpleNamespace(returncode=0, stdout="OK", stderr="")
+
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    try:
+        window.combo_ir_sensor.setCurrentIndex(
+            window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90640)
+        )
+
+        window._flash_selected_ir_firmware()
+
+        assert not warnings
+        assert infos and "Flashed MLX90640 thermal camera firmware" in infos[-1]
+        assert commands == [
+            [
+                str(programmer_path),
+                "-c",
+                "port=SWD",
+                "-w",
+                str(binary_path),
+                "0x08000000",
+                "-v",
+                "-rst",
+            ]
+        ]
+    finally:
         _close_test_window(window)
 
 
