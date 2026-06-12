@@ -11773,6 +11773,13 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return abs(float(value))
         if self._is_current_sweep_mode(self._automation_name):
+            if self._current_sweep_step_halving_strategy_enabled():
+                value = (
+                    config.current_sweep_nudge_mm
+                    if config is not None
+                    else float(self.spin_current_sweep_nudge_mm.value())
+                )
+                return max(self._motor_step_mm(), abs(float(value)))
             return self._seek_speed_limited_step_mm(
                 self._automation_basis,
                 self._motion_speed_for_current_context(manual_jog=False),
@@ -12238,6 +12245,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_response_count_by_key[seek_key] = old_count + 1
 
     def _current_sweep_uses_step_halving_strategy(self) -> bool:
+        return (
+            self._current_sweep_step_halving_strategy_enabled()
+            and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
+        )
+
+    def _current_sweep_step_halving_strategy_enabled(self) -> bool:
         config = self._control_config()
         strategy = (
             config.current_sweep_control_strategy
@@ -12247,7 +12260,6 @@ class MainWindow(QtWidgets.QMainWindow):
         return (
             strategy == CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
             and self._is_current_sweep_mode(self._automation_name)
-            and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
         )
 
     def _step_halving_seek_step_mm(
@@ -12282,7 +12294,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float],
     ) -> float:
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
-        if self._current_sweep_uses_step_halving_strategy():
+        if self._current_sweep_step_halving_strategy_enabled() and self._automation_step_note != "setup_return_zero":
             return self._step_halving_seek_step_mm(
                 basis,
                 error_value,
@@ -13382,6 +13394,145 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
+    def _step_halving_distribution_target(
+        self,
+        basis: str,
+        target_value: float,
+        tolerance: float,
+        *,
+        current_value: float,
+        seek_key: tuple[str, int, float],
+    ) -> bool:
+        delta_value = float(target_value) - float(current_value)
+        tolerance = abs(float(tolerance))
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if abs(delta_value) <= tolerance:
+            self._clear_seek_state(seek_key)
+            self._write_control_trace(
+                decision="accept",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=tolerance,
+                sensitivity_per_mm=sensitivity,
+                result="reached",
+                reason="step_halving",
+            )
+            return True
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._seek_has_unused_scale_sample(seek_key):
+            self._log_waiting_for_feedback("Waiting for a new scale sample before the next step-halving correction.")
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=tolerance,
+                sensitivity_per_mm=sensitivity,
+                result="waiting",
+                reason="new_scale_sample",
+            )
+            return False
+        if self._setup_preload_overload_exceeded(basis, target_value, current_value, tolerance):
+            self._stop_for_setup_preload_overload(basis, target_value, current_value)
+            return False
+        if self._current_sweep_mechanical_load_loss_detected(
+            basis,
+            target_value,
+            current_value,
+            tolerance,
+        ):
+            if self._current_sweep_mechanical_slack_takeup_allowed():
+                self._note_current_sweep_mechanical_slack_takeup(basis, target_value, current_value)
+            else:
+                self._stop_for_current_sweep_mechanical_load_loss(basis, target_value, current_value)
+                return False
+
+        nudge_mm = self._step_halving_seek_step_mm(
+            basis,
+            delta_value,
+            seek_key=seek_key,
+            sensitivity_per_mm=sensitivity,
+        )
+        if self._current_sweep_travel_limit_exceeded(seek_key, nudge_mm):
+            self._stop_for_current_sweep_travel_limit(seek_key, nudge_mm)
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=tolerance,
+                sensitivity_per_mm=sensitivity,
+                correction_mm=nudge_mm,
+                backlash_mm=0.0,
+                result="stopped",
+                reason="correction_travel_limit",
+            )
+            return False
+
+        seek_direction = delta_value
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
+            seek_direction *= self._tension_motion_sign()
+        movement_direction = math.copysign(1.0, seek_direction)
+        base_position_mm = self._seek_motion_base_mm(basis)
+        effective_base_position_mm = self._measurement_effective_position_mm()
+        target_mm = base_position_mm + movement_direction * nudge_mm
+        effective_target_mm = effective_base_position_mm + movement_direction * nudge_mm
+        command_speed_mm_s = self._motion_speed_for_current_context(manual_jog=False)
+        if not self._move_to_position_mm(
+            target_mm,
+            chain_from_last_target=self._seek_uses_planned_motion_base(basis),
+            effective_position_mm=effective_target_mm,
+            speed_mm_s=command_speed_mm_s,
+        ):
+            self._write_control_trace(
+                decision="correction",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=tolerance,
+                sensitivity_per_mm=sensitivity,
+                correction_mm=nudge_mm,
+                backlash_mm=0.0,
+                command_speed_mm_s=command_speed_mm_s,
+                target_mm=target_mm,
+                effective_target_mm=effective_target_mm,
+                result="move_blocked",
+                reason="step_halving",
+            )
+            return False
+
+        self._write_control_trace(
+            decision="correction",
+            basis=basis,
+            target_value=target_value,
+            current_value=current_value,
+            error_value=delta_value,
+            tolerance=tolerance,
+            sensitivity_per_mm=sensitivity,
+            correction_mm=nudge_mm,
+            backlash_mm=0.0,
+            command_speed_mm_s=command_speed_mm_s,
+            target_mm=target_mm,
+            effective_target_mm=effective_target_mm,
+            result="move_sent",
+            reason="step_halving",
+        )
+        self._seek_last_error_by_key[seek_key] = delta_value
+        self._seek_last_value_by_key[seek_key] = current_value
+        self._seek_last_time_by_key[seek_key] = time.monotonic()
+        latest_scale_sample_time_s = self._latest_scale_sample_time_s()
+        if latest_scale_sample_time_s is not None:
+            self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
+            self._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = latest_scale_sample_time_s
+        self._seek_post_move_sample_count_by_key[seek_key] = 0
+        self._seek_last_effective_position_by_key[seek_key] = self._current_effective_tensile_position_mm()
+        self._seek_travel_by_key[seek_key] = self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm)
+        return False
+
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
             age_s = self._scale_reading_age_s()
@@ -13421,6 +13572,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return False
             current_value = 0.0
+        if self._current_sweep_step_halving_strategy_enabled() and self._automation_step_note != "setup_return_zero":
+            return self._step_halving_distribution_target(
+                basis,
+                target_value,
+                tolerance,
+                current_value=current_value,
+                seek_key=seek_key,
+            )
         filtered_signal = (
             None
             if self._current_sweep_uses_step_halving_strategy()

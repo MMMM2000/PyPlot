@@ -15709,6 +15709,68 @@ def test_current_sweep_step_halving_strategy_ignores_predicted_stress_cap(
         _close_test_window(window)
 
 
+def test_current_sweep_step_halving_setup_preload_uses_small_first_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None, float | None]] = []
+
+    def capture_move(target_mm: float, **kwargs: object) -> bool:
+        effective_position_mm = kwargs.get("effective_position_mm")
+        speed_mm_s = kwargs.get("speed_mm_s")
+        moves.append(
+            (
+                float(target_mm),
+                None if effective_position_mm is None else float(effective_position_mm),
+                None if speed_mm_s is None else float(speed_mm_s),
+            )
+        )
+        return True
+
+    window._move_to_position_mm = capture_move  # type: ignore[method-assign]
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(35.1075)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_initial_length.setValue(57.235)
+    window.spin_current_sweep_nudge_mm.setValue(0.01)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=20.0,
+        note="setup_preload",
+    )
+    window._current_position_mm = -3.73625
+    window._effective_position_mm = -3.73625
+    window._last_move_target_mm = -3.73625
+    window._last_effective_move_target_mm = -3.73625
+    window._latest_scale_value_g = 35.1075
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is False
+        assert moves
+        target_mm, effective_target_mm, speed_mm_s = moves[-1]
+        assert abs(target_mm - window._current_position_mm) == pytest.approx(0.01)
+        assert effective_target_mm is not None
+        assert abs(effective_target_mm - window._effective_position_mm) == pytest.approx(0.01)
+        assert speed_mm_s == pytest.approx(window._motion_speed_for_current_context(manual_jog=False))
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_step_halving_strategy_does_not_protective_shrink_before_overshoot(
     tmp_path: Path,
     qtbot,
