@@ -12258,6 +12258,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float],
         sensitivity_per_mm: float | None,
     ) -> float:
+        _ = sensitivity_per_mm
         step_mm = max(
             self._motor_step_mm(),
             self._seek_nudge_mm(),
@@ -12268,17 +12269,7 @@ class MainWindow(QtWidgets.QMainWindow):
             step_mm = max(self._motor_step_mm(), float(previous_step_mm))
         if previous_error is not None and float(previous_error) * float(error_value) < 0.0:
             step_mm = max(self._motor_step_mm(), step_mm * 0.5)
-        correction_caps = [self._current_sweep_max_correction_mm()]
-        if sensitivity_per_mm is not None and math.isfinite(float(sensitivity_per_mm)) and float(sensitivity_per_mm) > 0.0:
-            stress_cap_mm = self._current_sweep_max_stress_correction_mm(
-                basis,
-                float(sensitivity_per_mm),
-                error_value=error_value,
-                seek_key=seek_key,
-            )
-            if stress_cap_mm is not None:
-                correction_caps.append(stress_cap_mm)
-        step_mm = max(self._motor_step_mm(), min(step_mm, *correction_caps))
+        step_mm = max(self._motor_step_mm(), min(step_mm, self._current_sweep_max_correction_mm()))
         self._seek_step_halving_step_mm_by_key[seek_key] = step_mm
         return step_mm
 
@@ -12724,6 +12715,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         ):
             return min(base_speed, self._setup_slack_speed_mm_s())
+        if self._current_sweep_uses_step_halving_strategy():
+            return base_speed
         if (
             self._is_current_sweep_mode(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}
@@ -12999,6 +12992,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return remaining_mm > feedback_travel_mm + safety_margin_mm + tolerance_mm
 
     def _seek_backlash_takeup_mm(self, movement_direction: float) -> float:
+        if self._current_sweep_uses_step_halving_strategy():
+            return 0.0
         if not self._use_backlash_compensation_for_current_recipe():
             return 0.0
         config = self._control_config()
@@ -13426,7 +13421,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return False
             current_value = 0.0
-        filtered_signal = self._seek_filtered_control_signal(basis)
+        filtered_signal = (
+            None
+            if self._current_sweep_uses_step_halving_strategy()
+            else self._seek_filtered_control_signal(basis)
+        )
         if filtered_signal is not None:
             current_value = filtered_signal.value
         setup_preload_relaxation = self._setup_preload_relaxation_active(
@@ -13626,12 +13625,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="new_scale_sample",
             )
             return False
-        if not self._current_hold_error_is_persistent(
-            seek_key,
-            basis,
-            delta_value,
-            acceptance_tolerance,
-            filtered_signal,
+        if (
+            not self._current_sweep_uses_step_halving_strategy()
+            and not self._current_hold_error_is_persistent(
+                seek_key,
+                basis,
+                delta_value,
+                acceptance_tolerance,
+                filtered_signal,
+            )
         ):
             self._log_waiting_for_feedback(
                 "Waiting for the current-hold load/stress error to persist before correcting."
@@ -13652,13 +13654,14 @@ class MainWindow(QtWidgets.QMainWindow):
             require_after_last_move
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             and self._last_motion_command_time_s is not None
+            and not self._current_sweep_uses_step_halving_strategy()
         ):
             if (
                 not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
                 and not self._filtered_signal_changed_after_last_correction(
-                seek_key,
-                filtered_signal,
-                acceptance_tolerance,
+                    seek_key,
+                    filtered_signal,
+                    acceptance_tolerance,
                 )
             ):
                 self._log_waiting_for_feedback(
@@ -13741,7 +13744,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_value=current_value,
         )
         preliminary_ramp_speed_cap_mm_s = None
-        if not setup_preload_takeup:
+        if not setup_preload_takeup and not self._current_sweep_uses_step_halving_strategy():
             preliminary_ramp_speed_cap_mm_s = self._target_ramp_speed_cap_mm_s(
                 basis,
                 seek_key=seek_key,
@@ -13750,14 +13753,18 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if preliminary_ramp_speed_cap_mm_s is not None:
             preliminary_speed_mm_s = min(preliminary_speed_mm_s, preliminary_ramp_speed_cap_mm_s)
-        cruise_mode = self._seek_cruise_feedback_allowed(
-            basis,
-            delta_value,
-            effective_tolerance,
-            speed_mm_s=preliminary_speed_mm_s,
-            seek_key=seek_key,
-            previous_error=previous_error,
-            setup_preload_relaxation=setup_preload_relaxation,
+        cruise_mode = (
+            False
+            if self._current_sweep_uses_step_halving_strategy()
+            else self._seek_cruise_feedback_allowed(
+                basis,
+                delta_value,
+                effective_tolerance,
+                speed_mm_s=preliminary_speed_mm_s,
+                seek_key=seek_key,
+                previous_error=previous_error,
+                setup_preload_relaxation=setup_preload_relaxation,
+            )
         )
         if (
             basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -13843,11 +13850,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._seek_pending_reversal_by_key.pop(seek_key, None)
             if (
                 not zero_return_needs_more_motion
+                and not self._current_sweep_uses_step_halving_strategy()
                 and self._target_reversal_is_practical_hold(
-                basis,
-                delta_value,
-                acceptance_tolerance,
-                seek_key=seek_key,
+                    basis,
+                    delta_value,
+                    acceptance_tolerance,
+                    seek_key=seek_key,
                 )
             ):
                 self._clear_seek_state(seek_key)
@@ -13952,12 +13960,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="correction_travel_limit",
             )
             return False
-        if not zero_return_needs_more_motion and not self._reverse_correction_is_worthwhile(
-            basis,
-            delta_value,
-            effective_tolerance,
-            backlash_takeup_mm,
-            seek_key=seek_key,
+        if (
+            not zero_return_needs_more_motion
+            and not self._current_sweep_uses_step_halving_strategy()
+            and not self._reverse_correction_is_worthwhile(
+                basis,
+                delta_value,
+                effective_tolerance,
+                backlash_takeup_mm,
+                seek_key=seek_key,
+            )
         ):
             self._clear_seek_state(seek_key)
             self._log(
@@ -14042,7 +14054,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(
                 f"Direction reversal: adding {_format_compact_unit(backlash_takeup_mm, 'mm')} backlash take-up."
             )
-        if setup_preload_takeup or self._automation_step_note == "setup_preload":
+        if (
+            setup_preload_takeup
+            or self._automation_step_note == "setup_preload"
+            or self._current_sweep_uses_step_halving_strategy()
+        ):
             command_speed_mm_s = speed_mm_s
         else:
             command_speed_mm_s = self._seek_feedback_compensated_speed_mm_s(
@@ -14101,7 +14117,11 @@ class MainWindow(QtWidgets.QMainWindow):
             target_mm=target_mm,
             effective_target_mm=effective_target_mm,
             result="move_sent",
-            reason="cruise" if cruise_mode else "gated",
+            reason=(
+                "step_halving"
+                if self._current_sweep_uses_step_halving_strategy()
+                else "cruise" if cruise_mode else "gated"
+            ),
         )
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value

@@ -15639,6 +15639,76 @@ def test_current_sweep_step_halving_strategy_is_branch_default(
         _close_test_window(window)
 
 
+def test_current_sweep_step_halving_strategy_uses_fixed_speed_near_target(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+    window.spin_current_sweep_target_speed_mm_s.setValue(4.0)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+        base_speed = window._motion_speed_for_current_context(manual_jog=False)
+
+        speed = window._seek_speed_mm_s(
+            error_value=0.02,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            seek_key=seek_key,
+            current_value=4.98,
+        )
+
+        assert speed == pytest.approx(base_speed)
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_step_halving_strategy_ignores_predicted_stress_cap(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._current_sweep_control_strategy = mini_dma_mod.CURRENT_SWEEP_CONTROL_STRATEGY_STEP_HALVING
+    window.spin_steps_per_mm.setValue(10000.0)
+    window.spin_current_sweep_nudge_mm.setValue(0.2)
+    window.spin_current_sweep_max_correction_strain_pct.setValue(10.0)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=5.0,
+        plateau_index=1,
+    )
+
+    def high_sensitivity(*_args, **_kwargs) -> float:
+        return 1000.0
+
+    window._basis_sensitivity_per_mm = high_sensitivity  # type: ignore[method-assign]
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 5.0)
+        expected_step = window._seek_nudge_mm()
+
+        step = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            error_value=0.05,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+            seek_key=seek_key,
+        )
+
+        assert step == pytest.approx(expected_step)
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_step_halving_strategy_does_not_protective_shrink_before_overshoot(
     tmp_path: Path,
     qtbot,
