@@ -257,6 +257,14 @@ IR_TEMPERATURE_CSV_FIELDNAMES = [
 ]
 MLX90640_FRAME_WIDTH = 32
 MLX90640_FRAME_HEIGHT = 24
+IR_SENSOR_AUTO = "auto"
+IR_SENSOR_MLX90614 = "mlx90614"
+IR_SENSOR_MLX90640 = "mlx90640"
+IR_SENSOR_LABELS = {
+    IR_SENSOR_AUTO: "Auto detect",
+    IR_SENSOR_MLX90614: "MLX90614 spot thermometer",
+    IR_SENSOR_MLX90640: "MLX90640 text-frame camera",
+}
 FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)?)")
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
@@ -2467,11 +2475,17 @@ class Mlx90614Worker(QtCore.QObject):
         port_name: str,
         baudrate: int,
         interval_code: int,
+        sensor_mode: str = IR_SENSOR_AUTO,
     ) -> None:
         super().__init__()
         self.port_name = port_name
         self.baudrate = int(baudrate)
         self.interval_code = max(1, min(7, int(interval_code)))
+        self.sensor_mode = (
+            sensor_mode
+            if sensor_mode in {IR_SENSOR_AUTO, IR_SENSOR_MLX90614, IR_SENSOR_MLX90640}
+            else IR_SENSOR_AUTO
+        )
         self._stop_event = Event()
         self._last_config1 = ""
 
@@ -2496,8 +2510,9 @@ class Mlx90614Worker(QtCore.QObject):
                 port.flush()
             except Exception:
                 pass
+            sensor_label = IR_SENSOR_LABELS.get(self.sensor_mode, IR_SENSOR_LABELS[IR_SENSOR_AUTO])
             self.status_changed.emit(
-                f"IR thermometer connected on {self.port_name} at {self.baudrate} baud."
+                f"IR logging connected on {self.port_name} at {self.baudrate} baud; expecting {sensor_label}."
             )
             frame_lines: list[str] = []
             while not self._stop_event.is_set():
@@ -2509,6 +2524,12 @@ class Mlx90614Worker(QtCore.QObject):
                     continue
                 timestamp_s = time.time()
                 if raw_text.startswith("FRAME_BEGIN"):
+                    if self.sensor_mode == IR_SENSOR_MLX90614:
+                        self.status_changed.emit(
+                            "Ignored MLX90640 frame because the selected IR sensor is MLX90614."
+                        )
+                        frame_lines = []
+                        continue
                     frame_lines = [raw_text]
                     continue
                 if frame_lines:
@@ -2526,6 +2547,11 @@ class Mlx90614Worker(QtCore.QObject):
                     continue
                 sample = _parse_mlx90614_probe_line(raw_text, timestamp_s=timestamp_s)
                 if sample is not None:
+                    if self.sensor_mode == IR_SENSOR_MLX90640:
+                        self.status_changed.emit(
+                            "Ignored MLX90614 sample because the selected IR sensor is MLX90640."
+                        )
+                        continue
                     sample.config1 = self._last_config1
                     self.sample_received.emit(sample)
                     continue
@@ -5387,7 +5413,11 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setToolTip(text)
 
     def _build_ui(self, log_dir: str) -> None:
-        install_standard_menu(self, open_folder=self._choose_log_dir)
+        install_standard_menu(
+            self,
+            open_folder=self._choose_log_dir,
+            help_topic="mini_dma_logger",
+        )
         self._install_mini_dma_settings_menu()
         self._install_mini_dma_developer_menu()
 
@@ -6056,6 +6086,14 @@ class MainWindow(QtWidgets.QMainWindow):
         ir_port_row.addWidget(refresh_ir_button)
         ir_form.addRow("Port", ir_port_row)
 
+        self.combo_ir_sensor = QtWidgets.QComboBox(ir_box)
+        for sensor_key in (IR_SENSOR_AUTO, IR_SENSOR_MLX90614, IR_SENSOR_MLX90640):
+            self.combo_ir_sensor.addItem(IR_SENSOR_LABELS[sensor_key], sensor_key)
+        self.combo_ir_sensor.setToolTip(
+            "Auto detect accepts either MLX90614 probe lines or MLX90640 text-frame summaries."
+        )
+        ir_form.addRow("Sensor", self.combo_ir_sensor)
+
         self.combo_ir_baud = QtWidgets.QComboBox(ir_box)
         for baud in ("115200", "921600", "2000000"):
             self.combo_ir_baud.addItem(baud)
@@ -6080,12 +6118,17 @@ class MainWindow(QtWidgets.QMainWindow):
         zero_ir_button = QtWidgets.QPushButton("Zero delta", ir_box)
         zero_ir_button.clicked.connect(self._zero_ir_temperature_delta)
         ir_buttons.addWidget(zero_ir_button)
+        wiring_help_button = QtWidgets.QPushButton("Wiring", ir_box)
+        wiring_help_button.clicked.connect(self._show_ir_wiring_help)
+        ir_buttons.addWidget(wiring_help_button)
         ir_form.addRow("", ir_buttons)
 
         self.label_ir_live = QtWidgets.QLabel("IR disconnected.")
         self.label_ir_live.setWordWrap(True)
         ir_form.addRow("", self.label_ir_live)
-        self.label_ir_status = QtWidgets.QLabel("Passive apparent-temperature logging; not used for control.")
+        self.label_ir_status = QtWidgets.QLabel(
+            "Auto-detects MLX90614 spot lines or MLX90640 text-frame camera summaries."
+        )
         self.label_ir_status.setWordWrap(True)
         self.label_ir_status.setStyleSheet("color: #a3a3a3;")
         ir_form.addRow("", self.label_ir_status)
@@ -10771,10 +10814,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         baudrate = int(self.combo_ir_baud.currentText())
         interval_code = int(self.combo_ir_rate.currentData() or 7)
+        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
         worker = Mlx90614Worker(
             port_name=port_name,
             baudrate=baudrate,
             interval_code=interval_code,
+            sensor_mode=sensor_mode,
         )
         thread = QtCore.QThread(self)
         worker.moveToThread(thread)
@@ -10794,6 +10839,9 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.start()
         self.button_ir_connect.setText("Disconnect IR")
         return True
+
+    def _show_ir_wiring_help(self) -> None:
+        show_help("mini_dma_logger", self)
 
     def _disconnect_ir_thermometer(self) -> None:
         worker = self._ir_worker
@@ -17474,6 +17522,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "ir_thermometer": {
                 "enabled": self._ir_thread is not None,
                 "port": str(self.combo_ir_port.currentData() or ""),
+                "sensor_mode": str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO),
                 "baud": int(self.combo_ir_baud.currentText()),
                 "rate_label": self.combo_ir_rate.currentText(),
                 "interval_code": int(self.combo_ir_rate.currentData() or 0),
@@ -23786,6 +23835,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("scale_request", self.edit_scale_request.text())
         self.settings.setValue("scale_terminator", self.edit_scale_terminator.text())
         self.settings.setValue("ir_port", self.combo_ir_port.currentData() or "")
+        self.settings.setValue("ir_sensor_mode", self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
         self.settings.setValue("ir_baud", self.combo_ir_baud.currentText())
         self.settings.setValue("ir_interval_code", self.combo_ir_rate.currentData() or 7)
         self.settings.setValue("supply_port", self.combo_supply_port.currentData() or "")
@@ -24045,6 +24095,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ir_baud = self.settings.value("ir_baud", "2000000", type=str)
         if self.combo_ir_baud.findText(ir_baud) >= 0:
             self.combo_ir_baud.setCurrentText(ir_baud)
+        ir_sensor_mode = self.settings.value("ir_sensor_mode", IR_SENSOR_AUTO, type=str)
+        ir_sensor_index = self.combo_ir_sensor.findData(ir_sensor_mode)
+        if ir_sensor_index >= 0:
+            self.combo_ir_sensor.setCurrentIndex(ir_sensor_index)
         ir_interval_code = int(self.settings.value("ir_interval_code", 7, type=int))
         ir_rate_index = self.combo_ir_rate.findData(ir_interval_code)
         if ir_rate_index >= 0:

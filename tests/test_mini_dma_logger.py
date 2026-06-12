@@ -6575,6 +6575,54 @@ def test_timing_controls_are_opened_from_settings_menu(tmp_path: Path, qtbot) ->
         _close_test_window(window)
 
 
+def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        help_menu = next(
+            action.menu()
+            for action in window.menuBar().actions()
+            if action.text().replace("&", "") == "Help"
+        )
+        assert help_menu is not None
+        assert help_menu.isEnabled()
+        assert any(action.text() == "View Help" for action in help_menu.actions())
+
+        sensor_labels = [
+            window.combo_ir_sensor.itemText(index)
+            for index in range(window.combo_ir_sensor.count())
+        ]
+        assert sensor_labels == [
+            "Auto detect",
+            "MLX90614 spot thermometer",
+            "MLX90640 text-frame camera",
+        ]
+        assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_AUTO
+        assert "Auto-detects MLX90614" in window.label_ir_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_ir_worker_records_selected_sensor_mode() -> None:
+    worker = mini_dma_mod.Mlx90614Worker(
+        port_name="COM10",
+        baudrate=2000000,
+        interval_code=7,
+        sensor_mode=mini_dma_mod.IR_SENSOR_MLX90640,
+    )
+
+    assert worker.sensor_mode == mini_dma_mod.IR_SENSOR_MLX90640
+
+    fallback = mini_dma_mod.Mlx90614Worker(
+        port_name="COM10",
+        baudrate=2000000,
+        interval_code=7,
+        sensor_mode="unknown",
+    )
+
+    assert fallback.sensor_mode == mini_dma_mod.IR_SENSOR_AUTO
+
+
 def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()

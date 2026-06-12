@@ -162,6 +162,51 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
+    "mini_dma_logger": {
+        "title": "Mini DMA Logger",
+        "body": dedent(
+            """
+            ### IR thermometer wiring
+            Use the NUCLEO-H753ZI ST-LINK USB connector for board power and the PC
+            virtual COM port. Turn the Nucleo power off before rewiring, and connect one
+            thermal module at a time to the checked-in firmware.
+
+            **Dratek MLX90614ESF-DCI spot thermometer module** (`0x5A`):
+
+            * Nucleo **3V3** -> module **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> module **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> module **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> module **SCL**
+
+            **MLX90640 110 degree, 32 x 24 thermal camera module** (`0x33`):
+
+            * Nucleo **3V3** -> camera **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> camera **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> camera **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> camera **SCL**
+            * Leave **INT**, **AD**, and other optional breakout pins unconnected unless
+              a custom firmware explicitly needs them.
+
+            Do not use **5V** power or 5 V I2C pullups unless a level shifter is
+            installed. The Nucleo side is a 3.3 V I2C bus; most breakout modules already
+            include suitable pullups.
+
+            ### Choosing the sensor
+            * **Auto detect** accepts either supported Mini DMA logging stream. This is
+              the normal choice when swapping firmware.
+            * **MLX90614 spot thermometer** expects STM32Cube MLX90614 probe lines at
+              `2000000` baud. The logger records the single apparent object temperature
+              plus sensor ambient temperature.
+            * **MLX90640 text-frame camera** expects the text-frame bridge stream. The
+              logger records the frame maximum as the apparent object temperature and
+              saves frame min/mean/center/hotspot details in `ir_temperature.csv`.
+
+            The high-speed STM32Cube MLX90640 raw-stream firmware is for the separate
+            Thermal Camera Viewer heatmap. Mini DMA logging intentionally stores a
+            compact temperature summary instead of every pixel.
+            """
+        ).strip(),
+    },
     "plot_temperature_sensitivity": {
         "title": "Temperature sensitivity plotter",
         "body": dedent(
