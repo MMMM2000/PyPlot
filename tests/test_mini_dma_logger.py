@@ -6603,24 +6603,26 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
             for index in range(window.combo_ir_sensor.count())
         ]
         assert sensor_labels == [
-            "Auto detect",
+            "MLX90640 Cube raw camera",
             "MLX90614 spot thermometer",
-            "MLX90640 text-frame camera",
         ]
-        assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_AUTO
+        assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_MLX90640
+        assert window.label_ir_rate.text() == "Camera refresh"
         assert window.button_ir_flash_firmware.text() == "Flash firmware"
-        assert "Auto-detects MLX90614" in window.label_ir_status.text()
+        assert "Cube raw camera firmware" in window.label_ir_status.text()
     finally:
         _close_test_window(window)
 
 
-def test_mini_dma_ir_auto_mode_preserves_selected_rate(tmp_path: Path, qtbot) -> None:
+def test_mini_dma_ir_camera_mode_exposes_camera_refresh_rates(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
-        assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_AUTO
-        window.combo_ir_rate.setCurrentIndex(window.combo_ir_rate.findData(7))
-
+        assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_MLX90640
+        assert [
+            window.combo_ir_rate.itemText(index)
+            for index in range(window.combo_ir_rate.count())
+        ] == ["16 Hz", "32 Hz", "64 Hz"]
         assert window.combo_ir_rate.currentData() == 7
     finally:
         _close_test_window(window)
@@ -6634,11 +6636,16 @@ def test_mini_dma_ir_sensor_selection_updates_rate_defaults(tmp_path: Path, qtbo
             window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90640)
         )
         assert window.combo_ir_rate.currentData() == 7
+        assert window.label_ir_rate.text() == "Camera refresh"
 
         window.combo_ir_sensor.setCurrentIndex(
             window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90614)
         )
-        assert window.combo_ir_rate.currentData() == 3
+        assert [
+            window.combo_ir_rate.itemText(index)
+            for index in range(window.combo_ir_rate.count())
+        ] == ["10 Hz", "50 Hz", "100 Hz", "Max stream"]
+        assert window.label_ir_rate.text() == "Sample interval"
         assert "thermometer firmware" in window.label_ir_status.text()
     finally:
         _close_test_window(window)
@@ -6713,30 +6720,6 @@ def test_mini_dma_live_camera_button_refuses_when_ir_connected(
         assert "Disconnect the Mini DMA IR logger first" in messages[-1]
     finally:
         window._ir_thread = None
-        _close_test_window(window)
-
-
-def test_mini_dma_flash_firmware_refuses_auto_sensor(
-    tmp_path: Path,
-    qtbot,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
-    messages: list[str] = []
-    monkeypatch.setattr(
-        mini_dma_mod.QtWidgets.QMessageBox,
-        "information",
-        lambda _parent, _title, text: messages.append(str(text)),
-    )
-
-    try:
-        window.combo_ir_sensor.setCurrentIndex(window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_AUTO))
-
-        window._flash_selected_ir_firmware()
-
-        assert messages
-        assert "Choose MLX90614 or MLX90640" in messages[-1]
-    finally:
         _close_test_window(window)
 
 
@@ -6825,7 +6808,40 @@ def test_ir_worker_records_selected_sensor_mode() -> None:
         sensor_mode="unknown",
     )
 
-    assert fallback.sensor_mode == mini_dma_mod.IR_SENSOR_AUTO
+    assert fallback.sensor_mode == mini_dma_mod.IR_SENSOR_MLX90640
+
+
+def test_ir_sample_from_thermal_frame_records_camera_summary() -> None:
+    frame = SimpleNamespace(
+        unit="C",
+        values=[20.0, 21.0, 22.0, 31.5, 23.0, 24.0],
+        width=3,
+        height=2,
+        sequence=42,
+        elapsed_ms=1200,
+        raw_read_us=15000,
+        ambient_c=25.0,
+        flags=1,
+    )
+
+    sample = mini_dma_mod._ir_sample_from_thermal_frame(frame, timestamp_s=10.0)
+
+    assert sample is not None
+    assert sample.sensor_type == mini_dma_mod.IR_SENSOR_MLX90640
+    assert sample.object_c_apparent == pytest.approx(31.5)
+    assert sample.frame_min_c == pytest.approx(20.0)
+    assert sample.frame_mean_c == pytest.approx(sum(frame.values) / len(frame.values))
+    assert sample.frame_center_c == pytest.approx(23.0)
+    assert sample.frame_hotspot_row == 1
+    assert sample.frame_hotspot_col == 0
+    assert sample.frame_width == 3
+    assert sample.frame_height == 2
+
+
+def test_ir_sample_from_thermal_frame_rejects_raw_units() -> None:
+    frame = SimpleNamespace(unit="raw", values=[1000, 1001], width=2, height=1)
+
+    assert mini_dma_mod._ir_sample_from_thermal_frame(frame, timestamp_s=10.0) is None
 
 
 def test_scale_request_poll_interval_migrates_to_response_time(tmp_path: Path, qtbot) -> None:

@@ -192,13 +192,14 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             include suitable pullups.
 
             ### Choosing the sensor
-            * **Auto detect** accepts either supported Mini DMA logging stream. This is
-              the normal choice when swapping firmware, but the current Nucleo firmware is
-              still sensor-specific.
+            * Choose the connected sensor explicitly. Mini DMA does not auto-detect the
+              sensor because the current Nucleo firmware images are sensor-specific.
             * **MLX90614 spot thermometer** expects STM32Cube MLX90614 probe lines at
-              `2000000` baud. The logger records the single apparent object temperature
-              plus sensor ambient temperature.
-            * **MLX90640 text-frame camera** expects the text-frame bridge stream. The
+              `2000000` baud. Its setting is the probe sample interval. The logger
+              records the single apparent object temperature plus sensor ambient
+              temperature.
+            * **MLX90640 Cube raw camera** expects the STM32Cube raw-stream camera
+              firmware at `2000000` baud. Its setting is the camera refresh code. The
               logger records the frame maximum as the apparent object temperature and
               saves frame min/mean/center/hotspot details in `ir_temperature.csv`.
 
@@ -214,9 +215,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             window at a time.
 
             Use **Flash firmware** after selecting **MLX90614 spot thermometer** or
-            **MLX90640 text-frame camera** to build and flash the matching STM32Cube
-            firmware over SWD. Auto-detect cannot choose firmware for you; it only
-            interprets whatever stream the currently flashed firmware sends.
+            **MLX90640 Cube raw camera** to build and flash the matching STM32Cube
+            firmware over SWD.
 
             The high-speed STM32Cube MLX90640 raw-stream firmware is for the separate
             Thermal Camera Viewer heatmap. Mini DMA logging intentionally stores a
