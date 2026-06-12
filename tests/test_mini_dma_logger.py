@@ -1922,6 +1922,16 @@ def test_parse_mlx90614_probe_line_returns_temperature_sample() -> None:
     assert sample.flags == 2
 
 
+def test_parse_mlx90614_probe_line_rejects_failed_zero_kelvin_read() -> None:
+    assert (
+        mini_dma_mod._parse_mlx90614_probe_line(
+            "MLX90614,43,1240,800,-273.15,-273.15,0,0,3",
+            timestamp_s=100.6,
+        )
+        is None
+    )
+
+
 def test_parse_mlx90640_text_frame_returns_max_temperature_sample() -> None:
     lines = ["FRAME_BEGIN,1234,22.50"]
     for row in range(24):
@@ -6599,6 +6609,37 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
         ]
         assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_AUTO
         assert "Auto-detects MLX90614" in window.label_ir_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_mini_dma_ir_auto_mode_uses_safe_mlx90614_interval(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert window.combo_ir_sensor.currentData() == mini_dma_mod.IR_SENSOR_AUTO
+        window.combo_ir_rate.setCurrentIndex(window.combo_ir_rate.findData(7))
+
+        assert window._effective_ir_interval_code() == 3
+        assert window.combo_ir_rate.currentData() == 3
+    finally:
+        _close_test_window(window)
+
+
+def test_mini_dma_ir_sensor_selection_updates_rate_defaults(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.combo_ir_sensor.setCurrentIndex(
+            window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90640)
+        )
+        assert window.combo_ir_rate.currentData() == 7
+
+        window.combo_ir_sensor.setCurrentIndex(
+            window.combo_ir_sensor.findData(mini_dma_mod.IR_SENSOR_MLX90614)
+        )
+        assert window.combo_ir_rate.currentData() == 3
+        assert "avoid Max stream" in window.label_ir_status.text()
     finally:
         _close_test_window(window)
 

@@ -193,13 +193,20 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
 
             ### Choosing the sensor
             * **Auto detect** accepts either supported Mini DMA logging stream. This is
-              the normal choice when swapping firmware.
+              the normal choice when swapping firmware, but the current Nucleo firmware is
+              still sensor-specific.
             * **MLX90614 spot thermometer** expects STM32Cube MLX90614 probe lines at
               `2000000` baud. The logger records the single apparent object temperature
               plus sensor ambient temperature.
             * **MLX90640 text-frame camera** expects the text-frame bridge stream. The
               logger records the frame maximum as the apparent object temperature and
               saves frame min/mean/center/hotspot details in `ir_temperature.csv`.
+
+            The NUCLEO-H753ZI hardware can use either module on the same pins because the
+            sensors have different I2C addresses (`0x5A` and `0x33`). The checked-in
+            firmware images are separate, though: flash the MLX90614 probe firmware for
+            the spot thermometer, or the MLX90640 firmware/bridge for the camera. A
+            combined firmware is possible later, but that is not the current bench setup.
 
             The high-speed STM32Cube MLX90640 raw-stream firmware is for the separate
             Thermal Camera Viewer heatmap. Mini DMA logging intentionally stores a

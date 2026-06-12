@@ -265,6 +265,8 @@ IR_SENSOR_LABELS = {
     IR_SENSOR_MLX90614: "MLX90614 spot thermometer",
     IR_SENSOR_MLX90640: "MLX90640 text-frame camera",
 }
+MLX90614_READ_ERROR_FLAG = 0x01
+MLX90614_MIN_VALID_C = -70.0
 FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)?)")
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
@@ -2375,6 +2377,14 @@ def _parse_mlx90614_probe_line(raw_text: str, *, timestamp_s: float) -> IrTemper
         raw_object = int(parts[7])
         flags = int(parts[8])
     except (TypeError, ValueError):
+        return None
+    if (
+        flags & MLX90614_READ_ERROR_FLAG
+        or raw_ambient == 0
+        or raw_object == 0
+        or ambient_c <= MLX90614_MIN_VALID_C
+        or object_c <= MLX90614_MIN_VALID_C
+    ):
         return None
     return IrTemperatureSample(
         timestamp_s=timestamp_s,
@@ -6092,6 +6102,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_ir_sensor.setToolTip(
             "Auto detect accepts either MLX90614 probe lines or MLX90640 text-frame summaries."
         )
+        self.combo_ir_sensor.currentIndexChanged.connect(self._handle_ir_sensor_changed)
         ir_form.addRow("Sensor", self.combo_ir_sensor)
 
         self.combo_ir_baud = QtWidgets.QComboBox(ir_box)
@@ -10806,6 +10817,38 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._connect_ir_thermometer()
 
+    def _handle_ir_sensor_changed(self) -> None:
+        if getattr(self, "_settings_restore_in_progress", False):
+            return
+        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
+        target_code = 7 if sensor_mode == IR_SENSOR_MLX90640 else 3
+        target_index = self.combo_ir_rate.findData(target_code)
+        if target_index >= 0:
+            self.combo_ir_rate.setCurrentIndex(target_index)
+        if hasattr(self, "label_ir_status"):
+            if sensor_mode == IR_SENSOR_MLX90640:
+                self.label_ir_status.setText(
+                    "MLX90640 mode logs text-frame summaries; use Thermal Camera Viewer for Cube raw heatmaps."
+                )
+            elif sensor_mode == IR_SENSOR_MLX90614:
+                self.label_ir_status.setText(
+                    "MLX90614 mode uses a safe 10 Hz default; avoid Max stream for this thermometer."
+                )
+            else:
+                self.label_ir_status.setText(
+                    "Auto-detects supported streams; uses a safe MLX90614 interval unless MLX90640 is selected."
+                )
+
+    def _effective_ir_interval_code(self) -> int:
+        sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
+        interval_code = int(self.combo_ir_rate.currentData() or 7)
+        if sensor_mode in {IR_SENSOR_AUTO, IR_SENSOR_MLX90614} and interval_code == 7:
+            safe_index = self.combo_ir_rate.findData(3)
+            if safe_index >= 0:
+                self.combo_ir_rate.setCurrentIndex(safe_index)
+            return 3
+        return interval_code
+
     def _connect_ir_thermometer(self, checked: bool = False, *, show_errors: bool = True) -> bool:
         port_name = str(self.combo_ir_port.currentData() or "").strip()
         if not port_name:
@@ -10813,7 +10856,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, APP_NAME, "Select an IR thermometer serial port first.")
             return False
         baudrate = int(self.combo_ir_baud.currentText())
-        interval_code = int(self.combo_ir_rate.currentData() or 7)
+        interval_code = self._effective_ir_interval_code()
         sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_AUTO)
         worker = Mlx90614Worker(
             port_name=port_name,
@@ -10841,7 +10884,31 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _show_ir_wiring_help(self) -> None:
-        show_help("mini_dma_logger", self)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Mini DMA IR wiring",
+            (
+                "NUCLEO-H753ZI wiring for both thermal modules:\n\n"
+                "MLX90614ESF-DCI spot thermometer (0x5A):\n"
+                "  Nucleo 3V3 -> module VCC/VIN that accepts 3.3 V\n"
+                "  Nucleo GND -> module GND\n"
+                "  Nucleo D14 / PB9 / I2C1_SDA -> module SDA\n"
+                "  Nucleo D15 / PB8 / I2C1_SCL -> module SCL\n\n"
+                "MLX90640 110 degree 32 x 24 camera (0x33):\n"
+                "  Nucleo 3V3 -> camera VCC/VIN that accepts 3.3 V\n"
+                "  Nucleo GND -> camera GND\n"
+                "  Nucleo D14 / PB9 / I2C1_SDA -> camera SDA\n"
+                "  Nucleo D15 / PB8 / I2C1_SCL -> camera SCL\n"
+                "  Leave INT, AD, and other optional pins unconnected.\n\n"
+                "Do not use 5 V power or 5 V I2C pullups unless a level shifter is installed.\n\n"
+                "The same Nucleo hardware and pins can work with either module, but the "
+                "checked-in firmware is sensor-specific: flash the MLX90614 probe firmware "
+                "for the spot thermometer, or the MLX90640 firmware/bridge for the camera.\n\n"
+                "Mini DMA logging accepts MLX90614 probe lines or MLX90640 text-frame "
+                "summaries. Use the separate Thermal Camera Viewer for the high-speed "
+                "Cube raw MLX90640 heatmap stream."
+            ),
+        )
 
     def _disconnect_ir_thermometer(self) -> None:
         worker = self._ir_worker
