@@ -6651,54 +6651,40 @@ def test_mini_dma_ir_sensor_selection_updates_rate_defaults(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
-def test_mini_dma_live_camera_button_configures_thermal_viewer(tmp_path: Path, qtbot) -> None:
+def test_mini_dma_live_camera_button_opens_embedded_frame_view(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
-    class FakeViewer(QtWidgets.QWidget):
-        def __init__(self) -> None:
-            super().__init__()
-            self.port_combo = QtWidgets.QComboBox(self)
-            self.port_combo.addItem("COM10", "COM10")
-            self.protocol_combo = QtWidgets.QComboBox(self)
-            self.protocol_combo.addItem("Cube raw", "cube_raw")
-            self.baudrate: int | None = None
-            self.refresh_rate_combo = QtWidgets.QComboBox(self)
-            self.refresh_rate_combo.addItem("16 Hz", 5)
-            self.refresh_rate_combo.addItem("32 Hz", 6)
-            self.refresh_rate_combo.addItem("64 Hz", 7)
-            self.connected = False
-
-        def refresh_ports(self) -> None:
-            pass
-
-        def _set_baudrate(self, baudrate: int) -> None:
-            self.baudrate = baudrate
-
-        def _toggle_connection(self) -> None:
-            self.connected = True
-
-    fake_viewer = FakeViewer()
-    qtbot.addWidget(fake_viewer)
-    window._create_thermal_camera_viewer = lambda: fake_viewer  # type: ignore[method-assign]
-
     try:
-        window.combo_ir_port.clear()
-        window.combo_ir_port.addItem("COM10 - STLink", "COM10")
-        window.combo_ir_rate.setCurrentIndex(window.combo_ir_rate.findData(7))
+        from experiments.thermal_camera_viewer import ThermalFrame
+
+        frame = ThermalFrame(
+            elapsed_ms=100,
+            ambient_c=24.0,
+            values=(20.0, 21.0, 22.0, 31.0),
+            unit="C",
+            raw_read_us=12000,
+            sequence=2,
+            width=2,
+            height=2,
+        )
+        with window._ir_state_lock:
+            window._latest_ir_frame = frame
 
         window._open_live_thermal_camera_viewer()
         QtWidgets.QApplication.processEvents()
 
-        assert fake_viewer.port_combo.currentData() == "COM10"
-        assert fake_viewer.protocol_combo.currentData() == "cube_raw"
-        assert fake_viewer.baudrate == 2000000
-        assert fake_viewer.refresh_rate_combo.currentData() == 7
-        assert fake_viewer.connected is True
+        dialog = window._thermal_camera_dialog
+        assert isinstance(dialog, mini_dma_mod.MiniDmaThermalCameraDialog)
+        assert dialog._latest_frame is frame
+        assert dialog.image_label.pixmap() is not None
+        assert "Max 31.00 C" in dialog.stats_label.text()
     finally:
+        if window._thermal_camera_dialog is not None:
+            window._thermal_camera_dialog.close()
         _close_test_window(window)
 
 
-def test_mini_dma_live_camera_button_refuses_when_ir_connected(
+def test_mini_dma_live_camera_button_opens_while_ir_connected(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -6716,9 +6702,12 @@ def test_mini_dma_live_camera_button_refuses_when_ir_connected(
 
         window._open_live_thermal_camera_viewer()
 
-        assert messages
-        assert "Disconnect the Mini DMA IR logger first" in messages[-1]
+        assert not messages
+        assert isinstance(window._thermal_camera_dialog, mini_dma_mod.MiniDmaThermalCameraDialog)
+        assert "Waiting for calibrated MLX90640 frames" in window._thermal_camera_dialog.stats_label.text()
     finally:
+        if window._thermal_camera_dialog is not None:
+            window._thermal_camera_dialog.close()
         window._ir_thread = None
         _close_test_window(window)
 

@@ -5,8 +5,9 @@
   Mini DMA Logger.
 - Enabled Mini DMA Logger help and added an explicit IR sensor selector for
   MLX90614 spot-thermometer firmware or MLX90640 Cube raw camera firmware.
-- Added a Mini DMA IR-panel Live camera button that opens Thermal Camera Viewer
-  preconfigured for MLX90640 Cube raw on the selected Nucleo serial port.
+- Added a Mini DMA IR-panel Live camera button that opens a passive embedded
+  MLX90640 heatmap popup fed by the active Mini DMA IR stream, so it can be used
+  during a measurement without taking over the serial port.
 - Added a Mini DMA IR-panel Flash firmware button that builds and flashes the
   selected MLX90614 or MLX90640 STM32Cube firmware with STM32CubeProgrammer.
 - Added MLX90640 Cube raw parsing to Mini DMA IR logging, with live max/mean/min,
