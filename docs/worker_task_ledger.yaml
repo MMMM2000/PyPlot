@@ -1,5 +1,5 @@
 ledger:
-  updated_utc: "2026-06-13 11:19"
+  updated_utc: "2026-06-13 11:26"
   integration_branch: "codex/integration-mini-dma-ready-review"
   notes: >
     Master coordination ledger for active and recently handed-off PyPlot worker
@@ -9,7 +9,7 @@ ledger:
 tasks:
   - id: "mini-dma-run-cleanup-ui"
     title: "Mini DMA wire-break run cleanup review"
-    status: "ready"
+    status: "integrated"
     priority: "normal"
     owner:
       thread_id: "019eb109-4ad3-7d50-9ad0-f34ec09e89df"
@@ -61,13 +61,16 @@ tasks:
         - "Needs combined checks against recent Mini DMA stop/session/camera changes."
     integration:
       decision: "merge"
-      merged_commit: ""
-      combined_checks: []
+      merged_commit: "2a45778"
+      combined_checks:
+        - "tests/test_mini_dma_run_cleanup.py full file: 6 passed."
+        - "Combined Mini DMA cleanup/session/camera-stop/move-log slice: 10 passed."
+        - "py_compile mini_dma_logger.py and run_cleanup.py passed."
       regression_guarantees_to_recheck:
         - "Stopped/control-stopped sessions do not keep appending live plot points."
         - "Wire-break/session metadata stop reasons remain preserved."
         - "Move logs preserve current accepted wording."
-      final_status: "pending"
+      final_status: "integrated and focused combined checks passed"
     links:
       handoff: "pasted in master thread"
       pr: ""
