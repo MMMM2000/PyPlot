@@ -143,6 +143,29 @@ def test_summarize_transition_currents_rejects_upward_heating_kink() -> None:
     assert anneal_core.format_transition_summary(summary) == ""
 
 
+def test_summarize_transition_currents_rejects_wrong_signed_cooling_kink() -> None:
+    up_current = np.linspace(1.0, 100.0, 160)
+    down_current = np.linspace(100.0, 1.0, 160)
+    up_drop = np.clip(1.0 - np.abs(up_current - 42.5) / 7.5, 0.0, 1.0)
+    wrong_cooling_drop = np.clip((7.0 - down_current) / 3.0, 0.0, 1.0)
+    up_resistance = 100.0 + (0.12 * up_current) - (12.0 * up_drop)
+    down_resistance = 80.0 - (10.0 * wrong_cooling_drop)
+    df = pd.DataFrame(
+        {
+            "I_mA": np.r_[up_current, down_current],
+            "R_Ohm": np.r_[up_resistance, down_resistance],
+        }
+    )
+
+    summary = anneal_core.summarize_transition_currents(df)
+
+    assert summary.as_current_mA == pytest.approx(35.0, abs=1.0)
+    assert summary.af_current_mA == pytest.approx(42.5, abs=1.0)
+    assert summary.ms_current_mA is None
+    assert summary.mf_current_mA is None
+    assert anneal_core.format_transition_summary(summary) == ""
+
+
 def test_summarize_transition_currents_detects_real_local_heating_drop() -> None:
     path = (
         Path(__file__).resolve().parent.parent
