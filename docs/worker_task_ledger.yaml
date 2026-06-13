@@ -1,5 +1,5 @@
 ledger:
-  updated_utc: "2026-06-13 11:26"
+  updated_utc: "2026-06-13 11:34"
   integration_branch: "codex/integration-mini-dma-ready-review"
   notes: >
     Master coordination ledger for active and recently handed-off PyPlot worker
@@ -78,7 +78,7 @@ tasks:
 
   - id: "mini-dma-ui-control-separation"
     title: "Mini DMA UI/control separation and optimization fixes"
-    status: "active"
+    status: "ready"
     priority: "high"
     owner:
       thread_id: "019e9312-40b2-7f72-a127-ee907170e38d"
@@ -93,10 +93,9 @@ tasks:
       clean_status_reported: true
     scope:
       summary: >
-        Worker contains selected Mini DMA optimization/control fixes, UI/control
-        separation, async sample import fixes, and replay-backed current-hold
-        stabilization work. User later said the worker still had more to do, so
-        do not integrate until a fresh final handoff supersedes this entry.
+        UI/control separation commits are already integrated in this branch.
+        The remaining worker branch tip contains later Mini DMA metadata/import
+        trust fixes that still need review/integration.
       touched_files:
         - "data_logging/mini_dma_logger/mini_dma_logger.py"
         - "tests/test_mini_dma_logger.py"
@@ -120,9 +119,8 @@ tasks:
       screenshots_or_artifacts: []
       changelog_status: "Fragments added in worker branch."
       risks:
-        - "Worker was explicitly not final after later user prompts."
-        - "Needs latest worker context before integration."
-        - "Hardware behavior after current-hold stabilization still needs validation."
+        - "Only the later metadata/import commits remain unmerged."
+        - "Needs latest worker context before integrating e7d5385/be1b3b2."
     integration:
       decision: "pending"
       merged_commit: ""
@@ -131,7 +129,7 @@ tasks:
         - "Camera runtime/session stop fixes."
         - "Mini DMA run cleanup stop/recovery hooks if merged first."
         - "Existing current-sweep numeric expectations."
-      final_status: "wait for final handoff"
+      final_status: "UI/control separation integrated; metadata/import tip pending"
     links:
       handoff: "pasted in master thread"
       pr: ""
@@ -357,11 +355,11 @@ tasks:
 
   - id: "ac-susceptibility-ui-rebuild"
     title: "AC susceptibility logger UI rebuild"
-    status: "planned"
+    status: "active"
     priority: "high"
     owner:
-      thread_id: ""
-      thread_title: "AC susceptibility UI rebuild"
+      thread_id: "019e92a1-255a-7132-bea8-467147f877d8"
+      thread_title: "AC shared HMP + continuous LCR"
       role: "worker"
     git:
       base_branch: "origin/codex/integration-mini-dma-ready-review"
@@ -372,9 +370,10 @@ tasks:
       clean_status_reported: false
     scope:
       summary: >
-        Planned worker to redesign the AC Susceptibility Logger layout so labels,
-        progress, hardware state, resume controls, and run buttons are not
-        cropped or duplicated. Must not stop or disturb any active AC measurement.
+        Continue the existing AC/LCR worker rather than starting a new worker.
+        Redesign the AC Susceptibility Logger layout so labels, progress,
+        hardware state, resume controls, and run buttons are not cropped or
+        duplicated. Must not stop or disturb any active AC measurement.
       touched_files:
         - "data_logging/ac_susceptibility_logger/"
         - "tests/test_ac_susceptibility_logger.py"
@@ -391,7 +390,7 @@ tasks:
       screenshots_or_artifacts: []
       changelog_status: ""
       risks:
-        - "Create inside PyPlot project with a new worktree and no environment."
+        - "Use the existing LCR/AC worker and branch context."
         - "Use software/offscreen verification first; do not touch active hardware run."
     integration:
       decision: "pending"
@@ -401,7 +400,7 @@ tasks:
         - "AC broker explicit channel behavior."
         - "AC run resume behavior."
         - "LCR debug stream settings remain bounded."
-      final_status: "not started"
+      final_status: "delegate to existing LCR worker"
     links:
       handoff: ""
       pr: ""
