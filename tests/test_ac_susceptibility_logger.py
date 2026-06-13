@@ -3093,14 +3093,18 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
     window = ac_logger.MainWindow()
     try:
         assert window.ui.frame_process_settings.isHidden()
-        assert window.frame_ac_plan_actions.isHidden()
+        assert not window.frame_ac_plan_actions.isHidden()
         assert window.comboBox_lcr_function.isHidden()
         assert window.checkBox_lcr_model_lsrs.isHidden()
         assert window.checkBox_lcr_model_lprp.text() == "Also measure Lp-Rp"
         assert window.checkBox_lcr_model_lprp.isChecked() is False
         assert window.pushButton_measure_lcr_baseline.text() == "Measure empty-coil baseline"
         assert window.pushButton_run_ac_sweep.text() == "Run microwire current sweep"
+        assert window.pushButton_continue_ac_sweep.text() == "Continue from previous sweep..."
+        assert window.pushButton_stop_ac_sweep.text() == "Stop"
         assert window.pushButton_lcr_default_presets.text() == "Default full scan"
+        inherited_frame = window.ui.pushButton_start_process.parentWidget()
+        assert inherited_frame.isHidden()
         sticky_texts = {
             window.ui.pushButton_start_process.text(),
             window.ui.pushButton_show_history.text(),
@@ -3133,6 +3137,8 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert window.ui.label_log_file.text() == "Microwire sweep base:"
         assert window.ui.label_extension.text() == ".tsv"
         assert window.label_ac_current_task.text() == "Current task: idle"
+        assert window.progress_ac_run.parentWidget() is window.groupBox_ac_plan
+        assert window.label_ac_current_task.parentWidget() is window.groupBox_ac_plan
         assert "ac_susc_empty_coil_baseline" in window.label_ac_baseline_file.text()
         assert not hasattr(window, "comboBox_ac_psu_backend")
         assert not hasattr(window, "comboBox_ac_psu_port")
@@ -3752,13 +3758,14 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         inherited_progress = getattr(window.ui, "progressBar_process", None)
         assert isinstance(inherited_progress, QtWidgets.QProgressBar)
         assert inherited_progress.isHidden()
-        sticky_frame = window.ui.pushButton_start_process.parentWidget()
-        sticky_parent_layout = sticky_frame.parentWidget().layout()
-        progress_index = sticky_parent_layout.indexOf(window.progress_ac_run)
-        sticky_index = sticky_parent_layout.indexOf(sticky_frame)
+        plan_layout = window.groupBox_ac_plan.layout()
+        assert isinstance(plan_layout, QtWidgets.QGridLayout)
+        progress_index = plan_layout.indexOf(window.progress_ac_run)
+        action_index = plan_layout.indexOf(window.frame_ac_plan_actions)
         assert progress_index >= 0
-        assert sticky_index >= 0
-        assert progress_index < sticky_index
+        assert action_index >= 0
+        assert progress_index > action_index
+        assert window.ui.pushButton_start_process.parentWidget().isHidden()
         window.lineEdit_lcr_frequencies.setText("100, 1k")
         window.lineEdit_lcr_levels.setText("0.1, 1")
         window.spinBox_ac_point_duration.setValue(10.0)
