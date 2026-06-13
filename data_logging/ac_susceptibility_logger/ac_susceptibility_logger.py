@@ -1925,25 +1925,32 @@ class MainWindow(CurrentAnnealingWindow):
         hardware_layout = QtWidgets.QVBoxLayout(hardware_group)
         hardware_layout.setContentsMargins(8, 8, 8, 8)
         hardware_layout.setSpacing(8)
-        hardware_top = QtWidgets.QHBoxLayout()
+        hardware_top = QtWidgets.QVBoxLayout()
         hardware_top.setContentsMargins(0, 0, 0, 0)
+        hardware_top.setSpacing(6)
         self.label_ac_hardware_status = QtWidgets.QLabel("Hardware not connected", hardware_group)
         self.label_ac_hardware_status.setWordWrap(True)
+        self.label_ac_hardware_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.pushButton_auto_setup = QtWidgets.QPushButton("Auto-connect hardware", hardware_group)
         self.pushButton_ac_hardware_details = QtWidgets.QToolButton(hardware_group)
         self.pushButton_ac_hardware_details.setText("Show hardware details")
         self.pushButton_ac_hardware_details.setCheckable(True)
         self.pushButton_ac_hardware_details.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-        hardware_top.addWidget(self.label_ac_hardware_status, stretch=1)
-        hardware_top.addWidget(self.pushButton_auto_setup)
-        hardware_top.addWidget(self.pushButton_ac_hardware_details)
+        hardware_buttons = QtWidgets.QHBoxLayout()
+        hardware_buttons.setContentsMargins(0, 0, 0, 0)
+        hardware_buttons.addWidget(self.pushButton_auto_setup)
+        hardware_buttons.addWidget(self.pushButton_ac_hardware_details)
+        hardware_buttons.addStretch(1)
+        hardware_top.addWidget(self.label_ac_hardware_status)
+        hardware_top.addLayout(hardware_buttons)
         hardware_layout.addLayout(hardware_top)
 
         self.frame_ac_hardware_details = QtWidgets.QFrame(hardware_group)
         details_grid = QtWidgets.QGridLayout(self.frame_ac_hardware_details)
         details_grid.setContentsMargins(0, 0, 0, 0)
+        details_grid.setHorizontalSpacing(8)
+        details_grid.setVerticalSpacing(6)
         details_grid.setColumnStretch(1, 1)
-        details_grid.setColumnStretch(3, 1)
         supply_combo = getattr(self.ui, "comboBox_supply", None)
         psu_port_combo = getattr(self.ui, "comboBox_port", None)
         baud_combo = getattr(self.ui, "comboBox_baudrate", None)
@@ -1952,12 +1959,12 @@ class MainWindow(CurrentAnnealingWindow):
             details_grid.addWidget(supply_combo, 0, 1)
         if isinstance(psu_port_combo, QtWidgets.QComboBox):
             self.label_ac_psu_port = QtWidgets.QLabel("PSU port:", self.frame_ac_hardware_details)
-            details_grid.addWidget(self.label_ac_psu_port, 0, 2)
-            details_grid.addWidget(psu_port_combo, 0, 3)
+            details_grid.addWidget(self.label_ac_psu_port, 1, 0)
+            details_grid.addWidget(psu_port_combo, 1, 1)
         if isinstance(baud_combo, QtWidgets.QComboBox):
             self.label_ac_psu_baud = QtWidgets.QLabel("Baud:", self.frame_ac_hardware_details)
-            details_grid.addWidget(self.label_ac_psu_baud, 1, 0)
-            details_grid.addWidget(baud_combo, 1, 1)
+            details_grid.addWidget(self.label_ac_psu_baud, 2, 0)
+            details_grid.addWidget(baud_combo, 2, 1)
         self.label_ac_broker_host = QtWidgets.QLabel("Broker host:", self.frame_ac_hardware_details)
         self.lineEdit_ac_broker_host = QtWidgets.QLineEdit(self.frame_ac_hardware_details)
         self.lineEdit_ac_broker_host.setText(AC_DEFAULT_BROKER_HOST)
@@ -1971,8 +1978,8 @@ class MainWindow(CurrentAnnealingWindow):
         self.comboBox_ac_broker_channel.setToolTip(
             "Select the wired HMP channel explicitly. On the current shared bench, AC susceptibility uses CH1."
         )
-        details_grid.addWidget(self.label_ac_broker_host, 2, 0)
-        details_grid.addWidget(self.lineEdit_ac_broker_host, 2, 1)
+        details_grid.addWidget(self.label_ac_broker_host, 3, 0)
+        details_grid.addWidget(self.lineEdit_ac_broker_host, 3, 1)
         broker_row = QtWidgets.QHBoxLayout()
         broker_row.setContentsMargins(0, 0, 0, 0)
         self.label_ac_broker_port = QtWidgets.QLabel("Port:", self.frame_ac_hardware_details)
@@ -1981,7 +1988,7 @@ class MainWindow(CurrentAnnealingWindow):
         self.label_ac_broker_channel = QtWidgets.QLabel("CH:", self.frame_ac_hardware_details)
         broker_row.addWidget(self.label_ac_broker_channel)
         broker_row.addWidget(self.comboBox_ac_broker_channel)
-        details_grid.addLayout(broker_row, 2, 2, 1, 2)
+        details_grid.addLayout(broker_row, 4, 1)
         connect_port_button = getattr(self.ui, "pushButton_connect_port", None)
         if isinstance(connect_port_button, QtWidgets.QPushButton):
             connect_port_button.hide()
@@ -1989,14 +1996,14 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_refresh_lcr_ports = QtWidgets.QPushButton("Refresh", group)
         self.pushButton_connect_lcr = QtWidgets.QPushButton("Connect LCR", group)
         self.pushButton_identify_lcr = QtWidgets.QPushButton("Identify", group)
-        details_grid.addWidget(QtWidgets.QLabel("LCR port:", self.frame_ac_hardware_details), 1, 2)
-        details_grid.addWidget(self.comboBox_lcr_port, 1, 3)
+        details_grid.addWidget(QtWidgets.QLabel("LCR port:", self.frame_ac_hardware_details), 5, 0)
+        details_grid.addWidget(self.comboBox_lcr_port, 5, 1)
         lcr_button_row = QtWidgets.QHBoxLayout()
         lcr_button_row.setContentsMargins(0, 0, 0, 0)
         lcr_button_row.addWidget(self.pushButton_refresh_lcr_ports)
         lcr_button_row.addWidget(self.pushButton_connect_lcr)
         lcr_button_row.addWidget(self.pushButton_identify_lcr)
-        details_grid.addLayout(lcr_button_row, 3, 2, 1, 2)
+        details_grid.addLayout(lcr_button_row, 6, 1)
         self.pushButton_identify_lcr.hide()
         self.frame_ac_hardware_details.hide()
         hardware_layout.addWidget(self.frame_ac_hardware_details)
@@ -2212,14 +2219,18 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.addWidget(self.spinBox_ac_lcr_debug_cadence, 4, 2)
         plan_grid.addWidget(self.spinBox_ac_lcr_debug_max_rows, 4, 3)
         plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
-        action_row = QtWidgets.QHBoxLayout()
-        action_row.addWidget(self.pushButton_measure_lcr_baseline)
-        action_row.addWidget(self.pushButton_run_ac_sweep)
-        action_row.addWidget(self.pushButton_continue_ac_sweep)
-        action_row.addWidget(self.pushButton_stop_ac_sweep)
+        action_row = QtWidgets.QGridLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setHorizontalSpacing(6)
+        action_row.setVerticalSpacing(6)
+        action_row.addWidget(self.pushButton_measure_lcr_baseline, 0, 0)
+        action_row.addWidget(self.pushButton_run_ac_sweep, 0, 1)
+        action_row.addWidget(self.pushButton_continue_ac_sweep, 1, 0)
+        action_row.addWidget(self.pushButton_stop_ac_sweep, 1, 1)
+        action_row.setColumnStretch(0, 1)
+        action_row.setColumnStretch(1, 1)
         self.frame_ac_plan_actions = QtWidgets.QFrame(plan_group)
         self.frame_ac_plan_actions.setLayout(action_row)
-        self.frame_ac_plan_actions.hide()
         plan_grid.addWidget(self.frame_ac_plan_actions, 6, 0, 1, 4)
         outer.addWidget(plan_group)
         self.groupBox_ac_plan = plan_group
@@ -2305,8 +2316,8 @@ class MainWindow(CurrentAnnealingWindow):
     def _make_ac_settings_panel_width_friendly(self) -> None:
         scroll = getattr(getattr(self, "ui", None), "left_scroll", None)
         if isinstance(scroll, QtWidgets.QScrollArea):
-            scroll.setMinimumWidth(500)
-            scroll.setMaximumWidth(720)
+            scroll.setMinimumWidth(540)
+            scroll.setMaximumWidth(660)
             scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             viewport = scroll.widget()
             if isinstance(viewport, QtWidgets.QWidget):
@@ -2317,8 +2328,8 @@ class MainWindow(CurrentAnnealingWindow):
                 )
             parent = scroll.parentWidget()
             if isinstance(parent, QtWidgets.QWidget):
-                parent.setMinimumWidth(500)
-                parent.setMaximumWidth(720)
+                parent.setMinimumWidth(540)
+                parent.setMaximumWidth(660)
         for widget in self.groupBox_lcr_settings.findChildren(
             (
                 QtWidgets.QComboBox,
@@ -2500,18 +2511,11 @@ class MainWindow(CurrentAnnealingWindow):
                 pass
             button.clicked.connect(slot)
         sticky_run = getattr(self.ui, "pushButton_show_history", None)
-        sticky_stop = getattr(self.ui, "pushButton_reverse_now", None)
-        if isinstance(sticky_run, QtWidgets.QPushButton) and isinstance(sticky_stop, QtWidgets.QPushButton):
+        if isinstance(sticky_run, QtWidgets.QPushButton):
             button_frame = sticky_run.parentWidget()
-            layout = button_frame.layout() if isinstance(button_frame, QtWidgets.QWidget) else None
-            if isinstance(layout, QtWidgets.QBoxLayout):
-                self.pushButton_continue_ac_sweep_sticky = QtWidgets.QPushButton(
-                    "Continue from previous sweep...",
-                    button_frame,
-                )
-                self.pushButton_continue_ac_sweep_sticky.clicked.connect(self.handle_continue_ac_sweep_clicked)
-                stop_index = layout.indexOf(sticky_stop)
-                layout.insertWidget(max(0, stop_index), self.pushButton_continue_ac_sweep_sticky)
+            if isinstance(button_frame, QtWidgets.QWidget):
+                button_frame.hide()
+        self.pushButton_continue_ac_sweep_sticky = self.pushButton_continue_ac_sweep
 
     def _find_menu_action(self, text: str) -> QtGui.QAction | None:
         menu_bar = self.menuBar()
@@ -2522,27 +2526,20 @@ class MainWindow(CurrentAnnealingWindow):
         return None
 
     def _install_ac_sticky_progress(self) -> None:
-        start_button = getattr(self.ui, "pushButton_start_process", None)
-        button_frame = start_button.parentWidget() if isinstance(start_button, QtWidgets.QPushButton) else None
-        container = button_frame.parentWidget() if isinstance(button_frame, QtWidgets.QWidget) else None
-        layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
-        if layout is None or button_frame is None:
+        plan_group = getattr(self, "groupBox_ac_plan", None)
+        plan_layout = plan_group.layout() if isinstance(plan_group, QtWidgets.QGroupBox) else None
+        if not isinstance(plan_layout, QtWidgets.QGridLayout):
             return
-        self.label_ac_current_task = QtWidgets.QLabel("Current task: idle", container)
+        self.label_ac_current_task = QtWidgets.QLabel("Current task: idle", plan_group)
         self.label_ac_current_task.setWordWrap(True)
-        self.progress_ac_run = QtWidgets.QProgressBar(container)
+        self.label_ac_current_task.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.progress_ac_run = QtWidgets.QProgressBar(plan_group)
         self.progress_ac_run.setRange(0, 100)
         self.progress_ac_run.setValue(0)
         self.progress_ac_run.setTextVisible(True)
         self.progress_ac_run.setFormat("AC progress: idle")
-        button_frame_index = layout.indexOf(button_frame)
-        if button_frame_index >= 0:
-            layout.insertWidget(button_frame_index, self.label_ac_current_task)
-            button_frame_index = layout.indexOf(button_frame)
-            layout.insertWidget(button_frame_index, self.progress_ac_run)
-        else:
-            layout.addWidget(self.label_ac_current_task)
-            layout.addWidget(self.progress_ac_run)
+        plan_layout.addWidget(self.label_ac_current_task, 7, 0, 1, 4)
+        plan_layout.addWidget(self.progress_ac_run, 8, 0, 1, 4)
 
     def _load_lcr_settings(self) -> None:
         self._ac_loading_settings = True

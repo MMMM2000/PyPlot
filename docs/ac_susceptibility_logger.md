@@ -125,7 +125,7 @@ Point acquisition controls are named for the AC experiment:
   durations, plus the local clock time when each run would finish if started
   now. The estimate uses the selected settle time and a rough LCR-read
   allowance; real serial communication overhead can still add time.
-- During a run, the sticky task line reports the active LCR model, frequency,
+- During a run, the experiment-plan task line reports the active LCR model, frequency,
   excitation level, read number, and microwire current when applicable. The progress
   bar reports elapsed/total measurement time, estimated time remaining, and
   the expected finish clock time/date.
