@@ -1,0 +1,405 @@
+ledger:
+  updated_utc: "2026-06-13 11:19"
+  integration_branch: "codex/integration-mini-dma-ready-review"
+  notes: >
+    Master coordination ledger for active and recently handed-off PyPlot worker
+    branches. Update this before integrating worker branches or creating new
+    workers so pending work is not tracked only in chat.
+
+tasks:
+  - id: "mini-dma-run-cleanup-ui"
+    title: "Mini DMA wire-break run cleanup review"
+    status: "ready"
+    priority: "normal"
+    owner:
+      thread_id: "019eb109-4ad3-7d50-9ad0-f34ec09e89df"
+      thread_title: "Mini DMA run cleanup UI"
+      role: "worker"
+    git:
+      base_branch: "codex/integration-mini-dma-ready-review"
+      branch: "codex/mini-dma-run-cleanup-ui"
+      upstream: "origin/codex/mini-dma-run-cleanup-ui"
+      commit: "90333a05474fa596cd9ea6a36289fe2050bb7edd"
+      worktree: "9572"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Adds opt-in cleanup/archive review after Mini DMA wire-break/contact-loss
+        stops, with metadata-based sibling grouping, graph previews, iso-current
+        preview handling, and clearer commanded-move log wording.
+      touched_files:
+        - "data_logging/mini_dma_logger/run_cleanup.py"
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "tests/test_mini_dma_run_cleanup.py"
+        - "tests/test_mini_dma_logger.py"
+        - "docs/pyplot.md"
+        - "changelog.d/2026-06-10-mini-dma-run-cleanup-ui.md"
+        - "changelog.d/2026-06-11-mini-dma-motor-step-log.md"
+      conflict_areas:
+        - "Mini DMA stop/recovery flow"
+        - "Mini DMA Matplotlib preview/dialog imports"
+        - "Mini DMA move log wording"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Archive workflow is opt-in and never deletes runs."
+        - "Current run is not selectable for archive."
+        - "Preconditioning/first-overheating runs default to keep."
+        - "Selected cleanup candidate shows stress-time and strain-current preview; iso-current uses strain-stress."
+        - "Motor move log leads with commanded micrometers and tension/relax direction."
+      tests:
+        - "8 cleanup/session tests passed in worker."
+        - "2 motor-log tests passed in worker."
+      screenshots_or_artifacts:
+        - "artifacts/mini_dma_cleanup_visual/run_cleanup_dialog_with_graphs.png"
+        - "artifacts/mini_dma_cleanup_visual/iso_current_cleanup_dialog.png"
+      changelog_status: "Fragments added."
+      risks:
+        - "No hardware validation."
+        - "Needs combined checks against recent Mini DMA stop/session/camera changes."
+    integration:
+      decision: "merge"
+      merged_commit: ""
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "Stopped/control-stopped sessions do not keep appending live plot points."
+        - "Wire-break/session metadata stop reasons remain preserved."
+        - "Move logs preserve current accepted wording."
+      final_status: "pending"
+    links:
+      handoff: "pasted in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "mini-dma-ui-control-separation"
+    title: "Mini DMA UI/control separation and optimization fixes"
+    status: "active"
+    priority: "high"
+    owner:
+      thread_id: "019e9312-40b2-7f72-a127-ee907170e38d"
+      thread_title: "Run Mini DMA campaign"
+      role: "worker"
+    git:
+      base_branch: "codex/integration-mini-dma-ready-review"
+      branch: "codex/mini-dma-live-opt-12-2-12e8"
+      upstream: "origin/codex/mini-dma-live-opt-12-2-12e8"
+      commit: "b698c8b230f6afd6f88f7d0625795f2f7e11749f"
+      worktree: "12e8"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Worker contains selected Mini DMA optimization/control fixes, UI/control
+        separation, async sample import fixes, and replay-backed current-hold
+        stabilization work. User later said the worker still had more to do, so
+        do not integrate until a fresh final handoff supersedes this entry.
+      touched_files:
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "tests/test_mini_dma_logger.py"
+        - "docs/mini_dma_campaigns/"
+      conflict_areas:
+        - "Mini DMA recipe control loop"
+        - "Mini DMA UI refresh/log batching"
+        - "Mini DMA current-hold correction logic"
+        - "Sample metadata and diameter trust state"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Recipe/control ticks can run separately from GUI refresh."
+        - "Run-log output is batched during active background control."
+        - "Microwire suggestions and diameter import refresh are cheaper and retry after async races."
+      tests:
+        - "505 Mini DMA logger tests passed for UI/control separation handoff."
+        - "Focused current-hold and import tests passed in worker."
+      screenshots_or_artifacts: []
+      changelog_status: "Fragments added in worker branch."
+      risks:
+        - "Worker was explicitly not final after later user prompts."
+        - "Needs latest worker context before integration."
+        - "Hardware behavior after current-hold stabilization still needs validation."
+    integration:
+      decision: "pending"
+      merged_commit: ""
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "Camera runtime/session stop fixes."
+        - "Mini DMA run cleanup stop/recovery hooks if merged first."
+        - "Existing current-sweep numeric expectations."
+      final_status: "wait for final handoff"
+    links:
+      handoff: "pasted in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "mini-dma-camera-runtime-controls"
+    title: "Mini DMA thermal camera runtime controls"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "019eab9d-6fdd-7ca0-93b4-7bf0a70afe5a"
+      thread_title: "Mini DMA camera/logging fixes"
+      role: "worker"
+    git:
+      base_branch: "origin/codex/integration-mini-dma-ready-review"
+      branch: "codex/mini-dma-camera-runtime-controls"
+      upstream: "origin/codex/mini-dma-camera-runtime-controls"
+      commit: "6992e3996450962c369eb21ff678f7d8859122f1"
+      worktree: "4897"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Camera popup controls, dashboard temperature channel cleanup, buffer
+        snapshot fix, stop/session cleanup, CH4 limit refresh, and later
+        integration-tip camera stall fix.
+      touched_files:
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "tests/test_mini_dma_logger.py"
+      conflict_areas:
+        - "Mini DMA IR worker and live camera popup"
+        - "Mini DMA plot channels"
+        - "Mini DMA recipe stop/session cleanup"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Popup can pause/resume view and throttle display without throttling acquisition."
+        - "Stopped/control-stopped sessions close logging and should not extend recipe time graphs."
+        - "Dashboard exposes a single Temperature (C) plot channel."
+        - "Scale and IR buffers snapshot before UI iteration."
+      tests:
+        - "21 focused tests passed in worker."
+      screenshots_or_artifacts:
+        - "artifacts/mini_dma_camera_popup_followup_narrow_1fps.png"
+      changelog_status: "Fragments added."
+      risks:
+        - "Live Windows minimize behavior still needs manual verification."
+    integration:
+      decision: "merge"
+      merged_commit: "fc61d40"
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "Camera live view continues updating after refresh-code request."
+        - "No post-stop tails in dashboard time plots."
+      final_status: "integrated into current branch"
+    links:
+      handoff: "pasted in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "current-annealing-metadata-autocomplete"
+    title: "Current Annealing metadata autocomplete and diameter trust"
+    status: "integrated"
+    priority: "normal"
+    owner:
+      thread_id: "019ebc37-38fc-72a1-beb0-c2707779372f"
+      thread_title: "Current Annealing metadata autocomplete"
+      role: "worker"
+    git:
+      base_branch: "codex/integration-mini-dma-ready-review"
+      branch: "codex/current-annealing-metadata-autocomplete"
+      upstream: "origin/codex/current-annealing-metadata-autocomplete"
+      commit: "1bf8ee2945ea0034f30683bf7c6f795658a145ff"
+      worktree: "40f3"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Adds Mini-DMA-style composition/microwire suggestions, trusted imported
+        diameter state, red/green diameter feedback, current-density refresh,
+        and top-axis tick alignment in Current Annealing Logger.
+      touched_files:
+        - "data_logging/current_annealing_logger/current_annealing.py"
+        - "tests/test_current_annealing_logger.py"
+      conflict_areas:
+        - "Current Annealing metadata panel"
+        - "Current Annealing pyqtgraph dashboard axes"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Green diameter means exact trusted import for current composition and microwire."
+        - "Manual/unmatched/stale diameter state is red and untrusted."
+        - "Top current-density ticks correspond to bottom current ticks."
+      tests:
+        - "71 Current Annealing tests passed."
+      screenshots_or_artifacts:
+        - "artifacts/current_annealing_metadata_autocomplete.png"
+        - "artifacts/current_annealing_metadata_panel_imported.png"
+      changelog_status: "Fragment added."
+      risks:
+        - "No hardware run."
+    integration:
+      decision: "merge"
+      merged_commit: "1bf8ee2"
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "Current Annealing shared broker connection still works."
+        - "No cropped metadata controls after later layout work."
+      final_status: "integrated into current branch"
+    links:
+      handoff: "pasted in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "ac-shared-hmp-lcr-debug"
+    title: "AC logger shared-HMP broker and LCR debug stream"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "019e92a1-255a-7132-bea8-467147f877d8"
+      thread_title: "AC shared HMP + continuous LCR"
+      role: "worker"
+    git:
+      base_branch: "codex/integration-mini-dma-ready-review"
+      branch: "codex/ac-shared-hmp-lcr-debug"
+      upstream: "origin/codex/ac-shared-hmp-lcr-debug"
+      commit: "877e78e83de00b34f696bcf416eb5ed4c08b2976"
+      worktree: ""
+      clean_status_reported: true
+    scope:
+      summary: >
+        Adds AC shared-HMP broker profile, explicit channel selection, bounded
+        LCR debug stream, and broker UI behavior fixes. Current branch contains
+        this remote tip, but user-visible AC UI/layout quality is still poor.
+      touched_files:
+        - "data_logging/ac_susceptibility_logger/"
+        - "data_logging/shared_power_supply/"
+        - "tests/test_ac_susceptibility_logger.py"
+        - "tests/test_shared_power_supply_broker.py"
+      conflict_areas:
+        - "AC hardware connection"
+        - "Shared HMP broker client behavior"
+        - "AC UI layout"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "AC shared broker requires explicit channel selection."
+        - "Auto-connect preserves broker mode."
+        - "LCR debug stream is bounded and opt-in."
+      tests:
+        - "Worker reported 111 focused tests passed before later commits."
+      screenshots_or_artifacts:
+        - "artifacts/ac-broker-channel-visual/dropdown_unselected.png"
+        - "artifacts/ac-broker-channel-visual/dropdown_ch3.png"
+      changelog_status: "Fragments added."
+      risks:
+        - "User later observed AC logger UI/layout problems."
+        - "Need live broker/LCR confidence before main merge."
+    integration:
+      decision: "merge"
+      merged_commit: "19c2e25"
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "AC logger can connect to LCR and broker on real hardware."
+        - "Run button auto-connects hardware when safe."
+      final_status: "integrated into current branch"
+    links:
+      handoff: "pasted in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "current-annealing-pyqtgraph"
+    title: "Current Annealing pyqtgraph dashboard and broker UI"
+    status: "deferred"
+    priority: "normal"
+    owner:
+      thread_id: ""
+      thread_title: "Continue Mini DMA HMP4040 work"
+      role: "worker"
+    git:
+      base_branch: "unknown"
+      branch: "codex/current-annealing-pyqtgraph"
+      upstream: "origin/codex/current-annealing-pyqtgraph"
+      commit: "51b62fd65a252dfd59ecf8fb4937d00380d688e9"
+      worktree: "6a3f"
+      clean_status_reported: false
+    scope:
+      summary: >
+        Older Current Annealing pyqtgraph/dashboard/shared-broker branch. It may
+        contain useful UI ideas, but it predates later broker fixes and is not an
+        ancestor of the current integration branch.
+      touched_files: []
+      conflict_areas:
+        - "Current Annealing UI layout"
+        - "Current Annealing shared broker integration"
+    readiness:
+      handoff_received: false
+      branch_and_commit: true
+      clean_git_status: false
+      behavioral_guarantees: []
+      tests: []
+      screenshots_or_artifacts: []
+      changelog_status: "unknown"
+      risks:
+        - "Likely conflicts with newer broker and metadata changes."
+        - "Must read worker context and diff before cherry-picking functionality."
+    integration:
+      decision: "defer"
+      merged_commit: ""
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "Current Annealing broker autodetect."
+        - "Current Annealing metadata autocomplete trust."
+      final_status: "deferred pending review"
+    links:
+      handoff: ""
+      pr: ""
+      artifacts: []
+
+  - id: "ac-susceptibility-ui-rebuild"
+    title: "AC susceptibility logger UI rebuild"
+    status: "planned"
+    priority: "high"
+    owner:
+      thread_id: ""
+      thread_title: "AC susceptibility UI rebuild"
+      role: "worker"
+    git:
+      base_branch: "origin/codex/integration-mini-dma-ready-review"
+      branch: "codex/ac-susceptibility-ui-rebuild"
+      upstream: ""
+      commit: ""
+      worktree: ""
+      clean_status_reported: false
+    scope:
+      summary: >
+        Planned worker to redesign the AC Susceptibility Logger layout so labels,
+        progress, hardware state, resume controls, and run buttons are not
+        cropped or duplicated. Must not stop or disturb any active AC measurement.
+      touched_files:
+        - "data_logging/ac_susceptibility_logger/"
+        - "tests/test_ac_susceptibility_logger.py"
+      conflict_areas:
+        - "AC shared-HMP broker UI"
+        - "AC LCR debug stream controls"
+        - "AC run progress/resume controls"
+    readiness:
+      handoff_received: false
+      branch_and_commit: false
+      clean_git_status: false
+      behavioral_guarantees: []
+      tests: []
+      screenshots_or_artifacts: []
+      changelog_status: ""
+      risks:
+        - "Create inside PyPlot project with a new worktree and no environment."
+        - "Use software/offscreen verification first; do not touch active hardware run."
+    integration:
+      decision: "pending"
+      merged_commit: ""
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "AC broker explicit channel behavior."
+        - "AC run resume behavior."
+        - "LCR debug stream settings remain bounded."
+      final_status: "not started"
+    links:
+      handoff: ""
+      pr: ""
+      artifacts: []
