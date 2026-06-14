@@ -18,7 +18,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Callable, Dict, Hashable, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -4621,6 +4621,46 @@ def export_pyplot_origin_artifacts_for_paths(
                     token in str(getattr(workbook, "name", "") or "").casefold()
                     for token in ("derivative", "smoothed", "overlay")
                 )
+            ]
+        requested_paths: List[Path] = []
+        for path in filtered:
+            try:
+                requested_paths.append(path.resolve())
+            except OSError:
+                requested_paths.append(path)
+
+        def _source_matches_requested(source: object) -> bool:
+            if not source:
+                return False
+            try:
+                source_path = Path(str(source)).resolve()
+            except OSError:
+                source_path = Path(str(source))
+            candidates = [source_path]
+            candidates.extend(source_path.parents)
+            return any(candidate in requested_paths for candidate in candidates)
+
+        matching_workbook_keys: Set[Hashable] = set()
+        source_tagged_workbook_keys: Set[Hashable] = set()
+        shared_by_tab = getattr(window, "_shared_plot_workbook_by_tab", {})
+        tab_descriptors = getattr(window, "_tab_descriptors", {})
+        if isinstance(shared_by_tab, Mapping) and isinstance(tab_descriptors, Mapping):
+            for tab, key in shared_by_tab.items():
+                descriptor = tab_descriptors.get(tab)
+                metadata = getattr(descriptor, "metadata", None)
+                if not isinstance(metadata, Mapping):
+                    continue
+                source_file = metadata.get("source_file")
+                if not source_file:
+                    continue
+                source_tagged_workbook_keys.add(key)
+                if _source_matches_requested(source_file):
+                    matching_workbook_keys.add(key)
+        if source_tagged_workbook_keys:
+            workbooks = [
+                workbook
+                for workbook in workbooks
+                if getattr(workbook, "key", None) in matching_workbook_keys
             ]
         if not workbooks:
             if log is not None:
