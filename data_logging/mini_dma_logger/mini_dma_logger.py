@@ -580,6 +580,9 @@ WIRE_BREAK_MAX_MEASURED_MA = 0.5
 WIRE_BREAK_VOLTAGE_LIMIT_FRACTION = 0.95
 CONTINUITY_CURRENT_DEFAULT_MA = 1.0
 MIN_RECIPE_CURRENT_MA = 1.0
+ISO_CURRENT_TRANSITION_DEFAULT_STRESS_MPA = 10.0
+ISO_CURRENT_TRANSITION_DEFAULT_RATE_MA_S = 1.0
+ISO_CURRENT_TRANSITION_DEFAULT_SETTLE_S = 1.0
 RAW_SCALE_DISPLAY_LIMIT_DEFAULT_G = 30.0
 SETUP_PRELOAD_OVERLOAD_FACTOR = 2.0
 CURRENT_SWEEP_BASIS_BY_MODE = {
@@ -6766,7 +6769,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Iso-load current sweep", CURRENT_SWEEP_LOAD)
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
-        self.combo_recipe_mode.addItem("Constant-current stress-strain", CONSTANT_CURRENT_STRAIN_SWEEP)
+        self.combo_recipe_mode.addItem("Iso-current stress-strain", CONSTANT_CURRENT_STRAIN_SWEEP)
         self.combo_recipe_mode.currentIndexChanged.connect(self._handle_recipe_mode_changed)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
         self.recipe_file_controls_widget = QtWidgets.QWidget(automation_box)
@@ -7688,6 +7691,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_step_mA.setValue(10.0)
         self.spin_constant_current_step_mA.setSuffix(" mA")
         constant_current_form.addRow("Current step", self.spin_constant_current_step_mA)
+        constant_current_transition_label = QtWidgets.QLabel("Current transition", automation_box)
+        transition_font = constant_current_transition_label.font()
+        transition_font.setBold(True)
+        constant_current_transition_label.setFont(transition_font)
+        constant_current_form.addRow("", constant_current_transition_label)
+        self.check_constant_current_transition_enabled = QtWidgets.QCheckBox(
+            "Ramp to each current before stress-strain scan",
+            automation_box,
+        )
+        self.check_constant_current_transition_enabled.setChecked(True)
+        constant_current_form.addRow("", self.check_constant_current_transition_enabled)
+        self.spin_constant_current_transition_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_transition_stress_mpa.setDecimals(3)
+        self.spin_constant_current_transition_stress_mpa.setRange(0.0, 100000.0)
+        self.spin_constant_current_transition_stress_mpa.setValue(ISO_CURRENT_TRANSITION_DEFAULT_STRESS_MPA)
+        self.spin_constant_current_transition_stress_mpa.setSuffix(" MPa")
+        constant_current_transition_row, self.label_constant_current_transition_equiv = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_transition_stress_mpa,
+        )
+        constant_current_form.addRow("Transition stress", constant_current_transition_row)
+        self.spin_constant_current_transition_rate_mA_s = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_transition_rate_mA_s.setDecimals(3)
+        self.spin_constant_current_transition_rate_mA_s.setRange(0.001, 5000.0)
+        self.spin_constant_current_transition_rate_mA_s.setValue(ISO_CURRENT_TRANSITION_DEFAULT_RATE_MA_S)
+        self.spin_constant_current_transition_rate_mA_s.setSuffix(" mA/s")
+        constant_current_form.addRow("Transition current ramp", self.spin_constant_current_transition_rate_mA_s)
+        self.spin_constant_current_transition_settle_s = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_transition_settle_s.setDecimals(2)
+        self.spin_constant_current_transition_settle_s.setRange(0.0, 3600.0)
+        self.spin_constant_current_transition_settle_s.setValue(ISO_CURRENT_TRANSITION_DEFAULT_SETTLE_S)
+        self.spin_constant_current_transition_settle_s.setSuffix(" s")
+        constant_current_form.addRow("Transition settle", self.spin_constant_current_transition_settle_s)
         self.check_constant_current_return_to_start = QtWidgets.QCheckBox(
             "Step back to the start target after each current",
             automation_box,
@@ -8154,6 +8190,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_mA,
             self.spin_constant_current_end_mA,
             self.spin_constant_current_step_mA,
+            self.spin_constant_current_transition_stress_mpa,
+            self.spin_constant_current_transition_rate_mA_s,
+            self.spin_constant_current_transition_settle_s,
         ):
             widget.valueChanged.connect(self._update_recipe_mode_ui)
         self.spin_ui_interval.valueChanged.connect(self._apply_ui_refresh_interval)
@@ -8178,6 +8217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_constant_current_start_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_constant_current_step_basis.currentIndexChanged.connect(self._update_constant_current_basis_ui)
         self.combo_constant_current_step_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
+        self.check_constant_current_transition_enabled.toggled.connect(self._update_recipe_mode_ui)
         self.check_constant_current_return_to_start.toggled.connect(self._update_recipe_mode_ui)
         self.spin_steps_per_mm.valueChanged.connect(self._clamp_motion_resolution_controls)
         self.spin_steps_per_mm.valueChanged.connect(self._update_recipe_mode_ui)
@@ -12093,6 +12133,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_constant_current_end_equiv.setText(
             self._target_equivalent_text(constant_basis, float(self.spin_constant_current_end_target.value()))
+        )
+        self.label_constant_current_transition_equiv.setText(
+            self._load_equivalent_text(float(self.spin_constant_current_transition_stress_mpa.value()))
         )
 
     def _set_position_reference_now(self) -> None:
@@ -16418,7 +16461,7 @@ class MainWindow(QtWidgets.QMainWindow):
             suffix, _ = self._distribution_units(basis)
             step_suffix = "%" if self._constant_current_step_basis() == HSW_BASIS_STRAIN_PCT else "mm"
             summary = (
-                f"Plan: constant-current stress-strain, current "
+                f"Plan: iso-current stress-strain, current "
                 f"{_format_compact_number(self.spin_constant_current_start_mA.value(), decimals=2)} to "
                 f"{_format_compact_unit(self.spin_constant_current_end_mA.value(), 'mA', decimals=2)} in "
                 f"{_format_compact_unit(self.spin_constant_current_step_mA.value(), 'mA', decimals=2)} steps; "
@@ -16427,11 +16470,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"then fixed {_format_compact_unit(abs(self.spin_constant_current_step_size.value()), step_suffix, decimals=4)} "
                 f"mechanical steps until {_format_compact_number(self.spin_constant_current_end_target.value())}{suffix}."
             )
+            if self.check_constant_current_transition_enabled.isChecked():
+                transition_load = self._load_equivalent_text(
+                    float(self.spin_constant_current_transition_stress_mpa.value())
+                )
+                summary += (
+                    " Current transition ramps at "
+                    f"{_format_compact_unit(self.spin_constant_current_transition_rate_mA_s.value(), 'mA/s', decimals=3)} "
+                    f"while holding {_format_compact_unit(self.spin_constant_current_transition_stress_mpa.value(), 'MPa', decimals=3)}"
+                    f" ({transition_load}), then settles "
+                    f"{_format_compact_unit(self.spin_constant_current_transition_settle_s.value(), 's', decimals=2)}."
+                )
             if self.check_constant_current_return_to_start.isChecked():
                 summary += " Steps back to the start target after each current."
             summary += (
                 f" Holds/logs {_format_compact_unit(self.spin_constant_current_hold_s.value(), 's', decimals=2)} "
-                "after each displacement step. No closed-loop corrections are applied during the linear steps."
+                "after fresh feedback for each displacement step."
             )
             if self._pre_measurement_setup_enabled(mode):
                 setup_load_g = load_g_from_stress_mpa(
@@ -16444,7 +16498,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
                     f"{load_text} preload for length entry, then back to 0 g."
                 )
-            banner = "Constant-current stress-strain"
+            banner = "Iso-current stress-strain"
         else:
             summary = (
                 f"Plan: displacement ramp of {_format_compact_unit(self.spin_ramp_distance.value(), 'mm')} "
@@ -16455,7 +16509,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._is_current_sweep_mode(mode):
                 summary += " Recipe controls current."
             elif self._is_constant_current_strain_sweep_mode(mode):
-                summary += " Recipe controls current and open-loop displacement steps."
+                summary += " Recipe controls current and fixed displacement steps."
             else:
                 summary += " Recipe owns the hardware sequence."
         preload_text = (
@@ -19688,7 +19742,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 HSW_BASIS_STRAIN_PCT: "strain",
             }.get(self._constant_current_start_basis(), "target")
             return (
-                f"constant-current-stress-strain_setup{setup}MPa_{basis_token}{target_start}-{target_end}_"
+                f"iso-current-stress-strain_setup{setup}MPa_{basis_token}{target_start}-{target_end}_"
                 f"step{step}{step_unit}_current{current_start}-{current_end}x{current_step}mA.recipe.json"
             )
         else:
@@ -19787,6 +19841,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_start_mA": float(self.spin_constant_current_start_mA.value()),
                 "current_end_mA": float(self.spin_constant_current_end_mA.value()),
                 "current_step_mA": float(self.spin_constant_current_step_mA.value()),
+                "transition_enabled": bool(self.check_constant_current_transition_enabled.isChecked()),
+                "transition_stress_mpa": float(self.spin_constant_current_transition_stress_mpa.value()),
+                "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
+                "transition_settle_s": float(self.spin_constant_current_transition_settle_s.value()),
                 "return_to_start": bool(self.check_constant_current_return_to_start.isChecked()),
             }
         return payload
@@ -19911,6 +19969,39 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_mA.setValue(float(constant_current.get("current_start_mA", self.spin_constant_current_start_mA.value())))
             self.spin_constant_current_end_mA.setValue(float(constant_current.get("current_end_mA", self.spin_constant_current_end_mA.value())))
             self.spin_constant_current_step_mA.setValue(float(constant_current.get("current_step_mA", self.spin_constant_current_step_mA.value())))
+            self.check_constant_current_transition_enabled.setChecked(
+                bool(constant_current.get("transition_enabled", self.check_constant_current_transition_enabled.isChecked()))
+            )
+            self.spin_constant_current_transition_stress_mpa.setValue(
+                float(
+                    constant_current.get(
+                        "transition_stress_mpa",
+                        self.spin_constant_current_transition_stress_mpa.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_transition_rate_mA_s.setValue(
+                max(
+                    0.001,
+                    float(
+                        constant_current.get(
+                            "transition_rate_mA_s",
+                            self.spin_constant_current_transition_rate_mA_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.spin_constant_current_transition_settle_s.setValue(
+                max(
+                    0.0,
+                    float(
+                        constant_current.get(
+                            "transition_settle_s",
+                            self.spin_constant_current_transition_settle_s.value(),
+                        )
+                    ),
+                )
+            )
             self.check_constant_current_return_to_start.setChecked(bool(constant_current.get("return_to_start", self.check_constant_current_return_to_start.isChecked())))
         self._update_recipe_mode_ui()
 
@@ -22587,27 +22678,72 @@ class MainWindow(QtWidgets.QMainWindow):
             current_start = float(self.spin_constant_current_start_mA.value())
             current_end = float(self.spin_constant_current_end_mA.value())
             current_step = abs(float(self.spin_constant_current_step_mA.value()))
+            transition_enabled = bool(self.check_constant_current_transition_enabled.isChecked())
+            transition_stress_mpa = float(self.spin_constant_current_transition_stress_mpa.value())
+            transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
+            transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
             if mechanical_step_value <= 0.0:
                 raise ValueError("Set a non-zero mechanical step size.")
             if current_step <= 0.0:
                 raise ValueError("Set a non-zero current step.")
+            if transition_enabled and transition_rate_mA_s <= 0.0:
+                raise ValueError("Set a non-zero current-transition ramp rate.")
             current_targets = []
             for current_target in self._build_numeric_targets(current_start, current_end, current_step):
                 clamped_target = self._recipe_current_setpoint_mA(current_target)
                 if not current_targets or abs(clamped_target - current_targets[-1]) > 1e-12:
                     current_targets.append(clamped_target)
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
+            previous_current_mA = MIN_RECIPE_CURRENT_MA
             for current_index, current_mA in enumerate(current_targets, start=1):
                 note_prefix = f"{current_index}"
-                steps.append(
-                    AutomationStep(
-                        "set_current",
-                        target_value=start_target,
-                        basis=basis,
-                        current_mA=current_mA,
-                        note=f"{note_prefix}:current",
+                transition_start_mA = self._recipe_current_setpoint_mA(previous_current_mA)
+                if transition_enabled:
+                    steps.append(
+                        AutomationStep(
+                            "seek_target",
+                            target_value=transition_stress_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_mA=transition_start_mA,
+                            note=f"{note_prefix}:transition_seek",
+                        )
                     )
-                )
+                    steps.append(
+                        AutomationStep(
+                            "sweep_current",
+                            target_value=transition_stress_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_start_mA=transition_start_mA,
+                            current_end_mA=current_mA,
+                            current_ramp_rate_mA_s=transition_rate_mA_s,
+                            current_hold_enabled=True,
+                            current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                            current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                            current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                            note=note_prefix,
+                        )
+                    )
+                    if transition_settle_s > 0.0:
+                        steps.append(
+                            AutomationStep(
+                                "settle",
+                                target_value=transition_stress_mpa,
+                                basis=HSW_BASIS_STRESS_MPA,
+                                current_mA=current_mA,
+                                duration_s=transition_settle_s,
+                                note=f"{note_prefix}:transition_settle",
+                            )
+                        )
+                else:
+                    steps.append(
+                        AutomationStep(
+                            "set_current",
+                            target_value=start_target,
+                            basis=basis,
+                            current_mA=current_mA,
+                            note=f"{note_prefix}:current",
+                        )
+                    )
                 steps.append(
                     AutomationStep(
                         "seek_target",
@@ -22653,17 +22789,22 @@ class MainWindow(QtWidgets.QMainWindow):
                             note=f"{note_prefix}:down",
                         )
                     )
+                previous_current_mA = current_mA
             steps = self._append_return_to_origin(steps)
             suffix, _ = self._distribution_units(basis)
             step_unit = "%" if mechanical_step_basis == HSW_BASIS_STRAIN_PCT else "mm"
             summary = (
-                "Started constant-current stress-strain recipe: "
+                "Started iso-current stress-strain recipe: "
                 f"current {current_start:.2f} to {current_end:.2f} mA in {current_step:.2f} mA steps, "
                 f"{HSW_BASIS_LABELS.get(basis, basis)} {start_target:.4f}{suffix} to {end_target:.4f}{suffix}, "
                 f"fixed mechanical step {mechanical_step_value:.4f} {step_unit}, "
-                f"hold/log {hold_s:.2f} s after each step; {clock_summary}. "
-                "No closed-loop corrections are applied during the linear displacement legs."
+                f"hold/log {hold_s:.2f} s after fresh feedback for each step; {clock_summary}."
             )
+            if transition_enabled:
+                summary += (
+                    f" Current transitions ramp at {transition_rate_mA_s:.3f} mA/s "
+                    f"while holding {transition_stress_mpa:.3f} MPa, then settle {transition_settle_s:.2f} s."
+                )
             if self.check_constant_current_return_to_start.isChecked():
                 summary += " Each current leg steps back to the start target."
             summary += self._recipe_setup_summary_sentence()
@@ -23408,19 +23549,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_automation_context(phase="mechanical_scan", basis=basis, target_value=target_value, note=step.note)
 
         hold_s = max(0.0, float(step.duration_s or 0.0))
-        if self._active_mechanical_scan_hold_started_s is not None:
+        if self._active_mechanical_scan_move_pending:
+            current_value = self._current_distribution_value(basis, require_after_last_move=True)
+            if current_value is None:
+                self._log_waiting_for_feedback("Waiting for fresh feedback after the fixed displacement step.")
+                return False
+            if self._active_mechanical_scan_hold_started_s is None:
+                self._active_mechanical_scan_hold_started_s = time.monotonic()
+                if hold_s > 0.0:
+                    return False
             if not self._record_scheduled_recipe_point(step):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
-            if time.monotonic() - self._active_mechanical_scan_hold_started_s < hold_s:
+            if hold_s > 0.0 and time.monotonic() - self._active_mechanical_scan_hold_started_s < hold_s:
                 return False
-            self._active_mechanical_scan_hold_started_s = None
             self._active_mechanical_scan_move_pending = False
+            self._active_mechanical_scan_hold_started_s = None
+            return False
 
-        current_value = self._current_distribution_value(
-            basis,
-            require_after_last_move=self._active_mechanical_scan_move_pending,
-        )
+        current_value = self._current_distribution_value(basis, require_after_last_move=False)
         if current_value is None:
             self._log_waiting_for_feedback("Waiting for fresh feedback after the fixed displacement step.")
             return False
@@ -23468,10 +23615,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         self._active_mechanical_scan_move_count += 1
         self._active_mechanical_scan_move_pending = True
-        self._active_mechanical_scan_hold_started_s = time.monotonic() if hold_s > 0.0 else None
-        if hold_s <= 0.0 and not self._record_scheduled_recipe_point(step):
-            self._stop_auto_ramp(log_completion=False, offer_recovery=True)
-            return True
+        self._active_mechanical_scan_hold_started_s = None
         return False
 
     def _handle_current_zero_mark_step(self, step: AutomationStep) -> bool:
@@ -24851,6 +24995,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_start_mA", self.spin_constant_current_start_mA.value())
         self.settings.setValue("constant_current_end_mA", self.spin_constant_current_end_mA.value())
         self.settings.setValue("constant_current_step_mA", self.spin_constant_current_step_mA.value())
+        self.settings.setValue(
+            "constant_current_transition_enabled",
+            self.check_constant_current_transition_enabled.isChecked(),
+        )
+        self.settings.setValue(
+            "constant_current_transition_stress_mpa",
+            self.spin_constant_current_transition_stress_mpa.value(),
+        )
+        self.settings.setValue(
+            "constant_current_transition_rate_mA_s",
+            self.spin_constant_current_transition_rate_mA_s.value(),
+        )
+        self.settings.setValue(
+            "constant_current_transition_settle_s",
+            self.spin_constant_current_transition_settle_s.value(),
+        )
         self.settings.setValue("constant_current_return_to_start", self.check_constant_current_return_to_start.isChecked())
         self._store_default_dashboard_plot_settings_if_missing()
         self._store_dashboard_plot_settings(write_settings=True)
@@ -25542,6 +25702,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_end_mA.setValue(float(self.settings.value("constant_current_end_mA", 100.0)))
         self.spin_constant_current_step_mA.setValue(
             max(0.01, float(self.settings.value("constant_current_step_mA", 10.0)))
+        )
+        self.check_constant_current_transition_enabled.setChecked(
+            bool(self.settings.value("constant_current_transition_enabled", True, type=bool))
+        )
+        self.spin_constant_current_transition_stress_mpa.setValue(
+            float(
+                self.settings.value(
+                    "constant_current_transition_stress_mpa",
+                    ISO_CURRENT_TRANSITION_DEFAULT_STRESS_MPA,
+                )
+            )
+        )
+        self.spin_constant_current_transition_rate_mA_s.setValue(
+            max(
+                0.001,
+                float(
+                    self.settings.value(
+                        "constant_current_transition_rate_mA_s",
+                        ISO_CURRENT_TRANSITION_DEFAULT_RATE_MA_S,
+                    )
+                ),
+            )
+        )
+        self.spin_constant_current_transition_settle_s.setValue(
+            max(
+                0.0,
+                float(
+                    self.settings.value(
+                        "constant_current_transition_settle_s",
+                        ISO_CURRENT_TRANSITION_DEFAULT_SETTLE_S,
+                    )
+                ),
+            )
         )
         self.check_constant_current_return_to_start.setChecked(
             bool(self.settings.value("constant_current_return_to_start", True, type=bool))

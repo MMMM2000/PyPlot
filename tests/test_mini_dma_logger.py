@@ -4239,28 +4239,47 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         window.spin_constant_current_step_size.setValue(0.01)
         window.spin_constant_current_hold_s.setValue(1.0)
         window.spin_constant_current_move_speed_mm_s.setValue(0.05)
-        window.spin_constant_current_start_mA.setValue(0.0)
-        window.spin_constant_current_end_mA.setValue(100.0)
+        window.spin_constant_current_start_mA.setValue(40.0)
+        window.spin_constant_current_end_mA.setValue(50.0)
         window.spin_constant_current_step_mA.setValue(10.0)
+        window.spin_constant_current_transition_stress_mpa.setValue(10.0)
+        window.spin_constant_current_transition_rate_mA_s.setValue(1.0)
+        window.spin_constant_current_transition_settle_s.setValue(1.0)
         window.check_constant_current_return_to_start.setChecked(True)
 
         steps, summary, interval_ms = window._build_automation_recipe()
 
         recipe_start = next(index for index, step in enumerate(steps) if step.action == "start_session")
         recipe_steps = steps[recipe_start + 1 :]
-        current_steps = [step for step in recipe_steps if step.action == "set_current"]
+        sweep_steps = [step for step in recipe_steps if step.action == "sweep_current"]
+        transition_settle_steps = [
+            step
+            for step in recipe_steps
+            if step.action == "settle" and str(step.note or "").endswith(":transition_settle")
+        ]
         zero_steps = [step for step in recipe_steps if step.action == "mark_current_zero"]
         scan_steps = [step for step in recipe_steps if step.action == "mechanical_scan"]
 
         assert interval_ms == window._control_interval_ms()
-        assert [step.current_mA for step in current_steps] == pytest.approx(
-            [1.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+        assert not any(step.action == "set_current" for step in recipe_steps)
+        assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == pytest.approx(
+            [(1.0, 40.0), (40.0, 50.0)]
         )
-        assert [step.current_mA for step in zero_steps] == pytest.approx(
-            [1.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
-        )
-        assert [step.note for step in recipe_steps[:4]] == ["1:current", "1:start", "1:zero", "1:up"]
-        assert len(scan_steps) == 22
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in sweep_steps)
+        assert all(step.target_value == pytest.approx(10.0) for step in sweep_steps)
+        assert all(step.current_ramp_rate_mA_s == pytest.approx(1.0) for step in sweep_steps)
+        assert all(step.current_hold_enabled is True for step in sweep_steps)
+        assert len(transition_settle_steps) == 2
+        assert [step.current_mA for step in zero_steps] == pytest.approx([40.0, 50.0])
+        assert [step.note for step in recipe_steps[:6]] == [
+            "1:transition_seek",
+            "1",
+            "1:transition_settle",
+            "1:start",
+            "1:zero",
+            "1:up",
+        ]
+        assert len(scan_steps) == 4
         assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in scan_steps)
         assert scan_steps[0].target_value == pytest.approx(500.0)
         assert scan_steps[1].target_value == pytest.approx(0.0)
@@ -4268,7 +4287,8 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         assert all(step.mechanical_step_value == pytest.approx(0.01) for step in scan_steps)
         assert all(step.duration_s == pytest.approx(1.0) for step in scan_steps)
         assert not any(step.action == "ramp_target" for step in recipe_steps)
-        assert "No closed-loop corrections" in summary
+        assert "Started iso-current stress-strain recipe" in summary
+        assert "Current transitions ramp at 1.000 mA/s" in summary
     finally:
         _close_test_window(window)
 
@@ -4346,9 +4366,9 @@ def test_constant_current_recipe_commands_at_least_one_milliamp(tmp_path: Path, 
 
         steps, _summary, _interval_ms = window._build_automation_recipe()
 
-        current_steps = [step for step in steps if step.action == "set_current"]
-        assert current_steps
-        assert [step.current_mA for step in current_steps] == pytest.approx([1.0])
+        sweep_steps = [step for step in steps if step.action == "sweep_current"]
+        assert sweep_steps
+        assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == pytest.approx([(1.0, 1.0)])
     finally:
         _close_test_window(window)
 
@@ -4672,7 +4692,7 @@ def test_constant_current_recipe_has_no_max_step_cap_setting(tmp_path: Path, qtb
 def test_constant_current_mechanical_scan_uses_fixed_displacement_steps(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     moves: list[float] = []
-    values = iter([0.0, 100.0, 250.0, 510.0])
+    values = iter([0.0, 100.0, 250.0, 300.0, 490.0, 510.0, 510.0])
     records: list[bool] = []
 
     try:
@@ -4698,14 +4718,15 @@ def test_constant_current_mechanical_scan_uses_fixed_displacement_steps(tmp_path
             note="1:up",
         )
 
-        assert window._handle_mechanical_scan_step(step, 4) is False
-        window._last_move_target_mm = moves[-1]
-        window._manual_jog_uses_last_target = True
-        assert window._handle_mechanical_scan_step(step, 4) is False
-        window._last_move_target_mm = moves[-1]
-        window._manual_jog_uses_last_target = True
-        assert window._handle_mechanical_scan_step(step, 4) is False
-        assert window._handle_mechanical_scan_step(step, 4) is True
+        finished = False
+        for _ in range(10):
+            finished = window._handle_mechanical_scan_step(step, 4)
+            if moves:
+                window._last_move_target_mm = moves[-1]
+                window._manual_jog_uses_last_target = True
+            if finished:
+                break
+        assert finished is True
 
         assert moves == pytest.approx([0.01, 0.02, 0.03])
         assert len(records) == 3
@@ -4713,10 +4734,52 @@ def test_constant_current_mechanical_scan_uses_fixed_displacement_steps(tmp_path
         _close_test_window(window)
 
 
+def test_constant_current_mechanical_scan_waits_for_fresh_post_move_feedback(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    values = iter([0.0, None, 100.0, 100.0])
+    records: list[bool] = []
+
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+        window._session_active = True
+        window._last_move_target_mm = 0.0
+        window._last_effective_move_target_mm = 0.0
+        window._manual_jog_uses_last_target = True
+        window._current_distribution_value = lambda *_args, **_kwargs: next(values)  # type: ignore[method-assign]
+        window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+        window._record_scheduled_recipe_point = lambda _step: records.append(True) or True  # type: ignore[method-assign]
+        window._tension_motion_sign = lambda: 1.0  # type: ignore[method-assign]
+        step = mini_dma_mod.AutomationStep(
+            "mechanical_scan",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_mA=20.0,
+            mechanical_step_basis=mini_dma_mod.MECHANICAL_STEP_DISPLACEMENT_MM,
+            mechanical_step_value=0.01,
+            mechanical_step_speed_mm_s=0.05,
+            duration_s=0.0,
+            note="1:up",
+        )
+
+        assert window._handle_mechanical_scan_step(step, 4) is False
+        assert moves == pytest.approx([0.01])
+        assert records == []
+
+        assert window._handle_mechanical_scan_step(step, 4) is False
+        assert records == []
+
+        assert window._handle_mechanical_scan_step(step, 4) is False
+        assert records == [True]
+    finally:
+        _close_test_window(window)
+
+
 def test_constant_current_return_scan_clamps_to_mechanical_start(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     moves: list[float] = []
-    values = iter([120.0, 80.0, 20.0])
+    values = iter([120.0, 80.0, 20.0, 20.0, 0.0])
     records: list[bool] = []
 
     try:
@@ -4744,11 +4807,14 @@ def test_constant_current_return_scan_clamps_to_mechanical_start(tmp_path: Path,
             note="1:down",
         )
 
-        assert window._handle_mechanical_scan_step(step, 8) is False
-        window._last_move_target_mm = moves[-1]
-        assert window._handle_mechanical_scan_step(step, 8) is False
-        window._last_move_target_mm = moves[-1]
-        assert window._handle_mechanical_scan_step(step, 8) is True
+        finished = False
+        for _ in range(10):
+            finished = window._handle_mechanical_scan_step(step, 8)
+            if moves:
+                window._last_move_target_mm = moves[-1]
+            if finished:
+                break
+        assert finished is True
 
         assert moves == pytest.approx([0.01, 0.0])
         assert len(records) == 2
