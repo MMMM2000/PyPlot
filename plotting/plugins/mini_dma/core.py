@@ -15,6 +15,8 @@ from plotting.shared.transition_analysis import TangentTransitionFit, fit_tangen
 MEASUREMENT_FILE = "measurement.csv"
 PLOT_PHASES = {"current"}
 SUMMARY_PHASES = {"current", "current_hold"}
+ISO_CURRENT_RECIPE_MODES = {"constant_current_strain_sweep", "iso-current", "iso_current"}
+ISO_CURRENT_PHASES = {"current_zero", "target_ramp", "current", "current_hold"}
 REQUIRED_COLUMNS = {
     "elapsed_s",
     "automation_phase",
@@ -112,6 +114,10 @@ def load_run(path: Path) -> MiniDmaRun:
         "current_set_mA",
         "current_measured_mA",
         "position_mm",
+        "load_g",
+        "current_l0_mm",
+        "current_relative_position_mm",
+        "current_relative_strain_pct",
     ):
         if column in cleaned.columns:
             cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
@@ -133,6 +139,69 @@ def load_run(path: Path) -> MiniDmaRun:
         initial_length_mm=_initial_length_from_metadata(metadata),
         wire_diameter_mm=_wire_diameter_from_metadata(metadata),
     )
+
+
+def is_iso_current_run(run: MiniDmaRun) -> bool:
+    """Return true for constant-current stress/strain Mini DMA recipes."""
+    frame = run.frame
+    if "recipe_mode" in frame.columns:
+        modes = {
+            str(value).strip().casefold()
+            for value in frame["recipe_mode"].dropna().unique().tolist()
+            if str(value).strip()
+        }
+        if modes.intersection(ISO_CURRENT_RECIPE_MODES):
+            return True
+    metadata = _metadata_for_run(run.measurement_path)
+    metadata_modes = _metadata_recipe_mode_values(metadata)
+    if metadata_modes.intersection(ISO_CURRENT_RECIPE_MODES):
+        return True
+    if _has_iso_current_columns(frame) and bool(iso_current_groups(run)):
+        return True
+    return "iso-current" in run.path.name.casefold()
+
+
+def iso_current_groups(run: MiniDmaRun) -> list[tuple[float, pd.DataFrame]]:
+    """Group iso-current stress/strain rows by commanded current."""
+    frame = run.frame
+    if "stress_mpa" not in frame.columns:
+        return []
+    filtered = frame.copy()
+    if "automation_phase" in filtered.columns:
+        phase_mask = filtered["automation_phase"].isin(ISO_CURRENT_PHASES)
+        if bool(phase_mask.any()):
+            filtered = filtered.loc[phase_mask].copy()
+    strain = _iso_current_strain_series(run, filtered)
+    current = _iso_current_group_current(filtered)
+    filtered["_mini_dma_iso_strain_pct"] = pd.to_numeric(strain, errors="coerce")
+    filtered["_mini_dma_iso_current_mA"] = pd.to_numeric(current, errors="coerce")
+    filtered = filtered.dropna(
+        subset=[
+            "_mini_dma_iso_current_mA",
+            "_mini_dma_iso_strain_pct",
+            "stress_mpa",
+        ]
+    )
+    filtered = filtered[filtered["_mini_dma_iso_current_mA"].abs() > 0.0]
+    if filtered.empty:
+        return []
+
+    rounded_current = filtered["_mini_dma_iso_current_mA"].round(6)
+    groups: list[tuple[float, pd.DataFrame]] = []
+    for current_mA, group in filtered.groupby(rounded_current, sort=True):
+        usable = group.sort_values("elapsed_s", kind="stable").copy()
+        usable = _drop_consecutive_duplicate_rows(
+            usable,
+            subset=["_mini_dma_iso_strain_pct", "stress_mpa", "load_g"],
+        )
+        if len(usable) < MIN_POINTS_PER_TARGET:
+            continue
+        x_values = pd.to_numeric(usable["_mini_dma_iso_strain_pct"], errors="coerce")
+        y_values = pd.to_numeric(usable["stress_mpa"], errors="coerce")
+        if x_values.nunique(dropna=True) < 2 or y_values.nunique(dropna=True) < 2:
+            continue
+        groups.append((float(current_mA), usable.reset_index(drop=True)))
+    return groups
 
 
 def current_sweep_groups(
@@ -221,6 +290,42 @@ def make_resistance_current_figure(
         show_power_top_axis=show_power_top_axis,
         power_axis_mode=power_axis_mode,
     )
+
+
+def make_iso_current_figure(run: MiniDmaRun) -> Figure:
+    groups = iso_current_groups(run)
+    if not groups:
+        raise ValueError("No iso-current stress/strain groups with enough points.")
+
+    fig = Figure(figsize=(8.0, 5.0), constrained_layout=True)
+    ax = fig.add_subplot(111)
+    load_points: list[tuple[float, float]] = []
+    l0_values: list[float] = []
+    for current_mA, group in groups:
+        strain = pd.to_numeric(group["_mini_dma_iso_strain_pct"], errors="coerce")
+        stress = pd.to_numeric(group["stress_mpa"], errors="coerce")
+        ax.plot(
+            strain.to_numpy(dtype=float),
+            stress.to_numpy(dtype=float),
+            label=_format_current_density_label(run, current_mA),
+            linewidth=1.4,
+            marker="o",
+            markersize=3.5,
+        )
+        if "load_g" in group.columns:
+            load = pd.to_numeric(group["load_g"], errors="coerce")
+            for x_value, load_value in zip(strain.tolist(), load.tolist(), strict=False):
+                if pd.notna(x_value) and pd.notna(load_value):
+                    load_points.append((float(x_value), float(load_value)))
+        l0_values.extend(_iso_current_l0_values(group))
+
+    ax.set_title(f"{run.sample_name} - Iso-current Stress vs Strain")
+    ax.set_xlabel(_iso_current_strain_axis_label(run, l0_values))
+    ax.set_ylabel(_iso_current_stress_axis_label(run))
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=9, title="Current / current density", title_fontsize=9)
+    _add_load_top_axis(ax, load_points)
+    return fig
 
 
 def _make_current_figure(
@@ -582,6 +687,160 @@ def _strain_axis_label(
     if l0_mm is None or not pd.notna(l0_mm) or l0_mm <= 0.0:
         return "Strain [%]"
     return f"Strain [%] (l₀ = {_format_compact_number(l0_mm, max_decimals=1)} mm)"
+
+
+def _metadata_recipe_mode_values(payload: dict[str, object]) -> set[str]:
+    values: set[str] = set()
+    for key in ("recipe_mode", "mode"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip().casefold())
+    recipe = payload.get("recipe")
+    if isinstance(recipe, dict):
+        for key in ("recipe_mode", "mode", "type"):
+            value = recipe.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(value.strip().casefold())
+        for key, section in recipe.items():
+            if isinstance(key, str) and key.strip():
+                values.add(key.strip().casefold())
+            if isinstance(section, dict):
+                nested_mode = section.get("recipe_mode") or section.get("mode") or section.get("type")
+                if isinstance(nested_mode, str) and nested_mode.strip():
+                    values.add(nested_mode.strip().casefold())
+    for key, section in payload.items():
+        if isinstance(key, str) and "iso-current" in key.casefold():
+            values.add("iso-current")
+        if isinstance(section, dict):
+            nested_mode = section.get("recipe_mode") or section.get("mode") or section.get("type")
+            if isinstance(nested_mode, str) and nested_mode.strip():
+                values.add(nested_mode.strip().casefold())
+    return values
+
+
+def _has_iso_current_columns(frame: pd.DataFrame) -> bool:
+    return bool(
+        {"current_relative_strain_pct", "current_l0_mm"}.intersection(frame.columns)
+    )
+
+
+def _iso_current_strain_series(run: MiniDmaRun, frame: pd.DataFrame) -> pd.Series:
+    if "current_relative_strain_pct" in frame.columns:
+        values = pd.to_numeric(frame["current_relative_strain_pct"], errors="coerce")
+        if values.notna().any():
+            return values
+    if {"current_relative_position_mm", "current_l0_mm"}.issubset(frame.columns):
+        position = pd.to_numeric(frame["current_relative_position_mm"], errors="coerce")
+        l0 = pd.to_numeric(frame["current_l0_mm"], errors="coerce")
+        values = position / l0 * 100.0
+        if values.notna().any():
+            return values
+    if "strain_pct" in frame.columns:
+        strain = pd.to_numeric(frame["strain_pct"], errors="coerce")
+        if strain.notna().any():
+            return strain - strain.min(skipna=True)
+    return pd.Series([math.nan] * len(frame.index), index=frame.index)
+
+
+def _iso_current_group_current(frame: pd.DataFrame) -> pd.Series:
+    for column in ("current_set_mA", "current_mA", "current_measured_mA"):
+        if column not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.notna().any() and values.abs().sum() > 0.0:
+            return values
+    return pd.Series([math.nan] * len(frame.index), index=frame.index)
+
+
+def _iso_current_l0_values(group: pd.DataFrame) -> list[float]:
+    values: list[float] = []
+    if "current_l0_mm" in group.columns:
+        series = pd.to_numeric(group["current_l0_mm"], errors="coerce").dropna()
+        values.extend(float(value) for value in series.tolist() if float(value) > 0.0)
+    return values
+
+
+def _iso_current_strain_axis_label(run: MiniDmaRun, l0_values: Sequence[float]) -> str:
+    finite_values = [float(value) for value in l0_values if math.isfinite(float(value))]
+    if finite_values:
+        minimum = min(finite_values)
+        maximum = max(finite_values)
+        if math.isclose(minimum, maximum, rel_tol=1e-6, abs_tol=1e-6):
+            return f"Strain [%] (l\u2080 = {_format_compact_number(minimum, max_decimals=1)} mm)"
+        return "Strain [%] (per-current l\u2080)"
+    return _strain_axis_label(run, STRAIN_BASELINE_RAW)
+
+
+def _iso_current_stress_axis_label(run: MiniDmaRun) -> str:
+    if run.wire_diameter_mm is None or run.wire_diameter_mm <= 0.0:
+        return "Stress [MPa]"
+    diameter_um = run.wire_diameter_mm * 1000.0
+    return f"Stress [MPa] (d = {_format_compact_number(diameter_um)} \u00b5m)"
+
+
+def _format_current_density_label(run: MiniDmaRun, current_mA: float) -> str:
+    current_label = f"{_format_compact_number(current_mA, max_decimals=1)} mA"
+    area_mm2 = _wire_area_mm2(run)
+    if area_mm2 is None:
+        return current_label
+    current_density = (current_mA / 1000.0) / area_mm2
+    return (
+        f"{current_label} / "
+        f"{_format_compact_number(current_density, max_decimals=0)} A/mm\u00b2"
+    )
+
+
+def _add_load_top_axis(ax: object, points: Sequence[tuple[float, float]]) -> None:
+    if not points:
+        return
+    sorted_points = sorted(points, key=lambda item: item[0])
+    x_values = [item[0] for item in sorted_points]
+    load_values = [item[1] for item in sorted_points]
+    if len(set(x_values)) < 2:
+        return
+    top_ax = ax.twiny()
+    top_ax.set_xlim(ax.get_xlim())
+    ticks = [
+        float(tick)
+        for tick in ax.get_xticks()
+        if x_values[0] <= float(tick) <= x_values[-1]
+    ]
+    if not ticks:
+        ticks = [
+            x_values[0],
+            x_values[len(x_values) // 2],
+            x_values[-1],
+        ]
+    top_ax.set_xticks(ticks)
+    labels: list[str] = []
+    for tick in ticks:
+        load = _interpolate_nearest_load(tick, x_values, load_values)
+        labels.append(_format_compact_number(load, max_decimals=2))
+    top_ax.set_xticklabels(labels)
+    top_ax.set_xlabel("Load [g]")
+
+
+def _interpolate_nearest_load(
+    x_value: float,
+    x_values: Sequence[float],
+    load_values: Sequence[float],
+) -> float:
+    if x_value <= x_values[0]:
+        return load_values[0]
+    if x_value >= x_values[-1]:
+        return load_values[-1]
+    for index in range(1, len(x_values)):
+        left_x = x_values[index - 1]
+        right_x = x_values[index]
+        if x_value > right_x:
+            continue
+        left_load = load_values[index - 1]
+        right_load = load_values[index]
+        if math.isclose(right_x, left_x, abs_tol=1e-12):
+            return right_load
+        ratio = (x_value - left_x) / (right_x - left_x)
+        return left_load + ratio * (right_load - left_load)
+    return load_values[-1]
 
 
 def _choose_current_column(frame: pd.DataFrame) -> str | None:

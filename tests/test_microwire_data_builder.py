@@ -1315,6 +1315,48 @@ def _sample_mini_dma_record() -> MiniDmaRecord:
     )
 
 
+def _write_iso_current_mini_dma_run(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 iso-current"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "sample_name": "Ni50Fe27Ga23 12_2 iso-current",
+                "created_utc": "2026-06-01 11:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 11:10:00",
+                "initial_length_mm": 58.0,
+                "wire_diameter_mm": 0.02,
+                "recipe": {"recipe_mode": "constant_current_strain_sweep"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows: list[dict[str, float | str | int]] = []
+    for current_mA, offset in ((20.0, 0.0), (40.0, 0.12)):
+        for index, strain_pct in enumerate((0.0, 0.25, 0.5, 0.75), start=1):
+            rows.append(
+                {
+                    "elapsed_s": len(rows),
+                    "recipe_mode": "constant_current_strain_sweep",
+                    "automation_phase": "target_ramp",
+                    "automation_target_value": 0.0,
+                    "plateau_index": index,
+                    "strain_pct": strain_pct + offset,
+                    "current_relative_strain_pct": strain_pct,
+                    "current_l0_mm": 58.0,
+                    "current_relative_position_mm": strain_pct / 100.0 * 58.0,
+                    "stress_mpa": 35.0 + offset * 30.0 + strain_pct * 42.0,
+                    "load_g": 1.0 + strain_pct * 2.0 + offset,
+                    "resistance_ohm": 100.0 + current_mA,
+                    "current_measured_mA": current_mA,
+                    "current_set_mA": current_mA,
+                }
+            )
+    pd.DataFrame(rows).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
 def test_mini_dma_transition_review_entries_use_real_stress_targets() -> None:
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [_sample_mini_dma_record()],
@@ -1449,6 +1491,55 @@ def test_mini_dma_preview_items_skip_insufficient_sweeps_without_error(
         )
 
     assert items == []
+    assert not caplog.records
+
+
+def test_mini_dma_preview_items_render_iso_current_without_current_sweep_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _ensure_qapp()
+    run_path = _write_iso_current_mini_dma_run(tmp_path)
+    record = MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label=run_path.name,
+    )
+    logger = logging.getLogger("test.mini_dma_iso_current_preview")
+
+    with caplog.at_level(logging.ERROR, logger=logger.name):
+        items = builder_ui._mini_dma_preview_items(  # noqa: SLF001
+            [record],
+            logger,
+            width_px=builder_ui.ANNEALING_GRAPH_WIDTH,
+            height_px=builder_ui.ANNEALING_GRAPH_HEIGHT,
+        )
+
+    assert len(items) == 1
+    assert not items[0].pixmap.isNull()
+    assert not caplog.records
+
+
+def test_mini_dma_section_process_accepts_iso_current_without_sweep_summary_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _ensure_qapp()
+    run_path = _write_iso_current_mini_dma_run(tmp_path)
+    logger = logging.getLogger("test.mini_dma_iso_current_process")
+    section = builder_ui.MiniDmaSection(logger, lambda *_args: None)
+    try:
+        section.data = MiniDatabaseData(sources=[str(tmp_path)])
+        with caplog.at_level(logging.ERROR, logger=logger.name):
+            result = section.process([run_path / "measurement.csv"])
+    finally:
+        section.close()
+        section.deleteLater()
+
+    assert len(result.payloads["mini_dma_records"]) == 1
+    assert not result.table.empty
     assert not caplog.records
 
 

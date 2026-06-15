@@ -30,6 +30,44 @@ def _ensure_qapp() -> QtWidgets.QApplication:
     return app
 
 
+def _write_iso_current_run(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 iso-current"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        '{'
+        '"sample_name": "Ni50Fe27Ga23 12_2 iso-current", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "constant_current_strain_sweep"}'
+        '}',
+        encoding="utf-8",
+    )
+    rows: list[dict[str, float | str | int]] = []
+    for current_mA, offset in ((20.0, 0.0), (40.0, 0.12)):
+        for index, strain_pct in enumerate((0.0, 0.25, 0.5, 0.75), start=1):
+            stress_mpa = 35.0 + offset * 30.0 + strain_pct * 42.0
+            rows.append(
+                {
+                    "elapsed_s": len(rows),
+                    "recipe_mode": "constant_current_strain_sweep",
+                    "automation_phase": "target_ramp",
+                    "automation_target_value": 0.0,
+                    "plateau_index": index,
+                    "strain_pct": strain_pct + offset,
+                    "current_relative_strain_pct": strain_pct,
+                    "current_l0_mm": 58.0,
+                    "current_relative_position_mm": strain_pct / 100.0 * 58.0,
+                    "stress_mpa": stress_mpa,
+                    "load_g": 1.0 + strain_pct * 2.0 + offset,
+                    "resistance_ohm": 100.0 + current_mA,
+                    "current_measured_mA": current_mA,
+                    "current_set_mA": current_mA,
+                }
+            )
+    pd.DataFrame(rows).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
 def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
     run = core.load_run(SAMPLE_RUN)
 
@@ -122,6 +160,34 @@ def test_current_sweep_summary_groups_include_current_hold_rows() -> None:
     summary = core.summarize_current_sweep(run)
 
     assert summary.targets[0].max_strain_pct == pytest.approx(1.2)
+
+
+def test_iso_current_run_classifies_and_groups_by_current(tmp_path: Path) -> None:
+    run = core.load_run(_write_iso_current_run(tmp_path))
+
+    assert core.is_iso_current_run(run) is True
+    groups = core.iso_current_groups(run)
+
+    assert [current for current, _group in groups] == [20.0, 40.0]
+    assert groups[0][1]["_mini_dma_iso_strain_pct"].tolist() == [0.0, 0.25, 0.5, 0.75]
+
+
+def test_iso_current_figure_uses_strain_stress_axes_and_current_legend(tmp_path: Path) -> None:
+    run = core.load_run(_write_iso_current_run(tmp_path))
+
+    fig = core.make_iso_current_figure(run)
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xlabel() == "Strain [%] (l\u2080 = 58 mm)"
+        assert ax.get_ylabel() == "Stress [MPa] (d = 20 \u00b5m)"
+        assert ax.lines[0].get_xdata().tolist() == [0.0, 0.25, 0.5, 0.75]
+        assert ax.lines[0].get_ydata().tolist() == pytest.approx([35.0, 45.5, 56.0, 66.5])
+        assert ax.lines[0].get_label() == "20 mA / 64 A/mm\u00b2"
+        assert ax.get_legend().get_title().get_text() == "Current / current density"
+        assert len(fig.axes) == 2
+        assert fig.axes[1].get_xlabel() == "Load [g]"
+    finally:
+        plt.close(fig)
 
 
 def test_make_figures_create_one_line_per_target() -> None:
