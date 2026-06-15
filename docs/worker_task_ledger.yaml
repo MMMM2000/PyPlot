@@ -1,5 +1,5 @@
 ledger:
-  updated_utc: "2026-06-13 11:34"
+  updated_utc: "2026-06-15 11:09"
   integration_branch: "codex/integration-mini-dma-ready-review"
   notes: >
     Master coordination ledger for active and recently handed-off PyPlot worker
@@ -122,14 +122,15 @@ tasks:
         - "Only the later metadata/import commits remain unmerged."
         - "Needs latest worker context before integrating e7d5385/be1b3b2."
     integration:
-      decision: "pending"
+      decision: "already-represented"
       merged_commit: ""
-      combined_checks: []
+      combined_checks:
+        - "2026-06-15: git cherry shows only e7d5385/be1b3b2 as non-equivalent; both replayed empty onto current integration after conflict resolution, so no commit was added."
       regression_guarantees_to_recheck:
         - "Camera runtime/session stop fixes."
         - "Mini DMA run cleanup stop/recovery hooks if merged first."
         - "Existing current-sweep numeric expectations."
-      final_status: "UI/control separation integrated; metadata/import tip pending"
+      final_status: "UI/control separation and metadata/import behavior represented in current integration; no broad merge from stale branch"
     links:
       handoff: "pasted in master thread"
       pr: ""
@@ -188,6 +189,67 @@ tasks:
       final_status: "integrated into current branch"
     links:
       handoff: "pasted in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "mini-dma-iso-current-transition"
+    title: "Mini DMA iso-current transition ramp"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "019eab9d-6fdd-7ca0-93b4-7bf0a70afe5a"
+      thread_title: "Mini DMA camera/logging fixes"
+      role: "worker"
+    git:
+      base_branch: "codex/mini-dma-camera-runtime-controls"
+      branch: "codex/mini-dma-iso-current-transition"
+      upstream: "origin/codex/mini-dma-iso-current-transition"
+      commit: "bdca25c"
+      worktree: "4897"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Renames the constant-current stress-strain recipe to Iso-current
+        stress-strain, adds a low-stress current-transition ramp before each
+        mechanical scan, and waits for fresh post-move feedback before logging
+        fixed-step scan points.
+      touched_files:
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "tests/test_mini_dma_logger.py"
+        - "changelog.d/2026-06-15-iso-current-transition.md"
+      conflict_areas:
+        - "Mini DMA recipe generation"
+        - "Mini DMA mechanical scan logging"
+        - "Mini DMA recipe naming/dashboard choices"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Internal legacy recipe id remains load-compatible while UI/generated filenames say iso-current."
+        - "Current target transitions ramp under a low stress target before the fixed stress-strain scan."
+        - "Mechanical scan points are not logged until fresh post-move feedback arrives."
+      tests:
+        - "Worker reported 5 focused iso-current tests passed."
+        - "Worker reported 3 nearby UI/name tests passed."
+        - "py_compile passed in worker."
+      screenshots_or_artifacts:
+        - "artifacts/iso-current-ui.png"
+      changelog_status: "Fragment added."
+      risks:
+        - "Software-only; next live run should verify 10 MPa transition stress and 1 mA/s ramp are practical defaults."
+    integration:
+      decision: "cherry-pick"
+      merged_commit: "b10160f"
+      combined_checks:
+        - "2026-06-15 new master: Mini DMA focused iso-current/import/camera slice: 18 passed, 517 deselected."
+      regression_guarantees_to_recheck:
+        - "Mini DMA camera runtime/session logging behavior."
+        - "Mini DMA cleanup stop/recovery behavior."
+        - "Current-sweep CH4 limit refresh behavior."
+      final_status: "integrated into current branch; focused combined checks passed"
+    links:
+      handoff: "read from worker and prior master thread"
       pr: ""
       artifacts: []
 
@@ -258,14 +320,14 @@ tasks:
       base_branch: "codex/integration-mini-dma-ready-review"
       branch: "codex/ac-shared-hmp-lcr-debug"
       upstream: "origin/codex/ac-shared-hmp-lcr-debug"
-      commit: "877e78e83de00b34f696bcf416eb5ed4c08b2976"
+      commit: "565f6de"
       worktree: ""
       clean_status_reported: true
     scope:
       summary: >
         Adds AC shared-HMP broker profile, explicit channel selection, bounded
-        LCR debug stream, and broker UI behavior fixes. Current branch contains
-        this remote tip, but user-visible AC UI/layout quality is still poor.
+        LCR debug stream, durable run-status/heartbeat diagnostics, stale-run
+        classification, and AC layout polish.
       touched_files:
         - "data_logging/ac_susceptibility_logger/"
         - "data_logging/shared_power_supply/"
@@ -283,23 +345,29 @@ tasks:
         - "AC shared broker requires explicit channel selection."
         - "Auto-connect preserves broker mode."
         - "LCR debug stream is bounded and opt-in."
+        - "Long AC runs write durable status/checkpoint data and classify stale/missing-close runs."
+        - "AC run controls and progress are visible in the experiment plan without duplicate bottom controls."
       tests:
         - "Worker reported 111 focused tests passed before later commits."
+        - "Worker reported final combined AC/shared PSU run: 128 passed."
+        - "Worker reported Current Annealing shared-broker guard: 25 passed."
+        - "Worker reported Mini DMA shared-broker guard: 7 passed."
       screenshots_or_artifacts:
         - "artifacts/ac-broker-channel-visual/dropdown_unselected.png"
         - "artifacts/ac-broker-channel-visual/dropdown_ch3.png"
       changelog_status: "Fragments added."
       risks:
-        - "User later observed AC logger UI/layout problems."
         - "Need live broker/LCR confidence before main merge."
     integration:
-      decision: "merge"
-      merged_commit: "19c2e25"
-      combined_checks: []
+      decision: "cherry-pick"
+      merged_commit: "5a97fa9, a771cab"
+      combined_checks:
+        - "2026-06-15 new master: tests/test_ac_susceptibility_logger.py: 117 passed."
+        - "2026-06-15 new master: shared power-supply broker/setup checks: 17 passed."
       regression_guarantees_to_recheck:
         - "AC logger can connect to LCR and broker on real hardware."
         - "Run button auto-connects hardware when safe."
-      final_status: "integrated into current branch"
+      final_status: "run-status diagnostics and layout polish integrated into current branch; focused combined checks passed"
     links:
       handoff: "pasted in master thread"
       pr: ""
@@ -355,7 +423,7 @@ tasks:
 
   - id: "ac-susceptibility-ui-rebuild"
     title: "AC susceptibility logger UI rebuild"
-    status: "active"
+    status: "integrated"
     priority: "high"
     owner:
       thread_id: "019e92a1-255a-7132-bea8-467147f877d8"
@@ -363,11 +431,11 @@ tasks:
       role: "worker"
     git:
       base_branch: "origin/codex/integration-mini-dma-ready-review"
-      branch: "codex/ac-susceptibility-ui-rebuild"
-      upstream: ""
-      commit: ""
-      worktree: ""
-      clean_status_reported: false
+      branch: "codex/ac-shared-hmp-lcr-debug"
+      upstream: "origin/codex/ac-shared-hmp-lcr-debug"
+      commit: "565f6de"
+      worktree: "7beb"
+      clean_status_reported: true
     scope:
       summary: >
         Continue the existing AC/LCR worker rather than starting a new worker.
@@ -382,25 +450,34 @@ tasks:
         - "AC LCR debug stream controls"
         - "AC run progress/resume controls"
     readiness:
-      handoff_received: false
-      branch_and_commit: false
-      clean_git_status: false
-      behavioral_guarantees: []
-      tests: []
-      screenshots_or_artifacts: []
-      changelog_status: ""
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Plan controls are always visible in the experiment plan."
+        - "AC task/progress is owned by the experiment plan area."
+        - "Inherited bottom action/progress controls are hidden to remove duplication."
+      tests:
+        - "Worker reported 111 focused AC tests passed."
+        - "Worker reported final combined AC/shared PSU run: 128 passed."
+      screenshots_or_artifacts:
+        - "artifacts/ac-ui-layout/before/ac_logger_layout.png"
+        - "artifacts/ac-ui-layout/after/ac_logger_layout.png"
+        - "artifacts/ac-ui-layout/after/geometry.txt"
+      changelog_status: "Fragment added."
       risks:
-        - "Use the existing LCR/AC worker and branch context."
-        - "Use software/offscreen verification first; do not touch active hardware run."
+        - "No live AC/LCR hardware validation was run from the new master thread."
     integration:
-      decision: "pending"
-      merged_commit: ""
-      combined_checks: []
+      decision: "cherry-pick"
+      merged_commit: "a771cab"
+      combined_checks:
+        - "2026-06-15 new master: tests/test_ac_susceptibility_logger.py: 117 passed."
+        - "2026-06-15 new master: shared power-supply broker/setup checks: 17 passed."
       regression_guarantees_to_recheck:
         - "AC broker explicit channel behavior."
         - "AC run resume behavior."
         - "LCR debug stream settings remain bounded."
-      final_status: "delegate to existing LCR worker"
+      final_status: "integrated into current branch; focused combined checks passed"
     links:
       handoff: ""
       pr: ""
