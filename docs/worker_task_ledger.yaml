@@ -204,7 +204,7 @@ tasks:
       base_branch: "codex/mini-dma-camera-runtime-controls"
       branch: "codex/mini-dma-iso-current-transition"
       upstream: "origin/codex/mini-dma-iso-current-transition"
-      commit: "bdca25c"
+      commit: "e54955f"
       worktree: "4897"
       clean_status_reported: true
     scope:
@@ -212,7 +212,10 @@ tasks:
         Renames the constant-current stress-strain recipe to Iso-current
         stress-strain, adds a low-stress current-transition ramp before each
         mechanical scan, and waits for fresh post-move feedback before logging
-        fixed-step scan points.
+        fixed-step scan points. Follow-up UI polish makes the recipe page closer
+        to iso-stress, adds current-density equivalents, makes transition always
+        on, hides the confusing step-back option, and raises the default scan
+        speed to 0.2 mm/s.
       touched_files:
         - "data_logging/mini_dma_logger/mini_dma_logger.py"
         - "tests/test_mini_dma_logger.py"
@@ -229,20 +232,28 @@ tasks:
         - "Internal legacy recipe id remains load-compatible while UI/generated filenames say iso-current."
         - "Current target transitions ramp under a low stress target before the fixed stress-strain scan."
         - "Mechanical scan points are not logged until fresh post-move feedback arrives."
+        - "Current transition is always enabled; the old enable checkbox is hidden/compat-only."
+        - "Generated recipes include both up and down mechanical scans for each current."
+        - "Transition ramp exposes Pause while target recovers and uses it for sweep_current steps."
       tests:
         - "Worker reported 5 focused iso-current tests passed."
         - "Worker reported 3 nearby UI/name tests passed."
+        - "Worker follow-up reported 8 focused iso-current UI/recipe tests passed."
         - "py_compile passed in worker."
       screenshots_or_artifacts:
         - "artifacts/iso-current-ui.png"
+        - "artifacts/iso-current-ui-followup.png"
       changelog_status: "Fragment added."
       risks:
         - "Software-only; next live run should verify 10 MPa transition stress and 1 mA/s ramp are practical defaults."
+        - "Default fixed-step scan speed is now 0.2 mm/s; keep editable for fragile wires."
     integration:
       decision: "cherry-pick"
-      merged_commit: "b10160f"
+      merged_commit: "b10160f, 116ea5c"
       combined_checks:
         - "2026-06-15 new master: Mini DMA focused iso-current/import/camera slice: 18 passed, 517 deselected."
+        - "2026-06-15 new master follow-up: focused iso-current UI/recipe slice: 8 passed, 528 deselected."
+        - "2026-06-15 new master follow-up: py_compile mini_dma_logger.py passed; git diff --check passed."
       regression_guarantees_to_recheck:
         - "Mini DMA camera runtime/session logging behavior."
         - "Mini DMA cleanup stop/recovery behavior."
