@@ -547,9 +547,11 @@ SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
-SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRAIN_PCT = 0.18
-SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRESS_MPA = 35.0
-SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S = 0.6
+SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRAIN_PCT = 0.08
+SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRESS_MPA = 15.0
+SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S = 0.3
+SERVO_ISO_CURRENT_STRESS_RAMP_ENDPOINT_TAPER_FRACTION = 0.25
+SERVO_ISO_CURRENT_STRESS_RAMP_ENDPOINT_MIN_CAP_MPA = 3.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
 SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_STEP_FACTOR = 0.55
 SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_MIN_CAP_MPA = 3.0
@@ -5271,6 +5273,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index: int | None = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value: float | None = None
+        self._active_target_ramp_end_value: float | None = None
         self._active_target_ramp_rate_value_s: float | None = None
         self._active_timed_step_index: int | None = None
         self._active_timed_step_started_s = 0.0
@@ -13511,6 +13514,32 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return math.copysign(1.0, float(error_value)) == direction
 
+    def _iso_current_stress_ramp_endpoint_cap_value(self, basis: str) -> float | None:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return None
+        end_value = self._active_target_ramp_end_value
+        target_value = self._automation_target_value
+        if end_value is None or target_value is None:
+            return None
+        remaining = abs(float(end_value) - float(target_value))
+        if not math.isfinite(remaining):
+            return None
+        if basis == HSW_BASIS_STRESS_MPA:
+            return max(
+                SERVO_ISO_CURRENT_STRESS_RAMP_ENDPOINT_MIN_CAP_MPA,
+                remaining * SERVO_ISO_CURRENT_STRESS_RAMP_ENDPOINT_TAPER_FRACTION,
+            )
+        if basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            stress_cap = max(
+                SERVO_ISO_CURRENT_STRESS_RAMP_ENDPOINT_MIN_CAP_MPA,
+                remaining * SERVO_ISO_CURRENT_STRESS_RAMP_ENDPOINT_TAPER_FRACTION,
+            )
+            load_cap_g = load_g_from_stress_mpa(stress_cap, diameter_mm)
+            return None if load_cap_g is None else abs(float(load_cap_g))
+        return None
+
     def _iso_current_stress_ramp_command_cap_mm(
         self,
         basis: str,
@@ -13524,6 +13553,13 @@ class MainWindow(QtWidgets.QMainWindow):
             basis,
             SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRESS_MPA,
         )
+        endpoint_cap_value = self._iso_current_stress_ramp_endpoint_cap_value(basis)
+        if (
+            stress_cap_value is not None
+            and endpoint_cap_value is not None
+            and math.isfinite(float(endpoint_cap_value))
+        ):
+            stress_cap_value = min(abs(float(stress_cap_value)), abs(float(endpoint_cap_value)))
         caps = [
             self._current_sweep_max_correction_mm(),
             strain_cap_mm,
@@ -21829,6 +21865,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
+        self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._setup_zero_fallback_return_position_mm = None
         self._end_zero_fallback_armed = False
@@ -21938,6 +21975,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
+        self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
@@ -22866,6 +22904,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_step_index = None
         self._active_target_ramp_started_s = 0.0
         self._active_target_ramp_start_value = None
+        self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
@@ -24507,6 +24546,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_target_ramp_step_index = step_index
             self._active_target_ramp_started_s = time.monotonic()
             self._active_target_ramp_rate_value_s = configured_ramp_rate
+            self._active_target_ramp_end_value = end_value
             start_value = step.target_start_value
             if start_value is None:
                 start_value = self._current_distribution_value(step.basis)
@@ -24605,6 +24645,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_target_ramp_step_index = None
             self._active_target_ramp_started_s = 0.0
             self._active_target_ramp_start_value = None
+            self._active_target_ramp_end_value = None
             self._active_target_ramp_rate_value_s = None
             return True
         return False

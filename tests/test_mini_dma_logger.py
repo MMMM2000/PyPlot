@@ -17789,7 +17789,7 @@ def test_iso_current_stress_ramp_target_uses_larger_dynamic_step_cap(
         )
 
         assert correction_mm > window.spin_current_sweep_nudge_mm.value()
-        assert correction_mm == pytest.approx(50.0 * 0.0018)
+        assert correction_mm == pytest.approx(50.0 * 0.0008)
     finally:
         _close_test_window(window)
 
@@ -17847,8 +17847,46 @@ def test_iso_current_stress_ramp_lagging_target_adds_feedforward(
         )
 
         assert lagging_step > ahead_step
-        assert lagging_step - ahead_step == pytest.approx(3.0 / 142.0)
+        assert lagging_step - ahead_step == pytest.approx(1.5 / 142.0)
         assert lagging_speed > ahead_speed
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_current_stress_ramp_tapers_correction_near_endpoint(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_initial_length.setValue(50.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    stiffness_load_g = mini_dma_mod.load_g_from_stress_mpa(142.0, window.spin_diameter.value())
+    assert stiffness_load_g is not None
+    window._calibrated_stiffness_g_per_mm = stiffness_load_g
+    window._calibrated_stiffness_length_mm = 50.0
+    window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP
+    window._active_target_ramp_start_value = 0.0
+    window._active_target_ramp_end_value = 400.0
+    window._active_target_ramp_rate_value_s = 5.0
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=392.0,
+        plateau_index=1,
+        note="1:up",
+    )
+
+    try:
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 392.0)
+        correction_mm = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            error_value=60.0,
+            tolerance=0.1,
+            seek_key=seek_key,
+        )
+
+        assert correction_mm == pytest.approx(3.0 / 142.0)
     finally:
         _close_test_window(window)
 
