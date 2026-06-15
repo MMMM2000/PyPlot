@@ -163,13 +163,13 @@ def supports_transition_review(run: MiniDmaRun) -> bool:
     """Return true when current-sweep transition extraction is meaningful."""
     if is_iso_current_run(run):
         return False
+    if _run_name_has_mode(run, "iso-strain") or _run_name_has_mode(run, "iso-current"):
+        return False
     modes = _run_recipe_mode_values(run)
     if modes.intersection(TRANSITION_REVIEW_UNSUPPORTED_RECIPE_MODES):
         return False
     if modes.intersection(TRANSITION_REVIEW_RECIPE_MODES):
         return True
-    if _run_name_has_mode(run, "iso-strain") or _run_name_has_mode(run, "iso-current"):
-        return False
     if _run_name_has_mode(run, "iso-stress") or "current-sweep" in _normalised_run_name(run):
         return True
     return bool(current_sweep_groups(run.frame, phases=SUMMARY_PHASES))

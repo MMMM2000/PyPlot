@@ -156,6 +156,42 @@ def _write_current_sweep_with_iso_current_columns(tmp_path: Path) -> Path:
     return run_path
 
 
+def _write_iso_strain_named_current_sweep(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 11_1 iso-strain_run09"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        '{'
+        '"sample_name": "Ni50Fe27Ga23 11_1 iso-strain", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "current_sweep_stress"}'
+        '}',
+        encoding="utf-8",
+    )
+    rows: list[dict[str, float | str | int]] = []
+    for current_mA, strain_pct in ((10.0, 0.1), (20.0, 0.3), (30.0, 0.6)):
+        rows.append(
+            {
+                "elapsed_s": len(rows),
+                "recipe_mode": "current_sweep_stress",
+                "automation_phase": "current",
+                "automation_target_value": 50.0,
+                "plateau_index": 50,
+                "strain_pct": strain_pct,
+                "current_relative_strain_pct": strain_pct,
+                "current_l0_mm": 58.0,
+                "current_relative_position_mm": strain_pct / 100.0 * 58.0,
+                "stress_mpa": 50.0,
+                "load_g": 1.0,
+                "resistance_ohm": 100.0 + current_mA,
+                "current_measured_mA": current_mA,
+                "current_set_mA": current_mA,
+            }
+        )
+    pd.DataFrame(rows).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
 def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
     run = core.load_run(SAMPLE_RUN)
 
@@ -276,6 +312,13 @@ def test_current_sweep_with_iso_current_columns_is_not_iso_current(tmp_path: Pat
     assert core.supports_transition_review(run) is True
     groups = core.current_sweep_groups(run.frame)
     assert [target for target, _group in groups] == [50.0, 100.0]
+
+
+def test_iso_strain_run_name_disables_transition_review(tmp_path: Path) -> None:
+    run = core.load_run(_write_iso_strain_named_current_sweep(tmp_path))
+
+    assert core.is_iso_current_run(run) is False
+    assert core.supports_transition_review(run) is False
 
 
 def test_iso_current_figure_uses_strain_stress_axes_and_current_legend(tmp_path: Path) -> None:
