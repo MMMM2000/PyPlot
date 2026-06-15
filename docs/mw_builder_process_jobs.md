@@ -177,3 +177,15 @@ Origin or Word COM for this flow.
 
 Codex can run the same command noninteractively, inspect the JSON artifacts, and
 resume diagnosis from the manifest paths.
+
+## Remaining UI Work
+
+The prototype is ready for a focused UI integration worker, but it is not yet
+used by the Assemble DOCX export button. The next implementation should:
+
+- generate a job JSON from the current export dialog choices,
+- launch `launcher.py --microwire-word-job <job.json>` through `QProcess`,
+- poll and render `status.json`, `progress.json`, and `job.log`,
+- make Stop create the configured cancel marker,
+- add cancel checks inside the Word/Origin export loop between samples and graph embedding batches,
+- keep the existing in-process export path available until the subprocess path has been verified with real embedded Origin OLE objects.
