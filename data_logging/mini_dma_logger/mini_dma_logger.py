@@ -332,6 +332,8 @@ DISPLAY_PLOT_BRIDGE_POINTS = 200
 DISPLAY_PLOT_BASE_BUCKET_S = 1.0
 DISPLAY_PLOT_OLD_CACHE_GRANULARITY = 1000
 IR_DASHBOARD_TEMPERATURE_WINDOW_S = 0.25
+MLX90640_SILENT_STATUS_TIMEOUT_S = 2.0
+MLX90640_UNPARSED_STATUS_TIMEOUT_S = 2.0
 DISPLAY_PLOT_BREAK_GAP_S = 30.0
 SCALE_REQUEST_TIMEOUT_MIN_S = 0.30
 SETUP_ZERO_FALLBACK_MIN_POINTS = 4
@@ -2728,6 +2730,12 @@ class Mlx90614Worker(QtCore.QObject):
         celsius_values: list[float] | None = None
         waiting_for_calibration_reported = False
         waiting_for_celsius_reported = False
+        started_s = time.monotonic()
+        bytes_started_s: float | None = None
+        packet_count = 0
+        silence_reported = False
+        unparsed_reported = False
+        text_status_tokens_reported: set[bytes] = set()
         try:
             port.write(f"{self.interval_code}\n".encode("ascii"))
             port.flush()
@@ -2737,9 +2745,49 @@ class Mlx90614Worker(QtCore.QObject):
         while not self._stop_event.is_set():
             chunk = port.read(4096)
             if not chunk:
+                if (
+                    not silence_reported
+                    and bytes_started_s is None
+                    and time.monotonic() - started_s >= MLX90640_SILENT_STATUS_TIMEOUT_S
+                ):
+                    self.status_changed.emit(
+                        "No MLX90640 serial bytes received yet. Check that the camera Nucleo is flashed "
+                        "with stm32cube_mlx90640_stream, reset it, and make sure no other app owns the port."
+                    )
+                    silence_reported = True
+                elif (
+                    not unparsed_reported
+                    and bytes_started_s is not None
+                    and packet_count == 0
+                    and time.monotonic() - bytes_started_s >= MLX90640_UNPARSED_STATUS_TIMEOUT_S
+                ):
+                    self.status_changed.emit(
+                        "Receiving serial bytes, but no MLXE/MLXR MLX90640 Cube raw packets yet. "
+                        "Check the selected IR sensor mode and flashed firmware."
+                    )
+                    unparsed_reported = True
                 continue
+            if bytes_started_s is None:
+                bytes_started_s = time.monotonic()
+            if b"MLX90614" in chunk and b"MLX90614" not in text_status_tokens_reported:
+                self.status_changed.emit(
+                    "Nucleo is streaming MLX90614 thermometer firmware; flash MLX90640 Cube raw firmware "
+                    "for the connected MLX90640 camera."
+                )
+                text_status_tokens_reported.add(b"MLX90614")
+            if b"FRAME_BEGIN" in chunk and b"FRAME_BEGIN" not in text_status_tokens_reported:
+                self.status_changed.emit(
+                    "Nucleo is streaming MLX90640 text frames, not Cube raw packets; flash/select the "
+                    "Cube raw MLX90640 firmware for Mini DMA live camera logging."
+                )
+                text_status_tokens_reported.add(b"FRAME_BEGIN")
+            if b"MLX90640_CUBE_ERROR" in chunk and b"MLX90640_CUBE_ERROR" not in text_status_tokens_reported:
+                text = chunk.decode("ascii", errors="ignore").strip()
+                self.status_changed.emit(text or "MLX90640 Cube firmware reported an error.")
+                text_status_tokens_reported.add(b"MLX90640_CUBE_ERROR")
             buffer.extend(chunk)
             eeprom_packets, frames = pop_cube_packets(buffer)
+            packet_count += len(eeprom_packets) + len(frames)
             for eeprom_words in eeprom_packets:
                 try:
                     calibrator = MLX90640Calibration(eeprom_words)
