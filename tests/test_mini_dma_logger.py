@@ -3624,6 +3624,34 @@ def test_manual_auto_connect_prepares_current_sweep_channel_without_enabling_out
         _close_test_window(window)
 
 
+def test_manual_auto_connect_warns_when_a_step_fails(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    warnings: list[str] = []
+
+    try:
+        window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._ensure_supply_ready_for_recipe = lambda: False  # type: ignore[method-assign]
+        window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        original_warning = QtWidgets.QMessageBox.warning
+        QtWidgets.QMessageBox.warning = (  # type: ignore[method-assign]
+            lambda _parent, _title, message: warnings.append(str(message))
+        )
+        try:
+            window._show_manual_auto_connect_progress()
+            window._run_manual_auto_connect_hardware()
+        finally:
+            QtWidgets.QMessageBox.warning = original_warning  # type: ignore[method-assign]
+
+        assert warnings == [
+            "Hardware auto-connect did not complete:\n\n- Power supply connection failed."
+        ]
+        assert "Manual hardware auto-connect did not complete: Power supply connection failed." in (
+            window.log_output.toPlainText()
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_microwire_entry_does_not_insert_slash_before_fourth_digit(qtbot) -> None:
     edit = mini_dma_mod.MicrowireLineEdit()
     qtbot.addWidget(edit)
@@ -11780,6 +11808,93 @@ def test_shared_broker_preflight_connects_without_serial_auto_detect(
 
         assert calls == []
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_preflight_repairs_bad_endpoint_without_serial_fallback(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clients: list[tuple[str, int]] = []
+    owned_broker_starts: list[bool] = []
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            clients.append((host, port))
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            if self.port != mini_dma_mod.DEFAULT_SHARED_BROKER_PORT:
+                raise TimeoutError("wrong broker endpoint")
+            if action == "snapshot":
+                return {"ok": True, "snapshot": {"model": "hmp4040"}}
+            return {"ok": True}
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.edit_shared_broker_host.setText("localhost")
+        window.spin_shared_broker_port.setValue(9999)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.check_motor_supply_power.setChecked(True)
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        window._start_owned_shared_broker = lambda: owned_broker_starts.append(True)  # type: ignore[method-assign]
+
+        assert window._ensure_supply_ready_for_recipe() is True
+
+        assert clients == [("localhost", 9999), ("127.0.0.1", mini_dma_mod.DEFAULT_SHARED_BROKER_PORT)]
+        assert owned_broker_starts == []
+        assert window.edit_shared_broker_host.text() == "127.0.0.1"
+        assert window.spin_shared_broker_port.value() == mini_dma_mod.DEFAULT_SHARED_BROKER_PORT
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+        log_text = window.log_output.toPlainText()
+        assert "trying default 127.0.0.1:8765" in log_text
+        assert "Supply connected through shared HMP broker" in log_text
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_preflight_does_not_open_serial_when_default_broker_is_down(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    owned_broker_starts: list[bool] = []
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            raise TimeoutError("broker unavailable")
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.spin_shared_broker_port.setValue(mini_dma_mod.DEFAULT_SHARED_BROKER_PORT)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._start_owned_shared_broker = lambda: owned_broker_starts.append(True)  # type: ignore[method-assign]
+
+        assert window._ensure_supply_ready_for_recipe() is False
+
+        assert owned_broker_starts == []
+        log_text = window.log_output.toPlainText()
+        assert "Mini DMA will not open the HMP serial port" in log_text
+        assert "broker unavailable" in log_text
     finally:
         _close_test_window(window)
 

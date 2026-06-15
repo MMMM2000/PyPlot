@@ -64,6 +64,8 @@ except Exception:  # pragma: no cover - import guard
 APP_NAME = "Mini DMA Logger"
 DEFAULT_LOG_BASENAME = "mini_dma"
 DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
+DEFAULT_SHARED_BROKER_HOST = "127.0.0.1"
+DEFAULT_SHARED_BROKER_PORT = 8765
 DEFAULT_ZERO_LOAD_SCALE_G = 21.2
 SESSION_MEASUREMENT_TX = "measurement.txt"
 SESSION_MEASUREMENT_CSV = "measurement.csv"
@@ -6357,13 +6359,13 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form.addRow("Baud", self.combo_supply_baud)
 
         broker_row = QtWidgets.QHBoxLayout()
-        self.edit_shared_broker_host = QtWidgets.QLineEdit("127.0.0.1", supply_box)
+        self.edit_shared_broker_host = QtWidgets.QLineEdit(DEFAULT_SHARED_BROKER_HOST, supply_box)
         self.edit_shared_broker_host.setMaximumWidth(120)
         self.edit_shared_broker_host.setToolTip("Shared HMP broker host.")
         broker_row.addWidget(self.edit_shared_broker_host)
         self.spin_shared_broker_port = QtWidgets.QSpinBox(supply_box)
         self.spin_shared_broker_port.setRange(1, 65535)
-        self.spin_shared_broker_port.setValue(8765)
+        self.spin_shared_broker_port.setValue(DEFAULT_SHARED_BROKER_PORT)
         self.spin_shared_broker_port.setMaximumWidth(90)
         self.spin_shared_broker_port.setToolTip("Shared HMP broker port.")
         broker_row.addWidget(self.spin_shared_broker_port)
@@ -9281,6 +9283,23 @@ class MainWindow(QtWidgets.QMainWindow):
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         return bool(SUPPLY_PROFILES.get(profile_id, {}).get("shared_broker", False))
 
+    def _shared_broker_endpoint(self) -> tuple[str, int]:
+        return self.edit_shared_broker_host.text().strip(), int(self.spin_shared_broker_port.value())
+
+    def _try_default_shared_broker_endpoint(self, failure: Exception) -> PowerSupplyController | None:
+        host, port = self._shared_broker_endpoint()
+        if host == DEFAULT_SHARED_BROKER_HOST and port == DEFAULT_SHARED_BROKER_PORT:
+            return None
+        self.edit_shared_broker_host.setText(DEFAULT_SHARED_BROKER_HOST)
+        self.spin_shared_broker_port.setValue(DEFAULT_SHARED_BROKER_PORT)
+        self._log(
+            f"Shared HMP broker at {host or '<blank>'}:{port} was not reachable ({failure}); "
+            f"trying default {DEFAULT_SHARED_BROKER_HOST}:{DEFAULT_SHARED_BROKER_PORT}."
+        )
+        controller = self._build_supply_controller()
+        controller.connect()
+        return controller
+
     def _apply_supply_profile_defaults(self) -> None:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
@@ -9297,13 +9316,64 @@ class MainWindow(QtWidgets.QMainWindow):
             if motor_channel_index >= 0:
                 self.combo_motor_supply_channel.setCurrentIndex(motor_channel_index)
 
-    def _connect_supply(self, checked: bool = False, *, show_errors: bool = True) -> bool:
+    def _connect_supply(
+        self,
+        checked: bool = False,
+        *,
+        show_errors: bool = True,
+        allow_start_owned_broker: bool = True,
+    ) -> bool:
         self._disconnect_supply()
+        if self._using_shared_broker_supply():
+            self._apply_shared_broker_endpoint_defaults_for_preflight()
         controller = self._build_supply_controller()
         try:
             controller.connect()
         except Exception as exc:
             if self._using_shared_broker_supply():
+                try:
+                    default_controller = self._try_default_shared_broker_endpoint(exc)
+                except Exception as default_exc:
+                    if not allow_start_owned_broker:
+                        message = (
+                            f"Shared HMP broker at {DEFAULT_SHARED_BROKER_HOST}:{DEFAULT_SHARED_BROKER_PORT} "
+                            f"is not reachable: {default_exc}. Start the shared broker or check its port; "
+                            "Mini DMA will not open the HMP serial port while using the shared-broker profile."
+                        )
+                        if show_errors:
+                            QtWidgets.QMessageBox.warning(
+                                self,
+                                APP_NAME,
+                                f"Failed to connect power supply: {message}",
+                            )
+                        else:
+                            self._log(f"Failed to connect power supply: {message}")
+                        return False
+                    exc = default_exc
+                else:
+                    if default_controller is not None:
+                        controller = default_controller
+                    else:
+                        default_controller = None
+                    if default_controller is not None:
+                        self._supply_controller = controller
+                        self.label_supply_status.setText(
+                            f"Supply connected through shared HMP broker at {controller.port_name}."
+                        )
+                        self._log(self.label_supply_status.text())
+                        self._refresh_supply_snapshot(force=True)
+                        return True
+                if not allow_start_owned_broker:
+                    message = (
+                        f"Shared HMP broker at {controller.port_name} is not reachable: {exc}. "
+                        "Start or select the existing shared broker; Mini DMA will not open the HMP serial port "
+                        "while using the shared-broker profile."
+                    )
+                    if show_errors:
+                        QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to connect power supply: {message}")
+                    else:
+                        self._log(f"Failed to connect power supply: {message}")
+                    return False
                 try:
                     self._start_owned_shared_broker()
                     controller = self._build_supply_controller()
@@ -9481,6 +9551,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 + ", ".join(changed)
                 + "."
             )
+
+    def _apply_shared_broker_endpoint_defaults_for_preflight(self) -> None:
+        if not self._using_shared_broker_supply():
+            return
+        changed: list[str] = []
+        host = self.edit_shared_broker_host.text().strip()
+        port = int(self.spin_shared_broker_port.value())
+        if not host:
+            self.edit_shared_broker_host.setText(DEFAULT_SHARED_BROKER_HOST)
+            changed.append(f"broker host {DEFAULT_SHARED_BROKER_HOST}")
+        if port <= 1:
+            self.spin_shared_broker_port.setValue(DEFAULT_SHARED_BROKER_PORT)
+            changed.append(f"broker port {DEFAULT_SHARED_BROKER_PORT}")
+        if changed:
+            self._log("Shared HMP broker endpoint defaults applied: " + ", ".join(changed) + ".")
 
     def _enable_motor_supply_output(self) -> bool:
         if self._supply_controller is None or not self._supply_controller.is_connected():
@@ -17349,34 +17434,43 @@ class MainWindow(QtWidgets.QMainWindow):
     def _run_manual_auto_connect_hardware(self) -> None:
         self._apply_shared_broker_bench_defaults_for_tic_preflight()
         connected = True
+        issues: list[str] = []
         connect_ir = self._manual_auto_connect_should_connect_ir()
         steps = 3 + (1 if self._motor_supply_enabled() else 0) + (1 if connect_ir else 0)
         completed_steps = 0
         try:
             self._set_manual_auto_connect_progress("Connecting scale...", completed_steps, steps)
             if self._scale_thread is None:
-                connected = self._ensure_scale_ready_for_recipe() and connected
+                if not self._ensure_scale_ready_for_recipe():
+                    issues.append("Scale connection failed.")
+                    connected = False
             completed_steps += 1
             self._set_manual_auto_connect_progress("Preparing current-sweep supply channel...", completed_steps, steps)
             if not self._ensure_supply_ready_for_recipe():
+                issues.append("Power supply connection failed.")
                 connected = False
             elif not self._prepare_current_sweep_supply_channel():
+                issues.append("Current-sweep supply channel could not be prepared.")
                 connected = False
             completed_steps += 1
             if self._motor_supply_enabled():
                 self._set_manual_auto_connect_progress("Preparing motor power supply...", completed_steps, steps)
                 if not self._ensure_supply_ready_for_recipe():
+                    issues.append("Motor power supply connection failed.")
                     connected = False
                 elif not self._enable_motor_supply_output():
+                    issues.append("Motor power supply output could not be enabled.")
                     connected = False
                 completed_steps += 1
             self._set_manual_auto_connect_progress("Connecting motor controller...", completed_steps, steps)
             if not self._ensure_tic_ready_for_recipe():
+                issues.append("Motor controller is not ready.")
                 connected = False
             completed_steps += 1
             if connect_ir:
                 self._set_manual_auto_connect_progress("Connecting IR camera/thermometer...", completed_steps, steps)
                 if self._ir_thread is None and not self._connect_ir_thermometer(show_errors=False):
+                    issues.append("IR camera/thermometer connection failed.")
                     connected = False
                 completed_steps += 1
             if connected:
@@ -17384,7 +17478,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log("Manual hardware auto-connect completed.")
             else:
                 self._set_manual_auto_connect_progress("Hardware auto-connect needs attention.", completed_steps, steps)
-                self._log("Manual hardware auto-connect did not complete; check the hardware status cards.")
+                issue_text = " ".join(issues) if issues else "Check the hardware status cards."
+                self._log(f"Manual hardware auto-connect did not complete: {issue_text}")
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    "Hardware auto-connect did not complete:\n\n"
+                    + "\n".join(f"- {issue}" for issue in issues or ["Check the hardware status cards."]),
+                )
             self._refresh_live_labels()
         finally:
             self._close_manual_auto_connect_progress()
@@ -19668,11 +19769,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_controller is not None and self._supply_controller.is_connected():
             return True
         self._log("Preflight: power supply is not connected, trying auto-detect/connect.")
+        if self._using_shared_broker_supply():
+            self._apply_shared_broker_bench_defaults_for_tic_preflight()
+            self._apply_shared_broker_endpoint_defaults_for_preflight()
         if not self._using_shared_broker_supply() and not str(self.combo_supply_port.currentData() or "").strip():
             self._refresh_supply_ports()
         if not self._using_shared_broker_supply():
             self._auto_detect_supply_port()
-        return self._connect_supply(show_errors=False)
+        return self._connect_supply(
+            show_errors=False,
+            allow_start_owned_broker=not self._using_shared_broker_supply(),
+        )
 
     def _ensure_tic_ready_for_recipe(self) -> bool:
         if not self.edit_tic_serial.text().strip():
@@ -25206,10 +25313,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.combo_supply_baud.findText(supply_baud) >= 0:
             self.combo_supply_baud.setCurrentText(supply_baud)
         self.edit_shared_broker_host.setText(
-            self.settings.value("shared_broker_host", "127.0.0.1", type=str)
+            self.settings.value("shared_broker_host", DEFAULT_SHARED_BROKER_HOST, type=str)
         )
         self.spin_shared_broker_port.setValue(
-            int(self.settings.value("shared_broker_port", 8765, type=int))
+            int(self.settings.value("shared_broker_port", DEFAULT_SHARED_BROKER_PORT, type=int))
         )
         current_sweep_channel = int(
             self.settings.value(
