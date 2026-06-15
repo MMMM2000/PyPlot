@@ -14,6 +14,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 import warnings
 from pathlib import Path
 from typing import Any, Callable, Sequence, cast
@@ -115,6 +116,10 @@ AC_PLOT_SPREAD_PIXELS = {
 AC_UI_TELEMETRY_INTERVAL_MS = 16
 AC_UI_TELEMETRY_REPORT_TICKS = 60
 AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
+_AC_EXCEPTION_HOOKS_INSTALLED = False
+_AC_PREVIOUS_SYS_EXCEPTHOOK: Any | None = None
+_AC_PREVIOUS_THREADING_EXCEPTHOOK: Any | None = None
+_AC_PREVIOUS_QT_MESSAGE_HANDLER: Any | None = None
 AC_LCR_SLOW_RETRY_MIN_FREQUENCY_HZ = 1000.0
 AC_LCR_SLOW_RETRY_MIN_RATE_HZ = 20.0
 AC_LCR_SLOW_RETRY_CHECK_S = 3.0
@@ -129,6 +134,82 @@ LEGACY_DEFAULT_LEVEL_TEXTS = {"0.1, 0.3, 1.0", "0.1, 0.3, 1"}
 LEGACY_CURRENT_LEVEL_TEXTS = {"1, 5, 10, 20", "1, 5, 20", "1, 5, 10, 20.0"}
 DEFAULT_CURRENT_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
 DEFAULT_VOLTAGE_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
+
+
+def _write_ac_global_diagnostic(event: str, **payload: Any) -> None:
+    try:
+        AC_DIAGNOSTICS_DEFAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            "event": event,
+            **payload,
+        }
+        with AC_DIAGNOSTICS_DEFAULT_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def _install_ac_exception_hooks() -> None:
+    global _AC_EXCEPTION_HOOKS_INSTALLED
+    global _AC_PREVIOUS_SYS_EXCEPTHOOK
+    global _AC_PREVIOUS_THREADING_EXCEPTHOOK
+    global _AC_PREVIOUS_QT_MESSAGE_HANDLER
+    if _AC_EXCEPTION_HOOKS_INSTALLED:
+        return
+    _AC_EXCEPTION_HOOKS_INSTALLED = True
+    _AC_PREVIOUS_SYS_EXCEPTHOOK = sys.excepthook
+    _AC_PREVIOUS_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
+
+    def _sys_hook(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
+        _write_ac_global_diagnostic(
+            "sys_excepthook",
+            exception_type=getattr(exc_type, "__name__", str(exc_type)),
+            message=str(exc),
+            traceback="".join(traceback.format_exception(exc_type, exc, tb)),
+        )
+        previous = _AC_PREVIOUS_SYS_EXCEPTHOOK
+        if callable(previous):
+            previous(exc_type, exc, tb)
+
+    def _thread_hook(args: Any) -> None:
+        _write_ac_global_diagnostic(
+            "threading_excepthook",
+            thread=getattr(getattr(args, "thread", None), "name", ""),
+            exception_type=getattr(getattr(args, "exc_type", None), "__name__", str(getattr(args, "exc_type", ""))),
+            message=str(getattr(args, "exc_value", "")),
+            traceback="".join(
+                traceback.format_exception(
+                    getattr(args, "exc_type", BaseException),
+                    getattr(args, "exc_value", None),
+                    getattr(args, "exc_traceback", None),
+                )
+            ),
+        )
+        previous = _AC_PREVIOUS_THREADING_EXCEPTHOOK
+        if callable(previous):
+            previous(args)
+
+    sys.excepthook = _sys_hook
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _thread_hook  # type: ignore[assignment]
+
+    def _qt_message_handler(mode: Any, context: Any, message: str) -> None:
+        mode_name = getattr(mode, "name", str(mode))
+        if "Fatal" in mode_name or "Critical" in mode_name:
+            _write_ac_global_diagnostic(
+                "qt_message",
+                mode=mode_name,
+                message=str(message),
+                file=getattr(context, "file", ""),
+                line=getattr(context, "line", 0),
+                function=getattr(context, "function", ""),
+            )
+        previous = _AC_PREVIOUS_QT_MESSAGE_HANDLER
+        if callable(previous):
+            previous(mode, context, message)
+
+    _AC_PREVIOUS_QT_MESSAGE_HANDLER = QtCore.qInstallMessageHandler(_qt_message_handler)
 
 
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
@@ -575,6 +656,14 @@ class AcSweepWorker(QtCore.QObject):
             if self._stop_requested:
                 self.finished.emit(str(self.output_path), True)
                 return
+            sweep.record_ac_run_exception(self.output_path, exc, phase="worker_exception")
+            _write_ac_global_diagnostic(
+                "ac_sweep_worker_exception",
+                output_path=str(self.output_path),
+                message=str(exc),
+                exception_type=type(exc).__name__,
+                traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            )
             self.failed.emit(str(exc))
 
 
@@ -680,6 +769,7 @@ class MainWindow(CurrentAnnealingWindow):
     """Current annealing logger extended with LCR-6200 measurements."""
 
     def __init__(self) -> None:
+        _install_ac_exception_hooks()
         self.ac_settings = QtCore.QSettings("microwire", "ac_susceptibility_logger")
         self.lcr_meter: Lcr6000Serial | None = None
         self._lcr_plan: list[Lcr6000Settings] = []
@@ -3091,6 +3181,20 @@ class MainWindow(CurrentAnnealingWindow):
             )
         else:
             message = resume_plan.summary
+        unclean_statuses = [item for item in resume_plan.run_statuses if item.is_unclean]
+        if unclean_statuses:
+            details = "\n".join(
+                f"- {item.output_path.name}: {item.status}"
+                for item in unclean_statuses[:5]
+            )
+            if len(unclean_statuses) > 5:
+                details += "\n- ..."
+            message = (
+                f"{message}\n\n"
+                "Previous run status warning:\n"
+                f"{details}\n\n"
+                "Continuation will still repeat any partial setting from its first current point."
+            )
         response = QtWidgets.QMessageBox.question(
             self,
             "Continue AC sweep",

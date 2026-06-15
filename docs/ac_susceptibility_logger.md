@@ -371,6 +371,16 @@ each row. It records cadence-sampled settle-window and measurement-window rows
 with the LCR setting, current setpoint, PSU readback, broker metadata when used,
 aggregation metadata, and a close record with the stop reason.
 
+Every microwire current sweep also writes a durable
+`<sweep>_run_status.json` sidecar. This file is flushed throughout the run with
+the process ID, heartbeat timestamp, active setting/current point, rows written,
+output paths, shared-HMP channel/lease context when available, and the final
+status on completion, user stop, or handled error. If a previous TSV is selected
+with **Continue from previous sweep...** and its heartbeat looks stale or its
+debug stream has no close marker, the continuation prompt reports the unclean
+status. Resume remains setting-granular: complete settings can be skipped, but a
+partial setting is measured again from its first current point.
+
 The default debug cadence is `1 s` and the default cap is `120` rows per
 setting/current/phase. Debug logging is off by default so ordinary overnight
 sweeps keep their existing TSV output and plot behavior.
