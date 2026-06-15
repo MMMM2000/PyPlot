@@ -19295,7 +19295,7 @@ class MainWindow(QtWidgets.QMainWindow):
         load_g: float,
         load_summary: ScaleIntervalSummary | None = None,
     ) -> MeasurementPoint:
-        specimen_position_mm = float(position_mm) if effective_position_mm is None else float(effective_position_mm)
+        specimen_position_mm = float(position_mm)
         preload_state = self._current_preload_state(load_g)
         config = self._control_config()
         preload_threshold_g = (
@@ -19389,8 +19389,7 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_load_g = float(self._latest_scale_value_g)
         load_g = self._current_effective_load_g()
         position_mm = self._measurement_position_mm()
-        effective_position_mm = self._measurement_effective_position_mm()
-        specimen_position_mm = effective_position_mm
+        specimen_position_mm = float(position_mm)
         preload_state = self._current_preload_state(load_g)
         strain = None
         stress = None

@@ -4384,6 +4384,32 @@ def test_constant_current_measurement_logs_current_relative_zero_coordinates(tmp
         _close_test_window(window)
 
 
+def test_measurement_logs_strain_from_raw_position_not_effective_target(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.spin_initial_length.setValue(10.0)
+        window.check_positive_motion_is_tension.setChecked(True)
+        window._position_reference_mm = 0.0
+        window._active_constant_current_zero_position_mm = 0.25
+        window._active_constant_current_zero_current_mA = 50.0
+
+        point = window._capture_measurement_point(
+            elapsed_s=1.0,
+            position_mm=0.40,
+            effective_position_mm=-0.20,
+            raw_load_g=0.0,
+            load_g=0.0,
+        )
+
+        assert point.raw_position_mm == pytest.approx(0.40)
+        assert point.position_mm == pytest.approx(0.40)
+        assert point.strain_pct == pytest.approx(4.0)
+        assert point.current_relative_position_mm == pytest.approx(0.15)
+        assert point.current_relative_strain_pct == pytest.approx(100.0 * 0.15 / 10.25)
+    finally:
+        _close_test_window(window)
+
+
 def test_constant_current_recipe_commands_at_least_one_milliamp(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
@@ -7757,11 +7783,13 @@ def test_ui_refresh_adds_live_plot_sample_without_logging_or_supply_io(
         window._session_logging_enabled = True
         window._session_start_monotonic = 90.0
         window.spin_zero_load_scale_g.setValue(21.2)
+        window.spin_initial_length.setValue(20.0)
         window.check_tension_load_positive.setChecked(True)
+        window.check_positive_motion_is_tension.setChecked(True)
         window._latest_scale_value_g = 21.0
         window._latest_scale_timestamp = 123.0
         window._current_position_mm = -0.4
-        window._effective_position_mm = -0.4
+        window._effective_position_mm = 0.1
         window._position_reference_mm = 0.0
         window._supply_last_setpoint_mA = 50.0
         window._supply_snapshot = {
@@ -7779,6 +7807,9 @@ def test_ui_refresh_adds_live_plot_sample_without_logging_or_supply_io(
         assert plot_refreshes == [True]
         point = window._live_plot_points[0]
         assert point.elapsed_s == pytest.approx(10.0)
+        assert point.raw_position_mm == pytest.approx(-0.4)
+        assert point.position_mm == pytest.approx(-0.4)
+        assert point.strain_pct == pytest.approx(-2.0)
         assert point.load_g == pytest.approx(0.2)
         assert point.current_measured_mA == pytest.approx(49.0)
         assert point.resistance_ohm == pytest.approx(50.0)
@@ -14743,8 +14774,8 @@ def test_backlash_takeup_is_not_logged_as_tensile_displacement(tmp_path: Path, q
         assert reached is False
         assert controller.targets == [45]
         assert point.raw_position_mm == pytest.approx(0.045)
-        assert point.position_mm == pytest.approx(0.075)
-        assert point.strain_pct == pytest.approx(0.75)
+        assert point.position_mm == pytest.approx(0.045)
+        assert point.strain_pct == pytest.approx(0.45)
     finally:
         _close_test_window(window)
 
