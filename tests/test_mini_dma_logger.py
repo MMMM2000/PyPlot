@@ -4238,14 +4238,13 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         window.spin_constant_current_end_target.setValue(500.0)
         window.spin_constant_current_step_size.setValue(0.01)
         window.spin_constant_current_hold_s.setValue(1.0)
-        window.spin_constant_current_move_speed_mm_s.setValue(0.05)
+        window.spin_constant_current_move_speed_mm_s.setValue(0.2)
         window.spin_constant_current_start_mA.setValue(40.0)
         window.spin_constant_current_end_mA.setValue(50.0)
         window.spin_constant_current_step_mA.setValue(10.0)
         window.spin_constant_current_transition_stress_mpa.setValue(10.0)
         window.spin_constant_current_transition_rate_mA_s.setValue(1.0)
         window.spin_constant_current_transition_settle_s.setValue(1.0)
-        window.check_constant_current_return_to_start.setChecked(True)
 
         steps, summary, interval_ms = window._build_automation_recipe()
 
@@ -4269,6 +4268,7 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         assert all(step.target_value == pytest.approx(10.0) for step in sweep_steps)
         assert all(step.current_ramp_rate_mA_s == pytest.approx(1.0) for step in sweep_steps)
         assert all(step.current_hold_enabled is True for step in sweep_steps)
+        assert all(step.mechanical_step_speed_mm_s == pytest.approx(0.2) for step in scan_steps)
         assert len(transition_settle_steps) == 2
         assert [step.current_mA for step in zero_steps] == pytest.approx([40.0, 50.0])
         assert [step.note for step in recipe_steps[:6]] == [
@@ -4289,6 +4289,7 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         assert not any(step.action == "ramp_target" for step in recipe_steps)
         assert "Started iso-current stress-strain recipe" in summary
         assert "Current transitions ramp at 1.000 mA/s" in summary
+        assert "Each current leg scans up and back" in summary
     finally:
         _close_test_window(window)
 
@@ -4685,6 +4686,27 @@ def test_constant_current_recipe_has_no_max_step_cap_setting(tmp_path: Path, qtb
         assert not hasattr(window, "spin_constant_current_step_limit")
         labels = [label.text() for label in window.recipe_stack.currentWidget().findChildren(QtWidgets.QLabel)]
         assert "Max steps per leg" not in labels
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_current_transition_controls_are_collapsible_and_always_on(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+        assert window.button_constant_current_transition_details.arrowType() == QtCore.Qt.ArrowType.RightArrow
+        assert window.constant_current_transition_panel.isHidden() is True
+        assert window.check_constant_current_transition_enabled.isHidden() is True
+        assert window.check_constant_current_return_to_start.isHidden() is True
+        assert window.check_constant_current_transition_hold_on_error.isChecked() is True
+        assert "hold on" in window.label_constant_current_transition_summary.text()
+
+        window.button_constant_current_transition_details.setChecked(True)
+
+        assert window.button_constant_current_transition_details.arrowType() == QtCore.Qt.ArrowType.DownArrow
+        assert window.constant_current_transition_panel.isHidden() is False
     finally:
         _close_test_window(window)
 

@@ -7631,6 +7631,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_constant_current_start_basis = QtWidgets.QComboBox(automation_box)
         for basis_key in (HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT):
             self.combo_constant_current_start_basis.addItem(HSW_BASIS_LABELS[basis_key], basis_key)
+        self.label_constant_current_targets_section = QtWidgets.QLabel("Stress targets", automation_box)
+        constant_current_targets_font = self.label_constant_current_targets_section.font()
+        constant_current_targets_font.setBold(True)
+        self.label_constant_current_targets_section.setFont(constant_current_targets_font)
+        constant_current_form.addRow("", self.label_constant_current_targets_section)
         constant_current_form.addRow("Start target", self.combo_constant_current_start_basis)
         self.spin_constant_current_start_target = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_start_target.setDecimals(3)
@@ -7653,6 +7658,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_constant_current_step_basis = QtWidgets.QComboBox(automation_box)
         self.combo_constant_current_step_basis.addItem("Displacement (mm)", MECHANICAL_STEP_DISPLACEMENT_MM)
         self.combo_constant_current_step_basis.addItem("Strain (%)", HSW_BASIS_STRAIN_PCT)
+        self.label_constant_current_mechanical_section = QtWidgets.QLabel("Mechanical scan", automation_box)
+        constant_current_mechanical_font = self.label_constant_current_mechanical_section.font()
+        constant_current_mechanical_font.setBold(True)
+        self.label_constant_current_mechanical_section.setFont(constant_current_mechanical_font)
+        constant_current_form.addRow("", self.label_constant_current_mechanical_section)
         constant_current_form.addRow("Step basis", self.combo_constant_current_step_basis)
         self.spin_constant_current_step_size = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_step_size.setDecimals(4)
@@ -7669,66 +7679,133 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_move_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_move_speed_mm_s.setDecimals(3)
         self.spin_constant_current_move_speed_mm_s.setRange(0.001, 50.0)
-        self.spin_constant_current_move_speed_mm_s.setValue(0.05)
+        self.spin_constant_current_move_speed_mm_s.setValue(0.2)
         self.spin_constant_current_move_speed_mm_s.setSuffix(" mm/s")
         constant_current_form.addRow("Step speed", self.spin_constant_current_move_speed_mm_s)
+        self.label_constant_current_current_section = QtWidgets.QLabel("Current levels", automation_box)
+        constant_current_current_font = self.label_constant_current_current_section.font()
+        constant_current_current_font.setBold(True)
+        self.label_constant_current_current_section.setFont(constant_current_current_font)
+        constant_current_form.addRow("", self.label_constant_current_current_section)
         self.spin_constant_current_start_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_start_mA.setDecimals(2)
         self.spin_constant_current_start_mA.setRange(0.0, 5000.0)
         self.spin_constant_current_start_mA.setValue(1.0)
         self.spin_constant_current_start_mA.setSuffix(" mA")
-        constant_current_form.addRow("Current start", self.spin_constant_current_start_mA)
+        constant_current_start_mA_row, self.label_constant_current_start_density = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_start_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_constant_current_start_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        constant_current_form.addRow("Start", constant_current_start_mA_row)
         self.spin_constant_current_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_end_mA.setDecimals(2)
         self.spin_constant_current_end_mA.setRange(0.0, 5000.0)
         self.spin_constant_current_end_mA.setValue(80.0)
         self.spin_constant_current_end_mA.setSuffix(" mA")
-        constant_current_form.addRow("Current end", self.spin_constant_current_end_mA)
+        constant_current_end_mA_row, self.label_constant_current_end_density = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_end_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_constant_current_end_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        constant_current_form.addRow("End", constant_current_end_mA_row)
         self.spin_constant_current_step_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_step_mA.setDecimals(2)
         self.spin_constant_current_step_mA.setRange(0.01, 5000.0)
         self.spin_constant_current_step_mA.setValue(10.0)
         self.spin_constant_current_step_mA.setSuffix(" mA")
-        constant_current_form.addRow("Current step", self.spin_constant_current_step_mA)
-        constant_current_transition_label = QtWidgets.QLabel("Current transition", automation_box)
-        transition_font = constant_current_transition_label.font()
-        transition_font.setBold(True)
-        constant_current_transition_label.setFont(transition_font)
-        constant_current_form.addRow("", constant_current_transition_label)
+        constant_current_step_mA_row, self.label_constant_current_step_density = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_constant_current_step_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_constant_current_step_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        constant_current_form.addRow("Step", constant_current_step_mA_row)
+        constant_transition_header = QtWidgets.QWidget(automation_box)
+        constant_transition_header_layout = QtWidgets.QHBoxLayout(constant_transition_header)
+        constant_transition_header_layout.setContentsMargins(0, 0, 0, 0)
+        constant_transition_header_layout.setSpacing(8)
+        self.button_constant_current_transition_details = QtWidgets.QToolButton(constant_transition_header)
+        self.button_constant_current_transition_details.setText("Current transition")
+        self.button_constant_current_transition_details.setCheckable(True)
+        self.button_constant_current_transition_details.setChecked(False)
+        self.button_constant_current_transition_details.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.button_constant_current_transition_details.setToolButtonStyle(
+            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        constant_transition_header_layout.addWidget(self.button_constant_current_transition_details)
+        self.label_constant_current_transition_summary = QtWidgets.QLabel("", constant_transition_header)
+        self.label_constant_current_transition_summary.setWordWrap(True)
+        self.label_constant_current_transition_summary.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        constant_transition_header_layout.addWidget(self.label_constant_current_transition_summary, stretch=1)
+        constant_current_form.addRow("", constant_transition_header)
+        self.constant_current_transition_panel = QtWidgets.QWidget(automation_box)
+        constant_current_transition_form = QtWidgets.QFormLayout(self.constant_current_transition_panel)
+        constant_current_transition_form.setContentsMargins(0, 4, 0, 0)
+        constant_current_form.addRow("", self.constant_current_transition_panel)
+        self.constant_current_transition_panel.setVisible(False)
+        self.button_constant_current_transition_details.toggled.connect(
+            self._toggle_constant_current_transition_details
+        )
         self.check_constant_current_transition_enabled = QtWidgets.QCheckBox(
             "Ramp to each current before stress-strain scan",
-            automation_box,
+            self.constant_current_transition_panel,
         )
         self.check_constant_current_transition_enabled.setChecked(True)
-        constant_current_form.addRow("", self.check_constant_current_transition_enabled)
-        self.spin_constant_current_transition_stress_mpa = CompactDoubleSpinBox(automation_box)
+        self.check_constant_current_transition_enabled.setVisible(False)
+        self.spin_constant_current_transition_stress_mpa = CompactDoubleSpinBox(self.constant_current_transition_panel)
         self.spin_constant_current_transition_stress_mpa.setDecimals(3)
         self.spin_constant_current_transition_stress_mpa.setRange(0.0, 100000.0)
         self.spin_constant_current_transition_stress_mpa.setValue(ISO_CURRENT_TRANSITION_DEFAULT_STRESS_MPA)
         self.spin_constant_current_transition_stress_mpa.setSuffix(" MPa")
         constant_current_transition_row, self.label_constant_current_transition_equiv = self._spin_with_equivalent_label(
-            automation_box,
+            self.constant_current_transition_panel,
             self.spin_constant_current_transition_stress_mpa,
         )
-        constant_current_form.addRow("Transition stress", constant_current_transition_row)
-        self.spin_constant_current_transition_rate_mA_s = CompactDoubleSpinBox(automation_box)
+        constant_current_transition_form.addRow("Stress", constant_current_transition_row)
+        self.spin_constant_current_transition_rate_mA_s = CompactDoubleSpinBox(self.constant_current_transition_panel)
         self.spin_constant_current_transition_rate_mA_s.setDecimals(3)
         self.spin_constant_current_transition_rate_mA_s.setRange(0.001, 5000.0)
         self.spin_constant_current_transition_rate_mA_s.setValue(ISO_CURRENT_TRANSITION_DEFAULT_RATE_MA_S)
         self.spin_constant_current_transition_rate_mA_s.setSuffix(" mA/s")
-        constant_current_form.addRow("Transition current ramp", self.spin_constant_current_transition_rate_mA_s)
-        self.spin_constant_current_transition_settle_s = CompactDoubleSpinBox(automation_box)
+        constant_transition_rate_row, self.label_constant_current_transition_rate_density = self._spin_with_equivalent_label(
+            self.constant_current_transition_panel,
+            self.spin_constant_current_transition_rate_mA_s,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_constant_current_transition_rate_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        constant_current_transition_form.addRow("Current ramp", constant_transition_rate_row)
+        self.spin_constant_current_transition_settle_s = CompactDoubleSpinBox(self.constant_current_transition_panel)
         self.spin_constant_current_transition_settle_s.setDecimals(2)
         self.spin_constant_current_transition_settle_s.setRange(0.0, 3600.0)
         self.spin_constant_current_transition_settle_s.setValue(ISO_CURRENT_TRANSITION_DEFAULT_SETTLE_S)
         self.spin_constant_current_transition_settle_s.setSuffix(" s")
-        constant_current_form.addRow("Transition settle", self.spin_constant_current_transition_settle_s)
+        constant_current_transition_form.addRow("Settle", self.spin_constant_current_transition_settle_s)
+        self.check_constant_current_transition_hold_on_error = QtWidgets.QCheckBox(
+            "Pause while target recovers",
+            self.constant_current_transition_panel,
+        )
+        self.check_constant_current_transition_hold_on_error.setChecked(True)
+        self.check_constant_current_transition_hold_on_error.setToolTip(
+            "Hold the transition current setpoint when stress is too far from the transition target, "
+            "while the displacement servo keeps correcting."
+        )
+        constant_current_transition_form.addRow("", self.check_constant_current_transition_hold_on_error)
         self.check_constant_current_return_to_start = QtWidgets.QCheckBox(
             "Step back to the start target after each current",
             automation_box,
         )
         self.check_constant_current_return_to_start.setChecked(True)
-        constant_current_form.addRow("", self.check_constant_current_return_to_start)
+        self.check_constant_current_return_to_start.setVisible(False)
         self.recipe_stack.addWidget(constant_current_page)
 
         automation_form.addRow("", self.recipe_stack)
@@ -8206,6 +8283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
+        self.check_constant_current_transition_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
         self.spin_preload_threshold_g.valueChanged.connect(self._refresh_live_labels)
         self.combo_distribution_basis.currentIndexChanged.connect(self._update_distribution_basis_ui)
@@ -8216,8 +8294,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_constant_current_start_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
         self.combo_constant_current_step_basis.currentIndexChanged.connect(self._update_constant_current_basis_ui)
         self.combo_constant_current_step_basis.currentIndexChanged.connect(self._update_recipe_mode_ui)
-        self.check_constant_current_transition_enabled.toggled.connect(self._update_recipe_mode_ui)
-        self.check_constant_current_return_to_start.toggled.connect(self._update_recipe_mode_ui)
         self.spin_steps_per_mm.valueChanged.connect(self._clamp_motion_resolution_controls)
         self.spin_steps_per_mm.valueChanged.connect(self._update_recipe_mode_ui)
 
@@ -12130,15 +12206,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_density_text(float(self.spin_current_sweep_step_mA.value()), per_second=True)
         )
         constant_basis = self._constant_current_start_basis()
+        if hasattr(self, "label_constant_current_targets_section"):
+            if constant_basis == HSW_BASIS_LOAD_G:
+                self.label_constant_current_targets_section.setText("Load targets")
+            elif constant_basis == HSW_BASIS_STRAIN_PCT:
+                self.label_constant_current_targets_section.setText("Strain targets")
+            else:
+                self.label_constant_current_targets_section.setText("Stress targets")
         self.label_constant_current_start_equiv.setText(
             self._target_equivalent_text(constant_basis, float(self.spin_constant_current_start_target.value()))
         )
         self.label_constant_current_end_equiv.setText(
             self._target_equivalent_text(constant_basis, float(self.spin_constant_current_end_target.value()))
         )
+        self.label_constant_current_start_density.setText(
+            self._current_density_text(float(self.spin_constant_current_start_mA.value()))
+        )
+        self.label_constant_current_end_density.setText(
+            self._current_density_text(float(self.spin_constant_current_end_mA.value()))
+        )
+        self.label_constant_current_step_density.setText(
+            self._current_density_text(float(self.spin_constant_current_step_mA.value()))
+        )
         self.label_constant_current_transition_equiv.setText(
             self._load_equivalent_text(float(self.spin_constant_current_transition_stress_mpa.value()))
         )
+        self.label_constant_current_transition_rate_density.setText(
+            self._current_density_text(float(self.spin_constant_current_transition_rate_mA_s.value()), per_second=True)
+        )
+        self._update_constant_current_transition_summary()
 
     def _set_position_reference_now(self) -> None:
         self._position_reference_mm = self._effective_position_mm
@@ -13679,6 +13775,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
             )
 
+    def _toggle_constant_current_transition_details(self, checked: bool) -> None:
+        if hasattr(self, "constant_current_transition_panel"):
+            self.constant_current_transition_panel.setVisible(bool(checked))
+        if hasattr(self, "button_constant_current_transition_details"):
+            self.button_constant_current_transition_details.setArrowType(
+                QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow
+            )
+        self._update_recipe_mode_ui()
+
     def _toggle_manual_action_settings(self, checked: bool) -> None:
         if hasattr(self, "manual_action_settings_panel"):
             self.manual_action_settings_panel.setVisible(bool(checked))
@@ -13760,6 +13865,31 @@ class MainWindow(QtWidgets.QMainWindow):
             f"On: {preload_text}, {duration_text} ramp, {settle_text} settle"
         )
         self.label_setup_summary.setStyleSheet("color: palette(text);")
+
+    def _update_constant_current_transition_summary(self) -> None:
+        if not hasattr(self, "label_constant_current_transition_summary"):
+            return
+        stress_text = _format_compact_unit(
+            float(self.spin_constant_current_transition_stress_mpa.value()),
+            "MPa",
+            decimals=3,
+        )
+        load_text = self._load_equivalent_text(float(self.spin_constant_current_transition_stress_mpa.value()))
+        rate_text = _format_compact_unit(
+            float(self.spin_constant_current_transition_rate_mA_s.value()),
+            "mA/s",
+            decimals=3,
+        )
+        settle_text = _format_compact_unit(
+            float(self.spin_constant_current_transition_settle_s.value()),
+            "s",
+            decimals=2,
+        )
+        hold_text = "hold on" if self.check_constant_current_transition_hold_on_error.isChecked() else "hold off"
+        self.label_constant_current_transition_summary.setText(
+            f"On: {stress_text} ({load_text}), {rate_text}, {settle_text} settle, {hold_text}"
+        )
+        self.label_constant_current_transition_summary.setStyleSheet("color: palette(text);")
 
     def _distribution_units(self, basis: str | None = None) -> tuple[str, int]:
         basis = basis or self._distribution_basis()
@@ -16472,19 +16602,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"then fixed {_format_compact_unit(abs(self.spin_constant_current_step_size.value()), step_suffix, decimals=4)} "
                 f"mechanical steps until {_format_compact_number(self.spin_constant_current_end_target.value())}{suffix}."
             )
-            if self.check_constant_current_transition_enabled.isChecked():
-                transition_load = self._load_equivalent_text(
-                    float(self.spin_constant_current_transition_stress_mpa.value())
-                )
-                summary += (
-                    " Current transition ramps at "
-                    f"{_format_compact_unit(self.spin_constant_current_transition_rate_mA_s.value(), 'mA/s', decimals=3)} "
-                    f"while holding {_format_compact_unit(self.spin_constant_current_transition_stress_mpa.value(), 'MPa', decimals=3)}"
-                    f" ({transition_load}), then settles "
-                    f"{_format_compact_unit(self.spin_constant_current_transition_settle_s.value(), 's', decimals=2)}."
-                )
-            if self.check_constant_current_return_to_start.isChecked():
-                summary += " Steps back to the start target after each current."
+            transition_load = self._load_equivalent_text(
+                float(self.spin_constant_current_transition_stress_mpa.value())
+            )
+            summary += (
+                " Current transition ramps at "
+                f"{_format_compact_unit(self.spin_constant_current_transition_rate_mA_s.value(), 'mA/s', decimals=3)} "
+                f"while holding {_format_compact_unit(self.spin_constant_current_transition_stress_mpa.value(), 'MPa', decimals=3)}"
+                f" ({transition_load}), then settles "
+                f"{_format_compact_unit(self.spin_constant_current_transition_settle_s.value(), 's', decimals=2)}."
+            )
+            if self.check_constant_current_transition_hold_on_error.isChecked():
+                summary += " Transition current pauses while the target recovers."
+            summary += " Each current leg scans up and back to the start target."
             summary += (
                 f" Holds/logs {_format_compact_unit(self.spin_constant_current_hold_s.value(), 's', decimals=2)} "
                 "after fresh feedback for each displacement step."
@@ -19843,11 +19973,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_start_mA": float(self.spin_constant_current_start_mA.value()),
                 "current_end_mA": float(self.spin_constant_current_end_mA.value()),
                 "current_step_mA": float(self.spin_constant_current_step_mA.value()),
-                "transition_enabled": bool(self.check_constant_current_transition_enabled.isChecked()),
+                "transition_enabled": True,
                 "transition_stress_mpa": float(self.spin_constant_current_transition_stress_mpa.value()),
                 "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
                 "transition_settle_s": float(self.spin_constant_current_transition_settle_s.value()),
-                "return_to_start": bool(self.check_constant_current_return_to_start.isChecked()),
+                "transition_hold_on_error": bool(self.check_constant_current_transition_hold_on_error.isChecked()),
+                "return_to_start": True,
             }
         return payload
 
@@ -19971,9 +20102,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_mA.setValue(float(constant_current.get("current_start_mA", self.spin_constant_current_start_mA.value())))
             self.spin_constant_current_end_mA.setValue(float(constant_current.get("current_end_mA", self.spin_constant_current_end_mA.value())))
             self.spin_constant_current_step_mA.setValue(float(constant_current.get("current_step_mA", self.spin_constant_current_step_mA.value())))
-            self.check_constant_current_transition_enabled.setChecked(
-                bool(constant_current.get("transition_enabled", self.check_constant_current_transition_enabled.isChecked()))
-            )
+            self.check_constant_current_transition_enabled.setChecked(True)
             self.spin_constant_current_transition_stress_mpa.setValue(
                 float(
                     constant_current.get(
@@ -20002,6 +20131,14 @@ class MainWindow(QtWidgets.QMainWindow):
                             self.spin_constant_current_transition_settle_s.value(),
                         )
                     ),
+                )
+            )
+            self.check_constant_current_transition_hold_on_error.setChecked(
+                bool(
+                    constant_current.get(
+                        "transition_hold_on_error",
+                        self.check_constant_current_transition_hold_on_error.isChecked(),
+                    )
                 )
             )
             self.check_constant_current_return_to_start.setChecked(bool(constant_current.get("return_to_start", self.check_constant_current_return_to_start.isChecked())))
@@ -22680,10 +22817,11 @@ class MainWindow(QtWidgets.QMainWindow):
             current_start = float(self.spin_constant_current_start_mA.value())
             current_end = float(self.spin_constant_current_end_mA.value())
             current_step = abs(float(self.spin_constant_current_step_mA.value()))
-            transition_enabled = bool(self.check_constant_current_transition_enabled.isChecked())
+            transition_enabled = True
             transition_stress_mpa = float(self.spin_constant_current_transition_stress_mpa.value())
             transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
             transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
+            transition_hold_enabled = bool(self.check_constant_current_transition_hold_on_error.isChecked())
             if mechanical_step_value <= 0.0:
                 raise ValueError("Set a non-zero mechanical step size.")
             if current_step <= 0.0:
@@ -22718,7 +22856,7 @@ class MainWindow(QtWidgets.QMainWindow):
                             current_start_mA=transition_start_mA,
                             current_end_mA=current_mA,
                             current_ramp_rate_mA_s=transition_rate_mA_s,
-                            current_hold_enabled=True,
+                            current_hold_enabled=transition_hold_enabled,
                             current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
                             current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
                             current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
@@ -22777,20 +22915,19 @@ class MainWindow(QtWidgets.QMainWindow):
                         note=f"{note_prefix}:up",
                     )
                 )
-                if self.check_constant_current_return_to_start.isChecked():
-                    steps.append(
-                        AutomationStep(
-                            "mechanical_scan",
-                            target_value=start_target,
-                            basis=basis,
-                            current_mA=current_mA,
-                            mechanical_step_basis=mechanical_step_basis,
-                            mechanical_step_value=mechanical_step_value,
-                            mechanical_step_speed_mm_s=mechanical_step_speed_mm_s,
-                            duration_s=hold_s,
-                            note=f"{note_prefix}:down",
-                        )
+                steps.append(
+                    AutomationStep(
+                        "mechanical_scan",
+                        target_value=start_target,
+                        basis=basis,
+                        current_mA=current_mA,
+                        mechanical_step_basis=mechanical_step_basis,
+                        mechanical_step_value=mechanical_step_value,
+                        mechanical_step_speed_mm_s=mechanical_step_speed_mm_s,
+                        duration_s=hold_s,
+                        note=f"{note_prefix}:down",
                     )
+                )
                 previous_current_mA = current_mA
             steps = self._append_return_to_origin(steps)
             suffix, _ = self._distribution_units(basis)
@@ -22807,8 +22944,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     f" Current transitions ramp at {transition_rate_mA_s:.3f} mA/s "
                     f"while holding {transition_stress_mpa:.3f} MPa, then settle {transition_settle_s:.2f} s."
                 )
-            if self.check_constant_current_return_to_start.isChecked():
-                summary += " Each current leg steps back to the start target."
+                if transition_hold_enabled:
+                    summary += " Current transition pauses while the target recovers."
+            summary += " Each current leg scans up and back to the start target."
             summary += self._recipe_setup_summary_sentence()
             return steps, summary, control_interval_ms
 
@@ -24999,7 +25137,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_step_mA", self.spin_constant_current_step_mA.value())
         self.settings.setValue(
             "constant_current_transition_enabled",
-            self.check_constant_current_transition_enabled.isChecked(),
+            True,
         )
         self.settings.setValue(
             "constant_current_transition_stress_mpa",
@@ -25013,7 +25151,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "constant_current_transition_settle_s",
             self.spin_constant_current_transition_settle_s.value(),
         )
-        self.settings.setValue("constant_current_return_to_start", self.check_constant_current_return_to_start.isChecked())
+        self.settings.setValue(
+            "constant_current_transition_hold_on_error",
+            self.check_constant_current_transition_hold_on_error.isChecked(),
+        )
+        self.settings.setValue("constant_current_return_to_start", True)
         self._store_default_dashboard_plot_settings_if_missing()
         self._store_dashboard_plot_settings(write_settings=True)
         self.settings.sync()
@@ -25698,7 +25840,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_step_size.setValue(float(self.settings.value("constant_current_step_size", 0.01)))
         self.spin_constant_current_hold_s.setValue(float(self.settings.value("constant_current_hold_s", 1.0)))
         self.spin_constant_current_move_speed_mm_s.setValue(
-            max(0.001, float(self.settings.value("constant_current_move_speed_mm_s", 0.05)))
+            max(0.001, float(self.settings.value("constant_current_move_speed_mm_s", 0.2)))
         )
         self.spin_constant_current_start_mA.setValue(float(self.settings.value("constant_current_start_mA", 0.0)))
         self.spin_constant_current_end_mA.setValue(float(self.settings.value("constant_current_end_mA", 100.0)))
@@ -25706,7 +25848,7 @@ class MainWindow(QtWidgets.QMainWindow):
             max(0.01, float(self.settings.value("constant_current_step_mA", 10.0)))
         )
         self.check_constant_current_transition_enabled.setChecked(
-            bool(self.settings.value("constant_current_transition_enabled", True, type=bool))
+            True
         )
         self.spin_constant_current_transition_stress_mpa.setValue(
             float(
@@ -25737,6 +25879,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 ),
             )
+        )
+        self.check_constant_current_transition_hold_on_error.setChecked(
+            bool(self.settings.value("constant_current_transition_hold_on_error", True, type=bool))
         )
         self.check_constant_current_return_to_start.setChecked(
             bool(self.settings.value("constant_current_return_to_start", True, type=bool))
