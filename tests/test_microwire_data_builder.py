@@ -598,6 +598,55 @@ def test_render_measurement_pixmap_keeps_pyplot_legend(
             builder_ui.plt.close(figure)
 
 
+def test_render_measurement_pixmap_marks_auto_transition_currents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    captured_figures = []
+    original = builder_ui.plot_annealing_curve
+
+    def _wrapped(*args: object, **kwargs: object) -> object:
+        figure, config = original(*args, **kwargs)
+        captured_figures.append(figure)
+        return figure, config
+
+    monkeypatch.setattr(builder_ui, "plot_annealing_curve", _wrapped)
+    monkeypatch.setattr(
+        builder_ui,
+        "summarize_annealing_transition_currents",
+        lambda _frame: SimpleNamespace(
+            as_current_mA=25.0,
+            af_current_mA=40.0,
+            ms_current_mA=38.0,
+            mf_current_mA=20.0,
+        ),
+    )
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [10.0, 25.0, 40.0, 38.0, 20.0],
+                "R_ohm": [120.0, 118.0, 150.0, 140.0, 125.0],
+            }
+        ),
+        path=Path("Ni50Fe27Ga23 11_1 s1 1000mA.txt"),
+        metadata=None,
+    )
+
+    try:
+        pixmap = builder_ui._render_measurement_pixmap(record, logging.getLogger("test"))
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert captured_figures
+        axes = captured_figures[0].axes[0]
+        labels = [text.get_text() for text in axes.get_legend().get_texts()]
+        assert "As 25 mA" in labels
+        assert "Af 40 mA" in labels
+        assert "Ms 38 mA" in labels
+        assert "Mf 20 mA" in labels
+    finally:
+        for figure in captured_figures:
+            builder_ui.plt.close(figure)
+
+
 def test_annealing_display_keeps_pyplot_title_and_axis_labels() -> None:
     display = builder_ui._AnnealingPlotDisplay.__new__(builder_ui._AnnealingPlotDisplay)
     record = SimpleNamespace(
@@ -1357,6 +1406,86 @@ def _write_iso_current_mini_dma_run(tmp_path: Path) -> Path:
     return run_path
 
 
+def _write_current_sweep_mini_dma_run_with_iso_columns(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "sample_name": "Ni50Fe27Ga23 12_2 iso-stress",
+                "created_utc": "2026-06-01 11:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 11:10:00",
+                "initial_length_mm": 58.0,
+                "wire_diameter_mm": 0.02,
+                "recipe": {"recipe_mode": "current_sweep_stress"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows: list[dict[str, float | str | int]] = []
+    for stress_mpa in (50.0, 100.0):
+        for current_mA, strain_pct in ((10.0, 0.1), (20.0, 0.3), (30.0, 0.6)):
+            rows.append(
+                {
+                    "elapsed_s": len(rows),
+                    "recipe_mode": "current_sweep_stress",
+                    "automation_phase": "current",
+                    "automation_target_value": stress_mpa,
+                    "plateau_index": int(stress_mpa),
+                    "strain_pct": strain_pct,
+                    "current_relative_strain_pct": strain_pct,
+                    "current_l0_mm": 58.0,
+                    "current_relative_position_mm": strain_pct / 100.0 * 58.0,
+                    "stress_mpa": stress_mpa,
+                    "load_g": stress_mpa / 50.0,
+                    "resistance_ohm": 100.0 + current_mA,
+                    "current_measured_mA": current_mA,
+                    "current_set_mA": current_mA,
+                }
+            )
+    pd.DataFrame(rows).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
+def _write_iso_strain_mini_dma_run(tmp_path: Path) -> Path:
+    run_path = tmp_path / "Ni50Fe27Ga23 11_1 iso-strain_run09"
+    run_path.mkdir()
+    (run_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "sample_name": "Ni50Fe27Ga23 11_1 iso-strain",
+                "created_utc": "2026-06-01 11:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 11:10:00",
+                "initial_length_mm": 58.0,
+                "wire_diameter_mm": 0.02,
+                "recipe": {"recipe_mode": "current_sweep_strain"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "elapsed_s": index,
+                "recipe_mode": "current_sweep_strain",
+                "automation_phase": "current",
+                "automation_target_value": 0.25,
+                "plateau_index": 1,
+                "strain_pct": 0.25,
+                "stress_mpa": 30.0 + index,
+                "load_g": 1.0 + index / 10.0,
+                "resistance_ohm": 100.0 + index,
+                "current_measured_mA": 10.0 + index,
+                "current_set_mA": 10.0 + index,
+            }
+            for index in range(4)
+        ]
+    ).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
 def test_mini_dma_transition_review_entries_use_real_stress_targets() -> None:
     entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
         [_sample_mini_dma_record()],
@@ -1400,6 +1529,89 @@ def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
         dialog.show_markers_check.setChecked(False)
         dialog._redraw_current()  # noqa: SLF001
         assert dialog.canvas is not None
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) -> None:
+    iso_current = MiniDmaRecord(
+        path=_write_iso_current_mini_dma_run(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="iso-current",
+    )
+    iso_strain = MiniDmaRecord(
+        path=_write_iso_strain_mini_dma_run(tmp_path),
+        sample="Ni50Fe27Ga23 11_1",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 11, 1, None),
+        label="iso-strain",
+    )
+
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [iso_current, iso_strain],
+        logging.getLogger("test"),
+    )
+
+    assert entries == []
+
+
+def test_mini_dma_transition_review_worker_finishes_for_unsupported_run(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    record = MiniDmaRecord(
+        path=_write_iso_strain_mini_dma_run(tmp_path),
+        sample="Ni50Fe27Ga23 11_1",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 11, 1, None),
+        label="iso-strain",
+    )
+    worker = builder_ui._MiniDmaTransitionReviewLoadWorker(  # noqa: SLF001
+        "run-key",
+        record,
+        logging.getLogger("test"),
+    )
+    results: list[object] = []
+    worker.finished.connect(results.append)
+
+    worker.run()
+
+    assert len(results) == 1
+    result = results[0]
+    assert isinstance(result, builder_ui._MiniDmaTransitionReviewLoadResult)  # noqa: SLF001
+    assert result.entries == []
+    assert not result.error
+
+
+def test_mini_dma_transition_review_dialog_shows_empty_state_for_unsupported_run(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    record = MiniDmaRecord(
+        path=_write_iso_current_mini_dma_run(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="iso-current",
+    )
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+    )
+    try:
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        dialog._current_run_key = run_key  # noqa: SLF001
+        dialog._pending_select_key = run_key  # noqa: SLF001
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, [])  # noqa: SLF001
+        )
+
+        assert "No supported current-sweep transition targets" in dialog.empty_label.text()
+        assert dialog._entries_by_run[run_key] == []  # noqa: SLF001
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -1452,6 +1664,56 @@ def test_mini_dma_preview_items_render_real_thumbnail() -> None:
     assert not items[0].pixmap.isNull()
     assert items[0].pixmap.width() > 0
     assert items[0].pixmap.height() > 0
+
+
+def test_mini_dma_preview_items_route_current_sweep_and_iso_current(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    calls: list[str] = []
+
+    def _figure(kind: str):
+        calls.append(kind)
+        figure = builder_ui.Figure(figsize=(2, 1))
+        axis = figure.add_subplot(111)
+        axis.plot([0, 1], [0, 1])
+        return figure
+
+    monkeypatch.setattr(
+        builder_ui.mini_dma_core,
+        "make_strain_current_figure",
+        lambda *_args, **_kwargs: _figure("strain-current"),
+    )
+    monkeypatch.setattr(
+        builder_ui.mini_dma_core,
+        "make_iso_current_figure",
+        lambda *_args, **_kwargs: _figure("iso-current"),
+    )
+    current_sweep = MiniDmaRecord(
+        path=_write_current_sweep_mini_dma_run_with_iso_columns(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="current-sweep",
+    )
+    iso_current = MiniDmaRecord(
+        path=_write_iso_current_mini_dma_run(tmp_path),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="iso-current",
+    )
+
+    items = builder_ui._mini_dma_preview_items(  # noqa: SLF001
+        [current_sweep, iso_current],
+        logging.getLogger("test"),
+        width_px=builder_ui.ANNEALING_GRAPH_WIDTH,
+        height_px=builder_ui.ANNEALING_GRAPH_HEIGHT,
+    )
+
+    assert len(items) == 2
+    assert calls == ["strain-current", "iso-current"]
 
 
 def test_mini_dma_preview_items_skip_insufficient_sweeps_without_error(

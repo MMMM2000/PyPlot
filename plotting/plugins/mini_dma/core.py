@@ -17,6 +17,15 @@ PLOT_PHASES = {"current"}
 SUMMARY_PHASES = {"current", "current_hold"}
 ISO_CURRENT_RECIPE_MODES = {"constant_current_strain_sweep", "iso-current", "iso_current"}
 ISO_CURRENT_PHASES = {"current_zero", "target_ramp", "current", "current_hold"}
+TRANSITION_REVIEW_RECIPE_MODES = {"current_sweep_stress", "iso-stress", "iso_stress"}
+TRANSITION_REVIEW_UNSUPPORTED_RECIPE_MODES = {
+    "constant_current_strain_sweep",
+    "current_sweep_strain",
+    "iso-current",
+    "iso_current",
+    "iso-strain",
+    "iso_strain",
+}
 REQUIRED_COLUMNS = {
     "elapsed_s",
     "automation_phase",
@@ -27,6 +36,7 @@ REQUIRED_COLUMNS = {
 }
 CURRENT_COLUMNS = ("current_measured_mA", "current_set_mA")
 MIN_POINTS_PER_TARGET = 2
+MIN_POINTS_PER_ISO_CURRENT_TARGET = 3
 STRAIN_BASELINE_RAW = "raw"
 STRAIN_BASELINE_GLOBAL_MINIMUM = "global_minimum"
 STRAIN_BASELINE_PER_TARGET_MINIMUM = "per_target_minimum"
@@ -143,22 +153,26 @@ def load_run(path: Path) -> MiniDmaRun:
 
 def is_iso_current_run(run: MiniDmaRun) -> bool:
     """Return true for constant-current stress/strain Mini DMA recipes."""
-    frame = run.frame
-    if "recipe_mode" in frame.columns:
-        modes = {
-            str(value).strip().casefold()
-            for value in frame["recipe_mode"].dropna().unique().tolist()
-            if str(value).strip()
-        }
-        if modes.intersection(ISO_CURRENT_RECIPE_MODES):
-            return True
-    metadata = _metadata_for_run(run.measurement_path)
-    metadata_modes = _metadata_recipe_mode_values(metadata)
-    if metadata_modes.intersection(ISO_CURRENT_RECIPE_MODES):
+    modes = _run_recipe_mode_values(run)
+    if modes.intersection(ISO_CURRENT_RECIPE_MODES):
         return True
-    if _has_iso_current_columns(frame) and bool(iso_current_groups(run)):
+    return _run_name_has_mode(run, "iso-current")
+
+
+def supports_transition_review(run: MiniDmaRun) -> bool:
+    """Return true when current-sweep transition extraction is meaningful."""
+    if is_iso_current_run(run):
+        return False
+    modes = _run_recipe_mode_values(run)
+    if modes.intersection(TRANSITION_REVIEW_UNSUPPORTED_RECIPE_MODES):
+        return False
+    if modes.intersection(TRANSITION_REVIEW_RECIPE_MODES):
         return True
-    return "iso-current" in run.path.name.casefold()
+    if _run_name_has_mode(run, "iso-strain") or _run_name_has_mode(run, "iso-current"):
+        return False
+    if _run_name_has_mode(run, "iso-stress") or "current-sweep" in _normalised_run_name(run):
+        return True
+    return bool(current_sweep_groups(run.frame, phases=SUMMARY_PHASES))
 
 
 def iso_current_groups(run: MiniDmaRun) -> list[tuple[float, pd.DataFrame]]:
@@ -194,7 +208,7 @@ def iso_current_groups(run: MiniDmaRun) -> list[tuple[float, pd.DataFrame]]:
             usable,
             subset=["_mini_dma_iso_strain_pct", "stress_mpa", "load_g"],
         )
-        if len(usable) < MIN_POINTS_PER_TARGET:
+        if len(usable) < MIN_POINTS_PER_ISO_CURRENT_TARGET:
             continue
         x_values = pd.to_numeric(usable["_mini_dma_iso_strain_pct"], errors="coerce")
         y_values = pd.to_numeric(usable["stress_mpa"], errors="coerce")
@@ -716,6 +730,28 @@ def _metadata_recipe_mode_values(payload: dict[str, object]) -> set[str]:
             if isinstance(nested_mode, str) and nested_mode.strip():
                 values.add(nested_mode.strip().casefold())
     return values
+
+
+def _run_recipe_mode_values(run: MiniDmaRun) -> set[str]:
+    values: set[str] = set()
+    frame = run.frame
+    if "recipe_mode" in frame.columns:
+        values.update(
+            str(value).strip().casefold()
+            for value in frame["recipe_mode"].dropna().unique().tolist()
+            if str(value).strip()
+        )
+    metadata = _metadata_for_run(run.measurement_path)
+    values.update(_metadata_recipe_mode_values(metadata))
+    return values
+
+
+def _normalised_run_name(run: MiniDmaRun) -> str:
+    return run.path.name.casefold().replace("_", "-")
+
+
+def _run_name_has_mode(run: MiniDmaRun, mode: str) -> bool:
+    return mode.casefold().replace("_", "-") in _normalised_run_name(run)
 
 
 def _has_iso_current_columns(frame: pd.DataFrame) -> bool:

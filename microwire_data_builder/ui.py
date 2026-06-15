@@ -3777,6 +3777,7 @@ def _render_measurement_pixmap(
             title,
             target_px=(target_width, target_height),
         )
+        _add_annealing_transition_markers(figure, plot_df, logger)
         if figure is not None:
             figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
         canvas_agg = FigureCanvasAgg(figure)
@@ -3839,6 +3840,47 @@ def _render_measurement_pixmap(
     finally:
         if figure is not None:
             plt.close(figure)
+
+
+def _add_annealing_transition_markers(
+    figure: Figure | None,
+    plot_df: pd.DataFrame,
+    logger: logging.Logger | None = None,
+) -> None:
+    if figure is None or not figure.axes:
+        return
+    try:
+        summary = summarize_annealing_transition_currents(plot_df)
+    except Exception:
+        if logger is not None:
+            logger.debug("Failed to summarize annealing transition currents", exc_info=True)
+        return
+    markers = (
+        ("As", getattr(summary, "as_current_mA", None), "#2ca02c", "--"),
+        ("Af", getattr(summary, "af_current_mA", None), "#2ca02c", ":"),
+        ("Ms", getattr(summary, "ms_current_mA", None), "#9467bd", "--"),
+        ("Mf", getattr(summary, "mf_current_mA", None), "#9467bd", ":"),
+    )
+    axis = figure.axes[0]
+    added = False
+    for label, value, color, linestyle in markers:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            continue
+        axis.axvline(
+            float(value),
+            color=color,
+            linestyle=linestyle,
+            linewidth=1.1,
+            alpha=0.9,
+            label=f"{label} {float(value):.0f} mA",
+        )
+        added = True
+    if not added:
+        return
+    try:
+        axis.legend(loc="best", fontsize=8)
+    except Exception:
+        pass
 
 
 def _figure_to_pixmap(
@@ -5041,6 +5083,11 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             target_px=(target_width, target_height),
         )
         try:
+            logger = self.__dict__.get("_logger")
+        except Exception:
+            logger = None
+        _add_annealing_transition_markers(figure, plot_df, logger if isinstance(logger, logging.Logger) else None)
+        try:
             axes = figure.axes[0] if figure.axes else None
         except Exception:
             axes = None
@@ -5613,7 +5660,7 @@ def _mini_dma_transition_review_entries(
             continue
         try:
             run = mini_dma_core.load_run(path)
-            if mini_dma_core.is_iso_current_run(run):
+            if not mini_dma_core.supports_transition_review(run):
                 continue
             groups = mini_dma_core.current_sweep_groups(
                 run.frame,
@@ -6000,6 +6047,8 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self._refresh_tree()
         if pending:
             self._select_first_entry_for_run(result.key)
+        elif self._current_run_key == result.key and not result.entries and not result.error:
+            self._show_empty("No supported current-sweep transition targets for this Mini DMA run.")
 
     def _select_first_entry_for_run(self, key: str) -> None:
         entries = self._entries_by_run.get(key, [])
@@ -6010,6 +6059,9 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             if item is not None:
                 self.tree.setCurrentItem(item)
                 return
+        self._current_ref = None
+        self._current_run_key = key
+        self._show_empty("No supported current-sweep transition targets for this Mini DMA run.")
 
     def _show_empty(self, message: str = "No Mini DMA transition review targets are available.") -> None:
         self.figure.clear()
@@ -6483,7 +6535,11 @@ def _mini_dma_preview_items(
                     show_power_top_axis=False,
                 )
         except ValueError as exc:
-            if "No current-sweep target groups with enough points" in str(exc):
+            message = str(exc)
+            if (
+                "No current-sweep target groups with enough points" in message
+                or "No iso-current stress/strain groups with enough points" in message
+            ):
                 logger.debug("Skipping Mini DMA preview for %s: %s", path, exc)
             else:
                 logger.exception("Failed to render Mini DMA preview for %s", path)
