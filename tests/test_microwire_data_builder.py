@@ -673,6 +673,91 @@ def test_annealing_display_keeps_pyplot_title_and_axis_labels() -> None:
         builder_ui.plt.close(figure)
 
 
+def test_annealing_transition_review_entries_show_auto_summary() -> None:
+    path = Path("Ni50Fe27Ga23 11_1 1000mA.txt")
+    record = MeasurementRecord(
+        path=path,
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=11,
+            piece_y=1,
+            setpoint_mA=1000.0,
+            alt_variant=False,
+            measurement_id=path.stem,
+            file_name=path.name,
+            relpath=path.name,
+            timestamp_mtime_utc="2026-06-15T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [10.0, 25.0, 40.0, 38.0, 20.0],
+                "R_ohm": [120.0, 118.0, 150.0, 140.0, 125.0],
+            }
+        ),
+        sanity_ok=True,
+        sanity_error=None,
+        transition_summary=("1000mA: As 25 mA, Af 40 mA, Ms 38 mA, Mf 20 mA",),
+    )
+
+    entries = builder_ui._annealing_transition_review_entries(
+        [record],
+        logging.getLogger("test"),
+    )
+
+    assert len(entries) == 1
+    assert entries[0].status == "auto candidates"
+    assert "Ni50Fe27Ga23" in entries[0].title
+    assert entries[0].summary_lines == (
+        "1000mA: As 25 mA, Af 40 mA, Ms 38 mA, Mf 20 mA",
+    )
+
+
+def test_annealing_section_opens_transition_review_for_visible_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    path = Path("Ni50Fe27Ga23 11_1 1000mA.txt")
+    record = MeasurementRecord(
+        path=path,
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=11,
+            piece_y=1,
+            setpoint_mA=1000.0,
+            alt_variant=False,
+            measurement_id=path.stem,
+            file_name=path.name,
+            relpath=path.name,
+            timestamp_mtime_utc="2026-06-15T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [10.0, 20.0], "R_ohm": [120.0, 130.0]}),
+        sanity_ok=True,
+        sanity_error=None,
+        transition_summary=("1000mA: As 11 mA, Af 13 mA",),
+    )
+    opened: list[list[MeasurementRecord]] = []
+
+    class _FakeDialog:
+        def __init__(self, records: list[MeasurementRecord], *_args: object) -> None:
+            opened.append(list(records))
+
+        def exec(self) -> int:
+            return 0
+
+    try:
+        section._all_records = [record]
+        section._record_groups = {"Ni50Fe27Ga23|11|1": [record]}
+        monkeypatch.setattr(builder_ui, "_AnnealingTransitionReviewDialog", _FakeDialog)
+
+        section._open_transition_review()
+
+        assert opened == [[record]]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_shape_memory_preview_uses_dual_axis_overlay() -> None:
     record = ShapeMemoryStressStrainRecord(
         path=Path("loop.txt"),
@@ -6676,6 +6761,48 @@ def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:
         window._dirty = False
         window.hide()
         window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_section_visibility_menu_persists_hidden_tabs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+
+    window = BuilderWindow()
+    try:
+        action = window._section_visibility_actions["current_density"]
+        index = window.tab_widget.indexOf(window.current_density_section)
+        assert index >= 0
+        assert window.tab_widget.isTabVisible(index)
+
+        window._toggle_section_visibility("current_density", False)
+
+        assert not action.isChecked()
+        assert not window.tab_widget.isTabVisible(index)
+        assert "current_density" in json.loads(
+            str(window.settings.value(window._project_settings_key("hidden_sections")))
+        )
+        window.settings.sync()
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+    restored = BuilderWindow()
+    try:
+        restored_index = restored.tab_widget.indexOf(restored.current_density_section)
+        assert restored_index >= 0
+        assert not restored.tab_widget.isTabVisible(restored_index)
+        assert not restored._section_visibility_actions["current_density"].isChecked()
+    finally:
+        restored._dirty = False
+        restored.hide()
+        restored.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 

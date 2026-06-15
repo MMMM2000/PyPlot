@@ -213,6 +213,11 @@ ANNEALING_HIGH_GRAPH_COLUMN = "Graph — 1000 mA"
 ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other annealing"
 ANNEALING_LEGACY_LOW_GRAPH_COLUMN = "Graph — low mA"
 ANNEALING_LEGACY_OTHER_GRAPH_COLUMN = "Graph — other mA"
+OPTIONAL_BUILDER_SECTIONS: Tuple[Tuple[str, str], ...] = (
+    ("current_density", "Current density"),
+    ("strain", "Strain"),
+    ("shape_memory_stress_strain", "Manual stress/strain"),
+)
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
 MAX_PLOT_POINTS = 2000
@@ -5185,6 +5190,169 @@ class _AnnealingPlotGallery(QtWidgets.QWidget):
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
+
+
+@dataclass(frozen=True)
+class _AnnealingTransitionReviewEntry:
+    record: MeasurementRecord
+    title: str
+    status: str
+    summary_lines: Tuple[str, ...]
+
+
+def _annealing_transition_review_entries(
+    records: Sequence[MeasurementRecord],
+    logger: logging.Logger | None = None,
+) -> List[_AnnealingTransitionReviewEntry]:
+    entries: List[_AnnealingTransitionReviewEntry] = []
+    for record in records:
+        metadata = getattr(record, "metadata", None)
+        file_name = str(getattr(metadata, "file_name", "") or "")
+        if not file_name:
+            path = getattr(record, "path", None)
+            if path:
+                try:
+                    file_name = Path(path).name
+                except Exception:
+                    file_name = str(path)
+        title_parts: List[str] = []
+        composition = getattr(metadata, "composition_token", None)
+        draw = getattr(metadata, "draw_x", None)
+        piece = getattr(metadata, "piece_y", None)
+        if composition is not None and draw is not None and piece is not None:
+            try:
+                title_parts.append(f"{composition} {_microwire_label(int(draw), int(piece))}")
+            except Exception:
+                title_parts.append(str(composition))
+        setpoint = _extract_setpoint(record)
+        if setpoint is not None:
+            title_parts.append(f"{_format_setpoint(setpoint)} mA")
+        if file_name:
+            title_parts.append(file_name)
+        title = " - ".join(part for part in title_parts if part) or "Current annealing run"
+
+        raw_lines = getattr(record, "transition_summary", ()) or ()
+        lines = tuple(str(line) for line in raw_lines if str(line).strip())
+        if not lines:
+            try:
+                computed = _annealing_transition_summary(
+                    record.dataframe,
+                    label=file_name or None,
+                )
+                lines = tuple(str(line) for line in computed if str(line).strip())
+            except Exception:
+                if isinstance(logger, logging.Logger):
+                    logger.exception("Failed to summarize annealing transitions for %s", file_name or record)
+                lines = ()
+        status = "auto candidates" if lines else "no candidates"
+        entries.append(
+            _AnnealingTransitionReviewEntry(
+                record=record,
+                title=title,
+                status=status,
+                summary_lines=lines,
+            )
+        )
+    return entries
+
+
+class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        records: Sequence[MeasurementRecord],
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Current annealing transition review")
+        self.resize(1280, 780)
+        self._entries = _annealing_transition_review_entries(records, logger)
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(6)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        root.addWidget(splitter, 1)
+
+        self._tree = QtWidgets.QTreeWidget(splitter)
+        self._tree.setHeaderLabels(["Annealing run", "Status"])
+        self._tree.setUniformRowHeights(True)
+        self._tree.setRootIsDecorated(False)
+        self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        splitter.addWidget(self._tree)
+
+        right = QtWidgets.QWidget(splitter)
+        right_layout = QtWidgets.QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        self._summary_label = QtWidgets.QLabel("")
+        self._summary_label.setWordWrap(True)
+        self._summary_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        right_layout.addWidget(self._summary_label)
+        self._display = _AnnealingPlotDisplay(
+            "Current annealing transition review",
+            logger,
+            right,
+        )
+        right_layout.addWidget(self._display, 1)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        try:
+            splitter.setSizes([360, 920])
+        except Exception:
+            pass
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self._populate()
+        self._tree.currentItemChanged.connect(self._handle_current_item_changed)
+        if self._tree.topLevelItemCount():
+            self._tree.setCurrentItem(self._tree.topLevelItem(0))
+        else:
+            self._display.clear("No current annealing runs are available.")
+            self._summary_label.setText("No current annealing runs are available.")
+
+    def _populate(self) -> None:
+        self._tree.clear()
+        for index, entry in enumerate(self._entries):
+            item = QtWidgets.QTreeWidgetItem([entry.title, entry.status])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
+            if entry.summary_lines:
+                item.setToolTip(0, "\n".join(entry.summary_lines))
+            self._tree.addTopLevelItem(item)
+        self._tree.resizeColumnToContents(0)
+
+    def _handle_current_item_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            self._display.clear("Select an annealing run to review.")
+            self._summary_label.setText("")
+            return
+        index = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        try:
+            entry = self._entries[int(index)]
+        except Exception:
+            self._display.clear("Select an annealing run to review.")
+            self._summary_label.setText("")
+            return
+        if entry.summary_lines:
+            self._summary_label.setText("\n".join(entry.summary_lines))
+        else:
+            self._summary_label.setText("No automatic transition candidates were detected.")
+        self._display.set_record(
+            entry.record,
+            setpoint=_extract_setpoint(entry.record),
+            description="Select an annealing run to review.",
+        )
 
 
 @dataclass
@@ -10732,6 +10900,10 @@ class AnnealingSection(MiniDatabaseSection):
         self.visibility_button.setToolTip("Show or hide specific annealing graphs.")
         self.visibility_button.clicked.connect(self._open_visibility_dialog)
         self.controls_layout.addWidget(self.visibility_button)
+        self.review_transitions_button = QtWidgets.QPushButton("Review transitions")
+        self.review_transitions_button.setToolTip("Review automatic As/Af/Ms/Mf candidates on annealing graphs.")
+        self.review_transitions_button.clicked.connect(self._open_transition_review)
+        self.controls_layout.addWidget(self.review_transitions_button)
         self._update_export_enabled()
         self._refresh_record_groups()
         self._hide_columns(["_group_key", "_sources"])
@@ -10962,6 +11134,41 @@ class AnnealingSection(MiniDatabaseSection):
             self._hidden_paths = dialog.hidden_paths()
             self._store_hidden_paths()
             self._refresh_record_groups()
+
+    def _transition_review_records(self) -> List[MeasurementRecord]:
+        selected = self._selected_records()
+
+        def _dedupe(records: Sequence[MeasurementRecord]) -> List[MeasurementRecord]:
+            result: List[MeasurementRecord] = []
+            seen: Set[int] = set()
+            for record in records:
+                marker = id(record)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                result.append(record)
+            return result
+
+        if selected:
+            return _dedupe(selected)
+        if self._all_records:
+            return self._visible_records(self._all_records)
+        records: List[MeasurementRecord] = []
+        for group in self._record_groups.values():
+            records.extend(group)
+        return _dedupe(records)
+
+    def _open_transition_review(self) -> None:
+        records = self._transition_review_records()
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No current annealing graphs are available yet.",
+            )
+            return
+        dialog = _AnnealingTransitionReviewDialog(records, self.logger, self)
+        dialog.exec()
 
     def _clean_phase_points_payload(self, payload: Dict[str, Any]) -> Dict[str, float]:
         entry: Dict[str, float] = {}
@@ -29823,6 +30030,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._auto_open_latest_database_action: QtGui.QAction | None = None
         self._database_project_dir_action: QtGui.QAction | None = None
         self._data_menu: QtWidgets.QMenu | None = None
+        self._hidden_section_keys = self._load_hidden_section_keys()
+        self._section_visibility_actions: Dict[str, QtGui.QAction] = {}
         self._show_imported_action: QtGui.QAction | None = None
         self._separate_imported_action: QtGui.QAction | None = None
         self._remove_imported_action: QtGui.QAction | None = None
@@ -30110,6 +30319,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+        self._apply_section_visibility()
         menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
         self._setup_project_actions(menu_bar)
         self._setup_settings_menu(menu_bar)
@@ -30709,6 +30919,90 @@ class BuilderWindow(QtWidgets.QMainWindow):
             return f"Database folder: {self._database_project_dir}"
         return "Set database folder..."
 
+    def _load_hidden_section_keys(self) -> Set[str]:
+        allowed = {key for key, _label in OPTIONAL_BUILDER_SECTIONS}
+        try:
+            raw = self.settings.value(self._project_settings_key("hidden_sections"), "[]")
+        except Exception:
+            raw = "[]"
+        values: Iterable[Any]
+        if isinstance(raw, (list, tuple, set)):
+            values = raw
+        else:
+            text = str(raw or "").strip()
+            try:
+                decoded = json.loads(text) if text else []
+            except Exception:
+                decoded = [part.strip() for part in text.split(",")]
+            values = decoded if isinstance(decoded, list) else []
+        return {str(value) for value in values if str(value) in allowed}
+
+    def _save_hidden_section_keys(self) -> None:
+        try:
+            self.settings.setValue(
+                self._project_settings_key("hidden_sections"),
+                json.dumps(sorted(self._hidden_section_keys)),
+            )
+        except Exception:
+            pass
+
+    def _apply_section_visibility(self) -> None:
+        tab_widget = getattr(self, "tab_widget", None)
+        if isinstance(tab_widget, QtWidgets.QTabWidget):
+            for key, _label in OPTIONAL_BUILDER_SECTIONS:
+                section = self.sections.get(key)
+                if not isinstance(section, QtWidgets.QWidget):
+                    continue
+                index = tab_widget.indexOf(section)
+                if index < 0:
+                    continue
+                visible = key not in self._hidden_section_keys
+                try:
+                    tab_widget.setTabVisible(index, visible)
+                except Exception:
+                    pass
+            if tab_widget.count() and hasattr(tab_widget, "isTabVisible"):
+                current = tab_widget.currentIndex()
+                try:
+                    current_visible = bool(tab_widget.isTabVisible(current))
+                except Exception:
+                    current_visible = True
+                if not current_visible:
+                    for index in range(tab_widget.count()):
+                        try:
+                            if tab_widget.isTabVisible(index):
+                                tab_widget.setCurrentIndex(index)
+                                break
+                        except Exception:
+                            continue
+        project_items = getattr(self, "_project_items", {})
+        if isinstance(project_items, dict):
+            for key, _label in OPTIONAL_BUILDER_SECTIONS:
+                item = project_items.get(key)
+                if item is not None:
+                    try:
+                        item.setHidden(key in self._hidden_section_keys)
+                    except Exception:
+                        pass
+        for key, action in getattr(self, "_section_visibility_actions", {}).items():
+            if isinstance(action, QtGui.QAction):
+                try:
+                    action.blockSignals(True)
+                    action.setChecked(key not in self._hidden_section_keys)
+                finally:
+                    action.blockSignals(False)
+
+    def _toggle_section_visibility(self, section_key: str, visible: bool) -> None:
+        allowed = {key for key, _label in OPTIONAL_BUILDER_SECTIONS}
+        if section_key not in allowed:
+            return
+        if visible:
+            self._hidden_section_keys.discard(section_key)
+        else:
+            self._hidden_section_keys.add(section_key)
+        self._save_hidden_section_keys()
+        self._apply_section_visibility()
+
     def _update_database_settings_actions(self) -> None:
         if self._database_project_dir_action is not None:
             self._database_project_dir_action.setText(self._database_project_dir_label())
@@ -30740,6 +31034,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
         database_dir_action.triggered.connect(self._choose_database_project_dir)
         settings_menu.addAction(database_dir_action)
         self._database_project_dir_action = database_dir_action
+
+        sections_menu = settings_menu.addMenu("Sections")
+        for key, label in OPTIONAL_BUILDER_SECTIONS:
+            action = QtGui.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(key not in self._hidden_section_keys)
+            action.toggled.connect(
+                lambda checked, section_key=key: self._toggle_section_visibility(section_key, bool(checked))
+            )
+            sections_menu.addAction(action)
+            self._section_visibility_actions[key] = action
         self._update_database_settings_actions()
 
     def _setup_data_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
