@@ -4322,6 +4322,99 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         _close_test_window(window)
 
 
+def test_iso_current_stress_ramp_recipe_builds_target_ramps_with_transition(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_constant_current_start_target.setValue(0.0)
+        window.spin_constant_current_end_target.setValue(400.0)
+        window.spin_constant_current_stress_ramp_rate_mpa_s.setValue(5.0)
+        window.spin_constant_current_start_mA.setValue(50.0)
+        window.spin_constant_current_end_mA.setValue(50.0)
+        window.spin_constant_current_step_mA.setValue(10.0)
+        window.spin_constant_current_transition_stress_mpa.setValue(10.0)
+        window.spin_constant_current_transition_rate_mA_s.setValue(1.0)
+        window.spin_constant_current_transition_settle_s.setValue(1.0)
+
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        recipe_start = next(index for index, step in enumerate(steps) if step.action == "start_session")
+        recipe_steps = steps[recipe_start + 1 :]
+        sweep_steps = [step for step in recipe_steps if step.action == "sweep_current"]
+        ramp_steps = [step for step in recipe_steps if step.action == "ramp_target"]
+        zero_steps = [step for step in recipe_steps if step.action == "mark_current_zero"]
+
+        assert interval_ms == window._control_interval_ms()
+        assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == pytest.approx([(1.0, 50.0)])
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in sweep_steps)
+        assert all(step.target_value == pytest.approx(10.0) for step in sweep_steps)
+        assert len(zero_steps) == 1
+        assert zero_steps[0].current_mA == pytest.approx(50.0)
+        assert [step.note for step in recipe_steps[:6]] == [
+            "1:transition_seek",
+            "1",
+            "1:transition_settle",
+            "1:start",
+            "1:zero",
+            "1:up",
+        ]
+        assert [(step.target_start_value, step.target_end_value) for step in ramp_steps] == pytest.approx(
+            [(0.0, 400.0), (400.0, 0.0)]
+        )
+        assert all(step.current_mA == pytest.approx(50.0) for step in ramp_steps)
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in ramp_steps)
+        assert all(step.target_ramp_rate_value_s == pytest.approx(5.0) for step in ramp_steps)
+        assert not any(step.action == "mechanical_scan" for step in recipe_steps)
+        assert "Started iso-current stress ramp recipe" in summary
+        assert "at 5.0000 MPa/s" in summary
+        assert "Current transitions ramp at 1.000 mA/s" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_current_stress_ramp_ui_shows_ramp_rate_not_step_controls(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+        assert window.spin_constant_current_stress_ramp_rate_mpa_s.isVisibleTo(window.recipe_stack)
+        assert not window.combo_constant_current_step_basis.isVisibleTo(window.recipe_stack)
+        assert not window.spin_constant_current_step_size.isVisibleTo(window.recipe_stack)
+        assert not window.spin_constant_current_hold_s.isVisibleTo(window.recipe_stack)
+        assert not window.spin_constant_current_move_speed_mm_s.isVisibleTo(window.recipe_stack)
+        assert not window.combo_constant_current_start_basis.isVisibleTo(window.recipe_stack)
+        assert "stress ramp" in window.label_recipe_summary.text().casefold()
+
+        strain_mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP)
+        window.combo_recipe_mode.setCurrentIndex(strain_mode_index)
+
+        assert not window.spin_constant_current_stress_ramp_rate_mpa_s.isVisibleTo(window.recipe_stack)
+        assert window.combo_constant_current_step_basis.isVisibleTo(window.recipe_stack)
+        assert window.spin_constant_current_step_size.isVisibleTo(window.recipe_stack)
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_current_stress_ramp_requires_supply_for_transition_current(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_motor_supply_power.setChecked(False)
+        window.check_continuity_monitor.setChecked(False)
+
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+
+        assert any(step.action == "sweep_current" for step in steps)
+        assert window._recipe_requires_supply(steps) is True
+    finally:
+        _close_test_window(window)
+
+
 def test_constant_current_zero_mark_records_current_specific_origin(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     records: list[str] = []

@@ -440,6 +440,7 @@ CURRENT_SWEEP_LOAD = "current_sweep_load"
 CURRENT_SWEEP_STRESS = "current_sweep_stress"
 CURRENT_SWEEP_STRAIN = "current_sweep_strain"
 CONSTANT_CURRENT_STRAIN_SWEEP = "constant_current_strain_sweep"
+CONSTANT_CURRENT_STRESS_RAMP = "constant_current_stress_ramp"
 LEGACY_CURRENT_SWEEP = "current_sweep"
 CALIBRATION = "calibration"
 CALIBRATION_COPPER = "calibration_copper"
@@ -604,6 +605,7 @@ RECIPE_FILENAME_TOKENS = {
     CURRENT_SWEEP_STRESS: "iso-stress",
     CURRENT_SWEEP_STRAIN: "iso-strain",
     CONSTANT_CURRENT_STRAIN_SWEEP: "iso-current",
+    CONSTANT_CURRENT_STRESS_RAMP: "iso-current-stress-ramp",
 }
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
 PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
@@ -3137,7 +3139,7 @@ class MiniDmaAutomationController:
             recovery_return_duration_s = host._setup_return_duration_s() if is_calibration else None
             config = host._control_config()
             return_to_origin = config.return_to_origin if config is not None else host.check_return_to_origin.isChecked()
-            if host._is_constant_current_strain_sweep_mode(host._automation_name):
+            if host._is_iso_current_mode(host._automation_name):
                 return_to_origin = False
             host._update_recipe_progress(complete=True)
             host._stop_auto_ramp(log_completion=False, keep_progress=True)
@@ -6771,6 +6773,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
         self.combo_recipe_mode.addItem("Iso-current stress-strain", CONSTANT_CURRENT_STRAIN_SWEEP)
+        self.combo_recipe_mode.addItem("Iso-current stress ramp", CONSTANT_CURRENT_STRESS_RAMP)
         self.combo_recipe_mode.currentIndexChanged.connect(self._handle_recipe_mode_changed)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
         self.recipe_file_controls_widget = QtWidgets.QWidget(automation_box)
@@ -7639,6 +7642,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_targets_section.setFont(constant_current_targets_font)
         constant_current_form.addRow("", self.label_constant_current_targets_section)
         constant_current_form.addRow("Start target", self.combo_constant_current_start_basis)
+        self.label_constant_current_start_basis_row = constant_current_form.labelForField(
+            self.combo_constant_current_start_basis
+        )
         self.spin_constant_current_start_target = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_start_target.setDecimals(3)
         self.spin_constant_current_start_target.setRange(-100000.0, 100000.0)
@@ -7666,24 +7672,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_constant_current_mechanical_section.setFont(constant_current_mechanical_font)
         constant_current_form.addRow("", self.label_constant_current_mechanical_section)
         constant_current_form.addRow("Step basis", self.combo_constant_current_step_basis)
+        self.label_constant_current_step_basis_row = constant_current_form.labelForField(
+            self.combo_constant_current_step_basis
+        )
         self.spin_constant_current_step_size = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_step_size.setDecimals(4)
         self.spin_constant_current_step_size.setRange(-100000.0, 100000.0)
         self.spin_constant_current_step_size.setValue(0.01)
         self.spin_constant_current_step_size.setSuffix(" mm")
         constant_current_form.addRow("Step size", self.spin_constant_current_step_size)
+        self.label_constant_current_step_size_row = constant_current_form.labelForField(
+            self.spin_constant_current_step_size
+        )
         self.spin_constant_current_hold_s = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_hold_s.setDecimals(2)
         self.spin_constant_current_hold_s.setRange(0.0, 3600.0)
         self.spin_constant_current_hold_s.setValue(1.0)
         self.spin_constant_current_hold_s.setSuffix(" s")
         constant_current_form.addRow("Hold per step", self.spin_constant_current_hold_s)
+        self.label_constant_current_hold_row = constant_current_form.labelForField(self.spin_constant_current_hold_s)
         self.spin_constant_current_move_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_move_speed_mm_s.setDecimals(3)
         self.spin_constant_current_move_speed_mm_s.setRange(0.001, 50.0)
         self.spin_constant_current_move_speed_mm_s.setValue(0.2)
         self.spin_constant_current_move_speed_mm_s.setSuffix(" mm/s")
         constant_current_form.addRow("Step speed", self.spin_constant_current_move_speed_mm_s)
+        self.label_constant_current_step_speed_row = constant_current_form.labelForField(
+            self.spin_constant_current_move_speed_mm_s
+        )
+        self.spin_constant_current_stress_ramp_rate_mpa_s = CompactDoubleSpinBox(automation_box)
+        self.spin_constant_current_stress_ramp_rate_mpa_s.setDecimals(3)
+        self.spin_constant_current_stress_ramp_rate_mpa_s.setRange(0.001, 100000.0)
+        self.spin_constant_current_stress_ramp_rate_mpa_s.setValue(5.0)
+        self.spin_constant_current_stress_ramp_rate_mpa_s.setSuffix(" MPa/s")
+        constant_current_form.addRow("Stress ramp rate", self.spin_constant_current_stress_ramp_rate_mpa_s)
+        self.label_constant_current_stress_ramp_rate_row = constant_current_form.labelForField(
+            self.spin_constant_current_stress_ramp_rate_mpa_s
+        )
         self.label_constant_current_current_section = QtWidgets.QLabel("Current levels", automation_box)
         constant_current_current_font = self.label_constant_current_current_section.font()
         constant_current_current_font.setBold(True)
@@ -8265,6 +8290,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_step_size,
             self.spin_constant_current_hold_s,
             self.spin_constant_current_move_speed_mm_s,
+            self.spin_constant_current_stress_ramp_rate_mpa_s,
             self.spin_constant_current_start_mA,
             self.spin_constant_current_end_mA,
             self.spin_constant_current_step_mA,
@@ -13758,6 +13784,17 @@ class MainWindow(QtWidgets.QMainWindow):
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
         return str(mode if mode is not None else default_mode or "") == CONSTANT_CURRENT_STRAIN_SWEEP
 
+    def _is_constant_current_stress_ramp_mode(self, mode: str | None = None) -> bool:
+        default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
+        return str(mode if mode is not None else default_mode or "") == CONSTANT_CURRENT_STRESS_RAMP
+
+    def _is_iso_current_mode(self, mode: str | None = None) -> bool:
+        default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
+        return str(mode if mode is not None else default_mode or "") in {
+            CONSTANT_CURRENT_STRAIN_SWEEP,
+            CONSTANT_CURRENT_STRESS_RAMP,
+        }
+
     def _is_calibration_mode(self, mode: str | None = None) -> bool:
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
         return str(mode if mode is not None else default_mode or "") in CALIBRATION_MODES
@@ -13985,6 +14022,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return " MPa", 3
 
     def _constant_current_start_basis(self) -> str:
+        mode = str(self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name)
+        if self._is_constant_current_stress_ramp_mode(mode):
+            return HSW_BASIS_STRESS_MPA
         return str(self.combo_constant_current_start_basis.currentData() or HSW_BASIS_STRAIN_PCT)
 
     def _constant_current_step_basis(self) -> str:
@@ -13997,6 +14037,35 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.setDecimals(decimals)
             widget.setSuffix(suffix)
             widget.blockSignals(False)
+        stress_ramp_mode = self._is_constant_current_stress_ramp_mode()
+        if hasattr(self, "combo_constant_current_start_basis"):
+            self.combo_constant_current_start_basis.setVisible(not stress_ramp_mode)
+        start_basis_label = getattr(self, "label_constant_current_start_basis_row", None)
+        if start_basis_label is not None:
+            start_basis_label.setVisible(not stress_ramp_mode)
+        for widget_name in (
+            "combo_constant_current_step_basis",
+            "spin_constant_current_step_size",
+            "spin_constant_current_hold_s",
+            "spin_constant_current_move_speed_mm_s",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(not stress_ramp_mode)
+        for label_name in (
+            "label_constant_current_step_basis_row",
+            "label_constant_current_step_size_row",
+            "label_constant_current_hold_row",
+            "label_constant_current_step_speed_row",
+        ):
+            label = getattr(self, label_name, None)
+            if label is not None:
+                label.setVisible(not stress_ramp_mode)
+        if hasattr(self, "spin_constant_current_stress_ramp_rate_mpa_s"):
+            self.spin_constant_current_stress_ramp_rate_mpa_s.setVisible(stress_ramp_mode)
+        ramp_rate_label = getattr(self, "label_constant_current_stress_ramp_rate_row", None)
+        if ramp_rate_label is not None:
+            ramp_rate_label.setVisible(stress_ramp_mode)
         step_basis = self._constant_current_step_basis()
         self.spin_constant_current_step_size.blockSignals(True)
         if step_basis == HSW_BASIS_STRAIN_PCT:
@@ -15160,7 +15229,10 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return min(base_speed, self._setup_slack_speed_mm_s())
         if (
-            self._is_current_sweep_mode(self._automation_name)
+            (
+                self._is_current_sweep_mode(self._automation_name)
+                or self._is_constant_current_stress_ramp_mode(self._automation_name)
+            )
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}
         ):
             if self._current_sweep_hold_fast_recovery_needed(basis, error_value):
@@ -15266,7 +15338,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
             return None
         if (
-            self._is_current_sweep_mode(self._automation_name)
+            (
+                self._is_current_sweep_mode(self._automation_name)
+                or self._is_constant_current_stress_ramp_mode(self._automation_name)
+            )
             and self._automation_step_note != "setup_preload"
             and current_value is not None
             and target_value is not None
@@ -16565,6 +16640,7 @@ class MainWindow(QtWidgets.QMainWindow):
             CALIBRATION: 4,
             CALIBRATION_COPPER: 4,
             CONSTANT_CURRENT_STRAIN_SWEEP: 6,
+            CONSTANT_CURRENT_STRESS_RAMP: 6,
         }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
@@ -16672,6 +16748,43 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
                     f"{load_text} preload for length entry, then back to 0 g."
                 )
+        elif self._is_constant_current_stress_ramp_mode(mode):
+            self._update_constant_current_basis_ui()
+            suffix, _ = self._distribution_units(HSW_BASIS_STRESS_MPA)
+            summary = (
+                f"Plan: iso-current stress ramp, current "
+                f"{_format_compact_number(self.spin_constant_current_start_mA.value(), decimals=2)} to "
+                f"{_format_compact_unit(self.spin_constant_current_end_mA.value(), 'mA', decimals=2)} in "
+                f"{_format_compact_unit(self.spin_constant_current_step_mA.value(), 'mA', decimals=2)} steps; "
+                f"stress {_format_compact_number(self.spin_constant_current_start_target.value())}{suffix} to "
+                f"{_format_compact_number(self.spin_constant_current_end_target.value())}{suffix} at "
+                f"{_format_compact_unit(self.spin_constant_current_stress_ramp_rate_mpa_s.value(), 'MPa/s', decimals=3)}."
+            )
+            transition_load = self._load_equivalent_text(
+                float(self.spin_constant_current_transition_stress_mpa.value())
+            )
+            summary += (
+                " Current transition ramps at "
+                f"{_format_compact_unit(self.spin_constant_current_transition_rate_mA_s.value(), 'mA/s', decimals=3)} "
+                f"while holding {_format_compact_unit(self.spin_constant_current_transition_stress_mpa.value(), 'MPa', decimals=3)}"
+                f" ({transition_load}), then settles "
+                f"{_format_compact_unit(self.spin_constant_current_transition_settle_s.value(), 's', decimals=2)}."
+            )
+            if self.check_constant_current_transition_hold_on_error.isChecked():
+                summary += " Transition current pauses while the target recovers."
+            summary += " Each current leg ramps stress up and back to the start target."
+            if self._pre_measurement_setup_enabled(mode):
+                setup_load_g = load_g_from_stress_mpa(
+                    float(self.spin_setup_preload_stress_mpa.value()),
+                    float(self.spin_diameter.value()),
+                )
+                load_text = "" if setup_load_g is None else f" ({_format_compact_unit(setup_load_g, 'g', decimals=4)})"
+                summary += (
+                    " Setup: 0 g load, "
+                    f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
+                    f"{load_text} preload for length entry, then back to 0 g."
+                )
+            banner = "Iso-current stress ramp"
         elif self._is_constant_current_strain_sweep_mode(mode):
             self._update_constant_current_basis_ui()
             basis = self._constant_current_start_basis()
@@ -16722,11 +16835,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"from the current position."
             )
             banner = "Displacement ramp"
-        if self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode) or self._is_constant_current_strain_sweep_mode(mode):
+        if self._is_current_sweep_mode(mode) or self._is_calibration_mode(mode) or self._is_iso_current_mode(mode):
             if self._is_current_sweep_mode(mode):
                 summary += " Recipe controls current."
             elif self._is_constant_current_strain_sweep_mode(mode):
                 summary += " Recipe controls current and fixed displacement steps."
+            elif self._is_constant_current_stress_ramp_mode(mode):
+                summary += " Recipe controls current and stress target ramps."
             else:
                 summary += " Recipe owns the hardware sequence."
         preload_text = (
@@ -17686,7 +17801,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 and self._automation_basis == HSW_BASIS_STRESS_MPA
             ):
                 return self._setup_motion_speed_cap_mm_s()
-            if self._is_current_sweep_mode(self._automation_name):
+            if self._is_current_sweep_mode(self._automation_name) or self._is_constant_current_stress_ramp_mode(
+                self._automation_name
+            ):
                 return max(
                     self._minimum_held_speed_mm_s(),
                     self._current_sweep_dynamic_speed_cap_mm_s(),
@@ -17739,6 +17856,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return max(self._minimum_held_speed_mm_s(), speed_mm_s)
         mode = str(self.combo_recipe_mode.currentData() or "ramp")
         if self._is_current_sweep_mode(mode):
+            return self._current_sweep_dynamic_speed_cap_mm_s()
+        if self._is_constant_current_stress_ramp_mode(mode):
             return self._current_sweep_dynamic_speed_cap_mm_s()
         if self._is_constant_current_strain_sweep_mode(mode):
             return max(self._minimum_held_speed_mm_s(), float(self.spin_constant_current_move_speed_mm_s.value()))
@@ -19746,7 +19865,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _recipe_requires_supply(self, steps: Sequence[AutomationStep]) -> bool:
         if self._motor_supply_enabled():
             return True
-        if any(step.action == "set_current" for step in steps):
+        if self._recipe_uses_explicit_current(steps):
             return True
         if self._continuity_monitor_enabled() and self._continuity_current_mA() > 0.0:
             return True
@@ -19983,6 +20102,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"iso-current-stress-strain_setup{setup}MPa_{basis_token}{target_start}-{target_end}_"
                 f"step{step}{step_unit}_current{current_start}-{current_end}x{current_step}mA.recipe.json"
             )
+        elif mode == CONSTANT_CURRENT_STRESS_RAMP:
+            setup = self._recipe_number_token(self.spin_setup_preload_stress_mpa.value())
+            target_start = self._recipe_number_token(self.spin_constant_current_start_target.value())
+            target_end = self._recipe_number_token(self.spin_constant_current_end_target.value())
+            ramp_rate = self._recipe_number_token(self.spin_constant_current_stress_ramp_rate_mpa_s.value())
+            current_start = self._recipe_number_token(self.spin_constant_current_start_mA.value())
+            current_end = self._recipe_number_token(self.spin_constant_current_end_mA.value())
+            current_step = self._recipe_number_token(self.spin_constant_current_step_mA.value())
+            return (
+                f"iso-current-stress-ramp_setup{setup}MPa_stress{target_start}-{target_end}_"
+                f"{ramp_rate}MPaps_current{current_start}-{current_end}x{current_step}mA.recipe.json"
+            )
         else:
             prefix = re.sub(r"[^a-z0-9]+", "-", mode.lower()).strip("-") or "recipe"
             return f"{prefix}.recipe.json"
@@ -20076,6 +20207,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 "step_size": float(self.spin_constant_current_step_size.value()),
                 "hold_s": float(self.spin_constant_current_hold_s.value()),
                 "move_speed_mm_s": float(self.spin_constant_current_move_speed_mm_s.value()),
+                "current_start_mA": float(self.spin_constant_current_start_mA.value()),
+                "current_end_mA": float(self.spin_constant_current_end_mA.value()),
+                "current_step_mA": float(self.spin_constant_current_step_mA.value()),
+                "transition_enabled": True,
+                "transition_stress_mpa": float(self.spin_constant_current_transition_stress_mpa.value()),
+                "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
+                "transition_settle_s": float(self.spin_constant_current_transition_settle_s.value()),
+                "transition_hold_on_error": bool(self.check_constant_current_transition_hold_on_error.isChecked()),
+                "return_to_start": True,
+            }
+        if self._is_constant_current_stress_ramp_mode(mode):
+            payload["recipe"]["constant_current_stress_ramp"] = {
+                "target_start": float(self.spin_constant_current_start_target.value()),
+                "target_end": float(self.spin_constant_current_end_target.value()),
+                "target_ramp_rate_mpa_s": float(self.spin_constant_current_stress_ramp_rate_mpa_s.value()),
                 "current_start_mA": float(self.spin_constant_current_start_mA.value()),
                 "current_end_mA": float(self.spin_constant_current_end_mA.value()),
                 "current_step_mA": float(self.spin_constant_current_step_mA.value()),
@@ -20248,6 +20394,76 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             )
             self.check_constant_current_return_to_start.setChecked(bool(constant_current.get("return_to_start", self.check_constant_current_return_to_start.isChecked())))
+        constant_ramp = recipe.get("constant_current_stress_ramp")
+        if isinstance(constant_ramp, Mapping):
+            self.spin_constant_current_start_target.setValue(
+                float(constant_ramp.get("target_start", self.spin_constant_current_start_target.value()))
+            )
+            self.spin_constant_current_end_target.setValue(
+                float(constant_ramp.get("target_end", self.spin_constant_current_end_target.value()))
+            )
+            self.spin_constant_current_stress_ramp_rate_mpa_s.setValue(
+                max(
+                    0.001,
+                    float(
+                        constant_ramp.get(
+                            "target_ramp_rate_mpa_s",
+                            self.spin_constant_current_stress_ramp_rate_mpa_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.spin_constant_current_start_mA.setValue(
+                float(constant_ramp.get("current_start_mA", self.spin_constant_current_start_mA.value()))
+            )
+            self.spin_constant_current_end_mA.setValue(
+                float(constant_ramp.get("current_end_mA", self.spin_constant_current_end_mA.value()))
+            )
+            self.spin_constant_current_step_mA.setValue(
+                float(constant_ramp.get("current_step_mA", self.spin_constant_current_step_mA.value()))
+            )
+            self.check_constant_current_transition_enabled.setChecked(True)
+            self.spin_constant_current_transition_stress_mpa.setValue(
+                float(
+                    constant_ramp.get(
+                        "transition_stress_mpa",
+                        self.spin_constant_current_transition_stress_mpa.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_transition_rate_mA_s.setValue(
+                max(
+                    0.001,
+                    float(
+                        constant_ramp.get(
+                            "transition_rate_mA_s",
+                            self.spin_constant_current_transition_rate_mA_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.spin_constant_current_transition_settle_s.setValue(
+                max(
+                    0.0,
+                    float(
+                        constant_ramp.get(
+                            "transition_settle_s",
+                            self.spin_constant_current_transition_settle_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.check_constant_current_transition_hold_on_error.setChecked(
+                bool(
+                    constant_ramp.get(
+                        "transition_hold_on_error",
+                        self.check_constant_current_transition_hold_on_error.isChecked(),
+                    )
+                )
+            )
+            self.check_constant_current_return_to_start.setChecked(
+                bool(constant_ramp.get("return_to_start", self.check_constant_current_return_to_start.isChecked()))
+            )
         self._update_recipe_mode_ui()
 
     def _save_recipe_to_path(self, path: str | Path) -> None:
@@ -20385,6 +20601,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if step.action == "ramp_target":
             end_value = step.target_end_value if step.target_end_value is not None else step.target_value
             end_text = self._automation_target_text(step.basis, end_value)
+            if self._is_constant_current_stress_ramp_mode(self._automation_name) and step.current_mA is not None:
+                current_text = self._automation_current_target_text(step.current_mA)
+                direction = "ramp up" if (
+                    step.target_start_value is None
+                    or step.target_end_value is None
+                    or float(step.target_end_value) >= float(step.target_start_value)
+                ) else "ramp down"
+                return f"At {current_text}: stress {direction} to {end_text}"
             if (
                 self._is_current_sweep_mode(self._automation_name)
                 and step.target_start_value is not None
@@ -22912,6 +23136,128 @@ class MainWindow(QtWidgets.QMainWindow):
             summary += self._recipe_setup_summary_sentence()
             return steps, summary, control_interval_ms
 
+        if self._is_constant_current_stress_ramp_mode(mode):
+            start_target = float(self.spin_constant_current_start_target.value())
+            end_target = float(self.spin_constant_current_end_target.value())
+            target_ramp_rate = abs(float(self.spin_constant_current_stress_ramp_rate_mpa_s.value()))
+            current_start = float(self.spin_constant_current_start_mA.value())
+            current_end = float(self.spin_constant_current_end_mA.value())
+            current_step = abs(float(self.spin_constant_current_step_mA.value()))
+            transition_stress_mpa = float(self.spin_constant_current_transition_stress_mpa.value())
+            transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
+            transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
+            transition_hold_enabled = bool(self.check_constant_current_transition_hold_on_error.isChecked())
+            if target_ramp_rate <= 0.0:
+                raise ValueError("Set a non-zero stress ramp rate.")
+            if current_step <= 0.0:
+                raise ValueError("Set a non-zero current step.")
+            if transition_rate_mA_s <= 0.0:
+                raise ValueError("Set a non-zero current-transition ramp rate.")
+            current_targets = []
+            for current_target in self._build_numeric_targets(current_start, current_end, current_step):
+                clamped_target = self._recipe_current_setpoint_mA(current_target)
+                if not current_targets or abs(clamped_target - current_targets[-1]) > 1e-12:
+                    current_targets.append(clamped_target)
+            steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
+            previous_current_mA = MIN_RECIPE_CURRENT_MA
+            for current_index, current_mA in enumerate(current_targets, start=1):
+                note_prefix = f"{current_index}"
+                transition_start_mA = self._recipe_current_setpoint_mA(previous_current_mA)
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=transition_stress_mpa,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=transition_start_mA,
+                        note=f"{note_prefix}:transition_seek",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "sweep_current",
+                        target_value=transition_stress_mpa,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_start_mA=transition_start_mA,
+                        current_end_mA=current_mA,
+                        current_ramp_rate_mA_s=transition_rate_mA_s,
+                        current_hold_enabled=transition_hold_enabled,
+                        current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                        current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                        current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                        note=note_prefix,
+                    )
+                )
+                if transition_settle_s > 0.0:
+                    steps.append(
+                        AutomationStep(
+                            "settle",
+                            target_value=transition_stress_mpa,
+                            basis=HSW_BASIS_STRESS_MPA,
+                            current_mA=current_mA,
+                            duration_s=transition_settle_s,
+                            note=f"{note_prefix}:transition_settle",
+                        )
+                    )
+                steps.append(
+                    AutomationStep(
+                        "seek_target",
+                        target_value=start_target,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=current_mA,
+                        note=f"{note_prefix}:start",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "mark_current_zero",
+                        target_value=start_target,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=current_mA,
+                        note=f"{note_prefix}:zero",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "ramp_target",
+                        target_value=end_target,
+                        target_start_value=start_target,
+                        target_end_value=end_target,
+                        target_ramp_rate_value_s=target_ramp_rate,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=current_mA,
+                        note=f"{note_prefix}:up",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "ramp_target",
+                        target_value=start_target,
+                        target_start_value=end_target,
+                        target_end_value=start_target,
+                        target_ramp_rate_value_s=target_ramp_rate,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=current_mA,
+                        note=f"{note_prefix}:down",
+                    )
+                )
+                previous_current_mA = current_mA
+            steps = self._append_return_to_origin(steps)
+            summary = (
+                "Started iso-current stress ramp recipe: "
+                f"current {current_start:.2f} to {current_end:.2f} mA in {current_step:.2f} mA steps, "
+                f"stress {start_target:.4f} MPa to {end_target:.4f} MPa "
+                f"at {target_ramp_rate:.4f} MPa/s; {clock_summary}."
+            )
+            summary += (
+                f" Current transitions ramp at {transition_rate_mA_s:.3f} mA/s "
+                f"while holding {transition_stress_mpa:.3f} MPa, then settle {transition_settle_s:.2f} s."
+            )
+            if transition_hold_enabled:
+                summary += " Current transition pauses while the target recovers."
+            summary += " Each current leg ramps stress up and back to the start target."
+            summary += self._recipe_setup_summary_sentence()
+            return steps, summary, control_interval_ms
+
         if self._is_constant_current_strain_sweep_mode(mode):
             basis = self._constant_current_start_basis()
             start_target = float(self.spin_constant_current_start_target.value())
@@ -25238,6 +25584,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_step_size", self.spin_constant_current_step_size.value())
         self.settings.setValue("constant_current_hold_s", self.spin_constant_current_hold_s.value())
         self.settings.setValue("constant_current_move_speed_mm_s", self.spin_constant_current_move_speed_mm_s.value())
+        self.settings.setValue(
+            "constant_current_stress_ramp_rate_mpa_s",
+            self.spin_constant_current_stress_ramp_rate_mpa_s.value(),
+        )
         self.settings.setValue("constant_current_start_mA", self.spin_constant_current_start_mA.value())
         self.settings.setValue("constant_current_end_mA", self.spin_constant_current_end_mA.value())
         self.settings.setValue("constant_current_step_mA", self.spin_constant_current_step_mA.value())
@@ -25947,6 +26297,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_hold_s.setValue(float(self.settings.value("constant_current_hold_s", 1.0)))
         self.spin_constant_current_move_speed_mm_s.setValue(
             max(0.001, float(self.settings.value("constant_current_move_speed_mm_s", 0.2)))
+        )
+        self.spin_constant_current_stress_ramp_rate_mpa_s.setValue(
+            max(0.001, float(self.settings.value("constant_current_stress_ramp_rate_mpa_s", 5.0)))
         )
         self.spin_constant_current_start_mA.setValue(float(self.settings.value("constant_current_start_mA", 0.0)))
         self.spin_constant_current_end_mA.setValue(float(self.settings.value("constant_current_end_mA", 100.0)))
