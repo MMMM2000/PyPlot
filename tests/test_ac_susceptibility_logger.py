@@ -4,7 +4,7 @@ import json
 import csv
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1127,6 +1127,409 @@ def test_run_ac_sweep_writes_bounded_lcr_debug_sidecar(tmp_path: Path) -> None:
     assert records[-1]["event"] == "closed"
     assert len(sample_records) <= 2
     assert {record["phase"] for record in sample_records} == {"measure"}
+
+
+def test_run_ac_sweep_writes_completed_run_status(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-12T00:00:00.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "sweep.tsv"
+    debug_path = tmp_path / "sweep_lcr_debug.jsonl"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(debug_path),
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakePsu(),
+        output_path=output_path,
+        sleep=lambda _seconds: None,
+    )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["status"] == "completed"
+    assert status["phase"] == "closed"
+    assert status["rows_written"] == 1
+    assert status["setting_index"] == 1
+    assert status["current_point_index"] == 1
+    assert status["output_path"] == str(output_path)
+    assert status["lcr_continuous_log_path"] == str(debug_path)
+    assert status["lcr_continuous_log"]["cadence_s"] == 1.0
+    assert status["psu"]["shared_broker"]["enabled"] is False
+    closed = json.loads(debug_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert closed["event"] == "closed"
+    assert closed["status"] == "completed"
+
+
+def test_run_ac_sweep_run_status_records_shared_broker_lease(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-12T00:00:00.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakeSharedPsu:
+        backend_id = "shared_hmp_broker"
+        resource = "127.0.0.1:8765/CH1"
+        host = "127.0.0.1"
+        port = 8765
+        channel = 1
+        owner = "ac_susceptibility_logger"
+
+        def __init__(self) -> None:
+            self.lease_id: str | None = None
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.lease_id = "lease-ac-ch1"
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.lease_id = None
+
+    output_path = tmp_path / "shared.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="shared_hmp_broker",
+        psu_resource="127.0.0.1:8765/CH1",
+        voltage_limit_v=32.0,
+        shared_broker_host="127.0.0.1",
+        shared_broker_port=8765,
+        shared_broker_channel=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakeSharedPsu(),
+        output_path=output_path,
+        sleep=lambda _seconds: None,
+    )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["psu"]["shared_broker"] == {
+        "enabled": True,
+        "host": "127.0.0.1",
+        "port": 8765,
+        "channel": 1,
+    }
+    assert status["psu_runtime"]["shared_broker"]["channel"] == 1
+    assert status["psu_runtime"]["shared_broker"]["lease_id"] == "lease-ac-ch1"
+
+
+def test_run_ac_sweep_writes_stopped_run_status(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-12T00:00:00.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "stopped.tsv"
+    debug_path = tmp_path / "stopped_lcr_debug.jsonl"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up"), sweep.CurrentLoopPoint(0.04, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(debug_path),
+    )
+    should_stop = False
+
+    def progress(_row: sweep.AcSweepRow) -> None:
+        nonlocal should_stop
+        should_stop = True
+
+    with pytest.raises(RuntimeError, match="stopped by user"):
+        sweep.run_ac_sweep(
+            config=config,
+            lcr=FakeLcr(),
+            psu=FakePsu(),
+            output_path=output_path,
+            sleep=lambda _seconds: None,
+            progress=progress,
+            stop_requested=lambda: should_stop,
+        )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["status"] == "stopped"
+    assert status["stop_reason"] == "AC sweep stopped by user"
+    closed = json.loads(debug_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert closed["status"] == "stopped"
+
+
+def test_ac_sweep_worker_records_worker_exception_status(tmp_path: Path) -> None:
+    class FailingLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            raise RuntimeError("lcr configure failed")
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            raise AssertionError("not reached")
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "failed.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+
+    worker = ac_logger.AcSweepWorker(config=config, lcr=FailingLcr(), psu=FakePsu(), output_path=output_path)
+    worker.run()
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["phase"] == "worker_exception"
+    assert status["exception"]["type"] == "RuntimeError"
+    assert "lcr configure failed" in status["exception"]["message"]
+
+
+def test_classify_ac_run_status_detects_stale_missing_closed_marker(tmp_path: Path) -> None:
+    output_path = tmp_path / "partial.tsv"
+    output_path.write_text("# AC susceptibility sweep\n", encoding="utf-8")
+    debug_path = sweep.ac_lcr_debug_path_for_output(output_path)
+    debug_path.write_text(
+        json.dumps({"event": "metadata"}) + "\n" + json.dumps({"event": "lcr_sample"}) + "\n",
+        encoding="utf-8",
+    )
+    old = datetime(2026, 6, 12, 1, 0, tzinfo=timezone.utc)
+    sweep.ac_run_status_path_for_output(output_path).write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "running",
+                "phase": "measure",
+                "updated_utc": old.isoformat(),
+                "output_path": str(output_path),
+                "rows_written": 123,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = sweep.classify_ac_run_status(
+        output_path,
+        stale_after_s=60.0,
+        now_utc=old + timedelta(minutes=10),
+    )
+
+    assert summary.status == "unclean_stale_heartbeat"
+    assert summary.is_unclean
+    assert summary.stale
+    assert summary.lcr_debug_closed is False
+    assert summary.rows_written == 123
+
+
+def test_resume_plan_reports_unclean_partial_setting_metadata(tmp_path: Path) -> None:
+    current_points = [
+        sweep.CurrentLoopPoint(0.02, "up"),
+        sweep.CurrentLoopPoint(0.04, "up"),
+    ]
+    settings = [
+        lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs"),
+        lcr6000.Lcr6000Settings(2000.0, 0.1, function="Ls-Rs"),
+    ]
+    config = sweep.AcSweepConfig(
+        lcr_settings=settings,
+        current_points=current_points,
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+    output_path = tmp_path / "partial.tsv"
+    reading = lcr6000.Lcr6000Reading(
+        timestamp_utc="2026-06-12T00:00:00.000+00:00",
+        raw="+1.0,+2.0,+0.0,+0.0,OK",
+        primary=1.0,
+        secondary=2.0,
+        monitor1=0.0,
+        monitor2=0.0,
+        comparator="OK",
+    )
+    writer = sweep.AcSweepTsvWriter(output_path, config)
+    writer.write_metadata()
+    writer.write_row(
+        sweep.AcSweepRow(
+            timestamp_utc="2026-06-12T00:00:01.000+00:00",
+            elapsed_s=1.0,
+            setting_index=1,
+            total_settings=2,
+            setting=settings[0],
+            current_point=current_points[0],
+            repeat_index=1,
+            lcr_reading=reading,
+            psu_measurement=sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+        )
+    )
+    writer.close()
+    old = datetime(2026, 6, 12, 1, 0, tzinfo=timezone.utc)
+    sweep.ac_run_status_path_for_output(output_path).write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "running",
+                "phase": "measure",
+                "updated_utc": old.isoformat(),
+                "output_path": str(output_path),
+                "rows_written": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    sweep.ac_lcr_debug_path_for_output(output_path).write_text(json.dumps({"event": "lcr_sample"}) + "\n", encoding="utf-8")
+
+    plan = sweep.build_resume_plan(config, [output_path])
+
+    assert plan.completed_setting_indices == []
+    assert plan.partial_setting_indices == [1]
+    assert [setting.frequency_hz for setting in plan.config.lcr_settings] == [1000.0, 2000.0]
+    assert plan.run_statuses[0].is_unclean
+    assert "uncleanly" in plan.summary
 
 
 def test_run_ac_sweep_aborts_when_psu_actual_current_is_missing(tmp_path: Path) -> None:
