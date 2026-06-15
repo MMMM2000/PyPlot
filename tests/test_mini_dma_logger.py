@@ -7149,6 +7149,82 @@ def test_ir_worker_records_selected_sensor_mode() -> None:
     assert fallback.sensor_mode == mini_dma_mod.IR_SENSOR_MLX90640
 
 
+def test_mlx90640_worker_reports_silent_camera_stream(monkeypatch) -> None:
+    class SilentPort:
+        def reset_input_buffer(self) -> None:
+            pass
+
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        def flush(self) -> None:
+            pass
+
+        def read(self, _size: int) -> bytes:
+            time.sleep(0.005)
+            return b""
+
+    monkeypatch.setattr(mini_dma_mod, "MLX90640_SILENT_STATUS_TIMEOUT_S", 0.02)
+    statuses: list[str] = []
+    worker = mini_dma_mod.Mlx90614Worker(
+        port_name="COM10",
+        baudrate=2000000,
+        interval_code=7,
+        sensor_mode=mini_dma_mod.IR_SENSOR_MLX90640,
+    )
+
+    def collect_status(message: str) -> None:
+        statuses.append(message)
+        if "No MLX90640 serial bytes" in message:
+            worker.stop()
+
+    worker.status_changed.connect(collect_status)
+    worker._run_mlx90640_cube_raw(SilentPort())  # noqa: SLF001
+
+    assert any("No MLX90640 serial bytes" in message for message in statuses)
+    assert any("stm32cube_mlx90640_stream" in message for message in statuses)
+
+
+def test_mlx90640_worker_reports_mlx90614_firmware_bytes(monkeypatch) -> None:
+    class WrongFirmwarePort:
+        def __init__(self) -> None:
+            self._chunks = [b"MLX90614_BOOT,probe\r\n"]
+
+        def reset_input_buffer(self) -> None:
+            pass
+
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        def flush(self) -> None:
+            pass
+
+        def read(self, _size: int) -> bytes:
+            if self._chunks:
+                return self._chunks.pop(0)
+            time.sleep(0.005)
+            return b""
+
+    monkeypatch.setattr(mini_dma_mod, "MLX90640_SILENT_STATUS_TIMEOUT_S", 10.0)
+    statuses: list[str] = []
+    worker = mini_dma_mod.Mlx90614Worker(
+        port_name="COM10",
+        baudrate=2000000,
+        interval_code=7,
+        sensor_mode=mini_dma_mod.IR_SENSOR_MLX90640,
+    )
+
+    def collect_status(message: str) -> None:
+        statuses.append(message)
+        if "MLX90614 thermometer firmware" in message:
+            worker.stop()
+
+    worker.status_changed.connect(collect_status)
+    worker._run_mlx90640_cube_raw(WrongFirmwarePort())  # noqa: SLF001
+
+    assert any("MLX90614 thermometer firmware" in message for message in statuses)
+
+
 def test_ir_sample_from_thermal_frame_records_camera_summary() -> None:
     frame = SimpleNamespace(
         unit="C",
