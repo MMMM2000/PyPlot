@@ -5613,6 +5613,8 @@ def _mini_dma_transition_review_entries(
             continue
         try:
             run = mini_dma_core.load_run(path)
+            if mini_dma_core.is_iso_current_run(run):
+                continue
             groups = mini_dma_core.current_sweep_groups(
                 run.frame,
                 phases=mini_dma_core.SUMMARY_PHASES,
@@ -6472,11 +6474,14 @@ def _mini_dma_preview_items(
             continue
         try:
             run = mini_dma_core.load_run(path)
-            figure = mini_dma_core.make_strain_current_figure(
-                run,
-                strain_baseline_mode=mini_dma_core.STRAIN_BASELINE_PER_TARGET_MINIMUM,
-                show_power_top_axis=False,
-            )
+            if mini_dma_core.is_iso_current_run(run):
+                figure = mini_dma_core.make_iso_current_figure(run)
+            else:
+                figure = mini_dma_core.make_strain_current_figure(
+                    run,
+                    strain_baseline_mode=mini_dma_core.STRAIN_BASELINE_PER_TARGET_MINIMUM,
+                    show_power_top_axis=False,
+                )
         except ValueError as exc:
             if "No current-sweep target groups with enough points" in str(exc):
                 logger.debug("Skipping Mini DMA preview for %s: %s", path, exc)
@@ -19014,17 +19019,18 @@ class MiniDmaSection(MiniDatabaseSection):
             strain_summary: Tuple[str, ...] = ()
             transition_summary: Tuple[str, ...] = ()
             break_summary = ""
-            try:
-                sweep_summary = mini_dma_core.summarize_current_sweep(run)
-                strain_summary = tuple(
-                    mini_dma_core.format_current_sweep_strain_summary(sweep_summary)
-                )
-                transition_summary = tuple(
-                    mini_dma_core.format_current_sweep_transition_summary(sweep_summary)
-                )
-                break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
-            except Exception:
-                self.logger.exception("Failed to summarize Mini DMA run %s", run_path)
+            if not mini_dma_core.is_iso_current_run(run):
+                try:
+                    sweep_summary = mini_dma_core.summarize_current_sweep(run)
+                    strain_summary = tuple(
+                        mini_dma_core.format_current_sweep_strain_summary(sweep_summary)
+                    )
+                    transition_summary = tuple(
+                        mini_dma_core.format_current_sweep_transition_summary(sweep_summary)
+                    )
+                    break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
+                except Exception:
+                    self.logger.exception("Failed to summarize Mini DMA run %s", run_path)
             record = MiniDmaRecord(
                 path=run_path,
                 sample=sample or raw_sample or getattr(run, "sample_name", "") or run_path.name,
