@@ -547,6 +547,9 @@ SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
+SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRAIN_PCT = 0.18
+SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRESS_MPA = 35.0
+SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S = 0.6
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
 SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_STEP_FACTOR = 0.55
 SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_MIN_CAP_MPA = 3.0
@@ -13417,6 +13420,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
             if max_cap is not None and max_cap > 0.0:
+                if self._is_iso_current_stress_target_ramp(basis):
+                    return self._iso_current_stress_ramp_command_cap_mm(
+                        basis,
+                        sensitivity,
+                    )
                 if self._automation_phase == "target_ramp":
                     cap_value = min(
                         max_cap,
@@ -13472,6 +13480,91 @@ class MainWindow(QtWidgets.QMainWindow):
             self._motor_step_mm(),
             min(strain_cap_mm, self._current_sweep_max_correction_mm()),
         )
+
+    def _is_iso_current_stress_target_ramp(self, basis: str | None = None) -> bool:
+        if not self._is_constant_current_stress_ramp_mode(self._automation_name):
+            return False
+        if self._automation_phase != "target_ramp":
+            return False
+        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            return False
+        return basis is None or basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+
+    def _iso_current_stress_ramp_direction(self) -> float:
+        note = str(self._automation_step_note or "")
+        if note.endswith(":up"):
+            return 1.0
+        if note.endswith(":down"):
+            return -1.0
+        start = self._active_target_ramp_start_value
+        target = self._automation_target_value
+        if start is None or target is None:
+            return 0.0
+        delta = float(target) - float(start)
+        if abs(delta) <= 1e-12:
+            return 0.0
+        return math.copysign(1.0, delta)
+
+    def _iso_current_stress_ramp_lagging(self, error_value: float) -> bool:
+        direction = self._iso_current_stress_ramp_direction()
+        if direction == 0.0 or abs(float(error_value)) <= 0.0:
+            return False
+        return math.copysign(1.0, float(error_value)) == direction
+
+    def _iso_current_stress_ramp_command_cap_mm(
+        self,
+        basis: str,
+        sensitivity_per_mm: float,
+    ) -> float:
+        sensitivity = abs(float(sensitivity_per_mm))
+        strain_cap_mm = self._strain_pct_to_stage_mm(
+            SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRAIN_PCT
+        )
+        stress_cap_value = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRESS_MPA,
+        )
+        caps = [
+            self._current_sweep_max_correction_mm(),
+            strain_cap_mm,
+        ]
+        if (
+            stress_cap_value is not None
+            and math.isfinite(float(stress_cap_value))
+            and sensitivity > 0.0
+        ):
+            caps.append(abs(float(stress_cap_value)) / sensitivity)
+        return max(self._motor_step_mm(), min(caps))
+
+    def _iso_current_stress_ramp_feedforward_mm(
+        self,
+        basis: str,
+        sensitivity_per_mm: float,
+        error_value: float,
+    ) -> float:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return 0.0
+        if not self._iso_current_stress_ramp_lagging(error_value):
+            return 0.0
+        sensitivity = abs(float(sensitivity_per_mm))
+        if not math.isfinite(sensitivity) or sensitivity <= 0.0:
+            return 0.0
+        ramp_rate = self._target_ramp_rate_value_s_for_context(basis)
+        if ramp_rate is None or ramp_rate <= 0.0:
+            return 0.0
+        return abs(float(ramp_rate)) * SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S / sensitivity
+
+    def _iso_current_stress_ramp_feedforward_value_rate_s(
+        self,
+        basis: str,
+        error_value: float,
+    ) -> float:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return 0.0
+        if not self._iso_current_stress_ramp_lagging(error_value):
+            return 0.0
+        ramp_rate = self._target_ramp_rate_value_s_for_context(basis)
+        return 0.0 if ramp_rate is None else abs(float(ramp_rate))
 
     def _current_sweep_hold_instability_level(
         self,
@@ -14807,7 +14900,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._motion_speed_for_current_context(manual_jog=False),
                 )
             return self._seek_step_mm(error_value, tolerance, basis=basis)
-        predicted_mm = (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
+        feedforward_mm = self._iso_current_stress_ramp_feedforward_mm(
+            basis,
+            sensitivity,
+            error_value,
+        )
+        predicted_mm = (
+            (abs(float(error_value)) / abs(float(sensitivity))) * SERVO_CORRECTION_GAIN
+            + feedforward_mm
+        )
         max_step_mm = self._seek_nudge_mm()
         if self._automation_step_note == "setup_preload" and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             correction_caps = [
@@ -14830,7 +14931,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis,
                 self._motion_speed_for_current_context(manual_jog=False),
             )
-        elif self._is_current_sweep_mode(self._automation_name):
+        elif self._is_current_sweep_mode(self._automation_name) or self._is_iso_current_stress_target_ramp(basis):
             correction_caps = [self._current_sweep_max_correction_mm()]
             stress_cap_mm = self._current_sweep_max_stress_correction_mm(
                 basis,
@@ -15251,6 +15352,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 requested_value_rate_s = (
                     SERVO_CURRENT_SWEEP_ERROR_GAIN_PER_S * abs(float(error_value))
                     + SERVO_CURRENT_SWEEP_RATE_GAIN * away_rate
+                    + self._iso_current_stress_ramp_feedforward_value_rate_s(basis, error_value)
                 )
                 speed_mm_s = requested_value_rate_s / abs(float(sensitivity))
                 landing_cap_mm_s = max(
@@ -15405,7 +15507,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if cruise_mode:
             return max(self._motor_step_mm(), abs(float(nudge_mm)))
         if (
-            self._is_current_sweep_mode(self._automation_name)
+            (
+                self._is_current_sweep_mode(self._automation_name)
+                or self._is_iso_current_stress_target_ramp(basis)
+            )
             and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
         ):
             return max(
