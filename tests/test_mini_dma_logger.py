@@ -17891,6 +17891,67 @@ def test_iso_current_stress_ramp_tapers_correction_near_endpoint(
         _close_test_window(window)
 
 
+def test_iso_current_stress_ramp_skips_opposite_direction_corrections(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_initial_length.setValue(50.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    stiffness_load_g = mini_dma_mod.load_g_from_stress_mpa(142.0, window.spin_diameter.value())
+    assert stiffness_load_g is not None
+    window._calibrated_stiffness_g_per_mm = stiffness_load_g
+    window._calibrated_stiffness_length_mm = 50.0
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRESS_RAMP
+    window._active_target_ramp_start_value = 0.0
+    window._active_target_ramp_end_value = 400.0
+    window._active_target_ramp_rate_value_s = 5.0
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=200.0,
+        plateau_index=1,
+        note="1:up",
+    )
+    window._latest_scale_timestamp = time.time()
+    window._current_position_mm = 10.0
+    window._effective_position_mm = 10.0
+    moves: list[float] = []
+    trace_rows: list[dict[str, object]] = []
+    window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+    window._write_control_trace = lambda **kwargs: trace_rows.append(dict(kwargs))  # type: ignore[method-assign]
+
+    try:
+        window._current_distribution_value = lambda *_args, **_kwargs: 202.0  # type: ignore[method-assign]
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=200.0,
+            tolerance=0.1,
+        )
+
+        assert reached is True
+        assert moves == []
+        assert trace_rows[-1]["reason"] == "monotonic_target_ramp"
+
+        window._current_distribution_value = lambda *_args, **_kwargs: 198.0  # type: ignore[method-assign]
+        window._latest_scale_timestamp = time.time() + 1.0
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=200.0,
+            tolerance=0.1,
+        )
+
+        assert reached is False
+        assert len(moves) == 1
+        assert moves[-1] < 10.0
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_phase_uses_faster_recovery_cap(
     tmp_path: Path,
     qtbot,

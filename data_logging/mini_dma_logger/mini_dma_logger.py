@@ -13514,6 +13514,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return math.copysign(1.0, float(error_value)) == direction
 
+    def _iso_current_stress_ramp_is_ahead_of_target(self, basis: str, error_value: float) -> bool:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return False
+        direction = self._iso_current_stress_ramp_direction()
+        if direction == 0.0:
+            return False
+        return float(error_value) * direction <= 0.0
+
     def _iso_current_stress_ramp_endpoint_cap_value(self, basis: str) -> float | None:
         if not self._is_iso_current_stress_target_ramp(basis):
             return None
@@ -16299,6 +16307,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="hold_error_not_persistent",
             )
             return False
+        if self._iso_current_stress_ramp_is_ahead_of_target(basis, delta_value):
+            self._clear_seek_state(seek_key)
+            self._write_control_trace(
+                decision="accept",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=acceptance_tolerance,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="moving_target_ahead",
+                reason="monotonic_target_ramp",
+            )
+            return True
         if (
             require_after_last_move
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
