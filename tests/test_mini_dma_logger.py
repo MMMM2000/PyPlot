@@ -8687,6 +8687,12 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.label_current_sweep_first_overheating_section.text() == "First overheating"
         assert window.check_current_sweep_first_overheating.text() == "Enable first-overheating sweep"
         assert window.spin_current_sweep_first_overheating_target_mpa.isHidden() is False
+        assert window.check_current_sweep_first_overheating_use_normal_end.text() == "Use normal max current"
+        assert window.check_current_sweep_first_overheating_use_normal_end.isChecked() is True
+        assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is False
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is True
         assert window.label_current_sweep_targets_section.text() == "Load targets"
         assert window.label_current_sweep_current_section.text() == "Current sweep"
         assert window.check_current_sweep_return_target.isHidden() is True
@@ -9184,6 +9190,40 @@ def test_current_sweep_first_overheating_uses_independent_preheat_target(tmp_pat
         assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in current_sweep_steps[:2])
         assert "first overheating enabled" in summary.lower()
         assert "20.0000 MPa preheat target" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_first_overheating_can_use_independent_max_current(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(40.0)
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(100.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(60.0)
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+        assert [(step.current_start_mA, step.current_end_mA) for step in current_sweep_steps[:6]] == [
+            (pytest.approx(1.0), pytest.approx(60.0)),
+            (pytest.approx(60.0), pytest.approx(1.0)),
+            (pytest.approx(1.0), pytest.approx(40.0)),
+            (pytest.approx(40.0), pytest.approx(1.0)),
+            (pytest.approx(1.0), pytest.approx(40.0)),
+            (pytest.approx(40.0), pytest.approx(1.0)),
+        ]
+        assert "60 mA" in summary
     finally:
         _close_test_window(window)
 
@@ -18721,6 +18761,8 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.check_current_sweep_hold_on_error.setChecked(True)
         window.check_current_sweep_first_overheating.setChecked(True)
         window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(90.0)
         window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
 
         window._save_recipe_to_path(recipe_path)
@@ -18731,6 +18773,8 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert payload["recipe"]["setup"]["preload_stable_s"] == pytest.approx(2.5)
         assert payload["recipe"]["setup"]["zero_stable_s"] == pytest.approx(4.0)
         assert payload["recipe"]["current_sweep"]["first_overheating_target_mpa"] == pytest.approx(20.0)
+        assert payload["recipe"]["current_sweep"]["first_overheating_use_normal_current_end"] is False
+        assert payload["recipe"]["current_sweep"]["first_overheating_current_end_mA"] == pytest.approx(90.0)
 
         window.spin_setup_preload_stress_mpa.setValue(5.0)
         window.spin_setup_preload_stable_s.setValue(0.0)
@@ -18741,6 +18785,8 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         window.check_current_sweep_hold_on_error.setChecked(False)
         window.check_current_sweep_first_overheating.setChecked(False)
         window.spin_current_sweep_first_overheating_target_mpa.setValue(75.0)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(True)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(10.0)
         window.check_current_sweep_return_target.setChecked(False)
 
         window._load_recipe_from_path(recipe_path)
@@ -18755,6 +18801,8 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.check_current_sweep_hold_on_error.isChecked() is True
         assert window.check_current_sweep_first_overheating.isChecked() is True
         assert window.spin_current_sweep_first_overheating_target_mpa.value() == pytest.approx(20.0)
+        assert window.check_current_sweep_first_overheating_use_normal_end.isChecked() is False
+        assert window.spin_current_sweep_first_overheating_end_mA.value() == pytest.approx(90.0)
         assert window.check_current_sweep_return_target.isChecked() is True
         assert "Loaded recipe" in window.log_output.toPlainText()
     finally:

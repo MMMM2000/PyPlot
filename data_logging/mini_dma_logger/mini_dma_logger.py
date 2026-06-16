@@ -5194,6 +5194,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_timer.setSingleShot(True)
         self._builder_project_import_timer.setInterval(350)
         self._builder_project_import_timer.timeout.connect(self._run_scheduled_builder_project_auto_import)
+        self._settings_save_timer = QtCore.QTimer(self)
+        self._settings_save_timer.setSingleShot(True)
+        self._settings_save_timer.setInterval(750)
+        self._settings_save_timer.timeout.connect(self._save_settings)
         self._fabrication_folder_path: Path | None = None
         self._fabrication_records_by_composition: dict[str, list[FabricationSampleRecord]] = {}
         self._fabrication_composition_lookup: dict[str, str] = {}
@@ -5207,6 +5211,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_microwire_completer: QtWidgets.QCompleter | None = None
         self._fabrication_loaded_compositions: set[str] = set()
         self._fabrication_loading_composition: str | None = None
+        self._fabrication_pending_composition_load: tuple[Path, str] | None = None
+        self._fabrication_composition_load_timer = QtCore.QTimer(self)
+        self._fabrication_composition_load_timer.setSingleShot(True)
+        self._fabrication_composition_load_timer.setInterval(900)
+        self._fabrication_composition_load_timer.timeout.connect(
+            self._start_pending_fabrication_composition_load
+        )
         self._fabrication_thread: QtCore.QThread | None = None
         self._fabrication_worker: FabricationSuggestionWorker | None = None
         self._annealing_preview_windows: list[QtWidgets.QWidget] = []
@@ -7280,6 +7291,35 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Stress", current_preheat_row)
+        self.check_current_sweep_first_overheating_use_normal_end = QtWidgets.QCheckBox(
+            "Use normal max current",
+            automation_box,
+        )
+        self.check_current_sweep_first_overheating_use_normal_end.setChecked(True)
+        self.check_current_sweep_first_overheating_use_normal_end.setToolTip(
+            "Use the normal current-sweep end current for the optional first-overheating sweep."
+        )
+        current_sweep_form.addRow("", self.check_current_sweep_first_overheating_use_normal_end)
+        self.spin_current_sweep_first_overheating_end_mA = CompactDoubleSpinBox(automation_box)
+        self.spin_current_sweep_first_overheating_end_mA.setDecimals(2)
+        self.spin_current_sweep_first_overheating_end_mA.setRange(0.0, 5000.0)
+        self.spin_current_sweep_first_overheating_end_mA.setValue(3.0)
+        self.spin_current_sweep_first_overheating_end_mA.setSuffix(" mA")
+        self.spin_current_sweep_first_overheating_end_mA.setToolTip(
+            "Maximum current used only for the optional first-overheating sweep. "
+            "The current ramp rate stays the same as the normal sweep."
+        )
+        (
+            current_preheat_end_row,
+            self.label_current_first_overheating_end_density,
+        ) = self._spin_with_equivalent_label(
+            automation_box,
+            self.spin_current_sweep_first_overheating_end_mA,
+            spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
+            label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
+        )
+        self.label_current_first_overheating_end_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        current_sweep_form.addRow("First max", current_preheat_end_row)
 
         self.label_current_sweep_targets_section = QtWidgets.QLabel("Targets", automation_box)
         targets_font = self.label_current_sweep_targets_section.font()
@@ -8316,6 +8356,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_balance_speed_mm_s,
             self.spin_current_sweep_max_seek_mm,
             self.spin_current_sweep_first_overheating_target_mpa,
+            self.spin_current_sweep_first_overheating_end_mA,
             self.spin_current_sweep_interval,
             self.spin_current_sweep_log_interval,
             self.spin_constant_current_start_target,
@@ -8345,6 +8386,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_current_sweep_return_target.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_first_overheating.toggled.connect(self._update_recipe_mode_ui)
+        self.check_current_sweep_first_overheating_use_normal_end.toggled.connect(self._update_recipe_mode_ui)
         self.check_current_sweep_reverse_current.toggled.connect(self._update_recipe_mode_ui)
         self.check_constant_current_transition_hold_on_error.toggled.connect(self._update_recipe_mode_ui)
         self.check_zero_on_preload.toggled.connect(self._refresh_live_labels)
@@ -8736,17 +8778,22 @@ class MainWindow(QtWidgets.QMainWindow):
         right_label = self._compact_plot_label(y_right_channel.label)
         return f"{left_label} + {right_label} vs {x_label}"
 
-    def _persist_settings_if_enabled(self) -> None:
+    def _persist_settings_if_enabled(self, *, immediate: bool = False) -> None:
         if (
             self._persist_settings
             and self._settings_persistence_ready
             and not self._settings_restore_in_progress
         ):
-            self._save_settings()
+            if immediate:
+                self._settings_save_timer.stop()
+                self._save_settings()
+            else:
+                self._settings_save_timer.start()
 
     def _handle_plot_config_changed(self, *_args: object) -> None:
         if not self._plot_settings_restore_in_progress:
-            self._store_dashboard_plot_settings()
+            self._store_dashboard_plot_settings(write_settings=True)
+            self.settings.sync()
         self._refresh_plots()
         self._persist_settings_if_enabled()
 
@@ -8935,7 +8982,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if y_right_index >= 0:
                 tile.y_right_combo.setCurrentIndex(y_right_index)
         self._refresh_plots()
-        self._persist_settings_if_enabled()
+        self._persist_settings_if_enabled(immediate=True)
 
     def _plot_theme(self) -> dict[str, Any]:
         palette = self.palette()
@@ -10449,6 +10496,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_fabrication_folder_load(self, root: Path, *, composition: str | None = None) -> None:
         self._cancel_fabrication_folder_load()
+        self._fabrication_composition_load_timer.stop()
+        self._fabrication_pending_composition_load = None
         if self._fabrication_folder_path != root:
             self._fabrication_failed_composition_loads.clear()
         self._fabrication_folder_path = root
@@ -10476,6 +10525,8 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.start()
 
     def _cancel_fabrication_folder_load(self) -> None:
+        self._fabrication_composition_load_timer.stop()
+        self._fabrication_pending_composition_load = None
         worker = self._fabrication_worker
         if worker is not None:
             worker.cancel()
@@ -10490,7 +10541,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_worker = None
             self._fabrication_loading_composition = None
             self._set_fabrication_loading_ui(False)
-            QtCore.QTimer.singleShot(0, self._ensure_fabrication_composition_loaded)
+            QtCore.QTimer.singleShot(0, lambda: self._ensure_fabrication_composition_loaded(defer=True))
         thread.deleteLater()
 
     def _handle_fabrication_load_success(
@@ -10534,7 +10585,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Type/select a composition to load microwires."
             )
         self._apply_fabrication_sample_if_possible()
-        self._ensure_fabrication_composition_loaded()
+        self._ensure_fabrication_composition_loaded(defer=True)
 
     def _handle_fabrication_load_failure(self, root_obj: object, message: str) -> None:
         root = Path(root_obj)
@@ -10642,7 +10693,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_microwire_completer_key is not None
             and self._fabrication_microwire_completer_key[0] == composition_key
         ):
-            self._ensure_fabrication_composition_loaded()
+            self._ensure_fabrication_composition_loaded(defer=True)
             return
         labels_tuple = tuple(
             sorted(
@@ -10670,7 +10721,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if completer_key != self._fabrication_microwire_completer_key:
             self._fabrication_microwire_model.setStringList(list(labels_tuple))
             self._fabrication_microwire_completer_key = completer_key
-        self._ensure_fabrication_composition_loaded()
+        self._ensure_fabrication_composition_loaded(defer=True)
 
     def _rebuild_fabrication_lookup_cache(self) -> None:
         self._fabrication_composition_lookup = {
@@ -10714,7 +10765,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_name_wire.setText(display_text)
         self._sync_auto_name_fields()
 
-    def _ensure_fabrication_composition_loaded(self) -> None:
+    def _ensure_fabrication_composition_loaded(self, *, defer: bool = False) -> None:
         root = self._fabrication_folder_path
         composition = self._matching_fabrication_composition()
         if root is None or composition is None:
@@ -10735,7 +10786,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if records:
             self._fabrication_loaded_compositions.add(normalized)
             return
+        if defer:
+            self._fabrication_pending_composition_load = (root, composition)
+            self._fabrication_composition_load_timer.start()
+            return
         self._start_fabrication_folder_load(root, composition=composition)
+
+    def _start_pending_fabrication_composition_load(self) -> None:
+        pending = self._fabrication_pending_composition_load
+        self._fabrication_pending_composition_load = None
+        if pending is None:
+            return
+        root, composition = pending
+        if root != self._fabrication_folder_path:
+            return
+        if _normalized_token(composition) != _normalized_token(self.edit_name_composition.text()):
+            return
+        self._ensure_fabrication_composition_loaded(defer=False)
 
     def _matching_fabrication_composition(self) -> str | None:
         current = _normalized_token(self.edit_name_composition.text())
@@ -12327,6 +12394,9 @@ class MainWindow(QtWidgets.QMainWindow):
         current_basis = self._current_sweep_basis()
         self.label_current_first_overheating_target_equiv.setText(
             self._load_equivalent_text(float(self.spin_current_sweep_first_overheating_target_mpa.value()))
+        )
+        self.label_current_first_overheating_end_density.setText(
+            self._current_density_text(float(self.spin_current_sweep_first_overheating_end_mA.value()))
         )
         for label, spinbox in (
             (self.label_current_target_start_equiv, self.spin_current_sweep_target_start),
@@ -17014,6 +17084,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strain_setup_box.setVisible(True)
         self._refresh_equivalent_labels()
         self._update_setup_summary()
+        first_overheating_current_editable = (
+            self._is_current_sweep_mode(mode)
+            and self.check_current_sweep_first_overheating.isChecked()
+            and not self.check_current_sweep_first_overheating_use_normal_end.isChecked()
+        )
+        self.check_current_sweep_first_overheating_use_normal_end.setEnabled(
+            self._is_current_sweep_mode(mode) and self.check_current_sweep_first_overheating.isChecked()
+        )
+        self.spin_current_sweep_first_overheating_end_mA.setEnabled(first_overheating_current_editable)
         if mode == "cycle":
             summary = (
                 f"Plan: cyclic displacement, {self.spin_cycle_count.value()} cycle(s), "
@@ -19215,6 +19294,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
                 ),
+                "first_overheating_use_normal_current_end": self.check_current_sweep_first_overheating_use_normal_end.isChecked(),
+                "first_overheating_current_end_mA": float(
+                    self.spin_current_sweep_first_overheating_end_mA.value()
+                ),
                 "reverse_current": True,
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
@@ -19347,7 +19430,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_session(self, *, enable_logging: bool = True, record_initial_point: bool = True) -> None:
         if self._session_active:
             return
-        self._persist_settings_if_enabled()
+        self._persist_settings_if_enabled(immediate=True)
         self._clear_run_zero_load_scale_reference()
         created_utc = _utc_timestamp()
         try:
@@ -20552,6 +20635,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.check_current_sweep_first_overheating.isChecked():
             preheat = self._recipe_number_token(self.spin_current_sweep_first_overheating_target_mpa.value())
             flags.append(f"firstheat{preheat}MPa")
+            if not self.check_current_sweep_first_overheating_use_normal_end.isChecked():
+                first_current = self._recipe_number_token(self.spin_current_sweep_first_overheating_end_mA.value())
+                flags.append(f"firstmax{first_current}mA")
         flag_text = "" if not flags else "_" + "_".join(flags)
         return (
             f"{prefix}_setup{setup}MPa_target{target_start}-{target_end}x{target_step}{target_unit}_"
@@ -20613,6 +20699,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
+                ),
+                "first_overheating_use_normal_current_end": bool(
+                    self.check_current_sweep_first_overheating_use_normal_end.isChecked()
+                ),
+                "first_overheating_current_end_mA": float(
+                    self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
                 "reverse_current": bool(self.check_current_sweep_reverse_current.isChecked()),
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
@@ -20766,6 +20858,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_sweep.get(
                         "first_overheating_target_mpa",
                         current_sweep.get("target_start", self.spin_current_sweep_first_overheating_target_mpa.value()),
+                    )
+                )
+            )
+            self.check_current_sweep_first_overheating_use_normal_end.setChecked(
+                bool(
+                    current_sweep.get(
+                        "first_overheating_use_normal_current_end",
+                        current_sweep.get("first_overheating_use_normal_current", True),
+                    )
+                )
+            )
+            self.spin_current_sweep_first_overheating_end_mA.setValue(
+                float(
+                    current_sweep.get(
+                        "first_overheating_current_end_mA",
+                        self.spin_current_sweep_end_mA.value(),
                     )
                 )
             )
@@ -22109,6 +22217,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_current_sweep_basis,
             self.check_current_sweep_first_overheating,
             self.spin_current_sweep_first_overheating_target_mpa,
+            self.check_current_sweep_first_overheating_use_normal_end,
+            self.spin_current_sweep_first_overheating_end_mA,
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_max_correction_strain_pct,
             self.spin_current_sweep_correction_rate_pct_s,
@@ -24070,6 +24180,13 @@ class MainWindow(QtWidgets.QMainWindow):
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
             first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
+            first_overheating_current_end = (
+                current_end
+                if self.check_current_sweep_first_overheating_use_normal_end.isChecked()
+                else self._recipe_current_setpoint_mA(
+                    float(self.spin_current_sweep_first_overheating_end_mA.value())
+                )
+            )
             current_hold_pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
             current_hold_resume_factor = min(
                 current_hold_pause_factor,
@@ -24082,10 +24199,16 @@ class MainWindow(QtWidgets.QMainWindow):
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             previous_target: float | None = 0.0
 
-            def _append_current_sweep_plateau(*, target: float, plateau_basis: str, note: str) -> None:
-                sweep_ranges = [(current_start, current_end)]
-                if abs(current_end - current_start) > 1e-12:
-                    sweep_ranges.append((current_end, current_start))
+            def _append_current_sweep_plateau(
+                *,
+                target: float,
+                plateau_basis: str,
+                note: str,
+                plateau_current_end_mA: float = current_end,
+            ) -> None:
+                sweep_ranges = [(current_start, plateau_current_end_mA)]
+                if abs(plateau_current_end_mA - current_start) > 1e-12:
+                    sweep_ranges.append((plateau_current_end_mA, current_start))
                 for sweep_start_mA, sweep_end_mA in sweep_ranges:
                     steps.append(
                         AutomationStep(
@@ -24128,6 +24251,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     target=first_overheating_target_mpa,
                     plateau_basis=HSW_BASIS_STRESS_MPA,
                     note="first_overheating",
+                    plateau_current_end_mA=first_overheating_current_end,
                 )
                 if basis == HSW_BASIS_STRESS_MPA:
                     previous_target = first_overheating_target_mpa
@@ -24202,6 +24326,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     " First overheating enabled: "
                     f"{first_overheating_target_mpa:.4f} MPa preheat target before the normal sequence."
                 )
+                if not self.check_current_sweep_first_overheating_use_normal_end.isChecked():
+                    summary += (
+                        f" First overheating uses {_format_compact_unit(first_overheating_current_end, 'mA', decimals=2)} "
+                        "as its current maximum."
+                    )
             summary += self._recipe_setup_summary_sentence()
             return steps, summary, control_interval_ms
 
@@ -26229,6 +26358,14 @@ class MainWindow(QtWidgets.QMainWindow):
             "current_sweep_first_overheating_target_mpa",
             self.spin_current_sweep_first_overheating_target_mpa.value(),
         )
+        self.settings.setValue(
+            "current_sweep_first_overheating_use_normal_current_end",
+            self.check_current_sweep_first_overheating_use_normal_end.isChecked(),
+        )
+        self.settings.setValue(
+            "current_sweep_first_overheating_current_end_mA",
+            self.spin_current_sweep_first_overheating_end_mA.value(),
+        )
         self.settings.setValue("current_sweep_reverse_current", self.check_current_sweep_reverse_current.isChecked())
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
@@ -26933,6 +27070,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 float(self.settings.value("current_sweep_first_overheating_target_mpa", 20.0)),
             )
         )
+        self.check_current_sweep_first_overheating_use_normal_end.setChecked(
+            bool(
+                self.settings.value(
+                    "current_sweep_first_overheating_use_normal_current_end",
+                    True,
+                    type=bool,
+                )
+            )
+        )
+        self.spin_current_sweep_first_overheating_end_mA.setValue(
+            float(
+                self.settings.value(
+                    "current_sweep_first_overheating_current_end_mA",
+                    self.spin_current_sweep_end_mA.value(),
+                )
+            )
+        )
         self.check_current_sweep_reverse_current.setChecked(
             bool(self.settings.value("current_sweep_reverse_current", True, type=bool))
         )
@@ -27030,6 +27184,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
         self._close_transient_child_windows()
+        self._settings_save_timer.stop()
+        self._fabrication_composition_load_timer.stop()
         if self._persist_settings:
             self._save_settings()
         self._stop_tic_keepalive()
