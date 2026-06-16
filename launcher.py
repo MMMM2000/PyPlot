@@ -2961,46 +2961,61 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
     )
 
 
-def _microwire_word_graph_sections_for_row(row: Any) -> dict[str, dict[str, list[str]]]:
-    sections: dict[str, dict[str, list[str]]] = {}
+def _microwire_word_graph_sections_for_row(
+    row: Any,
+    origin_artifacts: Mapping[str, Any] | None = None,
+    *,
+    include_all: bool = False,
+) -> dict[str, dict[str, Any]]:
+    from microwire_data_builder.core import word_report_section_manifest_for_row
+
+    sections: dict[str, dict[str, Any]] = {}
+    evaluated = {
+        str(item.get("title") or ""): item
+        for item in word_report_section_manifest_for_row(row, origin_artifacts or {})
+    }
     for section_name, source_columns, graph_columns in _WORD_REPORT_GRAPH_MANIFEST_SECTIONS:
         source_values: list[str] = []
-        graph_values: list[str] = []
-        origin_values: list[str] = []
         for column in source_columns:
             source_values.extend(
                 str(item)
                 for item in _word_project_value_items(row.get(column))
                 if str(item or "").strip()
             )
-        for column in graph_columns:
-            values = [
-                str(item)
-                for item in _word_project_value_items(row.get(column))
-                if str(item or "").strip()
-            ]
-            graph_values.extend(values)
-            if str(column).endswith("(Origin)"):
-                origin_values.extend(values)
         source_values = list(dict.fromkeys(source_values))
-        graph_values = list(dict.fromkeys(graph_values))
-        origin_values = list(dict.fromkeys(origin_values))
-        if origin_values:
+        summary = evaluated.get(section_name, {})
+        included = bool(summary.get("included"))
+        if included or include_all:
             sections[section_name] = {
+                "included": included,
+                "status": str(summary.get("status") or ("included" if included else "skipped")),
+                "reason": str(summary.get("reason") or ""),
                 "sources": source_values,
-                "graphs": origin_values,
-                "references": graph_values,
+                "graphs": list(summary.get("origin_descriptors") or []),
+                "references": list(summary.get("references") or []),
+                "invalid_origin_descriptors": list(summary.get("invalid_origin_descriptors") or []),
+                "missing_origin_descriptors": list(summary.get("missing_origin_descriptors") or []),
+                "invalid_references": list(summary.get("invalid_references") or []),
             }
     return sections
 
 
-def _filter_microwire_word_graph_rows(frame: Any):
+def _filter_microwire_word_graph_rows(
+    frame: Any,
+    origin_artifacts: Mapping[str, Any] | None = None,
+):
     if frame.empty:
         return frame
     keep_indices = [
         index
         for index, row in frame.iterrows()
-        if _microwire_word_graph_sections_for_row(row)
+        if any(
+            section.get("included")
+            for section in _microwire_word_graph_sections_for_row(
+                row,
+                origin_artifacts,
+            ).values()
+        )
     ]
     return frame.loc[keep_indices].reset_index(drop=True)
 
@@ -3064,12 +3079,32 @@ def _write_microwire_word_manifest(
     source_path: Path,
     copied_project: str | None,
     include_origin: bool,
+    origin_artifacts: Mapping[str, Any] | None = None,
 ) -> tuple[Path, Path]:
     exported_at = datetime.now(timezone.utc).isoformat()
     rows: list[dict[str, Any]] = []
     for index, (_, row) in enumerate(frame.reset_index(drop=True).iterrows()):
         report_path = Path(reports[index]) if index < len(reports) else output_dir / _word_report_output_filenames(frame)[index]
-        sections = _microwire_word_graph_sections_for_row(row)
+        sections = _microwire_word_graph_sections_for_row(
+            row,
+            origin_artifacts,
+            include_all=True,
+        )
+        included_sections = sorted(
+            section_name
+            for section_name, section_data in sections.items()
+            if section_data.get("included")
+        )
+        skipped_sections = sorted(
+            section_name
+            for section_name, section_data in sections.items()
+            if not section_data.get("included") and section_data.get("status") == "skipped"
+        )
+        invalid_sections = sorted(
+            section_name
+            for section_name, section_data in sections.items()
+            if section_data.get("status") == "invalid"
+        )
         source_entries = {
             section_name: [
                 _word_manifest_source_entry(source)
@@ -3083,7 +3118,10 @@ def _write_microwire_word_manifest(
                 "microwire": str(row.get("Microwire") or "").strip(),
                 "docx": str(report_path),
                 "docx_name": report_path.name,
-                "graph_sections": sorted(sections.keys()),
+                "graph_sections": included_sections,
+                "included_sections": included_sections,
+                "skipped_sections": skipped_sections,
+                "invalid_sections": invalid_sections,
                 "sections": sections,
                 "source_files": source_entries,
             }
@@ -3215,7 +3253,7 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
         frame, origin_artifacts = _load_microwire_word_report_frame(source_path, args, output_dir)
         if bool(getattr(args, "microwire_word_graphs_only", False)):
             before_count = len(frame)
-            frame = _filter_microwire_word_graph_rows(frame)
+            frame = _filter_microwire_word_graph_rows(frame, origin_artifacts)
             print(f"[microwire-word] graph_rows={len(frame)}")
             print(f"[microwire-word] skipped_graphless_rows={before_count - len(frame)}")
         archived_reports = _archive_existing_microwire_word_reports(frame, output_dir)
@@ -3229,6 +3267,7 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
             source_path=source_path,
             copied_project=getattr(args, "_microwire_word_copied_project", None),
             include_origin=bool(getattr(args, "microwire_word_origin", True)),
+            origin_artifacts=origin_artifacts,
         )
         print(f"[microwire-word] output_dir={output_dir}")
         print(f"[microwire-word] reports={len(reports)}")
