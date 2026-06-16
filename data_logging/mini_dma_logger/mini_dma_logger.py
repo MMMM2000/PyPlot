@@ -126,6 +126,7 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_preserves_rate_limited_nominal_return",
     "voltage_limit_unwind_obeys_current_hold",
     "voltage_limit_unwind_waits_for_target_recovery",
+    "first_overheating_current_included_in_channel_limit",
     "wire_break_recovery_prompt_ui_thread",
     "current_sweep_mechanical_load_loss_guard",
     "fault_stop_metadata_preserved_on_app_close",
@@ -9388,10 +9389,20 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _planned_current_sweep_limit_mA(self) -> float:
+        first_overheating_end_mA = 0.0
+        if (
+            hasattr(self, "check_current_sweep_first_overheating")
+            and self.check_current_sweep_first_overheating.isChecked()
+            and hasattr(self, "check_current_sweep_first_overheating_use_normal_end")
+            and not self.check_current_sweep_first_overheating_use_normal_end.isChecked()
+            and hasattr(self, "spin_current_sweep_first_overheating_end_mA")
+        ):
+            first_overheating_end_mA = float(self.spin_current_sweep_first_overheating_end_mA.value())
         return max(
             float(self.spin_supply_manual_current.value()),
             float(self.spin_current_sweep_start_mA.value()),
             float(self.spin_current_sweep_end_mA.value()),
+            first_overheating_end_mA,
             float(self.spin_continuity_current_mA.value()) if self._continuity_monitor_enabled() else 0.0,
             1.0,
         )
