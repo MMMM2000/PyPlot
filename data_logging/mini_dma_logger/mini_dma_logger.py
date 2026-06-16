@@ -92,8 +92,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-05-29.2"
-CONTROL_LOGIC_PROFILE = "filtered-current-hold-setup-ui"
+CONTROL_LOGIC_VERSION = "2026-06-16.1"
+CONTROL_LOGIC_PROFILE = "unstable-current-hold-damping"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -109,12 +109,12 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_retry_after_filter_window",
     "current_hold_bounded_saved_cap",
     "current_hold_noise_band_resume",
-    "adaptive_current_hold_response_stiffness",
+    "conservative_current_hold_response_stiffness",
     "current_hold_waits_for_natural_target_return",
     "current_hold_response_requires_directional_motor_response",
     "current_hold_large_error_bypasses_persistence",
     "current_hold_moving_away_bypasses_persistence",
-    "current_hold_moving_away_preserves_predictive_step",
+    "current_hold_unstable_response_damps_to_single_motor_steps",
     "current_hold_large_error_not_masked_by_noise",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
@@ -556,6 +556,9 @@ SERVO_ISO_CURRENT_STRESS_RAMP_ENDPOINT_MIN_CAP_MPA = 3.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES = 3
 SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_STEP_FACTOR = 0.55
 SERVO_CURRENT_SWEEP_HOLD_INSTABILITY_MIN_CAP_MPA = 3.0
+SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL = 3
+SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_STABLE_SAMPLES = 4
+SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_OVERSHOOT_FACTOR = 8.0
 SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S = 1.0
 SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
@@ -5124,6 +5127,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_travel_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_pending_reversal_by_key: dict[tuple[str, int, float], tuple[float, float | None]] = {}
         self._current_sweep_hold_instability_by_key: dict[tuple[str, int, float], int] = {}
+        self._current_sweep_hold_stable_response_by_key: dict[tuple[str, int, float], int] = {}
         self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._iso_current_stress_ramp_rate_sample_by_key: dict[tuple[str, int, str], tuple[float, float]] = {}
@@ -13524,6 +13528,7 @@ class MainWindow(QtWidgets.QMainWindow):
             adaptive_sensitivity = self._current_sweep_hold_response_sensitivity_per_mm(
                 basis,
                 seek_key=seek_key,
+                baseline_sensitivity_per_mm=sensitivity,
             )
             if (
                 adaptive_sensitivity is not None
@@ -13826,10 +13831,54 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if self._automation_phase != "current_hold" or seek_key is None:
             return
+        self._current_sweep_hold_stable_response_by_key.pop(seek_key, None)
         self._current_sweep_hold_instability_by_key[seek_key] = min(
             8,
             self._current_sweep_hold_instability_level(seek_key) + 1,
         )
+
+    def _current_sweep_hold_unstable_response_active(
+        self,
+        seek_key: tuple[str, int, float] | None,
+    ) -> bool:
+        return self._current_sweep_hold_instability_level(seek_key) >= SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL
+
+    def _current_sweep_hold_large_overshoot(
+        self,
+        basis: str,
+        previous_error: float | None,
+        error_value: float,
+        tolerance: float,
+    ) -> bool:
+        if previous_error is None or self._automation_phase != "current_hold":
+            return False
+        if float(previous_error) * float(error_value) >= 0.0:
+            return False
+        band = max(
+            abs(float(tolerance)) * SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_OVERSHOOT_FACTOR,
+            self._current_sweep_hold_min_band_for_basis(
+                basis,
+                self._current_sweep_hold_min_pause_stress_mpa(),
+            ),
+        )
+        return min(abs(float(previous_error)), abs(float(error_value))) > band
+
+    def _note_current_sweep_hold_stable_response(
+        self,
+        seek_key: tuple[str, int, float] | None,
+    ) -> None:
+        if self._automation_phase != "current_hold" or seek_key is None:
+            return
+        level = self._current_sweep_hold_instability_level(seek_key)
+        if level <= 0:
+            self._current_sweep_hold_stable_response_by_key.pop(seek_key, None)
+            return
+        count = self._current_sweep_hold_stable_response_by_key.get(seek_key, 0) + 1
+        if count >= SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_STABLE_SAMPLES:
+            self._current_sweep_hold_stable_response_by_key.pop(seek_key, None)
+            self._decay_current_sweep_hold_instability(seek_key)
+        else:
+            self._current_sweep_hold_stable_response_by_key[seek_key] = count
 
     def _decay_current_sweep_hold_instability(
         self,
@@ -13837,6 +13886,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if seek_key is None:
             return
+        self._current_sweep_hold_stable_response_by_key.pop(seek_key, None)
         level = self._current_sweep_hold_instability_level(seek_key)
         if level <= 1:
             self._current_sweep_hold_instability_by_key.pop(seek_key, None)
@@ -13873,6 +13923,7 @@ class MainWindow(QtWidgets.QMainWindow):
         basis: str,
         *,
         seek_key: tuple[str, int, float] | None,
+        baseline_sensitivity_per_mm: float | None = None,
     ) -> float | None:
         if self._automation_phase != "current_hold" or seek_key is None:
             return None
@@ -13883,12 +13934,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if load_stiffness is None or not math.isfinite(float(load_stiffness)) or float(load_stiffness) <= 0.0:
             return None
         if basis == HSW_BASIS_LOAD_G:
-            return float(load_stiffness)
-        if basis == HSW_BASIS_STRESS_MPA:
+            sensitivity = float(load_stiffness)
+        elif basis == HSW_BASIS_STRESS_MPA:
             config = self._control_config()
             diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
-            return stress_mpa_from_load_g(float(load_stiffness), diameter_mm)
-        return None
+            sensitivity = stress_mpa_from_load_g(float(load_stiffness), diameter_mm)
+        else:
+            return None
+        if sensitivity is None or not math.isfinite(float(sensitivity)) or float(sensitivity) <= 0.0:
+            return None
+        if (
+            baseline_sensitivity_per_mm is not None
+            and math.isfinite(float(baseline_sensitivity_per_mm))
+            and abs(float(sensitivity)) < abs(float(baseline_sensitivity_per_mm))
+        ):
+            return None
+        return float(sensitivity)
 
     def _current_sweep_basis_value_from_stress_cap(self, basis: str, stress_mpa: float) -> float | None:
         if basis == HSW_BASIS_STRESS_MPA:
@@ -13902,6 +13963,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_sweep_hold_fast_recovery_needed(self, basis: str | None, error_value: float) -> bool:
         if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if (
+            self._automation_target_value is not None
+            and self._current_sweep_hold_unstable_response_active(
+                self._seek_error_key(basis, float(self._automation_target_value))
+            )
+        ):
             return False
         threshold_mpa = min(
             self._current_sweep_hold_correction_stress_mpa(),
@@ -15412,6 +15480,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_travel_by_key.pop(seek_key, None)
         self._seek_pending_reversal_by_key.pop(seek_key, None)
         self._current_sweep_hold_instability_by_key.pop(seek_key, None)
+        self._current_sweep_hold_stable_response_by_key.pop(seek_key, None)
         self._current_sweep_hold_response_stiffness_by_key.pop(seek_key, None)
         self._current_sweep_hold_response_count_by_key.pop(seek_key, None)
 
@@ -16761,6 +16830,12 @@ class MainWindow(QtWidgets.QMainWindow):
             and previous_error * delta_value < 0.0
             and not self._is_iso_current_stress_target_ramp(basis)
         )
+        large_current_hold_overshoot = self._current_sweep_hold_large_overshoot(
+            basis,
+            previous_error,
+            delta_value,
+            effective_tolerance,
+        )
         protective_single_step = self._current_sweep_protective_step_needed(
             previous_error,
             delta_value,
@@ -16769,6 +16844,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if overshot_target:
             if self._automation_phase == "current_hold":
                 self._note_current_sweep_hold_instability(seek_key)
+                if large_current_hold_overshoot:
+                    self._note_current_sweep_hold_instability(seek_key)
             if (
                 filtered_signal is not None
                 and self._is_current_sweep_mode(self._automation_name)
@@ -16870,6 +16947,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._seek_no_response_count_by_key[seek_key] = count
                 if self._automation_phase == "current_hold":
                     self._note_current_sweep_hold_instability(seek_key)
+                    if count >= 2:
+                        self._note_current_sweep_hold_instability(seek_key)
                 travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
                 self._log(
                     f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
@@ -16877,7 +16956,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
-                self._decay_current_sweep_hold_instability(seek_key)
+                self._note_current_sweep_hold_stable_response(seek_key)
         current_hold_moving_away_fast = (
             self._automation_phase == "current_hold"
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
@@ -16895,6 +16974,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Closed-loop response worsened after the previous correction; "
                 "using a protective single-step correction."
             )
+        if self._current_sweep_hold_unstable_response_active(seek_key):
+            nudge_mm = min(nudge_mm, self._motor_step_mm())
+            self._log(
+                "Current-hold response is unstable; damping load/stress correction to one motor step."
+            )
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
@@ -16908,7 +16992,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if (
             backlash_takeup_mm > 0.0
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-            and nudge_mm <= self._motor_step_mm() + 1e-12
+            and (
+                nudge_mm <= self._motor_step_mm() + 1e-12
+                or self._current_sweep_hold_unstable_response_active(seek_key)
+            )
         ):
             backlash_takeup_mm = 0.0
         if self._current_sweep_travel_limit_exceeded(seek_key, nudge_mm + backlash_takeup_mm):
@@ -19021,6 +19108,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
                 ),
                 "current_hold_adaptive_min_samples": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES,
+                "current_hold_unstable_level": SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL,
+                "current_hold_unstable_stable_samples": (
+                    SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_STABLE_SAMPLES
+                ),
+                "current_hold_unstable_overshoot_factor": (
+                    SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_OVERSHOOT_FACTOR
+                ),
                 "current_hold_correction_confirm_s": SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S,
                 "current_hold_noise_cap_tolerance_factor": (
                     SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR
@@ -22537,6 +22631,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
         self._current_sweep_hold_instability_by_key.clear()
+        self._current_sweep_hold_stable_response_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()
@@ -23417,6 +23512,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_stiffness_value_by_basis.clear()
         self._seek_last_stiffness_position_by_basis.clear()
         self._current_sweep_hold_instability_by_key.clear()
+        self._current_sweep_hold_stable_response_by_key.clear()
         self._current_sweep_hold_response_stiffness_by_key.clear()
         self._current_sweep_hold_response_count_by_key.clear()
         self._seek_no_response_count_by_key.clear()

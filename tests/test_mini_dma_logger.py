@@ -16214,6 +16214,172 @@ def test_current_sweep_hold_large_error_keeps_multi_step_correction_when_worseni
         _close_test_window(window)
 
 
+def test_current_sweep_hold_unstable_response_disables_fast_recovery_speed(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(61.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        800.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+
+    try:
+        normal_speed = window._seek_speed_mm_s(
+            -100.0,
+            0.4,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            seek_key=seek_key,
+            current_value=150.0,
+        )
+        for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL):
+            window._note_current_sweep_hold_instability(seek_key)
+
+        damped_speed = window._seek_speed_mm_s(
+            -100.0,
+            0.4,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            seek_key=seek_key,
+            current_value=150.0,
+        )
+
+        assert normal_speed == pytest.approx(5.0)
+        assert damped_speed < normal_speed
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_unstable_response_clamps_large_error_to_single_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0125)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(61.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        800.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -80.0
+    window._seek_last_value_by_key[seek_key] = 130.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._seek_out_of_band_sign_by_key[seek_key] = -1.0
+    window._seek_out_of_band_since_by_key[seek_key] = time.time() - 2.0
+    for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL):
+        window._note_current_sweep_hold_instability(seek_key)
+    window._current_position_mm = 0.0
+    window._effective_position_mm = 0.0
+    window._last_motion_command_time_s = time.time() - 1.0
+    window._last_motion_expected_complete_time_s = time.time() - 0.8
+    load_g = mini_dma_mod.load_g_from_stress_mpa(
+        150.0,
+        window.spin_diameter.value(),
+    )
+    assert load_g is not None
+    now_s = time.time()
+    for index in range(5):
+        timestamp_s = now_s - 1.2 + index * 0.3
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    window._seek_last_filtered_value_by_key[seek_key] = 130.0
+    window._seek_last_scale_timestamp_by_clock[(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1)] = (
+        window._latest_scale_timestamp - 0.1
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert moves, window.log_output.toPlainText()
+        target_mm, effective_mm = moves[-1]
+        commanded_mm = abs(target_mm if effective_mm is None else effective_mm)
+        assert commanded_mm == pytest.approx(window._motor_step_mm())
+        assert "unstable" in window.log_output.toPlainText().lower()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_unstable_response_decays_after_stable_samples(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+        note="1",
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+
+    try:
+        for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL):
+            window._note_current_sweep_hold_instability(seek_key)
+        assert window._current_sweep_hold_unstable_response_active(seek_key) is True
+
+        for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_STABLE_SAMPLES):
+            window._note_current_sweep_hold_stable_response(seek_key)
+
+        assert window._current_sweep_hold_unstable_response_active(seek_key) is False
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_moving_away_keeps_multi_step_correction_when_worsening(
     tmp_path: Path,
     qtbot,
@@ -17247,14 +17413,14 @@ def test_current_sweep_hold_uses_adaptive_response_stiffness_for_large_errors(
 
         correction_mm = window._current_sweep_max_stress_correction_mm(
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            sensitivity_per_mm=2090.0,
+            sensitivity_per_mm=300.0,
             error_value=40.0,
             seek_key=seek_key,
         )
 
         assert correction_mm is not None
         assert correction_mm == pytest.approx(0.059, rel=0.08)
-        assert correction_mm > (20.0 / 2090.0)
+        assert correction_mm < (20.0 / 300.0)
     finally:
         _close_test_window(window)
 
@@ -17285,13 +17451,54 @@ def test_current_sweep_hold_adaptive_response_respects_strain_rail(
 
         correction_mm = window._current_sweep_max_stress_correction_mm(
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            sensitivity_per_mm=2090.0,
+            sensitivity_per_mm=100.0,
             error_value=180.0,
             seek_key=seek_key,
         )
 
         assert correction_mm is not None
         assert correction_mm == pytest.approx(0.203)
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_rejects_response_stiffness_that_would_increase_steps(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(100.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=150.0,
+            plateau_index=3,
+        )
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 150.0)
+        softer_load_stiffness = mini_dma_mod.load_g_from_stress_mpa(150.0, window.spin_diameter.value())
+        assert softer_load_stiffness is not None
+
+        baseline_correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=450.0,
+            error_value=80.0,
+            seek_key=seek_key,
+        )
+        window._current_sweep_hold_response_stiffness_by_key[seek_key] = softer_load_stiffness
+        window._current_sweep_hold_response_count_by_key[seek_key] = 4
+        learned_correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=450.0,
+            error_value=80.0,
+            seek_key=seek_key,
+        )
+
+        assert baseline_correction_mm is not None
+        assert learned_correction_mm == pytest.approx(baseline_correction_mm)
     finally:
         _close_test_window(window)
 
@@ -19584,7 +19791,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "filtered-current-hold-setup-ui"
+        assert first_logic["profile"] == "unstable-current-hold-damping"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
@@ -19592,6 +19799,8 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
+        assert "conservative_current_hold_response_stiffness" in first_logic["features"]
+        assert "current_hold_unstable_response_damps_to_single_motor_steps" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]
