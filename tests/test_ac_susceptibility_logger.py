@@ -4129,6 +4129,127 @@ def test_ac_logger_run_attempts_auto_connect_before_missing_hardware_warning(
         app.processEvents()
 
 
+def test_ac_logger_serial_psu_prepare_failure_stays_idle_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "serial_psu_prepare_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+            voltage_limit_v=61.0,
+        )
+        monkeypatch.setattr(
+            window,
+            "_release_inherited_psu_port_for_ac",
+            lambda _resource: (_ for _ in ()).throw(RuntimeError("inherited process active")),
+        )
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert window._ac_sweep_running is False
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert "Power supply preparation failed: inherited process active" in window.label_lcr_status.text()
+        assert warnings == [
+            (
+                "AC power supply unavailable",
+                "Could not prepare the selected power supply for the AC sweep:\ninherited process active",
+            )
+        ]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_worker_launch_failure_resets_running_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "worker_launch_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    class _FailingSweepWorker:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("worker setup exploded")
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="shared_hmp_broker",
+            psu_resource="127.0.0.1:8765/CH1",
+            voltage_limit_v=32.0,
+            shared_broker_channel=1,
+        )
+        monkeypatch.setattr(window, "_ensure_ac_shared_broker_running", lambda _config=None: None)
+        monkeypatch.setattr(ac_logger, "AcSweepWorker", _FailingSweepWorker)
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window._ac_active_output_path is None
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert window._ac_worker is None
+        assert window._ac_worker_thread is None
+        assert window.label_lcr_status.text() == "AC sweep failed: worker setup exploded"
+        assert warnings == [("AC sweep failed", "worker setup exploded")]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_formats_expected_finish_times() -> None:
     now = datetime(2026, 5, 19, 9, 15)
     assert ac_logger.MainWindow._format_expected_finish(45 * 60, now=now) == "today 10:00"

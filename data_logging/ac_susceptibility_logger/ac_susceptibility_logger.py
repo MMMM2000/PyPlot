@@ -3318,13 +3318,24 @@ class MainWindow(CurrentAnnealingWindow):
                 voltage_limit_v=config.voltage_limit_v,
             )
         else:
-            self._release_inherited_psu_port_for_ac(config.psu_resource)
-            psu = sweep.SerialScpiCurrentSource(
-                backend_id=config.psu_backend,
-                resource=config.psu_resource,
-                baudrate=self._selected_ac_psu_baudrate(),
-                voltage_limit_v=config.voltage_limit_v,
-            )
+            try:
+                self._release_inherited_psu_port_for_ac(config.psu_resource)
+                psu = sweep.SerialScpiCurrentSource(
+                    backend_id=config.psu_backend,
+                    resource=config.psu_resource,
+                    baudrate=self._selected_ac_psu_baudrate(),
+                    voltage_limit_v=config.voltage_limit_v,
+                )
+            except Exception as exc:
+                self._lcr_last_error = str(exc)
+                self.label_lcr_status.setText(f"Power supply preparation failed: {exc}")
+                self._refresh_ac_hardware_status()
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "AC power supply unavailable",
+                    f"Could not prepare the selected power supply for the AC sweep:\n{exc}",
+                )
+                return
         self._reset_ac_live_plots(reset_reason)
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
@@ -3386,7 +3397,8 @@ class MainWindow(CurrentAnnealingWindow):
             if watchdog is not None:
                 watchdog.stop()
             self._ac_psu_watchdog = None
-            self._ac_active_output_path = None
+            self._finish_ac_worker_state()
+            self._clear_ac_worker_refs()
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"AC sweep failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "AC sweep failed", str(exc))

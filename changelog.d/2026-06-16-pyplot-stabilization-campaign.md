@@ -19,3 +19,4 @@
 - Reused fresh Mini DMA Builder project cache entries for immediate sample/microwire suggestions while background exact-match imports continue.
 - Added a Mini DMA run-quality CLI option to generate the standard core PNG/JSON plot artifacts while writing `run_quality.json`.
 - Made Mini DMA batch core-plot generation continue past incomplete run folders while reporting per-run plot errors.
+- Kept AC sweep-start failures from leaving the UI stuck in a running state when PSU preparation or worker startup fails.
