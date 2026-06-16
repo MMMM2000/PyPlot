@@ -11520,9 +11520,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_worker = None
         self._builder_project_import_request_key = None
         self._builder_import_in_progress = False
+        self._builder_project_import_retry_pending = False
         if thread is not None:
-            thread.quit()
-            thread.wait(1500)
+            try:
+                thread.quit()
+                thread.wait(1500)
+            except RuntimeError:
+                pass
 
     def _builder_project_auto_import_is_current(
         self,

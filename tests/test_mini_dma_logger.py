@@ -5901,6 +5901,123 @@ def test_builder_project_rows_feed_sample_completers(tmp_path: Path, qtbot) -> N
         _close_test_window(window)
 
 
+def test_builder_project_cache_reuses_payload_for_sample_suggestions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {"Composition": "Ni44Fe27Ga23Cu3Co3", "Microwire": "1/5"},
+                            {"Composition": "Ni44Fe27Ga23Cu3Co3", "Microwire": "1/2"},
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+        mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+
+    original_read_text = Path.read_text
+    read_paths: list[Path] = []
+
+    def _read_text_spy(self: Path, *args: object, **kwargs: object) -> str:
+        if self == project_path:
+            read_paths.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text_spy)
+
+    try:
+        first = mini_dma_mod._read_builder_project_cache_entry(project_path)
+        second = mini_dma_mod._read_builder_project_cache_entry(project_path)
+
+        assert first is second
+        assert read_paths == [project_path]
+        assert first.suggestions == {"Ni44Fe27Ga23Cu3Co3": ("1/2", "1/5")}
+    finally:
+        with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+            mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+
+
+def test_builder_project_stale_async_suggestions_are_ignored(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(json.dumps({"sections": {"microscope": {"rows": []}}}), encoding="utf-8")
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni44Fe27Ga23Cu3Co3")
+        window.edit_name_wire.setText("1/5")
+        current_key = window._project_import_request_key(project_path)
+        stale_key = (str(project_path), "Ni50Fe27Ga23", "12/2", "")
+        window._builder_project_path = project_path
+        window._builder_project_import_request_key = current_key
+        window._builder_project_sample_suggestions = {"Existing": ("9/9",)}
+
+        window._handle_builder_project_suggestions(
+            project_path,
+            stale_key,
+            {"Ni50Fe27Ga23": ("12/2",)},
+        )
+
+        assert window._builder_project_sample_suggestions == {"Existing": ("9/9",)}
+
+        window._handle_builder_project_suggestions(
+            project_path,
+            current_key,
+            {"Ni44Fe27Ga23Cu3Co3": ("1/5", "1/2")},
+        )
+
+        assert window._builder_project_sample_suggestions == {
+            "Ni44Fe27Ga23Cu3Co3": ("1/5", "1/2")
+        }
+    finally:
+        _close_test_window(window)
+
+
+def test_stopping_builder_project_import_clears_retry_state(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeThread:
+        def __init__(self) -> None:
+            self.quit_called = False
+            self.wait_timeout: int | None = None
+
+        def quit(self) -> None:
+            self.quit_called = True
+
+        def wait(self, timeout_ms: int) -> None:
+            self.wait_timeout = timeout_ms
+
+    thread = _FakeThread()
+
+    try:
+        window._builder_project_import_thread = thread  # type: ignore[assignment]
+        window._builder_project_import_worker = object()  # type: ignore[assignment]
+        window._builder_project_import_request_key = ("project.pydpj", "Ni50Fe27Ga23", "12/2", "")
+        window._builder_import_in_progress = True
+        window._builder_project_import_retry_pending = True
+
+        window._stop_builder_project_import_thread()
+
+        assert window._builder_project_import_thread is None
+        assert window._builder_project_import_worker is None
+        assert window._builder_project_import_request_key is None
+        assert window._builder_import_in_progress is False
+        assert window._builder_project_import_retry_pending is False
+        assert thread.quit_called is True
+        assert thread.wait_timeout == 1500
+    finally:
+        _close_test_window(window)
+
+
 def test_failed_fabrication_composition_load_is_not_retried_forever(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     root = tmp_path / "fabrication"
@@ -11878,6 +11995,99 @@ def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
                 "current_limit_a": 0.06,
             },
         )
+    ]
+
+
+def test_shared_broker_supply_controller_retries_after_stale_current_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.lease_count = 0
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "snapshot":
+                return {
+                    "ok": True,
+                    "snapshot": {
+                        "model": "hmp4040",
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.08,
+                                }
+                            }
+                        },
+                    },
+                }
+            return {"ok": True}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.lease_count += 1
+            lease_id = "lease-stale" if self.lease_count == 1 else "lease-fresh"
+            self.calls.append(
+                ("lease", {"channel": channel, "owner": owner, "role": role, "lease_id": lease_id})
+            )
+            return {"lease_id": lease_id}
+
+        def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            self.calls.append(
+                ("set_current", {"channel": channel, "lease_id": lease_id, "current_mA": current_mA})
+            )
+            if lease_id == "lease-stale":
+                raise RuntimeError("valid lease required for CH4")
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=0.08,
+    )
+
+    controller.connect()
+    controller.set_current_mA(10.0)
+
+    set_current_calls = [call for call in clients[0].calls if call[0] == "set_current"]
+    lease_calls = [call for call in clients[0].calls if call[0] == "lease"]
+    assert lease_calls == [
+        (
+            "lease",
+            {
+                "channel": 4,
+                "owner": "mini_dma_logger",
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                "lease_id": "lease-stale",
+            },
+        ),
+        (
+            "lease",
+            {
+                "channel": 4,
+                "owner": "mini_dma_logger",
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                "lease_id": "lease-fresh",
+            },
+        ),
+    ]
+    assert set_current_calls == [
+        ("set_current", {"channel": 4, "lease_id": "lease-stale", "current_mA": 10.0}),
+        ("set_current", {"channel": 4, "lease_id": "lease-fresh", "current_mA": 10.0}),
     ]
 
 

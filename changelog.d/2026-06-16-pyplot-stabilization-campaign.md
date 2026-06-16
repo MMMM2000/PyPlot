@@ -9,4 +9,5 @@
 - Stopped Mini DMA current-sweep voltage-limit unwinds immediately when the supply indicates open circuit or wire contact loss, before any mechanical recovery seek is attempted.
 - Scoped Mini DMA predictive seek control to active controlled phases while still honoring explicit calibrated or live stiffness for ordinary load/stress seeks.
 - Made Mini DMA IR thread disconnect/close cleanup tolerate naturally finished Qt threads that have already been deleted.
+- Made Mini DMA saved Builder project import cancellation clear pending retry state and tolerate already-deleted Qt thread wrappers.
 - Cleaned up Current Annealing fabrication-folder background-load completion so the UI resets promptly when the worker has already finished.

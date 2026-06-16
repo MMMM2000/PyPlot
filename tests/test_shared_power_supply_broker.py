@@ -13,7 +13,13 @@ from data_logging.shared_power_supply.broker import (
 )
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, detect_hmp_profile
-from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
+from data_logging.shared_power_supply.protocol import (
+    BrokerConnectionError,
+    BrokerJsonClient,
+    BrokerRequestError,
+    broker_failure_diagnostic,
+    start_broker_server,
+)
 
 
 class FakeHmpSerial:
@@ -231,3 +237,43 @@ def test_broker_json_client_uses_configurable_request_timeout(monkeypatch: pytes
     assert client.request("snapshot")["snapshot"] == {}
     assert seen["address"] == ("127.0.0.1", 8765)
     assert seen["timeout"] == pytest.approx(9.5)
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (
+            BrokerConnectionError(
+                host="127.0.0.1",
+                port=8765,
+                action="snapshot",
+                cause=TimeoutError("timed out"),
+            ),
+            "broker missing or not reachable at 127.0.0.1:8765",
+        ),
+        (
+            PermissionError(13, "Access is denied", "COM3"),
+            "direct HMP serial access was denied",
+        ),
+        (
+            BrokerRequestError(action="lease", message="channel already leased by ac_logger"),
+            "channel lease refused",
+        ),
+        (
+            BrokerRequestError(action="set_current", message="valid lease required for CH4"),
+            "stale channel lease detected",
+        ),
+        (
+            BrokerRequestError(action="configure_channel", message="requested current exceeds CH4 limit"),
+            "channel limit is stale or too low",
+        ),
+    ],
+)
+def test_broker_failure_diagnostic_classifies_common_operator_failures(
+    exc: Exception,
+    expected: str,
+) -> None:
+    diagnostic = broker_failure_diagnostic(exc, context="Test broker")
+
+    assert diagnostic.startswith("Test broker:")
+    assert expected in diagnostic

@@ -37,7 +37,10 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Mini DMA adaptive current-sweep seek/control slice after predictive-control scoping: `10 passed`.
 - Mini DMA IR cleanup regression: `1 passed`.
 - Current Annealing fabrication-load UI responsiveness regression: `1 passed`.
-- Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`): `774 passed`.
+- Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`): `783 passed`.
+- Shared HMP broker diagnostic classification tests: `17 passed` for `tests/test_shared_power_supply_broker.py`.
+- Mini DMA shared-broker stale-lease retry focused slice: `3 passed`.
+- Mini DMA Builder project sample-cache/stale-result/cancel focused slice: `8 passed`.
 
 ## Artifacts
 
@@ -51,13 +54,12 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - Mini DMA now stops current-sweep voltage-limit unwinds when measured current collapses near zero at the voltage limit, writes a terminal `wire_break_or_contact_loss` trace row, and avoids the mechanical recovery seek that previously kept moving after an electrical fault.
 - Mini DMA predictive stiffness control is now phase-scoped: active current-sweep/iso-current/elastocaloric/setup phases keep adaptive damping, while ordinary idle/manual seeks use the configured nudge unless explicit calibrated or live stiffness is available.
 - Mini DMA now clears naturally finished IR worker/thread references and tolerates already-deleted Qt wrappers during disconnect/close cleanup.
+- Mini DMA saved Builder project import cleanup now clears pending retry state and tolerates already-deleted Qt thread wrappers.
 - AC UI cleanup is a first coherent pass, not a full rewrite.
 - Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine.
 
 ## Remaining Work
 
-- Add focused tests for the new shared-broker diagnostic helper and stale-lease retry paths.
-- Add tests for Mini DMA Builder project cache hits/cancellation if this partial cache change remains.
 - Add live validation only after the user explicitly authorizes bench work.
 - Finish elastocaloric recipe behavior/tests and screenshot-check its UI in a dedicated Mini DMA worker.
 - Consider a deeper AC UI rewrite after the user reviews this first pass.
