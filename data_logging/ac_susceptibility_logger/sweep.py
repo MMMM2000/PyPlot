@@ -499,9 +499,29 @@ def _current_point_key(point: CurrentLoopPoint) -> tuple[float, str]:
 RUN_STATUS_SCHEMA = "ac_susceptibility_run_status_v1"
 
 
+class AcOutputPathError(RuntimeError):
+    """Raised when the AC sweep output path cannot be written durably."""
+
+    def __init__(self, path: str | Path, operation: str, exc: BaseException) -> None:
+        self.path = Path(path)
+        self.operation = str(operation)
+        self.original = exc
+        super().__init__(f"AC sweep output {self.operation} failed for {self.path}: {exc}")
+
+
 def ac_run_status_path_for_output(output_path: str | Path) -> Path:
     path = Path(output_path)
     return path.with_name(f"{path.stem}_run_status.json")
+
+
+def ac_local_status_fallback_dir() -> Path:
+    return Path.home() / "Downloads" / "ac_susceptibility" / "run_status_fallback"
+
+
+def ac_run_status_fallback_path_for_output(output_path: str | Path) -> Path:
+    path = Path(output_path)
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", path.stem).strip("._") or "ac_sweep"
+    return ac_local_status_fallback_dir() / f"{safe_stem}_run_status.json"
 
 
 def ac_lcr_debug_path_for_output(output_path: str | Path) -> Path:
@@ -523,20 +543,27 @@ def classify_ac_run_status(
     """
     output = Path(output_path)
     status_path = ac_run_status_path_for_output(output)
+    fallback_status_path = ac_run_status_fallback_path_for_output(output)
     debug_path = ac_lcr_debug_path_for_output(output)
     payload: dict[str, Any] = {}
-    if status_path.exists():
+    loaded_status_path = status_path
+    for candidate in (status_path, fallback_status_path):
+        if not _safe_path_exists(candidate):
+            continue
         try:
-            loaded = json.loads(status_path.read_text(encoding="utf-8"))
+            loaded = json.loads(candidate.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 payload = loaded
+                loaded_status_path = candidate
+                break
         except (OSError, json.JSONDecodeError):
             payload = {}
     updated_utc = str(payload.get("updated_utc") or payload.get("created_utc") or "")
     heartbeat_age_s = _heartbeat_age_s(updated_utc, now_utc=now_utc)
     status = str(payload.get("status") or "unknown").strip().lower() or "unknown"
     stale = status == "running" and heartbeat_age_s is not None and heartbeat_age_s > max(1.0, float(stale_after_s))
-    lcr_closed = _lcr_debug_has_closed_event(debug_path) if debug_path.exists() else None
+    lcr_debug_exists = _safe_path_exists(debug_path)
+    lcr_closed = _lcr_debug_has_closed_event(debug_path) if lcr_debug_exists else None
     is_unclean = False
     resume_note = ""
     if stale:
@@ -559,7 +586,7 @@ def classify_ac_run_status(
             resume_note = "no run status file and LCR debug stream has no closed marker"
     return AcRunStatusSummary(
         output_path=output,
-        status_path=status_path,
+        status_path=loaded_status_path,
         status=status,
         phase=str(payload.get("phase") or ""),
         updated_utc=updated_utc,
@@ -568,7 +595,7 @@ def classify_ac_run_status(
         is_unclean=is_unclean,
         stale=stale,
         heartbeat_age_s=heartbeat_age_s,
-        lcr_debug_path=debug_path if debug_path.exists() else None,
+        lcr_debug_path=debug_path if lcr_debug_exists else None,
         lcr_debug_closed=lcr_closed,
         resume_note=resume_note,
     )
@@ -583,11 +610,14 @@ def record_ac_run_exception(
     """Patch the status sidecar with a late worker/UI exception."""
     path = ac_run_status_path_for_output(output_path)
     payload: dict[str, Any] = {}
-    if path.exists():
+    for candidate in (path, ac_run_status_fallback_path_for_output(output_path)):
+        if not _safe_path_exists(candidate):
+            continue
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded = json.loads(candidate.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 payload = loaded
+                break
         except (OSError, json.JSONDecodeError):
             payload = {}
     if not payload:
@@ -606,7 +636,7 @@ def record_ac_run_exception(
             "exception": _exception_payload(exc),
         }
     )
-    _write_json_atomic(path, payload)
+    _write_json_atomic_best_effort(path, payload, ac_run_status_fallback_path_for_output(output_path))
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -614,6 +644,34 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _safe_path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _write_json_atomic_best_effort(
+    path: Path,
+    payload: dict[str, Any],
+    fallback_path: Path | None = None,
+) -> None:
+    errors: list[str] = []
+    for target, is_fallback in ((path, False), (fallback_path, True)):
+        if target is None:
+            continue
+        try:
+            target_payload = dict(payload)
+            target_payload["status_path"] = str(target)
+            target_payload["status_path_is_local_fallback"] = bool(is_fallback)
+            if errors:
+                target_payload["status_write_errors"] = list(errors)
+            _write_json_atomic(target, target_payload)
+        except OSError as exc:
+            errors.append(f"{target}: {exc}")
+            continue
 
 
 def _heartbeat_age_s(updated_utc: str, *, now_utc: datetime | None) -> float | None:
@@ -706,6 +764,7 @@ class AcRunStatusWriter:
     ) -> None:
         self.output_path = Path(output_path)
         self.path = ac_run_status_path_for_output(self.output_path)
+        self.fallback_path = ac_run_status_fallback_path_for_output(self.output_path)
         self.config = config
         self.continuous_log_path = None if continuous_log_path is None else Path(continuous_log_path)
         self.created_utc = _timestamp_utc()
@@ -713,7 +772,6 @@ class AcRunStatusWriter:
         self._payload: dict[str, Any] = self._base_payload(status="running", phase="starting")
 
     def open(self, *, psu: CurrentSource | None = None) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.update(phase="starting", psu=psu)
 
     def update(
@@ -757,7 +815,7 @@ class AcRunStatusWriter:
             }
         if psu is not None:
             self._payload["psu_runtime"] = _psu_runtime_snapshot(psu)
-        _write_json_atomic(self.path, self._payload)
+        self._write_status()
 
     def record_row(self, row: AcSweepRow) -> None:
         self.rows_written += 1
@@ -773,7 +831,20 @@ class AcRunStatusWriter:
         )
         self._payload["last_row_timestamp_utc"] = row.timestamp_utc
         self._payload["last_row_error"] = row.error or row.psu_measurement.error
-        _write_json_atomic(self.path, self._payload)
+        self._payload["last_completed_point"] = {
+            "setting_index": int(row.setting_index),
+            "setting_count": int(row.total_settings),
+            "current_point_index": int(row.current_point_index),
+            "current_point_count": int(row.total_current_points),
+            "repeat_index": int(row.repeat_index),
+            "timestamp_utc": row.timestamp_utc,
+            "point_elapsed_s": float(row.point_elapsed_s),
+            "current_set_a": float(row.current_point.current_a),
+            "current_set_mA": float(row.current_point.current_a) * 1000.0,
+            "direction": str(row.current_point.direction),
+            "lcr_setting": _lcr_setting_snapshot(row.setting),
+        }
+        self._write_status()
 
     def record_exception(self, exc: BaseException, *, phase: str = "exception") -> None:
         self._payload["exception"] = _exception_payload(exc)
@@ -792,7 +863,12 @@ class AcRunStatusWriter:
             self._payload["cleanup_errors"] = list(cleanup_errors)
         self.update(phase="closed", status=status, stop_reason=stop_reason, psu=psu)
         self._payload["closed_utc"] = self._payload["updated_utc"]
-        _write_json_atomic(self.path, self._payload)
+        self._write_status()
+
+    def _write_status(self) -> None:
+        self._payload["primary_status_path"] = str(self.path)
+        self._payload["local_fallback_status_path"] = str(self.fallback_path)
+        _write_json_atomic_best_effort(self.path, self._payload, self.fallback_path)
 
     def _base_payload(self, *, status: str, phase: str) -> dict[str, Any]:
         return {
@@ -837,8 +913,11 @@ class AcSweepTsvWriter:
         self._fh: Any | None = None
 
     def write_metadata(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.path.open("w", encoding="utf-8", newline="")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = self.path.open("w", encoding="utf-8", newline="")
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "open", exc) from exc
         self._write("# AC susceptibility sweep")
         self._write(f"# config_json={self._settings_snapshot_json()}")
         self._write(
@@ -975,13 +1054,20 @@ class AcSweepTsvWriter:
     def _write(self, text: str) -> None:
         if self._fh is None:
             raise RuntimeError("sweep writer is not open")
-        self._fh.write(text + "\n")
-        self._fh.flush()
+        try:
+            self._fh.write(text + "\n")
+            self._fh.flush()
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "write/flush", exc) from exc
 
     def close(self) -> None:
         if self._fh is not None:
-            self._fh.close()
-            self._fh = None
+            try:
+                self._fh.close()
+            except OSError as exc:
+                raise AcOutputPathError(self.path, "close", exc) from exc
+            finally:
+                self._fh = None
 
 
 class LcrContinuousJsonlWriter:
@@ -998,8 +1084,11 @@ class LcrContinuousJsonlWriter:
     def open(self) -> None:
         if self._fh is not None:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.path.open("w", encoding="utf-8")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = self.path.open("w", encoding="utf-8")
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "open", exc) from exc
         self._write(
             {
                 "event": "metadata",
@@ -1110,8 +1199,11 @@ class LcrContinuousJsonlWriter:
     def _write(self, payload: dict[str, object]) -> None:
         if self._fh is None:
             raise RuntimeError("continuous LCR writer is not open")
-        self._fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-        self._fh.flush()
+        try:
+            self._fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            self._fh.flush()
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "write/flush", exc) from exc
         if payload.get("event") == "lcr_sample":
             self._rows_written += 1
 
@@ -1129,8 +1221,12 @@ class LcrContinuousJsonlWriter:
                 }
             )
         finally:
-            self._fh.close()
-            self._fh = None
+            try:
+                self._fh.close()
+            except OSError as exc:
+                raise AcOutputPathError(self.path, "close", exc) from exc
+            finally:
+                self._fh = None
 
 
 def _continuous_writer_for_config(config: AcSweepConfig) -> LcrContinuousJsonlWriter | None:
