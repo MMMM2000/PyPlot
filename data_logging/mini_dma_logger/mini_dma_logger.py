@@ -5124,6 +5124,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_instability_by_key: dict[tuple[str, int, float], int] = {}
         self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
+        self._iso_current_stress_ramp_rate_sample_by_key: dict[tuple[str, int, str], tuple[float, float]] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
         self._seek_last_stiffness_value_by_basis: dict[str, float] = {}
@@ -13514,6 +13515,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return math.copysign(1.0, float(error_value)) == direction
 
+    def _iso_current_stress_ramp_at_endpoint(self, basis: str, target_value: float | None) -> bool:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return False
+        end_value = self._active_target_ramp_end_value
+        if end_value is None or target_value is None:
+            return False
+        return abs(float(end_value) - float(target_value)) <= 1e-6
+
+    def _iso_current_stress_ramp_should_drive(self, basis: str, target_value: float | None) -> bool:
+        return self._is_iso_current_stress_target_ramp(basis) and not self._iso_current_stress_ramp_at_endpoint(
+            basis,
+            target_value,
+        )
+
     def _iso_current_stress_ramp_is_ahead_of_target(self, basis: str, error_value: float) -> bool:
         if not self._is_iso_current_stress_target_ramp(basis):
             return False
@@ -13521,6 +13536,36 @@ class MainWindow(QtWidgets.QMainWindow):
         if direction == 0.0:
             return False
         return float(error_value) * direction <= 0.0
+
+    def _iso_current_stress_ramp_rate_key(self, basis: str) -> tuple[str, int, str]:
+        plateau = -1 if self._automation_plateau_index is None else int(self._automation_plateau_index)
+        return basis, plateau, str(self._automation_step_note or "")
+
+    def _iso_current_stress_ramp_rate_error_value_s(
+        self,
+        basis: str,
+        current_value: float,
+        sample_time_s: float,
+    ) -> float | None:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return None
+        ramp_rate = self._target_ramp_rate_value_s_for_context(basis)
+        if ramp_rate is None or ramp_rate <= 0.0:
+            return None
+        key = self._iso_current_stress_ramp_rate_key(basis)
+        previous = self._iso_current_stress_ramp_rate_sample_by_key.get(key)
+        self._iso_current_stress_ramp_rate_sample_by_key[key] = (float(current_value), float(sample_time_s))
+        if previous is None:
+            return None
+        previous_value, previous_time_s = previous
+        dt_s = float(sample_time_s) - float(previous_time_s)
+        if dt_s <= 1e-6:
+            return None
+        direction = self._iso_current_stress_ramp_direction()
+        if direction == 0.0:
+            return None
+        measured_rate_value_s = direction * (float(current_value) - float(previous_value)) / dt_s
+        return abs(float(ramp_rate)) - measured_rate_value_s
 
     def _iso_current_stress_ramp_endpoint_cap_value(self, basis: str) -> float | None:
         if not self._is_iso_current_stress_target_ramp(basis):
@@ -13597,6 +13642,37 @@ class MainWindow(QtWidgets.QMainWindow):
         if ramp_rate is None or ramp_rate <= 0.0:
             return 0.0
         return abs(float(ramp_rate)) * SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S / sensitivity
+
+    def _iso_current_stress_ramp_continuous_step_mm(
+        self,
+        basis: str,
+        sensitivity_per_mm: float | None,
+        error_value: float,
+        rate_error_value_s: float | None,
+    ) -> float | None:
+        if not self._is_iso_current_stress_target_ramp(basis):
+            return None
+        if sensitivity_per_mm is None:
+            return None
+        sensitivity = abs(float(sensitivity_per_mm))
+        if not math.isfinite(sensitivity) or sensitivity <= 0.0:
+            return None
+        ramp_rate = self._target_ramp_rate_value_s_for_context(basis)
+        if ramp_rate is None or ramp_rate <= 0.0:
+            return None
+        base_value = abs(float(ramp_rate)) * SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S
+        direction = self._iso_current_stress_ramp_direction()
+        phase_error = float(error_value) * direction if direction != 0.0 else 0.0
+        phase_value = max(-0.75 * base_value, min(1.5 * base_value, phase_error * 0.2))
+        rate_value = 0.0
+        if rate_error_value_s is not None and math.isfinite(float(rate_error_value_s)):
+            rate_value = max(
+                -0.75 * base_value,
+                min(1.5 * base_value, float(rate_error_value_s) * SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S * 0.35),
+            )
+        command_value = max(base_value * 0.2, base_value + phase_value + rate_value)
+        cap_mm = self._iso_current_stress_ramp_command_cap_mm(basis, sensitivity)
+        return max(self._motor_step_mm(), min(cap_mm, command_value / sensitivity))
 
     def _iso_current_stress_ramp_feedforward_value_rate_s(
         self,
@@ -15488,6 +15564,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._is_current_sweep_mode(self._automation_name)
                 or self._is_constant_current_stress_ramp_mode(self._automation_name)
             )
+            and not self._is_iso_current_stress_target_ramp(basis)
             and self._automation_step_note != "setup_preload"
             and current_value is not None
             and target_value is not None
@@ -16137,6 +16214,12 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_key=seek_key,
         )
         self._update_setup_preload_engagement(seek_key, basis, current_value)
+        iso_current_stress_ramp_driving = self._iso_current_stress_ramp_should_drive(basis, target_value)
+        iso_current_stress_ramp_rate_error = self._iso_current_stress_ramp_rate_error_value_s(
+            basis,
+            current_value,
+            seek_sample_time_s,
+        )
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
             return False
@@ -16181,7 +16264,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="setup_l0_baseline_committed",
             )
             return True
-        if abs(delta_value) <= acceptance_tolerance:
+        if abs(delta_value) <= acceptance_tolerance and not iso_current_stress_ramp_driving:
             if self._zero_return_requires_true_zero(basis, target_value):
                 current_load_g = self._zero_return_current_load_g(basis, current_value)
                 if current_load_g > self._zero_return_acceptance_tolerance_g():
@@ -16242,6 +16325,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     target_value,
                     acceptance_tolerance,
                 )
+                and not iso_current_stress_ramp_driving
             ):
                 self._clear_seek_state(seek_key)
                 self._write_control_trace(
@@ -16258,7 +16342,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
         if abs(delta_value) <= acceptance_tolerance and self._zero_return_requires_true_zero(basis, target_value):
             pass
-        elif abs(delta_value) <= acceptance_tolerance:
+        elif abs(delta_value) <= acceptance_tolerance and not iso_current_stress_ramp_driving:
             self._clear_seek_state(seek_key)
             self._write_control_trace(
                 decision="accept",
@@ -16307,7 +16391,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 reason="hold_error_not_persistent",
             )
             return False
-        if self._iso_current_stress_ramp_is_ahead_of_target(basis, delta_value):
+        if (
+            self._iso_current_stress_ramp_is_ahead_of_target(basis, delta_value)
+            and self._iso_current_stress_ramp_at_endpoint(basis, target_value)
+        ):
             self._clear_seek_state(seek_key)
             self._write_control_trace(
                 decision="accept",
@@ -16317,8 +16404,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 error_value=delta_value,
                 tolerance=acceptance_tolerance,
                 sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
-                result="moving_target_ahead",
-                reason="monotonic_target_ramp",
+                result="moving_target_endpoint_ahead",
+                reason="monotonic_target_ramp_endpoint",
             )
             return True
         if (
@@ -16398,6 +16485,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 effective_tolerance,
                 seek_key=seek_key,
             )
+            sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+            continuous_step_mm = self._iso_current_stress_ramp_continuous_step_mm(
+                basis,
+                sensitivity,
+                delta_value,
+                iso_current_stress_ramp_rate_error,
+            )
+            if continuous_step_mm is not None:
+                nudge_mm = continuous_step_mm
         if nudge_mm <= 0.0:
             raise ValueError("Set a non-zero correction step.")
         zero_return_needs_more_motion = (
@@ -16462,7 +16558,11 @@ class MainWindow(QtWidgets.QMainWindow):
             require_fresh_after_move=not cruise_mode and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
         ):
             return False
-        overshot_target = previous_error is not None and previous_error * delta_value < 0.0
+        overshot_target = (
+            previous_error is not None
+            and previous_error * delta_value < 0.0
+            and not self._is_iso_current_stress_target_ramp(basis)
+        )
         protective_single_step = self._current_sweep_protective_step_needed(
             previous_error,
             delta_value,
@@ -16601,6 +16701,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
         movement_direction = math.copysign(1.0, seek_direction)
+        ramp_direction = self._iso_current_stress_ramp_direction()
+        if self._is_iso_current_stress_target_ramp(basis) and ramp_direction != 0.0:
+            movement_direction = math.copysign(1.0, ramp_direction * self._tension_motion_sign())
         speed_mm_s = preliminary_speed_mm_s
         nudge_mm = self._seek_command_step_mm(nudge_mm, speed_mm_s, basis=basis, cruise_mode=cruise_mode)
         backlash_takeup_mm = self._seek_backlash_takeup_mm(movement_direction)
@@ -24569,6 +24672,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_target_ramp_started_s = time.monotonic()
             self._active_target_ramp_rate_value_s = configured_ramp_rate
             self._active_target_ramp_end_value = end_value
+            self._iso_current_stress_ramp_rate_sample_by_key.clear()
             start_value = step.target_start_value
             if start_value is None:
                 start_value = self._current_distribution_value(step.basis)
