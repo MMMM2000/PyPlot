@@ -598,7 +598,7 @@ def test_render_measurement_pixmap_keeps_pyplot_legend(
             builder_ui.plt.close(figure)
 
 
-def test_render_measurement_pixmap_marks_auto_transition_currents(
+def test_render_measurement_pixmap_omits_auto_transition_markers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _ensure_qapp()
@@ -611,16 +611,10 @@ def test_render_measurement_pixmap_marks_auto_transition_currents(
         return figure, config
 
     monkeypatch.setattr(builder_ui, "plot_annealing_curve", _wrapped)
-    monkeypatch.setattr(
-        builder_ui,
-        "summarize_annealing_transition_currents",
-        lambda _frame: SimpleNamespace(
-            as_current_mA=25.0,
-            af_current_mA=40.0,
-            ms_current_mA=38.0,
-            mf_current_mA=20.0,
-        ),
-    )
+    def _fail_if_called(_frame: object) -> object:
+        raise AssertionError("normal annealing previews should not compute transition markers")
+
+    monkeypatch.setattr(builder_ui, "summarize_annealing_transition_loops", _fail_if_called)
     record = SimpleNamespace(
         dataframe=pd.DataFrame(
             {
@@ -638,10 +632,10 @@ def test_render_measurement_pixmap_marks_auto_transition_currents(
         assert captured_figures
         axes = captured_figures[0].axes[0]
         labels = [text.get_text() for text in axes.get_legend().get_texts()]
-        assert "As 25 mA" in labels
-        assert "Af 40 mA" in labels
-        assert "Ms 38 mA" in labels
-        assert "Mf 20 mA" in labels
+        assert "As 25 mA" not in labels
+        assert "Af 40 mA" not in labels
+        assert "Ms 38 mA" not in labels
+        assert "Mf 20 mA" not in labels
     finally:
         for figure in captured_figures:
             builder_ui.plt.close(figure)
@@ -669,6 +663,48 @@ def test_annealing_display_keeps_pyplot_title_and_axis_labels() -> None:
         assert axes.get_xlabel() == "Current [mA]"
         assert axes.get_ylabel()
         assert axes.get_legend() is not None
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_annealing_display_review_mode_marks_auto_transition_currents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    display = builder_ui._AnnealingPlotDisplay.__new__(builder_ui._AnnealingPlotDisplay)
+    display._logger = logging.getLogger("test")  # noqa: SLF001
+    display._show_transition_markers = True  # noqa: SLF001
+    monkeypatch.setattr(
+        builder_ui,
+        "summarize_annealing_transition_loops",
+        lambda _frame: (
+            SimpleNamespace(
+                as_current_mA=25.0,
+                af_current_mA=40.0,
+                ms_current_mA=38.0,
+                mf_current_mA=20.0,
+                loop_index=1,
+            ),
+        ),
+    )
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [10.0, 25.0, 40.0, 38.0, 20.0],
+                "R_ohm": [120.0, 118.0, 150.0, 140.0, 125.0],
+            }
+        ),
+        path=Path("Ni50Fe27Ga23 11_1 s1 1000mA.txt"),
+        metadata=None,
+    )
+
+    figure = display._build_figure(record)
+    try:
+        axes = figure.axes[0]
+        labels = [text.get_text() for text in axes.get_legend().get_texts()]
+        assert "As 25 mA" in labels
+        assert "Af 40 mA" in labels
+        assert "Ms 38 mA" in labels
+        assert "Mf 20 mA" in labels
     finally:
         builder_ui.plt.close(figure)
 
@@ -709,6 +745,49 @@ def test_annealing_transition_review_entries_show_auto_summary() -> None:
     assert "Ni50Fe27Ga23" in entries[0].title
     assert entries[0].summary_lines == (
         "1000mA: As 25 mA, Af 40 mA, Ms 38 mA, Mf 20 mA",
+    )
+
+
+def test_annealing_transition_review_entries_show_multi_loop_auto_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path("Ni50Fe27Ga23 11_1 1000mA.txt")
+    record = MeasurementRecord(
+        path=path,
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=11,
+            piece_y=1,
+            setpoint_mA=1000.0,
+            alt_variant=False,
+            measurement_id=path.stem,
+            file_name=path.name,
+            relpath=path.name,
+            timestamp_mtime_utc="2026-06-15T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [10.0, 20.0], "R_ohm": [120.0, 130.0]}),
+        sanity_ok=True,
+        sanity_error=None,
+        transition_summary=(),
+    )
+    monkeypatch.setattr(
+        builder_ui,
+        "_annealing_transition_summary",
+        lambda _frame, *, label=None: (
+            f"{label} loop 1: As 25 mA, Af 40 mA, Ms 38 mA, Mf 20 mA",
+            f"{label} loop 2: As 50 mA, Af 60 mA",
+        ),
+    )
+
+    entries = builder_ui._annealing_transition_review_entries(
+        [record],
+        logging.getLogger("test"),
+    )
+
+    assert entries[0].status == "auto candidates"
+    assert entries[0].summary_lines == (
+        "Ni50Fe27Ga23 11_1 1000mA.txt loop 1: As 25 mA, Af 40 mA, Ms 38 mA, Mf 20 mA",
+        "Ni50Fe27Ga23 11_1 1000mA.txt loop 2: As 50 mA, Af 60 mA",
     )
 
 
@@ -1581,7 +1660,9 @@ def test_mini_dma_transition_review_entries_use_real_stress_targets() -> None:
     labels = {entry.target_label for entry in entries}
     assert "50 MPa / 1.46 g" in labels
     assert "350 MPa / 10.23 g" in labels
-    assert {entry.status for entry in entries} >= {"accepted", "rejected"}
+    statuses = {entry.status for entry in entries}
+    assert "accepted" in statuses
+    assert statuses & {"partial", "rejected"}
 
 
 def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
@@ -1931,6 +2012,28 @@ def test_mini_dma_section_preview_decoration_uses_side_by_side_cached_graph_pixm
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_combine_pixmaps_side_by_side_packs_aspect_scaled_images_compactly() -> None:
+    _ensure_qapp()
+    first = QtGui.QPixmap(100, 50)
+    first.fill(QtGui.QColor("#ff0000"))
+    second = QtGui.QPixmap(100, 50)
+    second.fill(QtGui.QColor("#0000ff"))
+
+    combined = builder_ui._combine_pixmaps_side_by_side(  # noqa: SLF001
+        [first, second],
+        width_px=500,
+        height_px=50,
+        spacing=6,
+        scale_to_fit=True,
+    )
+
+    assert combined is not None
+    image = combined.toImage()
+    assert image.pixelColor(10, 25) == QtGui.QColor("#ff0000")
+    assert image.pixelColor(110, 25) == QtGui.QColor("#0000ff")
+    assert image.pixelColor(240, 25).alpha() == 0
 
 
 def test_build_database_populates_shape_memory_value_columns(tmp_path: Path) -> None:

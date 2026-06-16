@@ -46,6 +46,7 @@ except Exception:  # pragma: no cover - optional dependency
 from plotting.plugins.current_annealing.core import (
     plot_one as plot_annealing_curve,
     summarize_transition_currents as summarize_annealing_transition_currents,
+    summarize_transition_loops as summarize_annealing_transition_loops,
 )
 from plotting.pyplot.window import _DockSwitcherWidget
 from plotting.shared.utils import (
@@ -3782,7 +3783,6 @@ def _render_measurement_pixmap(
             title,
             target_px=(target_width, target_height),
         )
-        _add_annealing_transition_markers(figure, plot_df, logger)
         if figure is not None:
             figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
         canvas_agg = FigureCanvasAgg(figure)
@@ -3855,31 +3855,35 @@ def _add_annealing_transition_markers(
     if figure is None or not figure.axes:
         return
     try:
-        summary = summarize_annealing_transition_currents(plot_df)
+        summaries = summarize_annealing_transition_loops(plot_df)
     except Exception:
         if logger is not None:
             logger.debug("Failed to summarize annealing transition currents", exc_info=True)
         return
-    markers = (
-        ("As", getattr(summary, "as_current_mA", None), "#2ca02c", "--"),
-        ("Af", getattr(summary, "af_current_mA", None), "#2ca02c", ":"),
-        ("Ms", getattr(summary, "ms_current_mA", None), "#9467bd", "--"),
-        ("Mf", getattr(summary, "mf_current_mA", None), "#9467bd", ":"),
-    )
     axis = figure.axes[0]
     added = False
-    for label, value, color, linestyle in markers:
-        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-            continue
-        axis.axvline(
-            float(value),
-            color=color,
-            linestyle=linestyle,
-            linewidth=1.1,
-            alpha=0.9,
-            label=f"{label} {float(value):.0f} mA",
+    multiple = len(summaries) > 1
+    for summary in summaries:
+        loop_index = getattr(summary, "loop_index", None)
+        suffix = str(loop_index) if loop_index is not None and (multiple or loop_index != 1) else ""
+        markers = (
+            (f"As{suffix}", getattr(summary, "as_current_mA", None), "#2ca02c", "--"),
+            (f"Af{suffix}", getattr(summary, "af_current_mA", None), "#2ca02c", ":"),
+            (f"Ms{suffix}", getattr(summary, "ms_current_mA", None), "#9467bd", "--"),
+            (f"Mf{suffix}", getattr(summary, "mf_current_mA", None), "#9467bd", ":"),
         )
-        added = True
+        for label, value, color, linestyle in markers:
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                continue
+            axis.axvline(
+                float(value),
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.1,
+                alpha=0.9,
+                label=f"{label} {float(value):.0f} mA",
+            )
+            added = True
     if not added:
         return
     try:
@@ -4151,7 +4155,7 @@ def _combine_pixmaps_side_by_side(
                 )
             y_pos = max((height_px - scaled.height()) // 2, 0)
             painter.drawPixmap(x_pos, y_pos, scaled)
-            x_pos += slot_width + spacing
+            x_pos += scaled.width() + spacing
     finally:
         painter.end()
     return target
@@ -4851,10 +4855,13 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         title: str,
         logger: logging.Logger,
         parent: QtWidgets.QWidget | None = None,
+        *,
+        show_transition_markers: bool = False,
     ) -> None:
         super().__init__(parent)
         self._base_title = title
         self._logger = logger
+        self._show_transition_markers = bool(show_transition_markers)
         self._canvas: FigureCanvasQTAgg | None = None
         self._motion_cid: Optional[int] = None
         self._click_cid: Optional[int] = None
@@ -5091,7 +5098,12 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             logger = self.__dict__.get("_logger")
         except Exception:
             logger = None
-        _add_annealing_transition_markers(figure, plot_df, logger if isinstance(logger, logging.Logger) else None)
+        if bool(self.__dict__.get("_show_transition_markers", False)):
+            _add_annealing_transition_markers(
+                figure,
+                plot_df,
+                logger if isinstance(logger, logging.Logger) else None,
+            )
         try:
             axes = figure.axes[0] if figure.axes else None
         except Exception:
@@ -5296,6 +5308,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             "Current annealing transition review",
             logger,
             right,
+            show_transition_markers=True,
         )
         right_layout.addWidget(self._display, 1)
         splitter.addWidget(right)
@@ -5841,7 +5854,7 @@ def _mini_dma_transition_review_entries(
         sample = str(getattr(record, "sample", "") or getattr(run, "sample_name", "") or path.name)
         run_label = str(getattr(record, "label", "") or path.name)
         for (target, group), target_summary in zip(groups, summary.targets, strict=False):
-            target_label = mini_dma_core._format_target_label(run, float(target))
+            target_label = mini_dma_core._format_plot_target_label(run, float(target), group)
             entries.append(
                 _MiniDmaTransitionReviewEntry(
                     sample=sample,
