@@ -14932,8 +14932,16 @@ class MainWindow(QtWidgets.QMainWindow):
             length_mm = config.initial_length_mm if config is not None else float(self.spin_initial_length.value())
             return None if length_mm <= 0.0 else 100.0 / length_mm
         stiffness_candidates: list[float | None] = []
+        local_seek_stiffness: float | None = None
         if seek_key is not None:
-            stiffness_candidates.append(self._seek_live_stiffness_by_key.get(seek_key))
+            candidate = self._seek_live_stiffness_by_key.get(seek_key)
+            if (
+                candidate is not None
+                and math.isfinite(float(candidate))
+                and float(candidate) > 0.0
+            ):
+                local_seek_stiffness = float(candidate)
+            stiffness_candidates.append(candidate)
         stiffness_candidates.extend(
             (
                 self._seek_live_stiffness_g_per_mm,
@@ -14951,7 +14959,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_current_sweep_mode(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
         ):
-            stiffness = max(valid_stiffness)
+            if self._automation_phase == "target_ramp" and local_seek_stiffness is not None:
+                stiffness = local_seek_stiffness
+            else:
+                stiffness = max(valid_stiffness)
         else:
             stiffness = valid_stiffness[0]
         if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:

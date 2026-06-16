@@ -18042,6 +18042,68 @@ def test_current_sweep_target_ramp_updates_live_stiffness_before_heating(
         _close_test_window(window)
 
 
+def test_current_sweep_target_ramp_prefers_local_stiffness_over_stiffer_prior(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.0191)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    local_load_stiffness = 10.0
+    window._seek_live_stiffness_by_key[seek_key] = local_load_stiffness
+    window._seek_live_stiffness_g_per_mm = 200.0
+    window._calibrated_stiffness_g_per_mm = 300.0
+
+    try:
+        assert window._basis_sensitivity_per_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            seek_key=seek_key,
+        ) == pytest.approx(
+            mini_dma_mod.stress_mpa_from_load_g(local_load_stiffness, window.spin_diameter.value())
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_keeps_conservative_stiffness_prior(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_diameter.setValue(0.0191)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_live_stiffness_by_key[seek_key] = 10.0
+    conservative_load_stiffness = 300.0
+    window._seek_live_stiffness_g_per_mm = 200.0
+    window._calibrated_stiffness_g_per_mm = conservative_load_stiffness
+
+    try:
+        assert window._basis_sensitivity_per_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            seek_key=seek_key,
+        ) == pytest.approx(
+            mini_dma_mod.stress_mpa_from_load_g(conservative_load_stiffness, window.spin_diameter.value())
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
