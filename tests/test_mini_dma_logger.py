@@ -8690,9 +8690,18 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.check_current_sweep_first_overheating_use_normal_end.text() == "Use normal max current"
         assert window.check_current_sweep_first_overheating_use_normal_end.isChecked() is True
         assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is False
+        assert window.row_current_sweep_first_overheating_end.isHidden() is True
+        assert window.label_current_sweep_first_overheating_end is not None
+        assert window.label_current_sweep_first_overheating_end.isHidden() is True
         window.check_current_sweep_first_overheating.setChecked(True)
         window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
         assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is True
+        assert window.row_current_sweep_first_overheating_end.isHidden() is False
+        assert window.label_current_sweep_first_overheating_end.isHidden() is False
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(True)
+        assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is False
+        assert window.row_current_sweep_first_overheating_end.isHidden() is True
+        assert window.label_current_sweep_first_overheating_end.isHidden() is True
         assert window.label_current_sweep_targets_section.text() == "Load targets"
         assert window.label_current_sweep_current_section.text() == "Current sweep"
         assert window.check_current_sweep_return_target.isHidden() is True

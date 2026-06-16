@@ -7310,7 +7310,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "The current ramp rate stays the same as the normal sweep."
         )
         (
-            current_preheat_end_row,
+            self.row_current_sweep_first_overheating_end,
             self.label_current_first_overheating_end_density,
         ) = self._spin_with_equivalent_label(
             automation_box,
@@ -7319,7 +7319,10 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         self.label_current_first_overheating_end_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        current_sweep_form.addRow("First max", current_preheat_end_row)
+        current_sweep_form.addRow("First max", self.row_current_sweep_first_overheating_end)
+        self.label_current_sweep_first_overheating_end = current_sweep_form.labelForField(
+            self.row_current_sweep_first_overheating_end
+        )
 
         self.label_current_sweep_targets_section = QtWidgets.QLabel("Targets", automation_box)
         targets_font = self.label_current_sweep_targets_section.font()
@@ -17118,6 +17121,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_current_sweep_mode(mode) and self.check_current_sweep_first_overheating.isChecked()
         )
         self.spin_current_sweep_first_overheating_end_mA.setEnabled(first_overheating_current_editable)
+        first_overheating_current_visible = first_overheating_current_editable
+        self.row_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
+        if self.label_current_sweep_first_overheating_end is not None:
+            self.label_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
+        self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         if mode == "cycle":
             summary = (
                 f"Plan: cyclic displacement, {self.spin_cycle_count.value()} cycle(s), "
