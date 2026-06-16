@@ -188,6 +188,7 @@ def generate_core_run_plot(
     summary_payload = {
         "run_dir": str(run_path),
         "image_path": str(image),
+        "summary_path": str(summary),
         "run_quality_path": str(run_path / "run_quality.json") if write_quality else None,
         "hold_span_count": len(hold_time_spans),
         "hold_spans": [{"start_s": start, "end_s": end, "duration_s": end - start} for start, end in hold_time_spans],

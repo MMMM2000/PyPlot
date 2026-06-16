@@ -35,6 +35,7 @@ def _write_run(run_dir: Path, *, rows: int = 120, stop_reason: str = "recipe_com
                 "automation_phase",
                 "automation_target_value",
                 "stress_mpa",
+                "strain_pct",
                 "current_set_mA",
                 "current_measured_mA",
                 "voltage_V",
@@ -52,6 +53,7 @@ def _write_run(run_dir: Path, *, rows: int = 120, stop_reason: str = "recipe_com
                     "automation_phase": phase,
                     "automation_target_value": 50.0,
                     "stress_mpa": stress,
+                    "strain_pct": index * 0.01,
                     "current_set_mA": current,
                     "current_measured_mA": current * 0.95,
                     "voltage_V": 2.0,
@@ -180,3 +182,20 @@ def test_run_quality_cli_writes_cache(tmp_path: Path) -> None:
     assert run_quality_main([str(run_dir), "--write"]) == 0
 
     assert (run_dir / "run_quality.json").exists()
+
+
+def test_run_quality_cli_can_generate_core_plot_batch_artifacts(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run01"
+    output_dir = tmp_path / "core-plots"
+    _write_run(run_dir)
+
+    assert run_quality_main([str(run_dir), "--write", "--core-plots", "--core-plot-dir", str(output_dir)]) == 0
+
+    image = output_dir / "run01_stress_time_strain_current.png"
+    summary = output_dir / "run01_stress_time_strain_current.json"
+    assert (run_dir / "run_quality.json").exists()
+    assert image.exists()
+    payload = json.loads(summary.read_text(encoding="utf-8"))
+    assert payload["image_path"] == str(image)
+    assert payload["summary_path"] == str(summary)
+    assert payload["run_quality_path"] == str(run_dir / "run_quality.json")

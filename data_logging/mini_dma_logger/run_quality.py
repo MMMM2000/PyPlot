@@ -664,22 +664,67 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compute Mini DMA per-run quality metrics.")
     parser.add_argument("paths", nargs="+", help="Run folders, metadata.json files, or parent folders.")
     parser.add_argument("--write", action="store_true", help="Write run_quality.json into each run folder.")
+    parser.add_argument(
+        "--core-plots",
+        action="store_true",
+        help="Also generate the standard phone-friendly core PNG and JSON summary for each run.",
+    )
+    parser.add_argument(
+        "--core-plot-dir",
+        help="Optional folder for generated core PNG/JSON files. Defaults under each run diagnostics folder.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON rows instead of a compact text summary.")
     args = parser.parse_args(argv)
     run_dirs = discover_quality_run_dirs(args.paths)
     qualities = [analyze_run_quality(run_dir) for run_dir in run_dirs]
-    if args.write:
+    if args.write or args.core_plots:
         for quality in qualities:
             write_run_quality(quality, Path(quality.run_dir) / "run_quality.json")
-    if args.json:
-        print(json.dumps([quality.to_dict() for quality in qualities], indent=2, ensure_ascii=False))
-    else:
+    plot_summaries: list[dict[str, Any]] = []
+    if args.core_plots:
+        from .run_core_plot import generate_core_run_plot
+
         for quality in qualities:
+            run_path = Path(quality.run_dir)
+            image_path = None
+            summary_path = None
+            if args.core_plot_dir:
+                output_dir = Path(args.core_plot_dir)
+                image_path = output_dir / f"{run_path.name}_stress_time_strain_current.png"
+                summary_path = image_path.with_suffix(".json")
+            plot_summaries.append(
+                generate_core_run_plot(
+                    run_path,
+                    image_path=image_path,
+                    summary_path=summary_path,
+                    write_quality=True,
+                )
+            )
+    if args.json:
+        payload: Any
+        if args.core_plots:
+            payload = [
+                {
+                    **quality.to_dict(),
+                    "core_plot_path": plot_summary["image_path"],
+                    "core_plot_summary_path": plot_summary["summary_path"],
+                }
+                for quality, plot_summary in zip(qualities, plot_summaries)
+            ]
+        else:
+            payload = [quality.to_dict() for quality in qualities]
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        for index, quality in enumerate(qualities):
             status = "include" if quality.include_in_optimization_summary else "exclude"
+            plot_note = ""
+            if args.core_plots and index < len(plot_summaries):
+                plot_note = f", plot={plot_summaries[index]['image_path']}"
             print(
                 f"{Path(quality.run_dir).name}: {status}, rows={quality.measurement_rows}, "
                 f"loops={quality.current_loop_count_estimate}, rms={quality.stress_error_rms_mpa}, "
                 f"p95={quality.stress_error_p95_abs_mpa}, problems={','.join(quality.biggest_problems)}"
+                f"{plot_note}"
             )
     return 0
 

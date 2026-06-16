@@ -44,6 +44,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Mini DMA elastocaloric recipe dropdown/build/JSON round-trip focused slice: `3 passed`.
 - AC worker-failure/run-status UI slice: `7 passed`.
 - Mini DMA sample naming/project-cache/completer focused slice: `19 passed`.
+- Mini DMA run-quality/core-plot CLI focused slice: `10 passed`.
 
 ## Artifacts
 
@@ -60,6 +61,7 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - Mini DMA now clears naturally finished IR worker/thread references and tolerates already-deleted Qt wrappers during disconnect/close cleanup.
 - Mini DMA saved Builder project import cleanup now clears pending retry state and tolerates already-deleted Qt thread wrappers.
 - Mini DMA Builder project suggestions now reuse a fresh parsed-project cache immediately when background import starts, so microwire completers stay populated while exact diameter/current matching continues in the worker.
+- Mini DMA run-quality CLI can now emit per-run core PNG/JSON artifacts in the same pass as `run_quality.json`, so optimization and normal-run follow-up can use one repeatable diagnostic command.
 - AC UI cleanup is a first coherent pass, not a full rewrite.
 - AC worker failures now surface run-status sidecar/fallback details in the UI, including rows written and local fallback status path when an output drive disappears.
 - Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine; the current branch now has software-only dropdown/build/round-trip coverage and screenshot evidence for that workflow.
