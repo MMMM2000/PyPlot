@@ -4322,6 +4322,90 @@ def test_constant_current_stress_strain_recipe_builds_fixed_mechanical_scans(tmp
         _close_test_window(window)
 
 
+def test_mini_dma_recipe_dropdown_hides_legacy_open_loop_recipes(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        items = {
+            window.combo_recipe_mode.itemText(index): window.combo_recipe_mode.itemData(index)
+            for index in range(window.combo_recipe_mode.count())
+        }
+
+        assert "Displacement ramp" not in items
+        assert "Cyclic displacement" not in items
+        assert "Displacement hold" not in items
+        assert "Hsw plateau scan" not in items
+        assert items["Elastocaloric effect"] == mini_dma_mod.ELASTOCALORIC_EFFECT
+    finally:
+        _close_test_window(window)
+
+
+def test_elastocaloric_recipe_builds_single_strain_jump_with_current_transition(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.spin_constant_current_start_target.setValue(0.0)
+        window.spin_constant_current_end_target.setValue(4.0)
+        window.spin_constant_current_start_mA.setValue(50.0)
+        window.spin_constant_current_move_speed_mm_s.setValue(5.0)
+        window.spin_elastocaloric_stabilize_s.setValue(30.0)
+        window.spin_constant_current_hold_s.setValue(6.0)
+        window.spin_elastocaloric_release_record_s.setValue(8.0)
+        window.spin_constant_current_transition_stress_mpa.setValue(10.0)
+        window.spin_constant_current_transition_rate_mA_s.setValue(1.0)
+        window.spin_constant_current_transition_settle_s.setValue(1.0)
+
+        window.show()
+        qtbot.waitExposed(window)
+
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        recipe_start = next(index for index, step in enumerate(steps) if step.action == "start_session")
+        recipe_steps = steps[recipe_start + 1 :]
+        sweep_steps = [step for step in recipe_steps if step.action == "sweep_current"]
+        scan_steps = [step for step in recipe_steps if step.action == "mechanical_scan"]
+        stabilize_steps = [
+            step
+            for step in recipe_steps
+            if step.action == "settle" and step.note == "temperature_stabilize"
+        ]
+
+        assert interval_ms == window._control_interval_ms()
+        assert window.spin_constant_current_hold_s.isVisibleTo(window.recipe_stack)
+        assert window.spin_constant_current_move_speed_mm_s.isVisibleTo(window.recipe_stack)
+        assert window.spin_elastocaloric_stabilize_s.isVisibleTo(window.recipe_stack)
+        assert window.spin_elastocaloric_release_record_s.isVisibleTo(window.recipe_stack)
+        assert not window.combo_constant_current_step_basis.isVisibleTo(window.recipe_stack)
+        assert not window.spin_constant_current_step_size.isVisibleTo(window.recipe_stack)
+        assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == pytest.approx([(1.0, 50.0)])
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in sweep_steps)
+        assert all(step.target_value == pytest.approx(10.0) for step in sweep_steps)
+        assert len(stabilize_steps) == 1
+        assert stabilize_steps[0].duration_s == pytest.approx(30.0)
+        assert stabilize_steps[0].current_mA == pytest.approx(50.0)
+        assert [step.note for step in recipe_steps[:7]] == [
+            "transition_seek",
+            "transition",
+            "transition_settle",
+            "start",
+            "temperature_stabilize",
+            "1:zero",
+            "1:up",
+        ]
+        assert len(scan_steps) == 2
+        assert [(step.target_value, step.note) for step in scan_steps] == [(4.0, "1:up"), (0.0, "1:down")]
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRAIN_PCT for step in scan_steps)
+        assert all(step.mechanical_step_basis == mini_dma_mod.HSW_BASIS_STRAIN_PCT for step in scan_steps)
+        assert all(step.mechanical_step_value == pytest.approx(4.0) for step in scan_steps)
+        assert all(step.mechanical_step_speed_mm_s == pytest.approx(5.0) for step in scan_steps)
+        assert [step.duration_s for step in scan_steps] == pytest.approx([6.0, 8.0])
+        assert "Started elastocaloric effect recipe" in summary
+        assert "one jump" in summary
+    finally:
+        _close_test_window(window)
+
+
 def test_iso_current_stress_ramp_recipe_builds_target_ramps_with_transition(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:

@@ -441,6 +441,7 @@ CURRENT_SWEEP_STRESS = "current_sweep_stress"
 CURRENT_SWEEP_STRAIN = "current_sweep_strain"
 CONSTANT_CURRENT_STRAIN_SWEEP = "constant_current_strain_sweep"
 CONSTANT_CURRENT_STRESS_RAMP = "constant_current_stress_ramp"
+ELASTOCALORIC_EFFECT = "elastocaloric_effect"
 LEGACY_CURRENT_SWEEP = "current_sweep"
 CALIBRATION = "calibration"
 CALIBRATION_COPPER = "calibration_copper"
@@ -611,6 +612,7 @@ RECIPE_FILENAME_TOKENS = {
     CURRENT_SWEEP_STRAIN: "iso-strain",
     CONSTANT_CURRENT_STRAIN_SWEEP: "iso-current",
     CONSTANT_CURRENT_STRESS_RAMP: "iso-current-stress-ramp",
+    ELASTOCALORIC_EFFECT: "elastocaloric",
 }
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
 PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
@@ -6771,16 +6773,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if graph_interval_label is not None:
             graph_interval_label.setVisible(False)
         self.combo_recipe_mode = QtWidgets.QComboBox(automation_box)
-        self.combo_recipe_mode.addItem("Displacement ramp", "ramp")
-        self.combo_recipe_mode.addItem("Cyclic displacement", "cycle")
-        self.combo_recipe_mode.addItem("Displacement hold", "hold")
-        self.combo_recipe_mode.addItem("Hsw plateau scan", "distribution")
         self.combo_recipe_mode.addItem("Calibration", CALIBRATION)
         self.combo_recipe_mode.addItem("Iso-load current sweep", CURRENT_SWEEP_LOAD)
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
         self.combo_recipe_mode.addItem("Iso-current stress-strain", CONSTANT_CURRENT_STRAIN_SWEEP)
         self.combo_recipe_mode.addItem("Iso-current stress ramp", CONSTANT_CURRENT_STRESS_RAMP)
+        self.combo_recipe_mode.addItem("Elastocaloric effect", ELASTOCALORIC_EFFECT)
         self.combo_recipe_mode.currentIndexChanged.connect(self._handle_recipe_mode_changed)
         automation_form.addRow("Recipe type", self.combo_recipe_mode)
         self.recipe_file_controls_widget = QtWidgets.QWidget(automation_box)
@@ -7661,6 +7660,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_start_target,
         )
         constant_current_form.addRow("Target start", constant_current_start_row)
+        self.label_constant_current_start_target_row = constant_current_form.labelForField(
+            constant_current_start_row
+        )
         self.spin_constant_current_end_target = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_end_target.setDecimals(3)
         self.spin_constant_current_end_target.setRange(-100000.0, 100000.0)
@@ -7670,6 +7672,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_end_target,
         )
         constant_current_form.addRow("Target end", constant_current_end_row)
+        self.label_constant_current_end_target_row = constant_current_form.labelForField(constant_current_end_row)
         self.combo_constant_current_step_basis = QtWidgets.QComboBox(automation_box)
         self.combo_constant_current_step_basis.addItem("Displacement (mm)", MECHANICAL_STEP_DISPLACEMENT_MM)
         self.combo_constant_current_step_basis.addItem("Strain (%)", HSW_BASIS_STRAIN_PCT)
@@ -7698,6 +7701,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_hold_s.setSuffix(" s")
         constant_current_form.addRow("Hold per step", self.spin_constant_current_hold_s)
         self.label_constant_current_hold_row = constant_current_form.labelForField(self.spin_constant_current_hold_s)
+        self.spin_elastocaloric_stabilize_s = CompactDoubleSpinBox(automation_box)
+        self.spin_elastocaloric_stabilize_s.setDecimals(1)
+        self.spin_elastocaloric_stabilize_s.setRange(0.0, 3600.0)
+        self.spin_elastocaloric_stabilize_s.setValue(30.0)
+        self.spin_elastocaloric_stabilize_s.setSuffix(" s")
+        constant_current_form.addRow("Temperature stabilize", self.spin_elastocaloric_stabilize_s)
+        self.label_elastocaloric_stabilize_row = constant_current_form.labelForField(
+            self.spin_elastocaloric_stabilize_s
+        )
+        self.spin_elastocaloric_release_record_s = CompactDoubleSpinBox(automation_box)
+        self.spin_elastocaloric_release_record_s.setDecimals(1)
+        self.spin_elastocaloric_release_record_s.setRange(0.0, 3600.0)
+        self.spin_elastocaloric_release_record_s.setValue(10.0)
+        self.spin_elastocaloric_release_record_s.setSuffix(" s")
+        constant_current_form.addRow("Record after release", self.spin_elastocaloric_release_record_s)
+        self.label_elastocaloric_release_record_row = constant_current_form.labelForField(
+            self.spin_elastocaloric_release_record_s
+        )
         self.spin_constant_current_move_speed_mm_s = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_move_speed_mm_s.setDecimals(3)
         self.spin_constant_current_move_speed_mm_s.setRange(0.001, 50.0)
@@ -7734,6 +7755,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_constant_current_start_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         constant_current_form.addRow("Start", constant_current_start_mA_row)
+        self.label_constant_current_start_mA_row = constant_current_form.labelForField(
+            constant_current_start_mA_row
+        )
         self.spin_constant_current_end_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_end_mA.setDecimals(2)
         self.spin_constant_current_end_mA.setRange(0.0, 5000.0)
@@ -7747,6 +7771,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_constant_current_end_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         constant_current_form.addRow("End", constant_current_end_mA_row)
+        self.label_constant_current_end_mA_row = constant_current_form.labelForField(constant_current_end_mA_row)
         self.spin_constant_current_step_mA = CompactDoubleSpinBox(automation_box)
         self.spin_constant_current_step_mA.setDecimals(2)
         self.spin_constant_current_step_mA.setRange(0.01, 5000.0)
@@ -7760,6 +7785,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.label_constant_current_step_density.setTextFormat(QtCore.Qt.TextFormat.RichText)
         constant_current_form.addRow("Step", constant_current_step_mA_row)
+        self.label_constant_current_step_mA_row = constant_current_form.labelForField(constant_current_step_mA_row)
         constant_transition_header = QtWidgets.QWidget(automation_box)
         constant_transition_header_layout = QtWidgets.QHBoxLayout(constant_transition_header)
         constant_transition_header_layout.setContentsMargins(0, 0, 0, 0)
@@ -8296,6 +8322,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_constant_current_end_target,
             self.spin_constant_current_step_size,
             self.spin_constant_current_hold_s,
+            self.spin_elastocaloric_stabilize_s,
+            self.spin_elastocaloric_release_record_s,
             self.spin_constant_current_move_speed_mm_s,
             self.spin_constant_current_stress_ramp_rate_mpa_s,
             self.spin_constant_current_start_mA,
@@ -14001,11 +14029,16 @@ class MainWindow(QtWidgets.QMainWindow):
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
         return str(mode if mode is not None else default_mode or "") == CONSTANT_CURRENT_STRESS_RAMP
 
+    def _is_elastocaloric_mode(self, mode: str | None = None) -> bool:
+        default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
+        return str(mode if mode is not None else default_mode or "") == ELASTOCALORIC_EFFECT
+
     def _is_iso_current_mode(self, mode: str | None = None) -> bool:
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
         return str(mode if mode is not None else default_mode or "") in {
             CONSTANT_CURRENT_STRAIN_SWEEP,
             CONSTANT_CURRENT_STRESS_RAMP,
+            ELASTOCALORIC_EFFECT,
         }
 
     def _is_calibration_mode(self, mode: str | None = None) -> bool:
@@ -14238,6 +14271,8 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = str(self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name)
         if self._is_constant_current_stress_ramp_mode(mode):
             return HSW_BASIS_STRESS_MPA
+        if self._is_elastocaloric_mode(mode):
+            return HSW_BASIS_STRAIN_PCT
         return str(self.combo_constant_current_start_basis.currentData() or HSW_BASIS_STRAIN_PCT)
 
     def _constant_current_step_basis(self) -> str:
@@ -14251,37 +14286,102 @@ class MainWindow(QtWidgets.QMainWindow):
             widget.setSuffix(suffix)
             widget.blockSignals(False)
         stress_ramp_mode = self._is_constant_current_stress_ramp_mode()
+        elastocaloric_mode = self._is_elastocaloric_mode()
+        fixed_strain_mode = stress_ramp_mode or elastocaloric_mode
         if hasattr(self, "combo_constant_current_start_basis"):
-            self.combo_constant_current_start_basis.setVisible(not stress_ramp_mode)
+            self.combo_constant_current_start_basis.setVisible(not fixed_strain_mode)
         start_basis_label = getattr(self, "label_constant_current_start_basis_row", None)
         if start_basis_label is not None:
-            start_basis_label.setVisible(not stress_ramp_mode)
+            start_basis_label.setVisible(not fixed_strain_mode)
+        if hasattr(self, "label_constant_current_targets_section"):
+            if elastocaloric_mode:
+                self.label_constant_current_targets_section.setText("Strain jump")
+            elif self._constant_current_start_basis() == HSW_BASIS_LOAD_G:
+                self.label_constant_current_targets_section.setText("Load targets")
+            elif self._constant_current_start_basis() == HSW_BASIS_STRAIN_PCT:
+                self.label_constant_current_targets_section.setText("Strain targets")
+            else:
+                self.label_constant_current_targets_section.setText("Stress targets")
+        if hasattr(self, "label_constant_current_mechanical_section"):
+            self.label_constant_current_mechanical_section.setText(
+                "Fast motion" if elastocaloric_mode else "Mechanical scan"
+            )
+        if hasattr(self, "label_constant_current_current_section"):
+            self.label_constant_current_current_section.setText(
+                "Current setpoint" if elastocaloric_mode else "Current levels"
+            )
         for widget_name in (
             "combo_constant_current_step_basis",
-            "spin_constant_current_step_size",
-            "spin_constant_current_hold_s",
-            "spin_constant_current_move_speed_mm_s",
         ):
             widget = getattr(self, widget_name, None)
             if widget is not None:
-                widget.setVisible(not stress_ramp_mode)
+                widget.setVisible(not fixed_strain_mode)
+        if hasattr(self, "spin_constant_current_hold_s"):
+            self.spin_constant_current_hold_s.setVisible(not stress_ramp_mode)
+        for widget_name in (
+            "spin_constant_current_step_size",
+            "spin_constant_current_move_speed_mm_s",
+            "spin_elastocaloric_stabilize_s",
+            "spin_elastocaloric_release_record_s",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                if widget_name.startswith("spin_elastocaloric"):
+                    widget.setVisible(elastocaloric_mode)
+                elif widget_name == "spin_constant_current_step_size":
+                    widget.setVisible(not fixed_strain_mode)
+                else:
+                    widget.setVisible(not stress_ramp_mode)
         for label_name in (
             "label_constant_current_step_basis_row",
-            "label_constant_current_step_size_row",
-            "label_constant_current_hold_row",
-            "label_constant_current_step_speed_row",
         ):
             label = getattr(self, label_name, None)
             if label is not None:
-                label.setVisible(not stress_ramp_mode)
+                label.setVisible(not fixed_strain_mode)
+        if getattr(self, "label_constant_current_hold_row", None) is not None:
+            self.label_constant_current_hold_row.setVisible(not stress_ramp_mode)
+        for label_name in (
+            "label_constant_current_step_size_row",
+            "label_constant_current_step_speed_row",
+            "label_elastocaloric_stabilize_row",
+            "label_elastocaloric_release_record_row",
+        ):
+            label = getattr(self, label_name, None)
+            if label is not None:
+                if label_name.startswith("label_elastocaloric"):
+                    label.setVisible(elastocaloric_mode)
+                elif label_name == "label_constant_current_step_size_row":
+                    label.setVisible(not fixed_strain_mode)
+                else:
+                    label.setVisible(not stress_ramp_mode)
         if hasattr(self, "spin_constant_current_stress_ramp_rate_mpa_s"):
             self.spin_constant_current_stress_ramp_rate_mpa_s.setVisible(stress_ramp_mode)
         ramp_rate_label = getattr(self, "label_constant_current_stress_ramp_rate_row", None)
         if ramp_rate_label is not None:
             ramp_rate_label.setVisible(stress_ramp_mode)
+        for widget_name in ("spin_constant_current_end_mA", "spin_constant_current_step_mA"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(not elastocaloric_mode)
+        for label_name in ("label_constant_current_end_mA_row", "label_constant_current_step_mA_row"):
+            label = getattr(self, label_name, None)
+            if label is not None:
+                label.setVisible(not elastocaloric_mode)
+        if getattr(self, "label_constant_current_start_mA_row", None) is not None:
+            self.label_constant_current_start_mA_row.setText("Current" if elastocaloric_mode else "Start")
+        if getattr(self, "label_constant_current_start_target_row", None) is not None:
+            self.label_constant_current_start_target_row.setText("Start strain" if elastocaloric_mode else "Target start")
+        if getattr(self, "label_constant_current_end_target_row", None) is not None:
+            self.label_constant_current_end_target_row.setText("Jump strain" if elastocaloric_mode else "Target end")
+        if getattr(self, "label_constant_current_step_size_row", None) is not None:
+            self.label_constant_current_step_size_row.setText("Jump size" if elastocaloric_mode else "Step size")
+        if getattr(self, "label_constant_current_hold_row", None) is not None:
+            self.label_constant_current_hold_row.setText("Record after jump" if elastocaloric_mode else "Hold per step")
+        if getattr(self, "label_constant_current_step_speed_row", None) is not None:
+            self.label_constant_current_step_speed_row.setText("Jump speed" if elastocaloric_mode else "Step speed")
         step_basis = self._constant_current_step_basis()
         self.spin_constant_current_step_size.blockSignals(True)
-        if step_basis == HSW_BASIS_STRAIN_PCT:
+        if elastocaloric_mode or step_basis == HSW_BASIS_STRAIN_PCT:
             self.spin_constant_current_step_size.setDecimals(4)
             self.spin_constant_current_step_size.setSuffix(" %")
         else:
@@ -16907,6 +17007,7 @@ class MainWindow(QtWidgets.QMainWindow):
             CALIBRATION_COPPER: 4,
             CONSTANT_CURRENT_STRAIN_SWEEP: 6,
             CONSTANT_CURRENT_STRESS_RAMP: 6,
+            ELASTOCALORIC_EFFECT: 6,
         }.get(mode, 0)
         self.recipe_stack.setCurrentIndex(page_index)
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
@@ -17095,6 +17196,49 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"{load_text} preload for length entry, then back to 0 g."
                 )
             banner = "Iso-current stress-strain"
+        elif self._is_elastocaloric_mode(mode):
+            self._update_constant_current_basis_ui()
+            start_strain = float(self.spin_constant_current_start_target.value())
+            jump_strain = float(self.spin_constant_current_end_target.value())
+            current_mA = float(self.spin_constant_current_start_mA.value())
+            transition_load = self._load_equivalent_text(
+                float(self.spin_constant_current_transition_stress_mpa.value())
+            )
+            summary = (
+                "Plan: elastocaloric effect, current "
+                f"{_format_compact_unit(current_mA, 'mA', decimals=2)}; "
+                f"seek strain {_format_compact_unit(start_strain, '%', decimals=4)}, "
+                f"stabilize temperature {_format_compact_unit(self.spin_elastocaloric_stabilize_s.value(), 's', decimals=1)}, "
+                f"jump to {_format_compact_unit(jump_strain, '%', decimals=4)} at "
+                f"{_format_compact_unit(self.spin_constant_current_move_speed_mm_s.value(), 'mm/s', decimals=3)}, "
+                "then release in one step."
+            )
+            summary += (
+                " Current transition ramps at "
+                f"{_format_compact_unit(self.spin_constant_current_transition_rate_mA_s.value(), 'mA/s', decimals=3)} "
+                f"while holding {_format_compact_unit(self.spin_constant_current_transition_stress_mpa.value(), 'MPa', decimals=3)}"
+                f" ({transition_load}), then settles "
+                f"{_format_compact_unit(self.spin_constant_current_transition_settle_s.value(), 's', decimals=2)}."
+            )
+            if self.check_constant_current_transition_hold_on_error.isChecked():
+                summary += " Transition current pauses while the target recovers."
+            summary += (
+                f" Records {_format_compact_unit(self.spin_constant_current_hold_s.value(), 's', decimals=1)} "
+                "after the tensile jump and "
+                f"{_format_compact_unit(self.spin_elastocaloric_release_record_s.value(), 's', decimals=1)} after release."
+            )
+            if self._pre_measurement_setup_enabled(mode):
+                setup_load_g = load_g_from_stress_mpa(
+                    float(self.spin_setup_preload_stress_mpa.value()),
+                    float(self.spin_diameter.value()),
+                )
+                load_text = "" if setup_load_g is None else f" ({_format_compact_unit(setup_load_g, 'g', decimals=4)})"
+                summary += (
+                    " Setup: 0 g load, "
+                    f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
+                    f"{load_text} preload for length entry, then back to 0 g."
+                )
+            banner = "Elastocaloric effect"
         else:
             summary = (
                 f"Plan: displacement ramp of {_format_compact_unit(self.spin_ramp_distance.value(), 'mm')} "
@@ -17108,6 +17252,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 summary += " Recipe controls current and fixed displacement steps."
             elif self._is_constant_current_stress_ramp_mode(mode):
                 summary += " Recipe controls current and stress target ramps."
+            elif self._is_elastocaloric_mode(mode):
+                summary += " Recipe controls current and fast strain jumps."
             else:
                 summary += " Recipe owns the hardware sequence."
         preload_text = (
@@ -20380,6 +20526,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"iso-current-stress-ramp_setup{setup}MPa_stress{target_start}-{target_end}_"
                 f"{ramp_rate}MPaps_current{current_start}-{current_end}x{current_step}mA.recipe.json"
             )
+        elif mode == ELASTOCALORIC_EFFECT:
+            setup = self._recipe_number_token(self.spin_setup_preload_stress_mpa.value())
+            strain_start = self._recipe_number_token(self.spin_constant_current_start_target.value())
+            strain_jump = self._recipe_number_token(self.spin_constant_current_end_target.value())
+            current = self._recipe_number_token(self.spin_constant_current_start_mA.value())
+            speed = self._recipe_number_token(self.spin_constant_current_move_speed_mm_s.value())
+            return (
+                f"elastocaloric_setup{setup}MPa_strain{strain_start}-{strain_jump}pct_"
+                f"current{current}mA_{speed}mmps.recipe.json"
+            )
         else:
             prefix = re.sub(r"[^a-z0-9]+", "-", mode.lower()).strip("-") or "recipe"
             return f"{prefix}.recipe.json"
@@ -20491,6 +20647,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_start_mA": float(self.spin_constant_current_start_mA.value()),
                 "current_end_mA": float(self.spin_constant_current_end_mA.value()),
                 "current_step_mA": float(self.spin_constant_current_step_mA.value()),
+                "transition_enabled": True,
+                "transition_stress_mpa": float(self.spin_constant_current_transition_stress_mpa.value()),
+                "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
+                "transition_settle_s": float(self.spin_constant_current_transition_settle_s.value()),
+                "transition_hold_on_error": bool(self.check_constant_current_transition_hold_on_error.isChecked()),
+                "return_to_start": True,
+            }
+        if self._is_elastocaloric_mode(mode):
+            payload["recipe"]["elastocaloric_effect"] = {
+                "start_strain_pct": float(self.spin_constant_current_start_target.value()),
+                "jump_strain_pct": float(self.spin_constant_current_end_target.value()),
+                "jump_speed_mm_s": float(self.spin_constant_current_move_speed_mm_s.value()),
+                "temperature_stabilize_s": float(self.spin_elastocaloric_stabilize_s.value()),
+                "record_after_jump_s": float(self.spin_constant_current_hold_s.value()),
+                "record_after_release_s": float(self.spin_elastocaloric_release_record_s.value()),
+                "current_mA": float(self.spin_constant_current_start_mA.value()),
                 "transition_enabled": True,
                 "transition_stress_mpa": float(self.spin_constant_current_transition_stress_mpa.value()),
                 "transition_rate_mA_s": float(self.spin_constant_current_transition_rate_mA_s.value()),
@@ -20730,6 +20902,93 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_constant_current_return_to_start.setChecked(
                 bool(constant_ramp.get("return_to_start", self.check_constant_current_return_to_start.isChecked()))
             )
+        elastocaloric = recipe.get("elastocaloric_effect")
+        if isinstance(elastocaloric, Mapping):
+            self.spin_constant_current_start_target.setValue(
+                float(elastocaloric.get("start_strain_pct", self.spin_constant_current_start_target.value()))
+            )
+            self.spin_constant_current_end_target.setValue(
+                float(elastocaloric.get("jump_strain_pct", self.spin_constant_current_end_target.value()))
+            )
+            self.spin_constant_current_move_speed_mm_s.setValue(
+                max(
+                    0.001,
+                    float(elastocaloric.get("jump_speed_mm_s", self.spin_constant_current_move_speed_mm_s.value())),
+                )
+            )
+            self.spin_elastocaloric_stabilize_s.setValue(
+                max(
+                    0.0,
+                    float(
+                        elastocaloric.get(
+                            "temperature_stabilize_s",
+                            self.spin_elastocaloric_stabilize_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.spin_constant_current_hold_s.setValue(
+                max(
+                    0.0,
+                    float(elastocaloric.get("record_after_jump_s", self.spin_constant_current_hold_s.value())),
+                )
+            )
+            self.spin_elastocaloric_release_record_s.setValue(
+                max(
+                    0.0,
+                    float(
+                        elastocaloric.get(
+                            "record_after_release_s",
+                            self.spin_elastocaloric_release_record_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.spin_constant_current_start_mA.setValue(
+                float(elastocaloric.get("current_mA", self.spin_constant_current_start_mA.value()))
+            )
+            self.check_constant_current_transition_enabled.setChecked(True)
+            self.spin_constant_current_transition_stress_mpa.setValue(
+                float(
+                    elastocaloric.get(
+                        "transition_stress_mpa",
+                        self.spin_constant_current_transition_stress_mpa.value(),
+                    )
+                )
+            )
+            self.spin_constant_current_transition_rate_mA_s.setValue(
+                max(
+                    0.001,
+                    float(
+                        elastocaloric.get(
+                            "transition_rate_mA_s",
+                            self.spin_constant_current_transition_rate_mA_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.spin_constant_current_transition_settle_s.setValue(
+                max(
+                    0.0,
+                    float(
+                        elastocaloric.get(
+                            "transition_settle_s",
+                            self.spin_constant_current_transition_settle_s.value(),
+                        )
+                    ),
+                )
+            )
+            self.check_constant_current_transition_hold_on_error.setChecked(
+                bool(
+                    elastocaloric.get(
+                        "transition_hold_on_error",
+                        self.check_constant_current_transition_hold_on_error.isChecked(),
+                    )
+                )
+            )
+            self.check_constant_current_return_to_start.setChecked(
+                bool(elastocaloric.get("return_to_start", self.check_constant_current_return_to_start.isChecked()))
+            )
         self._update_recipe_mode_ui()
 
     def _save_recipe_to_path(self, path: str | Path) -> None:
@@ -20890,6 +21149,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if step.action == "mechanical_scan":
             current_text = self._automation_current_target_text(step.current_mA)
+            if self._is_elastocaloric_mode(self._automation_name):
+                direction = "apply strain jump" if str(step.note or "").endswith(":up") else "release strain"
+                return f"At {current_text}: {direction} to {target_text}"
             return f"At {current_text}: fixed displacement steps toward {target_text}"
 
         if step.action == "settle":
@@ -23527,6 +23789,131 @@ class MainWindow(QtWidgets.QMainWindow):
             summary += self._recipe_setup_summary_sentence()
             return steps, summary, control_interval_ms
 
+        if self._is_elastocaloric_mode(mode):
+            start_strain = float(self.spin_constant_current_start_target.value())
+            jump_strain = float(self.spin_constant_current_end_target.value())
+            strain_jump_size = abs(jump_strain - start_strain)
+            jump_speed_mm_s = float(self.spin_constant_current_move_speed_mm_s.value())
+            jump_record_s = max(0.0, float(self.spin_constant_current_hold_s.value()))
+            release_record_s = max(0.0, float(self.spin_elastocaloric_release_record_s.value()))
+            stabilize_s = max(0.0, float(self.spin_elastocaloric_stabilize_s.value()))
+            current_mA = self._recipe_current_setpoint_mA(float(self.spin_constant_current_start_mA.value()))
+            transition_stress_mpa = float(self.spin_constant_current_transition_stress_mpa.value())
+            transition_rate_mA_s = abs(float(self.spin_constant_current_transition_rate_mA_s.value()))
+            transition_settle_s = max(0.0, float(self.spin_constant_current_transition_settle_s.value()))
+            transition_hold_enabled = bool(self.check_constant_current_transition_hold_on_error.isChecked())
+            if strain_jump_size <= 0.0:
+                raise ValueError("Set a non-zero elastocaloric strain jump.")
+            if transition_rate_mA_s <= 0.0:
+                raise ValueError("Set a non-zero current-transition ramp rate.")
+            steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
+            transition_start_mA = self._recipe_current_setpoint_mA(MIN_RECIPE_CURRENT_MA)
+            steps.append(
+                AutomationStep(
+                    "seek_target",
+                    target_value=transition_stress_mpa,
+                    basis=HSW_BASIS_STRESS_MPA,
+                    current_mA=transition_start_mA,
+                    note="transition_seek",
+                )
+            )
+            steps.append(
+                AutomationStep(
+                    "sweep_current",
+                    target_value=transition_stress_mpa,
+                    basis=HSW_BASIS_STRESS_MPA,
+                    current_start_mA=transition_start_mA,
+                    current_end_mA=current_mA,
+                    current_ramp_rate_mA_s=transition_rate_mA_s,
+                    current_hold_enabled=transition_hold_enabled,
+                    current_hold_pause_tolerance_factor=CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+                    current_hold_resume_tolerance_factor=CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
+                    current_hold_resume_stable_s=CURRENT_SWEEP_HOLD_RESUME_STABLE_S,
+                    note="transition",
+                )
+            )
+            if transition_settle_s > 0.0:
+                steps.append(
+                    AutomationStep(
+                        "settle",
+                        target_value=transition_stress_mpa,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=current_mA,
+                        duration_s=transition_settle_s,
+                        note="transition_settle",
+                    )
+                )
+            steps.append(
+                AutomationStep(
+                    "seek_target",
+                    target_value=start_strain,
+                    basis=HSW_BASIS_STRAIN_PCT,
+                    current_mA=current_mA,
+                    note="start",
+                )
+            )
+            if stabilize_s > 0.0:
+                steps.append(
+                    AutomationStep(
+                        "settle",
+                        target_value=start_strain,
+                        basis=HSW_BASIS_STRAIN_PCT,
+                        current_mA=current_mA,
+                        duration_s=stabilize_s,
+                        note="temperature_stabilize",
+                    )
+                )
+            steps.append(
+                AutomationStep(
+                    "mark_current_zero",
+                    target_value=start_strain,
+                    basis=HSW_BASIS_STRAIN_PCT,
+                    current_mA=current_mA,
+                    note="1:zero",
+                )
+            )
+            steps.append(
+                AutomationStep(
+                    "mechanical_scan",
+                    target_value=jump_strain,
+                    basis=HSW_BASIS_STRAIN_PCT,
+                    current_mA=current_mA,
+                    mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                    mechanical_step_value=strain_jump_size,
+                    mechanical_step_speed_mm_s=jump_speed_mm_s,
+                    duration_s=jump_record_s,
+                    note="1:up",
+                )
+            )
+            steps.append(
+                AutomationStep(
+                    "mechanical_scan",
+                    target_value=start_strain,
+                    basis=HSW_BASIS_STRAIN_PCT,
+                    current_mA=current_mA,
+                    mechanical_step_basis=HSW_BASIS_STRAIN_PCT,
+                    mechanical_step_value=strain_jump_size,
+                    mechanical_step_speed_mm_s=jump_speed_mm_s,
+                    duration_s=release_record_s,
+                    note="1:down",
+                )
+            )
+            summary = (
+                "Started elastocaloric effect recipe: "
+                f"current {current_mA:.2f} mA, strain {start_strain:.4f}% to {jump_strain:.4f}% "
+                f"in one jump at {jump_speed_mm_s:.4f} mm/s, stabilize {stabilize_s:.1f} s, "
+                f"record {jump_record_s:.1f} s after jump and {release_record_s:.1f} s after release; "
+                f"{clock_summary}."
+            )
+            summary += (
+                f" Current transition ramps at {transition_rate_mA_s:.3f} mA/s "
+                f"while holding {transition_stress_mpa:.3f} MPa, then settle {transition_settle_s:.2f} s."
+            )
+            if transition_hold_enabled:
+                summary += " Current transition pauses while the target recovers."
+            summary += self._recipe_setup_summary_sentence()
+            return steps, summary, control_interval_ms
+
         if self._is_constant_current_strain_sweep_mode(mode):
             basis = self._constant_current_start_basis()
             start_target = float(self.spin_constant_current_start_target.value())
@@ -25855,6 +26242,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("constant_current_step_basis", self._constant_current_step_basis())
         self.settings.setValue("constant_current_step_size", self.spin_constant_current_step_size.value())
         self.settings.setValue("constant_current_hold_s", self.spin_constant_current_hold_s.value())
+        self.settings.setValue("elastocaloric_stabilize_s", self.spin_elastocaloric_stabilize_s.value())
+        self.settings.setValue(
+            "elastocaloric_release_record_s",
+            self.spin_elastocaloric_release_record_s.value(),
+        )
         self.settings.setValue("constant_current_move_speed_mm_s", self.spin_constant_current_move_speed_mm_s.value())
         self.settings.setValue(
             "constant_current_stress_ramp_rate_mpa_s",
@@ -26567,6 +26959,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_constant_current_end_target.setValue(float(self.settings.value("constant_current_target_end", 500.0)))
         self.spin_constant_current_step_size.setValue(float(self.settings.value("constant_current_step_size", 0.01)))
         self.spin_constant_current_hold_s.setValue(float(self.settings.value("constant_current_hold_s", 1.0)))
+        self.spin_elastocaloric_stabilize_s.setValue(
+            max(0.0, float(self.settings.value("elastocaloric_stabilize_s", 30.0)))
+        )
+        self.spin_elastocaloric_release_record_s.setValue(
+            max(0.0, float(self.settings.value("elastocaloric_release_record_s", 10.0)))
+        )
         self.spin_constant_current_move_speed_mm_s.setValue(
             max(0.001, float(self.settings.value("constant_current_move_speed_mm_s", 0.2)))
         )
