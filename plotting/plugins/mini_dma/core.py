@@ -6,11 +6,16 @@ import math
 from pathlib import Path
 from typing import Collection, Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
 from plotting.shared.power_axis import add_power_top_axis
-from plotting.shared.transition_analysis import TangentTransitionFit, fit_tangent_transition
+from plotting.shared.transition_analysis import (
+    LinearSegmentFit,
+    TangentTransitionFit,
+    fit_tangent_transition,
+)
 
 MEASUREMENT_FILE = "measurement.csv"
 PLOT_PHASES = {"current"}
@@ -1056,7 +1061,13 @@ def _transition_currents_for_group(
         "mf_current_mA": None,
     }
     heating, cooling = _split_current_sweep_legs(group)
-    heating_fit = _fit_current_transition(heating, strain_pct)
+    cooling_after_slope_hint = _high_current_cooling_slope(cooling, strain_pct)
+    heating_fit = _fit_current_transition(
+        heating,
+        strain_pct,
+        after_slope_hint=cooling_after_slope_hint,
+        prefer_horizontal_after=True,
+    )
     if heating_fit is not None:
         result["as_current_mA"] = heating_fit.start_x
         result["af_current_mA"] = heating_fit.finish_x
@@ -1090,11 +1101,14 @@ def _split_current_sweep_legs(group: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
 def _fit_current_transition(
     group: pd.DataFrame,
     strain_pct: pd.Series,
+    *,
+    after_slope_hint: float | None = None,
+    prefer_horizontal_after: bool = False,
 ) -> TangentTransitionFit | None:
     if group.empty or len(group.index) < 18:
         return None
     strain = strain_pct.reindex(group.index)
-    return fit_tangent_transition(
+    generic = fit_tangent_transition(
         pd.to_numeric(group["current_mA"], errors="coerce"),
         pd.to_numeric(strain, errors="coerce"),
         min_segment_points=6,
@@ -1102,6 +1116,210 @@ def _fit_current_transition(
         # and cooling strain rises as current falls, so both are negative here.
         transition_slope_sign=-1,
     )
+    if not prefer_horizontal_after:
+        return generic
+    if generic is not None and _mini_dma_after_fit_is_flat_enough(
+        generic,
+        after_slope_hint=after_slope_hint,
+    ):
+        return generic
+    anchored = _fit_current_transition_with_suffix_after(
+        group,
+        strain,
+        after_slope_hint=after_slope_hint,
+    )
+    return anchored if anchored is not None else generic
+
+
+def _high_current_cooling_slope(
+    cooling: pd.DataFrame,
+    strain_pct: pd.Series,
+) -> float | None:
+    if cooling.empty or "current_mA" not in cooling.columns or len(cooling.index) < 6:
+        return None
+    head = cooling.iloc[: min(len(cooling.index), 12)]
+    strain = strain_pct.reindex(head.index)
+    fit = _mini_dma_line_fit(
+        pd.to_numeric(head["current_mA"], errors="coerce").to_numpy(dtype=float),
+        pd.to_numeric(strain, errors="coerce").to_numpy(dtype=float),
+    )
+    if fit is None or not math.isfinite(fit.slope):
+        return None
+    return float(fit.slope)
+
+
+def _mini_dma_after_fit_is_flat_enough(
+    fit: TangentTransitionFit,
+    *,
+    after_slope_hint: float | None = None,
+) -> bool:
+    transition_slope = abs(float(fit.transition.slope))
+    hint = (
+        abs(float(after_slope_hint))
+        if isinstance(after_slope_hint, (int, float)) and math.isfinite(float(after_slope_hint))
+        else 0.0
+    )
+    limit = max(0.01, hint * 2.5, transition_slope * 0.35)
+    return abs(float(fit.after.slope)) <= limit
+
+
+def _fit_current_transition_with_suffix_after(
+    group: pd.DataFrame,
+    strain_pct: pd.Series,
+    *,
+    after_slope_hint: float | None = None,
+) -> TangentTransitionFit | None:
+    if group.empty or len(group.index) < 18 or "current_mA" not in group.columns:
+        return None
+    strain = strain_pct.reindex(group.index)
+    x, y = _mini_dma_clean_xy(
+        pd.to_numeric(group["current_mA"], errors="coerce"),
+        pd.to_numeric(strain, errors="coerce"),
+    )
+    min_points = 6
+    if len(x) < min_points * 3:
+        return None
+    if len(x) > 240:
+        indices = np.linspace(0, len(x) - 1, 240).round().astype(int)
+        x = x[indices]
+        y = y[indices]
+    n = len(x)
+    lower = float(np.min(x))
+    upper = float(np.max(x))
+    scan_width = upper - lower
+    if scan_width <= 0.0:
+        return None
+    hint = (
+        abs(float(after_slope_hint))
+        if isinstance(after_slope_hint, (int, float)) and math.isfinite(float(after_slope_hint))
+        else 0.0
+    )
+    best: tuple[float, TangentTransitionFit] | None = None
+    first_after_start = max(min_points * 2, n - (min_points * 5))
+    for right_start in range(first_after_start, n - min_points + 1):
+        after = _mini_dma_line_fit(x[right_start:], y[right_start:])
+        if after is None:
+            continue
+        for left_end in range(min_points, right_start - min_points + 1):
+            before = _mini_dma_line_fit(x[:left_end], y[:left_end])
+            transition = _mini_dma_line_fit(x[left_end:right_start], y[left_end:right_start])
+            if before is None or transition is None:
+                continue
+            if transition.slope >= 0.0:
+                continue
+            baseline_slope = max(abs(before.slope), abs(after.slope))
+            slope_gain = abs(transition.slope) - baseline_slope
+            if slope_gain <= 0.0:
+                continue
+            if baseline_slope > 1e-12 and abs(transition.slope) / baseline_slope < 1.35:
+                continue
+            after_limit = max(0.01, hint * 2.5, abs(transition.slope) * 0.32)
+            if abs(after.slope) > after_limit:
+                continue
+            start_x = _mini_dma_line_intersection_x(before, transition)
+            finish_x = _mini_dma_line_intersection_x(transition, after)
+            if start_x is None or finish_x is None:
+                continue
+            start_x = min(max(start_x, lower), upper)
+            finish_x = min(max(finish_x, lower), upper)
+            if finish_x < start_x:
+                start_x, finish_x = finish_x, start_x
+            if finish_x - start_x < scan_width * 0.03:
+                continue
+            slack = scan_width * 0.08
+            if not _mini_dma_near_boundary(start_x, before.end_x, transition.start_x, slack):
+                continue
+            if not _mini_dma_near_boundary(finish_x, transition.end_x, after.start_x, slack):
+                continue
+            rmse = _mini_dma_combined_rmse(
+                (before.rmse, left_end),
+                (transition.rmse, right_start - left_end),
+                (after.rmse, n - right_start),
+            )
+            fit = TangentTransitionFit(
+                start_x=float(start_x),
+                finish_x=float(finish_x),
+                before=before,
+                transition=transition,
+                after=after,
+                rmse=rmse,
+            )
+            after_penalty = abs(after.slope) / max(after_limit, 1e-12)
+            score = (rmse / max(slope_gain, 1e-12)) + (after_penalty * 0.25)
+            if best is None or score < best[0]:
+                best = (score, fit)
+    return best[1] if best is not None else None
+
+
+def _mini_dma_clean_xy(
+    x_values: Iterable[float],
+    y_values: Iterable[float],
+) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(list(x_values), dtype=float)
+    y = np.asarray(list(y_values), dtype=float)
+    if x.shape != y.shape:
+        return np.asarray([], dtype=float), np.asarray([], dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+    if len(x) == 0:
+        return x, y
+    order = np.argsort(x, kind="stable")
+    x = x[order]
+    y = y[order]
+    unique_x: list[float] = []
+    unique_y: list[float] = []
+    for value in np.unique(x):
+        value_mask = x == value
+        unique_x.append(float(value))
+        unique_y.append(float(np.mean(y[value_mask])))
+    return np.asarray(unique_x, dtype=float), np.asarray(unique_y, dtype=float)
+
+
+def _mini_dma_line_fit(x_values: np.ndarray, y_values: np.ndarray) -> LinearSegmentFit | None:
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
+    x = x_values[mask]
+    y = y_values[mask]
+    if len(x) < 2 or len(np.unique(x)) < 2:
+        return None
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = (slope * x) + intercept
+    rmse = float(np.sqrt(np.mean((y - fitted) ** 2)))
+    if not all(math.isfinite(float(value)) for value in (slope, intercept, rmse)):
+        return None
+    return LinearSegmentFit(
+        slope=float(slope),
+        intercept=float(intercept),
+        start_x=float(x[0]),
+        end_x=float(x[-1]),
+        rmse=rmse,
+    )
+
+
+def _mini_dma_line_intersection_x(left: LinearSegmentFit, right: LinearSegmentFit) -> float | None:
+    denominator = left.slope - right.slope
+    if math.isclose(denominator, 0.0, abs_tol=1e-12):
+        return None
+    value = (right.intercept - left.intercept) / denominator
+    return float(value) if math.isfinite(float(value)) else None
+
+
+def _mini_dma_near_boundary(
+    intersection_x: float,
+    left_end_x: float,
+    right_start_x: float,
+    slack: float,
+) -> bool:
+    lower = min(float(left_end_x), float(right_start_x)) - slack
+    upper = max(float(left_end_x), float(right_start_x)) + slack
+    return lower <= float(intersection_x) <= upper
+
+
+def _mini_dma_combined_rmse(*segments: tuple[float, int]) -> float:
+    total = sum(count for _rmse, count in segments)
+    if total <= 0:
+        return float("inf")
+    return float(math.sqrt(sum((rmse**2) * count for rmse, count in segments) / total))
 
 
 def _detect_break_point(

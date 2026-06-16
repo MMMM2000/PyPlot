@@ -99,6 +99,100 @@ def test_summarize_transition_currents_detects_paired_annealing_transition() -> 
     )
 
 
+def _synthetic_annealing_loop(
+    *,
+    up_center: float,
+    up_half_width: float,
+    down_edge: float,
+    down_span: float,
+    base_resistance: float,
+    include_cooling_transition: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    up_current = np.linspace(1.0, 100.0, 160)
+    down_current = np.linspace(100.0, 1.0, 160)
+    up_drop = np.clip(1.0 - np.abs(up_current - up_center) / up_half_width, 0.0, 1.0)
+    up_resistance = base_resistance + (0.12 * up_current) - (12.0 * up_drop)
+    if include_cooling_transition:
+        down_rise = np.clip((down_edge - down_current) / down_span, 0.0, 1.0)
+        down_resistance = (base_resistance - 20.0) + (10.0 * down_rise)
+    else:
+        down_resistance = (base_resistance - 20.0) + (0.02 * down_current)
+    return (
+        pd.DataFrame({"I_mA": up_current, "R_Ohm": up_resistance}),
+        pd.DataFrame({"I_mA": down_current, "R_Ohm": down_resistance}),
+    )
+
+
+def test_summarize_transition_loops_detects_two_current_annealing_loops() -> None:
+    frames = [
+        *_synthetic_annealing_loop(
+            up_center=42.5,
+            up_half_width=7.5,
+            down_edge=7.0,
+            down_span=3.0,
+            base_resistance=100.0,
+        ),
+        *_synthetic_annealing_loop(
+            up_center=58.0,
+            up_half_width=8.0,
+            down_edge=13.0,
+            down_span=4.0,
+            base_resistance=110.0,
+        ),
+    ]
+    df = pd.concat(frames, ignore_index=True)
+
+    summaries = anneal_core.summarize_transition_loops(df)
+
+    assert len(summaries) == 2
+    assert [summary.loop_index for summary in summaries] == [1, 2]
+    first, second = summaries
+    assert first.as_current_mA == pytest.approx(35.0, abs=1.0)
+    assert first.af_current_mA == pytest.approx(43.0, abs=1.0)
+    assert first.ms_current_mA == pytest.approx(7.0, abs=1.0)
+    assert first.mf_current_mA == pytest.approx(3.0, abs=1.0)
+    assert second.as_current_mA == pytest.approx(50.0, abs=1.0)
+    assert second.af_current_mA == pytest.approx(58.0, abs=1.0)
+    assert second.ms_current_mA == pytest.approx(11.0, abs=1.0)
+    assert second.mf_current_mA == pytest.approx(8.0, abs=1.0)
+    assert anneal_core.format_transition_summaries(summaries, label="run") == (
+        "run loop 1: As 35 mA, Af 43 mA, Ms 7 mA, Mf 3 mA",
+        "run loop 2: As 50 mA, Af 58 mA, Ms 11 mA, Mf 8 mA",
+    )
+
+
+def test_summarize_transition_loops_keeps_partial_missing_cooling_loop() -> None:
+    frames = [
+        *_synthetic_annealing_loop(
+            up_center=42.5,
+            up_half_width=7.5,
+            down_edge=7.0,
+            down_span=3.0,
+            base_resistance=100.0,
+        ),
+        *_synthetic_annealing_loop(
+            up_center=58.0,
+            up_half_width=8.0,
+            down_edge=13.0,
+            down_span=4.0,
+            base_resistance=110.0,
+            include_cooling_transition=False,
+        ),
+    ]
+    df = pd.concat(frames, ignore_index=True)
+
+    summaries = anneal_core.summarize_transition_loops(df)
+
+    assert len(summaries) == 2
+    assert summaries[1].as_current_mA == pytest.approx(50.0, abs=1.0)
+    assert summaries[1].af_current_mA == pytest.approx(58.0, abs=1.0)
+    assert summaries[1].ms_current_mA is None
+    assert summaries[1].mf_current_mA is None
+    assert anneal_core.format_transition_summaries(summaries, label="run")[1] == (
+        "run loop 2: As 50 mA, Af 58 mA"
+    )
+
+
 def test_summarize_transition_currents_requires_paired_transition() -> None:
     up_current = np.linspace(1.0, 100.0, 160)
     down_current = np.linspace(100.0, 1.0, 160)
@@ -163,7 +257,7 @@ def test_summarize_transition_currents_rejects_wrong_signed_cooling_kink() -> No
     assert summary.af_current_mA == pytest.approx(42.5, abs=1.0)
     assert summary.ms_current_mA is None
     assert summary.mf_current_mA is None
-    assert anneal_core.format_transition_summary(summary) == ""
+    assert anneal_core.format_transition_summary(summary) == "As 35 mA, Af 43 mA"
 
 
 def test_summarize_transition_currents_detects_real_local_heating_drop() -> None:

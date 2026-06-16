@@ -694,6 +694,72 @@ def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs
     assert lines == ["50 MPa: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"]
 
 
+def test_summarize_current_sweep_prefers_horizontal_heating_after_fit() -> None:
+    heating_current = np.linspace(1.0, 100.0, 160)
+    cooling_current = np.linspace(100.0, 1.0, 160)
+
+    def heating_piecewise(current: np.ndarray) -> np.ndarray:
+        start = 30.0
+        finish = 94.0
+        before = 12.0 - current * 0.002
+        start_value = 12.0 - start * 0.002
+        transition = start_value - (current - start) * 0.045
+        finish_value = start_value - (finish - start) * 0.045
+        after = finish_value - (current - finish) * 0.001
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    def cooling_piecewise(current: np.ndarray) -> np.ndarray:
+        start = 30.0
+        finish = 70.0
+        before = 8.0 - current * 0.001
+        start_value = 8.0 - start * 0.001
+        transition = start_value - (current - start) * 0.04
+        finish_value = start_value - (finish - start) * 0.04
+        after = finish_value - (current - finish) * 0.001
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": np.arange(320, dtype=float),
+            "automation_phase": ["current"] * 320,
+            "automation_target_value": [50.0] * 320,
+            "plateau_index": [1] * 320,
+            "strain_pct": np.concatenate(
+                [
+                    heating_piecewise(heating_current),
+                    cooling_piecewise(cooling_current),
+                ]
+            ),
+            "resistance_ohm": [100.0] * 320,
+            "current_mA": np.concatenate([heating_current, cooling_current]),
+            "current_set_mA": np.concatenate([heating_current, cooling_current]),
+            "current_measured_mA": np.concatenate([heating_current, cooling_current]),
+        }
+    )
+    run = core.MiniDmaRun(
+        path=Path("run"),
+        measurement_path=Path("run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+    )
+
+    summary = core.summarize_current_sweep(run)
+    heating, cooling = core._split_current_sweep_legs(frame)
+    fit = core._fit_current_transition(
+        heating,
+        frame["strain_pct"],
+        after_slope_hint=core._high_current_cooling_slope(cooling, frame["strain_pct"]),
+        prefer_horizontal_after=True,
+    )
+
+    target = summary.targets[0]
+    assert target.af_current_mA == pytest.approx(94.0, abs=1.5)
+    assert fit is not None
+    assert fit.finish_x == pytest.approx(94.0, abs=1.5)
+    assert abs(fit.after.slope) < 0.005
+    assert fit.transition.slope < 0.0
+
+
 def test_summarize_current_sweep_rejects_wrong_signed_strain_transition() -> None:
     heating_current = np.linspace(1.0, 100.0, 120)
     cooling_current = np.linspace(100.0, 1.0, 120)

@@ -3596,13 +3596,11 @@ def _annealing_transition_summary(df: pd.DataFrame, *, label: str | None = None)
     try:
         from plotting.plugins.current_annealing import core as annealing_core
 
-        summary = annealing_core.summarize_transition_currents(df)
-        text = annealing_core.format_transition_summary(summary, label=label)
+        summaries = annealing_core.summarize_transition_loops(df)
+        lines = annealing_core.format_transition_summaries(summaries, label=label)
     except Exception:
         return ()
-    if not text:
-        return ()
-    return (text,)
+    return tuple(str(line) for line in lines if str(line).strip())
 
 
 def _series_to_mA(series: pd.Series) -> pd.Series:

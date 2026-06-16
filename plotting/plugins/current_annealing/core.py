@@ -72,6 +72,7 @@ class AnnealingTransitionSummary:
     af_current_mA: float | None = None
     ms_current_mA: float | None = None
     mf_current_mA: float | None = None
+    loop_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -269,70 +270,80 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
     return smoothed_values, segments
 
 
-def summarize_transition_currents(df: pd.DataFrame) -> AnnealingTransitionSummary:
-    """Estimate annealing As/Af/Ms/Mf currents from paired R(I) sweep legs.
+def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSummary, ...]:
+    """Estimate annealing As/Af/Ms/Mf currents for each paired R(I) loop.
 
     The annealing traces are deliberately gated more conservatively than Mini DMA:
-    a summary is emitted only when both increasing and decreasing current legs
-    have accepted tangent fits.
+    a loop is emitted only when its increasing-current leg has an accepted
+    austenite tangent fit. Cooling points are added for that same loop when the
+    following decreasing-current leg has a clear martensite fit.
     """
 
     resistance_column = "R_Ohm" if "R_Ohm" in df.columns else "R_ohm"
     if df.empty or "I_mA" not in df.columns or resistance_column not in df.columns:
-        return AnnealingTransitionSummary()
+        return ()
     currents = pd.to_numeric(df["I_mA"], errors="coerce")
     resistances = pd.to_numeric(df[resistance_column], errors="coerce")
     working = pd.DataFrame({"I_mA": currents, "R_Ohm": resistances}).dropna()
     if len(working.index) < 48:
-        return AnnealingTransitionSummary()
+        return ()
 
     _directions, segments = _direction_profile(working["I_mA"].to_numpy(dtype=float))
-    heating_candidates: List[_AnnealingTransitionCandidate] = []
-    cooling_candidates: List[_AnnealingTransitionCandidate] = []
-    for start, end, direction in segments:
-        segment = working.iloc[start:end].copy()
-        candidate = (
-            _fit_heating_resistance_drop_segment(segment)
-            if direction >= 0
+    summaries: List[AnnealingTransitionSummary] = []
+    loop_index = 0
+    segment_count = len(segments)
+    for segment_index, (start, end, direction) in enumerate(segments):
+        if direction < 0:
+            continue
+        loop_index += 1
+        heating = _fit_heating_resistance_drop_segment(working.iloc[start:end].copy())
+        if heating is None:
+            continue
+        cooling_candidates: List[_AnnealingTransitionCandidate] = []
+        for next_start, next_end, next_direction in segments[segment_index + 1 : segment_count]:
+            if next_direction >= 0:
+                break
+            candidate = _fit_cooling_resistance_increase_segment(
+                working.iloc[next_start:next_end].copy(),
+                max_current_mA=heating.fit.finish_x,
+            )
+            if candidate is None:
+                continue
+            if (
+                candidate.fit.finish_x < heating.fit.finish_x
+                and candidate.fit.start_x < heating.fit.finish_x
+                and candidate.fit.transition.slope < 0.0
+            ):
+                cooling_candidates.append(candidate)
+        cooling = (
+            min(cooling_candidates, key=lambda candidate: candidate.score)
+            if cooling_candidates
             else None
         )
-        if candidate is None:
-            continue
-        if direction >= 0:
-            heating_candidates.append(candidate)
-        else:
-            cooling_candidates.append(candidate)
+        summaries.append(
+            AnnealingTransitionSummary(
+                as_current_mA=heating.fit.start_x,
+                af_current_mA=heating.fit.finish_x,
+                mf_current_mA=cooling.fit.start_x if cooling is not None else None,
+                ms_current_mA=cooling.fit.finish_x if cooling is not None else None,
+                loop_index=loop_index,
+            )
+        )
+    return tuple(summaries)
 
-    if not heating_candidates:
+
+def summarize_transition_currents(df: pd.DataFrame) -> AnnealingTransitionSummary:
+    """Estimate the first annealing As/Af/Ms/Mf current set from an R(I) trace."""
+
+    summaries = summarize_transition_loops(df)
+    if not summaries:
         return AnnealingTransitionSummary()
-    heating = min(heating_candidates, key=lambda candidate: candidate.score)
-    for start, end, direction in segments:
-        if direction >= 0:
-            continue
-        candidate = _fit_cooling_resistance_increase_segment(
-            working.iloc[start:end].copy(),
-            max_current_mA=heating.fit.finish_x,
-        )
-        if candidate is not None:
-            cooling_candidates.append(candidate)
-    cooling_pool = [
-        candidate
-        for candidate in cooling_candidates
-        if candidate.fit.finish_x < heating.fit.finish_x
-        and candidate.fit.start_x < heating.fit.finish_x
-        and candidate.fit.transition.slope < 0.0
-    ]
-    if not cooling_pool:
-        return AnnealingTransitionSummary(
-            as_current_mA=heating.fit.start_x,
-            af_current_mA=heating.fit.finish_x,
-        )
-    cooling = min(cooling_pool, key=lambda candidate: candidate.score)
+    first = summaries[0]
     return AnnealingTransitionSummary(
-        as_current_mA=heating.fit.start_x,
-        af_current_mA=heating.fit.finish_x,
-        mf_current_mA=cooling.fit.start_x,
-        ms_current_mA=cooling.fit.finish_x,
+        as_current_mA=first.as_current_mA,
+        af_current_mA=first.af_current_mA,
+        ms_current_mA=first.ms_current_mA,
+        mf_current_mA=first.mf_current_mA,
     )
 
 
@@ -347,7 +358,7 @@ def format_transition_summary(
         ("Ms", summary.ms_current_mA),
         ("Mf", summary.mf_current_mA),
     )
-    if not all(value is not None for _name, value in values):
+    if not any(value is not None for _name, value in values):
         return ""
     parts = [
         f"{name} {_format_compact_number(float(value), max_decimals=0)} mA"
@@ -356,6 +367,26 @@ def format_transition_summary(
     ]
     prefix = f"{label}: " if label else ""
     return prefix + ", ".join(parts)
+
+
+def format_transition_summaries(
+    summaries: Tuple[AnnealingTransitionSummary, ...],
+    *,
+    label: str | None = None,
+) -> Tuple[str, ...]:
+    """Format one or more annealing loop summaries for review/table display."""
+
+    lines: List[str] = []
+    multiple = len(summaries) > 1
+    for summary in summaries:
+        loop_index = summary.loop_index
+        line_label = label
+        if loop_index is not None and (multiple or loop_index != 1):
+            line_label = f"{label} loop {loop_index}" if label else f"Loop {loop_index}"
+        text = format_transition_summary(summary, label=line_label)
+        if text:
+            lines.append(text)
+    return tuple(lines)
 
 
 def _fit_annealing_transition_segment(
