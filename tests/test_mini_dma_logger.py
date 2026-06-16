@@ -12110,13 +12110,14 @@ def test_shared_broker_preflight_repairs_bad_endpoint_without_serial_fallback(
         _close_test_window(window)
 
 
-def test_shared_broker_preflight_does_not_open_serial_when_default_broker_is_down(
+def test_shared_broker_preflight_auto_starts_owned_broker_when_default_broker_is_down(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     owned_broker_starts: list[bool] = []
+    broker_started = False
 
     class _FakeBrokerClient:
         def __init__(self, *, host: str, port: int) -> None:
@@ -12124,7 +12125,21 @@ def test_shared_broker_preflight_does_not_open_serial_when_default_broker_is_dow
             self.port = port
 
         def request(self, action: str, **payload: object) -> dict[str, object]:
-            raise TimeoutError("broker unavailable")
+            if not broker_started:
+                raise TimeoutError("broker unavailable")
+            if action == "snapshot":
+                return {"ok": True, "snapshot": {"model": "hmp4040"}}
+            if action == "measure_channel":
+                return {
+                    "ok": True,
+                    "readback": {
+                        "voltage_V": 0.0,
+                        "current_mA": 0.0,
+                        "resistance_ohm": None,
+                        "power_W": 0.0,
+                    },
+                }
+            return {"ok": True}
 
     try:
         monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
@@ -12135,14 +12150,109 @@ def test_shared_broker_preflight_does_not_open_serial_when_default_broker_is_dow
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
-        window._start_owned_shared_broker = lambda: owned_broker_starts.append(True)  # type: ignore[method-assign]
 
-        assert window._ensure_supply_ready_for_recipe() is False
+        def _fake_start_owned_shared_broker() -> None:
+            nonlocal broker_started
+            owned_broker_starts.append(True)
+            broker_started = True
 
-        assert owned_broker_starts == []
+        window._start_owned_shared_broker = _fake_start_owned_shared_broker  # type: ignore[method-assign]
+
+        assert window._ensure_supply_ready_for_recipe() is True
+
+        assert owned_broker_starts == [True]
         log_text = window.log_output.toPlainText()
-        assert "Mini DMA will not open the HMP serial port" in log_text
-        assert "broker unavailable" in log_text
+        assert "Mini DMA will not open the HMP serial port" not in log_text
+        assert "Supply connected through shared HMP broker" in log_text
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+    finally:
+        _close_test_window(window)
+
+
+def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_profile(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    started: dict[str, object] = {}
+
+    class _FakeDriver:
+        def __init__(self, *, port_name: str, baudrate: int, timeout_s: float) -> None:
+            self.port_name = port_name
+            self.baudrate = baudrate
+            self.timeout_s = timeout_s
+            self.profile = HMP4040_PROFILE
+            self.closed = False
+
+        def connect(self) -> None:
+            return None
+
+        def identify(self) -> str:
+            return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+        def close(self) -> None:
+            self.closed = True
+
+        def configure_channel(self, **_kwargs: object) -> None:
+            return None
+
+        def set_current_mA(self, **_kwargs: object) -> None:
+            return None
+
+        def set_output(self, **_kwargs: object) -> None:
+            return None
+
+    class _FakeServer:
+        def shutdown(self) -> None:
+            return None
+
+        def server_close(self) -> None:
+            return None
+
+    class _FakeThread:
+        def join(self, timeout: float | None = None) -> None:
+            return None
+
+    def _fake_start_broker_server(broker: object, *, host: str, port: int) -> tuple[_FakeServer, _FakeThread]:
+        started.update({"broker": broker, "host": host, "port": port})
+        return _FakeServer(), _FakeThread()
+
+    try:
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_supply_port.clear()
+        monkeypatch.setattr(
+            mini_dma_mod,
+            "list_ports",
+            SimpleNamespace(comports=lambda: [SimpleNamespace(device="COM7", description="HMP")]),
+        )
+        monkeypatch.setattr(
+            window,
+            "_probe_supply_candidate",
+            lambda _port: {
+                "port": "COM7",
+                "baudrate": 115200,
+                "profile_id": "hmp4040",
+                "idn_text": "ROHDE&SCHWARZ,HMP4040",
+            },
+        )
+        monkeypatch.setattr(mini_dma_mod, "HmpSerialDriver", _FakeDriver)
+        monkeypatch.setattr(mini_dma_mod, "start_broker_server", _fake_start_broker_server)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.check_motor_supply_power.setChecked(True)
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+
+        window._start_owned_shared_broker()
+
+        assert window.combo_supply_port.currentData() == "COM7"
+        assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
+        assert started["host"] == "127.0.0.1"
+        assert started["port"] == 8765
+        assert "Auto-detected HMP supply on COM7" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

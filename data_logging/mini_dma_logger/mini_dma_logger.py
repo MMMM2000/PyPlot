@@ -9082,6 +9082,30 @@ class MainWindow(QtWidgets.QMainWindow):
             if index >= 0:
                 self.combo_supply_port.setCurrentIndex(index)
 
+    def _auto_select_shared_broker_hmp_port(self) -> bool:
+        if str(self.combo_supply_port.currentData() or "").strip():
+            return True
+        if list_ports is None:
+            self._log("Shared HMP broker auto-start cannot scan supply ports because pyserial is missing.")
+            return False
+        self._refresh_supply_ports()
+        for port in list_ports.comports():
+            match = self._probe_supply_candidate(port.device)
+            if match is None:
+                continue
+            index = self.combo_supply_port.findData(match["port"])
+            if index >= 0:
+                self.combo_supply_port.setCurrentIndex(index)
+            if self.combo_supply_baud.findText(str(match["baudrate"])) >= 0:
+                self.combo_supply_baud.setCurrentText(str(match["baudrate"]))
+            self._log(
+                f"Auto-detected HMP supply on {match['port']} at {match['baudrate']} baud "
+                "for shared broker auto-start."
+            )
+            return True
+        self._log("Shared HMP broker auto-start did not find a supported serial power supply.")
+        return False
+
     def _log(self, message: str) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(lambda message=message: self._log(message))
@@ -9514,6 +9538,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_owned_shared_broker(self) -> None:
         if self._owned_shared_broker_server is not None:
             return
+        self._auto_select_shared_broker_hmp_port()
         port_name = str(self.combo_supply_port.currentData() or "").strip()
         if not port_name:
             raise RuntimeError("Select the HMP COM port before starting the shared HMP broker.")
@@ -20391,7 +20416,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._auto_detect_supply_port()
         return self._connect_supply(
             show_errors=False,
-            allow_start_owned_broker=not self._using_shared_broker_supply(),
+            allow_start_owned_broker=True,
         )
 
     def _ensure_tic_ready_for_recipe(self) -> bool:
