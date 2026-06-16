@@ -37,7 +37,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Mini DMA adaptive current-sweep seek/control slice after predictive-control scoping: `10 passed`.
 - Mini DMA IR cleanup regression: `1 passed`.
 - Current Annealing fabrication-load UI responsiveness regression: `1 passed`.
-- Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`): `786 passed`.
+- Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`, `tests/test_mini_dma_run_quality.py`, `tests/test_mini_dma_run_core_plot.py`, `tests/test_mini_dma_campaign.py`, `tests/test_mini_dma_automation_index.py`): `806 passed`.
 - Shared HMP broker diagnostic classification tests: `17 passed` for `tests/test_shared_power_supply_broker.py`.
 - Mini DMA shared-broker stale-lease retry focused slice: `3 passed`.
 - Mini DMA Builder project sample-cache/stale-result/cancel focused slice: `8 passed`.
