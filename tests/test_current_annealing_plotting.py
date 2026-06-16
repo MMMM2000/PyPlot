@@ -343,6 +343,53 @@ def test_plot_one_can_show_power_top_axis() -> None:
         plt.close(fig)
 
 
+def test_plot_one_adds_density_context_when_diameter_is_known() -> None:
+    df = pd.DataFrame(
+        {
+            "I_mA": [0.0, 50.0, 100.0, 50.0],
+            "R_Ohm": [100.0, 110.0, 120.0, 115.0],
+        }
+    )
+
+    fig, _ = anneal_core.plot_one(df, "Anneal", wire_diameter_um=20.0)
+
+    try:
+        assert len(fig.axes) == 2
+        ax = fig.axes[0]
+        top_ax = fig.axes[1]
+        assert ax.get_xlabel() == "Current [mA] (100 mA = 318 A/mm², d = 20 µm)"
+        assert top_ax.get_xlabel() == "Current density [A/mm²]"
+        assert top_ax.get_xlim() == pytest.approx(ax.get_xlim())
+        assert any(label.get_text() for label in top_ax.get_xticklabels())
+    finally:
+        plt.close(fig)
+
+
+def test_plot_one_power_axis_overrides_density_top_axis() -> None:
+    df = pd.DataFrame(
+        {
+            "I_mA": [0.0, 50.0, 100.0],
+            "R_Ohm": [100.0, 110.0, 120.0],
+        }
+    )
+
+    fig, _ = anneal_core.plot_one(
+        df,
+        "Anneal",
+        show_power_top_axis=True,
+        wire_diameter_um=20.0,
+    )
+
+    try:
+        assert len(fig.axes) == 2
+        ax = fig.axes[0]
+        top_ax = fig.axes[1]
+        assert "100 mA = 318 A/mm²" in ax.get_xlabel()
+        assert top_ax.get_xlabel() == "Power [mW]"
+    finally:
+        plt.close(fig)
+
+
 def test_plot_one_legend_text_color_follows_line_color() -> None:
     df = pd.DataFrame(
         {

@@ -3707,12 +3707,67 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+def _positive_float_or_none(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _diameter_um_from_mapping(values: Mapping[str, object] | None) -> float | None:
+    if not isinstance(values, Mapping):
+        return None
+    for key in (
+        MICROSCOPE_D_COLUMN,
+        "d (µm)",
+        "d (um)",
+        "wire_diameter_um",
+        "diameter_um",
+        "d_um",
+    ):
+        diameter_um = _positive_float_or_none(values.get(key))
+        if diameter_um is not None:
+            return diameter_um
+    for key in ("wire_diameter_mm", "diameter_mm", "d_mm"):
+        diameter_mm = _positive_float_or_none(values.get(key))
+        if diameter_mm is not None:
+            return diameter_mm * 1000.0
+    return None
+
+
+def _annealing_wire_diameter_um(
+    record: Optional[MeasurementRecord],
+    *,
+    explicit: float | None = None,
+) -> float | None:
+    diameter_um = _positive_float_or_none(explicit)
+    if diameter_um is not None:
+        return diameter_um
+    if record is None:
+        return None
+    frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else None
+    if isinstance(frame, pd.DataFrame):
+        diameter_um = _diameter_um_from_mapping(getattr(frame, "attrs", {}))
+        if diameter_um is not None:
+            return diameter_um
+    metadata = getattr(record, "metadata", None)
+    if metadata is not None:
+        diameter_um = _diameter_um_from_mapping(getattr(metadata, "__dict__", {}))
+        if diameter_um is not None:
+            return diameter_um
+    return None
+
+
 def _render_measurement_pixmap(
     record: Optional[MeasurementRecord],
     logger: logging.Logger,
     *,
     width_px: int = ANNEALING_GRAPH_WIDTH,
     height_px: int = ANNEALING_GRAPH_HEIGHT,
+    wire_diameter_um: float | None = None,
 ) -> Optional[QtGui.QPixmap]:
     if record is None:
         return None
@@ -3772,6 +3827,7 @@ def _render_measurement_pixmap(
                 title = ""
     if not title:
         title = "Current annealing"
+    diameter_um = _annealing_wire_diameter_um(record, explicit=wire_diameter_um)
     target_width = max(int(width_px * 2), width_px)
     target_height = max(int(height_px * 2), height_px)
     figsize = (max(target_width / 96.0, 1.0), max(target_height / 96.0, 1.0))
@@ -3782,6 +3838,7 @@ def _render_measurement_pixmap(
             plot_df,
             title,
             target_px=(target_width, target_height),
+            wire_diameter_um=diameter_um,
         )
         if figure is not None:
             figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
@@ -5093,6 +5150,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             plot_df,
             title,
             target_px=(target_width, target_height),
+            wire_diameter_um=_annealing_wire_diameter_um(record),
         )
         try:
             logger = self.__dict__.get("_logger")
@@ -11603,10 +11661,15 @@ class AnnealingSection(MiniDatabaseSection):
             records = loaded_records
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
+            diameter_um = _diameter_um_from_mapping(row.to_dict())
             high_record, other_records = _select_anchor_and_other_records(records)
             if column == ANNEALING_HIGH_GRAPH_COLUMN:
                 target = high_record
-                pixmap = _render_measurement_pixmap(target, self.logger)
+                pixmap = _render_measurement_pixmap(
+                    target,
+                    self.logger,
+                    wire_diameter_um=diameter_um,
+                )
             else:
                 if other_records:
                     preview_count = max(
@@ -11624,7 +11687,11 @@ class AnnealingSection(MiniDatabaseSection):
                         return cached
                     pixmaps: List[QtGui.QPixmap] = []
                     for record in other_records:
-                        preview = _render_measurement_pixmap(record, self.logger)
+                        preview = _render_measurement_pixmap(
+                            record,
+                            self.logger,
+                            wire_diameter_um=diameter_um,
+                        )
                         if preview is not None:
                             pixmaps.append(preview)
                     pixmap = _combine_pixmaps_side_by_side(
@@ -24297,6 +24364,7 @@ class CompareSection(MiniDatabaseSection):
                 else:
                     target = None
                 if target is not None:
+                    diameter_um = _diameter_um_from_mapping(row.to_dict())
                     measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
                     cache_key = (
                         "annealing",
@@ -24311,6 +24379,7 @@ class CompareSection(MiniDatabaseSection):
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if pixmap is None:
                         return None
@@ -24326,12 +24395,14 @@ class CompareSection(MiniDatabaseSection):
                 if cached is not None:
                     return cached
                 pixmaps: List[QtGui.QPixmap] = []
+                diameter_um = _diameter_um_from_mapping(row.to_dict())
                 for record in other_records:
                     preview = _render_measurement_pixmap(
                         record,
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if preview is not None:
                         pixmaps.append(preview)
@@ -27412,6 +27483,7 @@ class AssemblySection(QtWidgets.QWidget):
                 else:
                     target = None
                 if target is not None:
+                    diameter_um = _diameter_um_from_mapping(row.to_dict())
                     measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
                     cache_key = (
                         "annealing",
@@ -27426,6 +27498,7 @@ class AssemblySection(QtWidgets.QWidget):
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if pixmap is None:
                         return None
@@ -27441,12 +27514,14 @@ class AssemblySection(QtWidgets.QWidget):
                 if cached is not None:
                     return cached
                 pixmap_stack: List[QtGui.QPixmap] = []
+                diameter_um = _diameter_um_from_mapping(row.to_dict())
                 for record in other_records:
                     preview = _render_measurement_pixmap(
                         record,
                         self.logger,
                         width_px=ANNEALING_GRAPH_WIDTH,
                         height_px=ANNEALING_GRAPH_HEIGHT,
+                        wire_diameter_um=diameter_um,
                     )
                     if preview is not None:
                         pixmap_stack.append(preview)

@@ -711,6 +711,88 @@ def _format_compact_number(value: float, *, max_decimals: int = 2) -> str:
     return f"{rounded:.{max_decimals}f}".rstrip("0").rstrip(".")
 
 
+def _normalise_diameter_um(value: object) -> float | None:
+    try:
+        diameter_um = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(diameter_um) or diameter_um <= 0:
+        return None
+    return diameter_um
+
+
+def _wire_area_mm2_from_diameter_um(diameter_um: object) -> float | None:
+    normalised = _normalise_diameter_um(diameter_um)
+    if normalised is None:
+        return None
+    diameter_mm = normalised / 1000.0
+    return math.pi * (diameter_mm**2) / 4.0
+
+
+def _current_density_a_per_mm2(
+    current_mA: float | int | None,
+    diameter_um: object,
+) -> float | None:
+    area_mm2 = _wire_area_mm2_from_diameter_um(diameter_um)
+    if area_mm2 is None or area_mm2 <= 0:
+        return None
+    try:
+        current_value_mA = float(current_mA)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(current_value_mA):
+        return None
+    return (current_value_mA / 1000.0) / area_mm2
+
+
+def _current_axis_label(currents: np.ndarray, diameter_um: object) -> str:
+    base_label = "Current [mA]"
+    normalised_diameter = _normalise_diameter_um(diameter_um)
+    if normalised_diameter is None:
+        return base_label
+    finite_currents = np.asarray(currents, dtype=float)
+    finite_currents = finite_currents[np.isfinite(finite_currents)]
+    if finite_currents.size == 0:
+        return base_label
+    max_current_mA = float(np.nanmax(np.abs(finite_currents)))
+    density = _current_density_a_per_mm2(max_current_mA, normalised_diameter)
+    if density is None:
+        return base_label
+    return (
+        f"{base_label} "
+        f"({_format_compact_number(max_current_mA, max_decimals=0)} mA = "
+        f"{_format_compact_number(density, max_decimals=0)} A/mm², "
+        f"d = {_format_compact_number(normalised_diameter)} µm)"
+    )
+
+
+def _origin_current_axis_label(currents: np.ndarray, diameter_um: object) -> str:
+    return _current_axis_label(currents, diameter_um).replace("[mA]", "(mA)")
+
+
+def _add_current_density_top_axis(ax: Any, diameter_um: object) -> Any | None:
+    area_mm2 = _wire_area_mm2_from_diameter_um(diameter_um)
+    if area_mm2 is None or area_mm2 <= 0:
+        return None
+    top_ax = ax.twiny()
+    top_ax.set_xlim(ax.get_xlim())
+    ticks = [
+        float(tick)
+        for tick in ax.get_xticks()
+        if isinstance(tick, (int, float, np.floating)) and math.isfinite(float(tick))
+    ]
+    top_ax.set_xticks(ticks)
+    top_ax.set_xticklabels(
+        [
+            _format_compact_number((tick / 1000.0) / area_mm2, max_decimals=0)
+            for tick in ticks
+        ]
+    )
+    top_ax.set_xlabel("Current density [A/mm²]", fontsize=AXIS_LABEL_SIZE)
+    top_ax.tick_params(axis="x", labelsize=TICK_SIZE)
+    return top_ax
+
+
 def _normalise_origin_mode(mode: str | None) -> str:
     # Backwards compatibility: older projects may persist "experimental"/"simple".
     normalised = str(mode or "").strip().lower()
@@ -1495,6 +1577,8 @@ def plot_one(
     figsize: Tuple[float, float] | None = None,
     target_px: Tuple[int, int] | None = None,
     show_power_top_axis: bool = False,
+    show_current_density_top_axis: bool = True,
+    wire_diameter_um: float | None = None,
 ) -> Tuple[Figure, str]:
     if target_px is not None:
         target_width, target_height = target_px
@@ -1583,10 +1667,11 @@ def plot_one(
             )
             previous_direction = direction
 
-    ax.set_xlabel("Current [mA]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_xlabel(_current_axis_label(currents, wire_diameter_um), fontsize=AXIS_LABEL_SIZE)
     ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
+    density_top_axis = None
     if show_power_top_axis:
         add_power_top_axis(
             ax,
@@ -1596,6 +1681,8 @@ def plot_one(
             label_size=AXIS_LABEL_SIZE,
             tick_size=TICK_SIZE,
         )
+    elif show_current_density_top_axis:
+        density_top_axis = _add_current_density_top_axis(ax, wire_diameter_um)
     if legend_handles:
         legend = ax.legend(
             handles=legend_handles,
@@ -1633,6 +1720,11 @@ def plot_one(
     fig.tight_layout()
     cfg = dict(globals())
     apply_readability(ax, cfg)
+    if density_top_axis is not None:
+        try:
+            density_top_axis.set_xlim(ax.get_xlim())
+        except Exception:
+            pass
     legend = ax.get_legend()
     if legend is not None:
         try:
@@ -1657,6 +1749,8 @@ def plot_one_origin(
     mode: str | None = None,
     *,
     show_power_top_axis: bool = False,
+    show_current_density_top_axis: bool = True,
+    wire_diameter_um: float | None = None,
     return_handles: bool = False,
 ) -> dict[str, object] | None:
     currents = df["I_mA"].to_numpy(dtype=float)
@@ -1679,7 +1773,12 @@ def plot_one_origin(
         return handles if return_handles else None
 
     display_label = _format_origin_annotation(legend_label)
-    _apply_axis_labels(layer, "Current (mA)", "Resistance (Ω)")
+    _ = show_current_density_top_axis
+    _apply_axis_labels(
+        layer,
+        _origin_current_axis_label(currents, wire_diameter_um),
+        "Resistance (\u03a9)",
+    )
     _set_graph_title(layer, display_label, graph=graph, origin_any=origin_any)
     _assign_long_name(graph, legend_label)
     _assign_long_name(workbook, legend_label)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -182,11 +183,13 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
     def _create_plot_tab(self, path_str: str, df: pd.DataFrame) -> QtWidgets.QWidget | None:
         window_module = window_api()
         title = format_annealing_title(Path(path_str).stem)
+        wire_diameter_um = self._wire_diameter_um_for_frame(df)
         try:
             fig, _ = anneal_core.plot_one(
                 df,
                 title,
                 show_power_top_axis=self._show_power_top_axis_enabled(),
+                wire_diameter_um=wire_diameter_um,
             )
         except Exception as exc:
             self._log(f"Failed to plot {Path(path_str).name}: {exc}", level="error")
@@ -228,6 +231,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 "source_file": path_str,
                 "saved_path": "",
                 "show_power_top_axis": self._show_power_top_axis_enabled(),
+                "wire_diameter_um": wire_diameter_um,
             },
         )
         self.host.tab_widget.addTab(tab, Path(path_str).name)
@@ -445,6 +449,29 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         checkbox = self._show_power_top_axis_checkbox
         if checkbox is not None:
             checkbox.setChecked(bool(enabled))
+
+    @staticmethod
+    def _wire_diameter_um_for_frame(df: pd.DataFrame) -> float | None:
+        attrs = getattr(df, "attrs", {})
+        if not isinstance(attrs, dict):
+            return None
+        for key in ("wire_diameter_um", "diameter_um", "d_um", "d (µm)", "d (um)"):
+            value = attrs.get(key)
+            try:
+                diameter_um = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(diameter_um) and diameter_um > 0:
+                return diameter_um
+        for key in ("wire_diameter_mm", "diameter_mm", "d_mm"):
+            value = attrs.get(key)
+            try:
+                diameter_mm = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(diameter_mm) and diameter_mm > 0:
+                return diameter_mm * 1000.0
+        return None
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._plot_tabs and self._data_by_file:
