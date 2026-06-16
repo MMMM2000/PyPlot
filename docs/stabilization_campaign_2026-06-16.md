@@ -41,6 +41,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Current Annealing fabrication-load UI responsiveness regression: `1 passed`.
 - Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`, `tests/test_mini_dma_run_quality.py`, `tests/test_mini_dma_run_core_plot.py`, `tests/test_mini_dma_campaign.py`, `tests/test_mini_dma_automation_index.py`): `811 passed` on Python 3.14.4.
 - Current branch-tip wide stabilization suite, now also including `tests/test_mini_dma_trace_replay.py`: `816 passed` on Python 3.14.4.
+- Repo-local sample run diagnostics for `sample_data/mini dma/Ni50Fe27Ga23 12_2 test_run32`: run-quality classified the run as included with large stress error/compliance events; trace replay analyzed `14108` decisions; core plot artifacts generated.
 - Shared HMP broker diagnostic classification tests: `17 passed` for `tests/test_shared_power_supply_broker.py`.
 - Mini DMA shared-broker stale-lease retry focused slice: `3 passed`.
 - Mini DMA Builder project sample-cache/stale-result/cancel focused slice: `8 passed`.
@@ -60,6 +61,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - AC UI offscreen screenshot: `artifacts/ac_ui_screenshot/ac_logger_workflow_panel.png`.
 - Mini DMA elastocaloric recipe offscreen screenshot: `artifacts/elastocaloric_ui_screenshot/mini_dma_elastocaloric_recipe.png`.
 - AC UI redesign audit note: `docs/ac_susceptibility_ui_redesign.md`.
+- Repo-local sample run replay artifacts: `artifacts/sample-run32-trace-replay/control_trace_replay.md`, `artifacts/sample-run32-trace-replay/control_trace_replay_summary.json`, `artifacts/sample-run32-core-plot.png`, `artifacts/sample-run32-core-plot.json`.
 
 Offscreen Qt font fallback renders text as boxes on this machine, but layout geometry is visible.
 
