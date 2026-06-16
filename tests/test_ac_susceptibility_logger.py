@@ -1208,6 +1208,182 @@ def test_run_ac_sweep_writes_completed_run_status(tmp_path: Path) -> None:
     assert closed["status"] == "completed"
 
 
+def test_run_ac_sweep_uses_local_status_fallback_when_output_path_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-16T00:15:58.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "shared_hmp_broker"
+        resource = "127.0.0.1:8765/CH1"
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def connect(self) -> None:
+            self.events.append("connect")
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.events.append(f"initialize:{voltage_limit_v:g}")
+
+        def set_current(self, current_a: float) -> None:
+            self.events.append(f"set_current:{current_a:g}")
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            self.events.append(f"set_voltage:{voltage_v:g}")
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            self.events.append("output_off")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    class DisappearingTsvWriter(sweep.AcSweepTsvWriter):
+        def write_metadata(self) -> None:
+            return None
+
+        def write_row(self, row: sweep.AcSweepRow) -> None:
+            raise sweep.AcOutputPathError(self.path, "write/flush", FileNotFoundError(3, "lost drive", "G:\\"))
+
+        def close(self) -> None:
+            return None
+
+    fallback_dir = tmp_path / "local_fallback"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+    monkeypatch.setattr(sweep, "AcSweepTsvWriter", DisappearingTsvWriter)
+    real_write_json_atomic = sweep._write_json_atomic
+
+    def flaky_primary_status_write(path: Path, payload: dict[str, object]) -> None:
+        if str(path).replace("/", "\\").startswith("G:\\"):
+            raise FileNotFoundError(3, "lost drive", "G:\\")
+        real_write_json_atomic(path, payload)
+
+    monkeypatch.setattr(sweep, "_write_json_atomic", flaky_primary_status_write)
+
+    output_path = Path("G:/missing/ac_run.tsv")
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="shared_hmp_broker",
+        psu_resource="127.0.0.1:8765/CH1",
+        voltage_limit_v=32.0,
+        shared_broker_channel=1,
+    )
+    psu = FakePsu()
+
+    with pytest.raises(sweep.AcOutputPathError, match="write/flush failed"):
+        sweep.run_ac_sweep(
+            config=config,
+            lcr=FakeLcr(),
+            psu=psu,
+            output_path=output_path,
+            sleep=lambda _seconds: None,
+        )
+
+    fallback_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+    status = json.loads(fallback_path.read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["phase"] == "closed"
+    assert "write/flush failed" in status["stop_reason"]
+    assert status["local_fallback_status_path"] == str(fallback_path)
+    assert status["status_path_is_local_fallback"] is True
+    assert "status_write_errors" in status
+    assert psu.events[-2:] == ["output_off", "close"]
+
+
+def test_run_ac_sweep_status_tracks_last_completed_repeat(tmp_path: Path) -> None:
+    class FakeLcr:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-06-16T00:00:{self.count:02d}.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "repeat.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=3,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakePsu(),
+        output_path=output_path,
+        sleep=lambda _seconds: None,
+    )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["rows_written"] == 3
+    assert status["last_completed_point"]["setting_index"] == 1
+    assert status["last_completed_point"]["current_point_index"] == 1
+    assert status["last_completed_point"]["repeat_index"] == 3
+    assert status["last_completed_point"]["direction"] == "up"
+
+
 def test_run_ac_sweep_run_status_records_shared_broker_lease(tmp_path: Path) -> None:
     class FakeLcr:
         def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
@@ -1458,6 +1634,44 @@ def test_classify_ac_run_status_detects_stale_missing_closed_marker(tmp_path: Pa
     assert summary.stale
     assert summary.lcr_debug_closed is False
     assert summary.rows_written == 123
+
+
+def test_classify_ac_run_status_reads_local_fallback_when_primary_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+    output_path = Path("G:/missing/partial.tsv")
+    fallback_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "failed",
+                "phase": "closed",
+                "updated_utc": "2026-06-16T00:15:58+00:00",
+                "output_path": str(output_path),
+                "rows_written": 327690,
+                "last_completed_point": {
+                    "setting_index": 28,
+                    "current_point_index": 3,
+                    "repeat_index": 10,
+                },
+                "stop_reason": "AC sweep output write/flush failed for G:\\run.tsv: [WinError 3]",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = sweep.classify_ac_run_status(output_path)
+
+    assert summary.status == "failed"
+    assert summary.status_path == fallback_path
+    assert summary.rows_written == 327690
+    assert not summary.is_unclean
+    assert "write/flush failed" in summary.stop_reason
 
 
 def test_resume_plan_reports_unclean_partial_setting_metadata(tmp_path: Path) -> None:
@@ -4015,6 +4229,60 @@ def test_ac_logger_formats_current_excitation_in_sweep_status() -> None:
     assert ac_logger.MainWindow._format_lcr_excitation(
         lcr6000.Lcr6000Settings(10.0, 20e-3, level_mode="current")
     ) == "20 mA excitation"
+
+
+def test_ac_logger_worker_failure_clears_running_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_failure_state")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._ac_sweep_stop_requested = True
+        window._ac_active_sweep_config = sweep.AcSweepConfig(
+            lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+            current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+            point_duration_s=0.0,
+            repeats=1,
+            dwell_s=0.0,
+            psu_backend="shared_hmp_broker",
+            psu_resource="127.0.0.1:8765/CH1",
+            voltage_limit_v=32.0,
+            shared_broker_channel=1,
+        )
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_ac_worker_failed("AC sweep output write/flush failed for G:\\run.tsv: [WinError 3]")
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert "AC run failed:" in window.label_lcr_status.text()
+        assert "write/flush failed" in window.label_lcr_status.text()
+        assert window.label_ac_current_task.text() == "Current task: failed"
+        assert warnings and warnings[-1][0] == "AC run failed"
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_ac_logger_writes_optional_diagnostics(tmp_path: Path) -> None:

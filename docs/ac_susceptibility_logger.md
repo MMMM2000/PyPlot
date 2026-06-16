@@ -381,6 +381,12 @@ debug stream has no close marker, the continuation prompt reports the unclean
 status. Resume remains setting-granular: complete settings can be skipped, but a
 partial setting is measured again from its first current point.
 
+The same status payload is also mirrored to a local fallback file under
+`Downloads/ac_susceptibility/run_status_fallback`. This fallback does not depend
+on the experiment output drive, so a disconnected network/removable drive should
+still leave a final failed/stopped state and the last completed setting/current
+point/repeat for diagnosis and resume planning.
+
 The default debug cadence is `1 s` and the default cap is `120` rows per
 setting/current/phase. Debug logging is off by default so ordinary overnight
 sweeps keep their existing TSV output and plot behavior.
