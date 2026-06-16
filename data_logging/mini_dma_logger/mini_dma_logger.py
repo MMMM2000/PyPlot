@@ -25234,6 +25234,9 @@ class MainWindow(QtWidgets.QMainWindow):
             target_value=step.target_value,
             plateau_index=plateau_index,
         )
+        tolerance = self._automation_tolerance_for_step(step)
+        if self._stop_current_sweep_if_wire_break(step, tolerance=tolerance):
+            return True
         now_s = time.monotonic()
         holding_current, stopped_for_hold = self._update_current_sweep_ramp_hold(
             step,
@@ -25242,7 +25245,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if stopped_for_hold:
             return True
-        tolerance = self._automation_tolerance_for_step(step)
         if holding_current:
             return self._handle_current_sweep_held_recovery(
                 step,
@@ -25306,6 +25308,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self._clear_current_sweep_ramp_hold()
             return True
         return False
+
+    def _stop_current_sweep_if_wire_break(self, step: AutomationStep, *, tolerance: float) -> bool:
+        if not self._current_sweep_wire_break_detected():
+            return False
+        current_value = None
+        if step.basis:
+            try:
+                current_value = self._current_distribution_value(step.basis, require_after_last_move=False)
+            except Exception:
+                current_value = None
+        self._write_control_trace(
+            decision="stop",
+            basis=step.basis,
+            target_value=step.target_value,
+            current_value=current_value,
+            tolerance=tolerance,
+            result="stopped",
+            reason="wire_break_or_contact_loss",
+            task_text=self._current_sweep_step_task_summary(step),
+        )
+        self._stop_for_wire_break()
+        return True
 
     def _mechanical_step_mm_for_step(self, step: AutomationStep) -> float:
         step_value = abs(float(step.mechanical_step_value or 0.0))
@@ -25539,6 +25563,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
                 return True
             self._active_current_sweep_last_setpoint_mA = setpoint_mA
+
+        if self._stop_current_sweep_if_wire_break(step, tolerance=tolerance):
+            return True
 
         point_count_before_seek = len(self._session_points)
         try:

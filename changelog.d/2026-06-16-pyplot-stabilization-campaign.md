@@ -6,3 +6,4 @@
 - Added cached Mini DMA Builder project sample suggestions for faster sample naming/autofill refreshes during background project imports.
 - Expanded Mini DMA run-quality and core-plot summaries with stop classification, metadata warnings, current-hold recovery windows, voltage/current compliance events, and richer plot annotations.
 - Made Mini DMA trace replay tolerate missing/invalid metadata or trace files and report warnings instead of failing before analysis.
+- Stopped Mini DMA current-sweep voltage-limit unwinds immediately when the supply indicates open circuit or wire contact loss, before any mechanical recovery seek is attempted.

@@ -11291,6 +11291,89 @@ def test_voltage_limit_unwind_waits_for_target_recovery_before_completing(
         _close_test_window(window)
 
 
+def test_voltage_limit_unwind_open_circuit_stops_before_mechanical_seek(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.output_off_calls = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def output_off(self) -> None:
+            self.output_off_calls += 1
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    recovery_prompts: list[str] = []
+    trace_rows: list[dict[str, object]] = []
+    seek_calls: list[tuple[object, ...]] = []
+    window._ask_wire_break_recovery_after_stop = recovery_prompts.append  # type: ignore[method-assign]
+    window._maybe_offer_run_cleanup_after_wire_break = lambda: None  # type: ignore[method-assign]
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 25.4
+    window._supply_snapshot = {
+        "current_mA": 0.1,
+        "voltage_V": 32.054,
+        "resistance_ohm": None,
+        "power_W": 0.0,
+    }
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_last_setpoint_mA = 25.4
+    window._current_sweep_voltage_limit_step_index = 4
+    window._current_sweep_voltage_limit_started_s = 100.0
+    window._current_sweep_voltage_limit_start_mA = 25.4
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window._write_control_trace = lambda **kwargs: trace_rows.append(dict(kwargs))  # type: ignore[method-assign]
+    window._seek_distribution_target = lambda *args, **_kwargs: seek_calls.append(args) or False  # type: ignore[method-assign]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 101.0)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=950.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=50.0,
+        current_ramp_rate_mA_s=1.0,
+        note="4",
+    )
+
+    try:
+        assert window._handle_current_sweep_voltage_unwind(
+            step,
+            step_index=4,
+            ramp_rate_mA_s=1.0,
+            target_mA=1.0,
+        ) is True
+
+        assert window._automation_active is False
+        assert window._current_sweep_voltage_limit_step_index is None
+        assert supply.output_off_calls >= 1
+        assert seek_calls == []
+        assert len(recovery_prompts) == 1
+        assert "Wire break detected" in recovery_prompts[0]
+        assert trace_rows[-1]["decision"] == "stop"
+        assert trace_rows[-1]["reason"] == "wire_break_or_contact_loss"
+        assert trace_rows[-1]["result"] == "stopped"
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_open_circuit_zero_current_stops_recipe_and_offers_recovery(
     tmp_path: Path,
     qtbot,
