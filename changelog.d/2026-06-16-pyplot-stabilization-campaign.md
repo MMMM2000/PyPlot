@@ -21,3 +21,4 @@
 - Made Mini DMA batch core-plot generation continue past incomplete run folders while reporting per-run plot errors.
 - Kept AC sweep-start failures from leaving the UI stuck in a running state when PSU preparation or worker startup fails.
 - Avoided redundant Mini DMA Builder project auto-imports and trusted-diameter flicker for condition-only sample-name edits.
+- Reset AC baseline UI state if empty-coil baseline worker startup fails after the run has been marked active.

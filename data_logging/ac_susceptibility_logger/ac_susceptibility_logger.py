@@ -3489,6 +3489,9 @@ class MainWindow(CurrentAnnealingWindow):
             thread.start()
             return
         except Exception as exc:
+            if bool(getattr(self, "_ac_sweep_running", False)):
+                self._finish_ac_worker_state()
+                self._clear_ac_worker_refs()
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"Baseline failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "Baseline failed", str(exc))

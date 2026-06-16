@@ -4250,6 +4250,66 @@ def test_ac_logger_worker_launch_failure_resets_running_state(
         app.processEvents()
 
 
+def test_ac_logger_baseline_worker_launch_failure_resets_running_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "baseline_worker_launch_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    class _FailingBaselineWorker:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("baseline worker setup exploded")
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        monkeypatch.setattr(
+            window,
+            "_prepare_lcr_plan",
+            lambda: [
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+        )
+        monkeypatch.setattr(window, "_baseline_output_path", lambda: tmp_path / "baseline.tsv")
+        monkeypatch.setattr(ac_logger, "AcBaselineWorker", _FailingBaselineWorker)
+
+        window.handle_measure_lcr_baseline_clicked()
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window._ac_active_output_path is None
+        assert window.pushButton_measure_lcr_baseline.isEnabled()
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert window._ac_worker is None
+        assert window._ac_worker_thread is None
+        assert window.label_lcr_status.text() == "Baseline failed: baseline worker setup exploded"
+        assert warnings == [("Baseline failed", "baseline worker setup exploded")]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_formats_expected_finish_times() -> None:
     now = datetime(2026, 5, 19, 9, 15)
     assert ac_logger.MainWindow._format_expected_finish(45 * 60, now=now) == "today 10:00"

@@ -46,10 +46,11 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - AC sweep finish/stop status-summary UI slice: `5 passed`.
 - AC output-status run-status-path UI slice: `4 passed`.
 - AC/shared-HMP broker diagnostic slice: `8 passed`; full AC plus shared broker files: `142 passed`.
+- AC baseline launch-failure UI reset slice: `2 passed`.
 - Mini DMA sample naming/project-cache/completer focused slice: `19 passed`.
 - Mini DMA sample/project condition-only import-skip slice: `10 passed`; broader sample/naming/project slice: `60 passed`.
 - Mini DMA run-quality/core-plot CLI focused slice: `11 passed`.
-- AC sweep-start failure cleanup slice: `6 passed`; full AC plus shared-broker files after cleanup: `149 passed`.
+- AC sweep-start failure cleanup slice: `6 passed`; full AC plus shared-broker files after baseline-startup cleanup: `150 passed`.
 
 ## Artifacts
 
@@ -75,6 +76,7 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - AC output status now shows the planned run-status sidecar and local fallback paths before the sweep starts.
 - AC shared-broker current-source failures now use the same operator-facing broker diagnostics as Mini DMA and Current Annealing.
 - AC sweep-start failures now leave the UI idle and show a warning when PSU preparation or worker startup fails.
+- AC empty-coil baseline startup now uses the same UI-state cleanup if baseline worker creation fails after the run has been marked active.
 - Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine; the current branch now has software-only dropdown/build/round-trip coverage and screenshot evidence for that workflow.
 
 ## Remaining Work
