@@ -14113,6 +14113,16 @@ def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> 
         )
         window._active_current_sweep_display_target_mA = 70.0
         window._active_current_sweep_display_direction = 1.0
+        window._supply_output_enabled = True
+        window._supply_last_setpoint_mA = 42.0
+        window._supply_snapshot = {
+            "current_mA": 41.8,
+            "voltage_V": 31.95,
+            "resistance_ohm": 764.0,
+            "power_W": 1.336,
+        }
+        window._supply_snapshot_monotonic = time.monotonic() - 2.0
+        window.spin_supply_voltage_limit.setValue(32.05)
         window._write_control_trace(
             decision="accept",
             basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
@@ -14130,6 +14140,14 @@ def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> 
 
         assert len(rows) == 1
         assert rows[0]["task_text"] == "At 30 MPa: increasing current to 70 mA"
+        assert rows[0]["supply_output_enabled"] == "1"
+        assert rows[0]["supply_setpoint_mA"] == "42"
+        assert rows[0]["supply_measured_current_mA"] == "41.8"
+        assert rows[0]["supply_voltage_V"] == "31.95"
+        assert rows[0]["supply_voltage_limit_V"] == "32.05"
+        assert rows[0]["supply_resistance_ohm"] == "764"
+        assert rows[0]["supply_power_W"] == "1.336"
+        assert float(rows[0]["supply_snapshot_age_s"]) == pytest.approx(2.0, abs=0.5)
     finally:
         window._automation_active = False
         _close_test_window(window)

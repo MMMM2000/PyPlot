@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-16.2"
+CONTROL_LOGIC_VERSION = "2026-06-16.3"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -136,6 +136,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_sweep_mechanical_load_loss_guard",
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
+    "control_trace_supply_snapshot",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
@@ -163,6 +164,14 @@ CONTROL_TRACE_FIELDNAMES = [
     "post_move_sample_count",
     "target_mm",
     "effective_target_mm",
+    "supply_output_enabled",
+    "supply_setpoint_mA",
+    "supply_measured_current_mA",
+    "supply_voltage_V",
+    "supply_voltage_limit_V",
+    "supply_resistance_ohm",
+    "supply_power_W",
+    "supply_snapshot_age_s",
     "result",
     "reason",
 ]
@@ -20271,7 +20280,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 return ""
             return f"{value:.9g}"
 
-        elapsed_s = max(0.0, time.monotonic() - self._session_start_monotonic)
+        now_s = time.monotonic()
+        elapsed_s = max(0.0, now_s - self._session_start_monotonic)
+        supply_snapshot = getattr(self, "_supply_snapshot", {})
+        supply_snapshot_age_s: float | None = None
+        try:
+            snapshot_started_s = float(getattr(self, "_supply_snapshot_monotonic", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            snapshot_started_s = 0.0
+        if snapshot_started_s > 0.0:
+            supply_snapshot_age_s = max(0.0, now_s - snapshot_started_s)
+        try:
+            voltage_limit_v = float(self.spin_supply_voltage_limit.value())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            voltage_limit_v = None
         self._session_control_trace_writer.writerow(
             {
                 "elapsed_s": f"{elapsed_s:.6f}",
@@ -20295,6 +20317,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "post_move_sample_count": "" if post_move_sample_count is None else int(post_move_sample_count),
                 "target_mm": _number(target_mm),
                 "effective_target_mm": _number(effective_target_mm),
+                "supply_output_enabled": int(bool(getattr(self, "_supply_output_enabled", False))),
+                "supply_setpoint_mA": _number(getattr(self, "_supply_last_setpoint_mA", None)),
+                "supply_measured_current_mA": _number(supply_snapshot.get("current_mA")),
+                "supply_voltage_V": _number(supply_snapshot.get("voltage_V")),
+                "supply_voltage_limit_V": _number(voltage_limit_v),
+                "supply_resistance_ohm": _number(supply_snapshot.get("resistance_ohm")),
+                "supply_power_W": _number(supply_snapshot.get("power_W")),
+                "supply_snapshot_age_s": _number(supply_snapshot_age_s),
                 "result": result,
                 "reason": reason,
             }

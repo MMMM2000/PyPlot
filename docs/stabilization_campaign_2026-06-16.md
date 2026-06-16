@@ -33,6 +33,8 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Current Annealing shared-broker focused tests: `26 passed`.
 - Iso-current worker behavior slice from `e54955f`: `8 passed` on this branch; the branch content was already present, so the old worker commit was not cherry-picked over the newer integration base.
 - Mini DMA wire-break/open-circuit focused slice: `13 passed`.
+- Mini DMA control-trace supply snapshot and wire-break focused slice: `5 passed`.
+- Mini DMA trace replay/run-quality/core-plot consumers after trace schema expansion: `14 passed`.
 - Mini DMA ordinary-seek regression slice after predictive-control scoping: `9 passed`.
 - Mini DMA adaptive current-sweep seek/control slice after predictive-control scoping: `10 passed`.
 - Mini DMA IR cleanup regression: `1 passed`.
@@ -63,6 +65,7 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 
 - Latest inspected Mini DMA run `Ni50Fe25Ga25 3_1 iso-stress_run02` stopped as `wire_break_or_contact_loss` after voltage limit and current collapse: set current about `25.4 mA`, measured current about `0.1 mA`, voltage about `32.054 V`.
 - Mini DMA now stops current-sweep voltage-limit unwinds when measured current collapses near zero at the voltage limit, writes a terminal `wire_break_or_contact_loss` trace row, and avoids the mechanical recovery seek that previously kept moving after an electrical fault.
+- Mini DMA `control_trace.csv` rows now include cached supply output/setpoint/readback/voltage-limit fields, so future current-collapse or compliance failures can be correlated with the mechanical seek decisions.
 - Mini DMA predictive stiffness control is now phase-scoped: active current-sweep/iso-current/elastocaloric/setup phases keep adaptive damping, while ordinary idle/manual seeks use the configured nudge unless explicit calibrated or live stiffness is available.
 - Mini DMA now clears naturally finished IR worker/thread references and tolerates already-deleted Qt wrappers during disconnect/close cleanup.
 - Mini DMA saved Builder project import cleanup now clears pending retry state and tolerates already-deleted Qt thread wrappers.
