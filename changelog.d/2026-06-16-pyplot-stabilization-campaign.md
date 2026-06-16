@@ -12,3 +12,4 @@
 - Made Mini DMA saved Builder project import cancellation clear pending retry state and tolerate already-deleted Qt thread wrappers.
 - Cleaned up Current Annealing fabrication-folder background-load completion so the UI resets promptly when the worker has already finished.
 - Added Mini DMA elastocaloric recipe JSON round-trip coverage and offscreen UI screenshot evidence for the fast strain-jump workflow.
+- Made AC run failures show run-status sidecar/fallback details in the status label and warning dialog, including rows written and local fallback status path when the primary output path disappears.

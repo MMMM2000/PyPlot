@@ -820,6 +820,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._lcr_correction_last_result: LcrCorrectionResult | None = None
         self._ac_progress_units = "count"
         self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
+        self._ac_active_output_path: Path | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
         self._ac_worker: QtCore.QObject | None = None
         self._ac_psu_watchdog: AcPsuWatchdogGuard | None = None
@@ -3321,6 +3322,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = config
+        self._ac_active_output_path = output_path
         watchdog = None
         if not config.uses_shared_broker:
             watchdog = AcPsuWatchdogGuard(
@@ -3333,6 +3335,7 @@ class MainWindow(CurrentAnnealingWindow):
             except Exception as exc:
                 self._ac_sweep_running = False
                 self._ac_active_sweep_config = None
+                self._ac_active_output_path = None
                 QtWidgets.QMessageBox.warning(
                     self,
                     "AC sweep watchdog failed",
@@ -3376,6 +3379,7 @@ class MainWindow(CurrentAnnealingWindow):
             if watchdog is not None:
                 watchdog.stop()
             self._ac_psu_watchdog = None
+            self._ac_active_output_path = None
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"AC sweep failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "AC sweep failed", str(exc))
@@ -3488,6 +3492,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = None
+        self._ac_active_output_path = None
         self.pushButton_measure_lcr_baseline.setEnabled(True)
         self.pushButton_run_ac_sweep.setEnabled(True)
         self.pushButton_continue_ac_sweep.setEnabled(True)
@@ -3537,15 +3542,47 @@ class MainWindow(CurrentAnnealingWindow):
     @QtCore.pyqtSlot(str)
     def _handle_ac_worker_failed(self, message: str) -> None:
         stopped = "stopped by user" in message.lower()
+        output_path = getattr(self, "_ac_active_output_path", None)
         self._finish_ac_worker_state()
         if stopped:
             self.label_lcr_status.setText("AC run stopped by user.")
             self._set_ac_current_task("Current task: stopped")
             return
         self._lcr_last_error = message
-        self.label_lcr_status.setText(f"AC run failed: {message}")
+        detail = self._format_ac_failure_status_detail(output_path, message)
+        display_message = f"{message}\n\n{detail}" if detail else message
+        self.label_lcr_status.setText(f"AC run failed: {display_message}")
         self._set_ac_current_task("Current task: failed")
-        QtWidgets.QMessageBox.warning(self, "AC run failed", message)
+        QtWidgets.QMessageBox.warning(self, "AC run failed", display_message)
+
+    def _format_ac_failure_status_detail(self, output_path: Path | None, message: str) -> str:
+        if output_path is None:
+            return ""
+        try:
+            summary = sweep.classify_ac_run_status(output_path)
+        except Exception:
+            return ""
+        primary_status_path = sweep.ac_run_status_path_for_output(output_path)
+        fallback_status_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+        status_path = Path(summary.status_path)
+        try:
+            status_exists = status_path.exists()
+        except OSError:
+            status_exists = False
+        if not status_exists and summary.status in {"unknown", "unknown_no_run_status"} and not summary.stop_reason:
+            return ""
+        parts: list[str] = [f"Run status: {summary.status}"]
+        if summary.phase:
+            parts[-1] += f" ({summary.phase})"
+        if summary.rows_written:
+            parts.append(f"Rows written: {summary.rows_written}")
+        if summary.stop_reason and summary.stop_reason not in message:
+            parts.append(f"Stop reason: {summary.stop_reason}")
+        if status_path == fallback_status_path and status_path != primary_status_path:
+            parts.append(f"Local fallback status: {status_path}")
+        else:
+            parts.append(f"Run status file: {status_path}")
+        return "\n".join(parts)
 
     def _reset_ac_progress(self, label: str, total: int, *, units: str = "count") -> None:
         self._ac_progress_total = max(1, int(total))

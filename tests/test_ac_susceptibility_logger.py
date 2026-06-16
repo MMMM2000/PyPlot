@@ -4285,6 +4285,67 @@ def test_ac_logger_worker_failure_clears_running_progress(
         app.processEvents()
 
 
+def test_ac_logger_worker_failure_surfaces_local_status_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_failure_status_fallback")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    fallback_dir = tmp_path / "fallback_status"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    output_path = Path("G:/missing/ac_sweep.tsv")
+    fallback_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "failed",
+                "phase": "closed",
+                "rows_written": 42,
+                "updated_utc": "2026-06-16T20:00:00Z",
+                "output_path": str(output_path),
+                "stop_reason": "AC sweep output write/flush failed for G:\\missing\\ac_sweep.tsv: [WinError 3]",
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._ac_active_output_path = output_path
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_ac_worker_failed(
+            "AC sweep output write/flush failed for G:\\missing\\ac_sweep.tsv: [WinError 3]"
+        )
+
+        status_text = window.label_lcr_status.text()
+        assert "Run status: failed (closed)" in status_text
+        assert "Rows written: 42" in status_text
+        assert f"Local fallback status: {fallback_path}" in status_text
+        assert warnings and warnings[-1][0] == "AC run failed"
+        assert "Rows written: 42" in warnings[-1][1]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_writes_optional_diagnostics(tmp_path: Path) -> None:
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     path = tmp_path / "ac_diag.jsonl"
