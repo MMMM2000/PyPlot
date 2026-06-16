@@ -598,6 +598,47 @@ def test_render_measurement_pixmap_keeps_pyplot_legend(
             builder_ui.plt.close(figure)
 
 
+def test_render_measurement_pixmap_passes_wire_diameter_to_axis_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    captured_figures = []
+    original = builder_ui.plot_annealing_curve
+
+    def _wrapped(*args: object, **kwargs: object) -> object:
+        figure, config = original(*args, **kwargs)
+        captured_figures.append(figure)
+        return figure, config
+
+    monkeypatch.setattr(builder_ui, "plot_annealing_curve", _wrapped)
+    record = SimpleNamespace(
+        dataframe=pd.DataFrame(
+            {
+                "I_mA": [0.0, 50.0, 100.0, 50.0],
+                "R_ohm": [120.0, 150.0, 180.0, 160.0],
+            }
+        ),
+        path=Path("Ni50Fe27Ga23 11_1 s1 1000mA.txt"),
+        metadata=None,
+    )
+
+    try:
+        pixmap = builder_ui._render_measurement_pixmap(
+            record,
+            logging.getLogger("test"),
+            wire_diameter_um=20.0,
+        )
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert captured_figures
+        assert captured_figures[0].axes[0].get_xlabel() == (
+            "Current [mA] (100 mA = 318 A/mm², d = 20 µm)"
+        )
+        assert captured_figures[0].axes[1].get_xlabel() == "Current density [A/mm²]"
+    finally:
+        for figure in captured_figures:
+            builder_ui.plt.close(figure)
+
+
 def test_render_measurement_pixmap_omits_auto_transition_markers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -832,6 +873,57 @@ def test_annealing_section_opens_transition_review_for_visible_records(
         section._open_transition_review()
 
         assert opened == [[record]]
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_annealing_section_preview_uses_row_diameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    record = MeasurementRecord(
+        path=Path("Ni50Fe27Ga23 11_1 1000mA.txt"),
+        metadata=MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=11,
+            piece_y=1,
+            setpoint_mA=1000.0,
+            alt_variant=False,
+            measurement_id="Ni50Fe27Ga23 11_1 1000mA",
+            file_name="Ni50Fe27Ga23 11_1 1000mA.txt",
+            relpath="Ni50Fe27Ga23 11_1 1000mA.txt",
+            timestamp_mtime_utc="2026-06-16T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [0.0, 100.0], "R_ohm": [120.0, 180.0]}),
+        sanity_ok=True,
+        sanity_error=None,
+    )
+    captured: list[float | None] = []
+
+    def _fake_render(
+        _record: MeasurementRecord | None,
+        _logger: logging.Logger,
+        **kwargs: object,
+    ) -> QtGui.QPixmap:
+        captured.append(kwargs.get("wire_diameter_um"))  # type: ignore[arg-type]
+        return QtGui.QPixmap(10, 10)
+
+    monkeypatch.setattr(builder_ui, "_render_measurement_pixmap", _fake_render)
+    try:
+        section._record_groups = {"Ni50Fe27Ga23|11|1": [record]}
+        row = pd.Series(
+            {
+                "_group_key": "Ni50Fe27Ga23|11|1",
+                builder_ui.MICROSCOPE_D_COLUMN: 20.0,
+            }
+        )
+
+        pixmap = section._preview_decoration(row, builder_ui.ANNEALING_HIGH_GRAPH_COLUMN)
+
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert captured == [20.0]
     finally:
         section._shutdown_background_threads()
         section.close()
