@@ -37,14 +37,16 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Mini DMA adaptive current-sweep seek/control slice after predictive-control scoping: `10 passed`.
 - Mini DMA IR cleanup regression: `1 passed`.
 - Current Annealing fabrication-load UI responsiveness regression: `1 passed`.
-- Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`): `783 passed`.
+- Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`): `784 passed`.
 - Shared HMP broker diagnostic classification tests: `17 passed` for `tests/test_shared_power_supply_broker.py`.
 - Mini DMA shared-broker stale-lease retry focused slice: `3 passed`.
 - Mini DMA Builder project sample-cache/stale-result/cancel focused slice: `8 passed`.
+- Mini DMA elastocaloric recipe dropdown/build/JSON round-trip focused slice: `3 passed`.
 
 ## Artifacts
 
 - AC UI offscreen screenshot: `artifacts/ac_ui_screenshot/ac_logger_workflow_panel.png`.
+- Mini DMA elastocaloric recipe offscreen screenshot: `artifacts/elastocaloric_ui_screenshot/mini_dma_elastocaloric_recipe.png`.
 
 Offscreen Qt font fallback renders text as boxes on this machine, but layout geometry is visible.
 
@@ -56,10 +58,9 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - Mini DMA now clears naturally finished IR worker/thread references and tolerates already-deleted Qt wrappers during disconnect/close cleanup.
 - Mini DMA saved Builder project import cleanup now clears pending retry state and tolerates already-deleted Qt thread wrappers.
 - AC UI cleanup is a first coherent pass, not a full rewrite.
-- Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine.
+- Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine; the current branch now has software-only dropdown/build/round-trip coverage and screenshot evidence for that workflow.
 
 ## Remaining Work
 
 - Add live validation only after the user explicitly authorizes bench work.
-- Finish elastocaloric recipe behavior/tests and screenshot-check its UI in a dedicated Mini DMA worker.
 - Consider a deeper AC UI rewrite after the user reviews this first pass.

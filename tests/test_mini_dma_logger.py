@@ -19772,6 +19772,76 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         _close_test_window(window)
 
 
+def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recipe_path = tmp_path / "elastocaloric_setup10MPa_strain0-4pct_current50mA.recipe.json"
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_constant_current_start_target.setValue(0.5)
+        window.spin_constant_current_end_target.setValue(4.25)
+        window.spin_constant_current_move_speed_mm_s.setValue(6.0)
+        window.spin_elastocaloric_stabilize_s.setValue(45.0)
+        window.spin_constant_current_hold_s.setValue(7.0)
+        window.spin_elastocaloric_release_record_s.setValue(9.0)
+        window.spin_constant_current_start_mA.setValue(50.0)
+        window.spin_constant_current_transition_stress_mpa.setValue(10.0)
+        window.spin_constant_current_transition_rate_mA_s.setValue(1.5)
+        window.spin_constant_current_transition_settle_s.setValue(2.0)
+        window.check_constant_current_transition_hold_on_error.setChecked(True)
+
+        window._save_recipe_to_path(recipe_path)
+        payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+        elastocaloric = payload["recipe"]["elastocaloric_effect"]
+        assert payload["recipe"]["mode"] == mini_dma_mod.ELASTOCALORIC_EFFECT
+        assert elastocaloric["start_strain_pct"] == pytest.approx(0.5)
+        assert elastocaloric["jump_strain_pct"] == pytest.approx(4.25)
+        assert elastocaloric["jump_speed_mm_s"] == pytest.approx(6.0)
+        assert elastocaloric["temperature_stabilize_s"] == pytest.approx(45.0)
+        assert elastocaloric["record_after_jump_s"] == pytest.approx(7.0)
+        assert elastocaloric["record_after_release_s"] == pytest.approx(9.0)
+        assert elastocaloric["current_mA"] == pytest.approx(50.0)
+        assert elastocaloric["transition_enabled"] is True
+        assert elastocaloric["transition_stress_mpa"] == pytest.approx(10.0)
+        assert elastocaloric["transition_rate_mA_s"] == pytest.approx(1.5)
+        assert elastocaloric["transition_settle_s"] == pytest.approx(2.0)
+        assert elastocaloric["transition_hold_on_error"] is True
+
+        window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
+        window.spin_constant_current_start_target.setValue(0.0)
+        window.spin_constant_current_end_target.setValue(1.0)
+        window.spin_constant_current_move_speed_mm_s.setValue(0.5)
+        window.spin_elastocaloric_stabilize_s.setValue(1.0)
+        window.spin_constant_current_hold_s.setValue(1.0)
+        window.spin_elastocaloric_release_record_s.setValue(1.0)
+        window.spin_constant_current_start_mA.setValue(5.0)
+        window.spin_constant_current_transition_stress_mpa.setValue(2.0)
+        window.spin_constant_current_transition_rate_mA_s.setValue(0.1)
+        window.spin_constant_current_transition_settle_s.setValue(0.0)
+        window.check_constant_current_transition_hold_on_error.setChecked(False)
+
+        window._load_recipe_from_path(recipe_path)
+
+        assert window.combo_recipe_mode.currentData() == mini_dma_mod.ELASTOCALORIC_EFFECT
+        assert window.spin_constant_current_start_target.value() == pytest.approx(0.5)
+        assert window.spin_constant_current_end_target.value() == pytest.approx(4.25)
+        assert window.spin_constant_current_move_speed_mm_s.value() == pytest.approx(6.0)
+        assert window.spin_elastocaloric_stabilize_s.value() == pytest.approx(45.0)
+        assert window.spin_constant_current_hold_s.value() == pytest.approx(7.0)
+        assert window.spin_elastocaloric_release_record_s.value() == pytest.approx(9.0)
+        assert window.spin_constant_current_start_mA.value() == pytest.approx(50.0)
+        assert window.spin_constant_current_transition_stress_mpa.value() == pytest.approx(10.0)
+        assert window.spin_constant_current_transition_rate_mA_s.value() == pytest.approx(1.5)
+        assert window.spin_constant_current_transition_settle_s.value() == pytest.approx(2.0)
+        assert window.check_constant_current_transition_hold_on_error.isChecked() is True
+        assert window.spin_elastocaloric_stabilize_s.isVisibleTo(window.recipe_stack)
+        assert "Loaded recipe" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_recipe_round_trips_disabled_return_target(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "current_sweep_no_return.recipe.json"
