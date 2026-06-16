@@ -5467,6 +5467,59 @@ def test_project_auto_import_retries_after_sample_change_during_background_impor
         _close_test_window(window)
 
 
+def test_cached_builder_project_suggestions_are_visible_before_background_import_finishes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            },
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "d (um)": 18.4,
+                            },
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+        mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+    mini_dma_mod._read_builder_project_cache_entry(project_path)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        assert window._builder_project_sample_suggestions == {}
+
+        started = window._start_saved_builder_project_auto_import(project_path, quiet=True)
+
+        assert started is True
+        assert window._builder_project_sample_suggestions == {"Ni50Fe27Ga23": ("12/2", "12/3")}
+        assert "cached sample suggestions are ready" in window.label_project_status.text()
+        completer_model = window.edit_name_wire.completer().model()
+        suggestions = [
+            completer_model.data(completer_model.index(row, 0))
+            for row in range(completer_model.rowCount())
+        ]
+        assert suggestions == ["12/2", "12/3"]
+    finally:
+        window._stop_builder_project_import_thread()
+        _close_test_window(window)
+
+
 def test_project_diameter_stays_marked_stale_when_changed_microwire_has_no_match(
     tmp_path: Path,
     qtbot,

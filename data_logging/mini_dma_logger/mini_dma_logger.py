@@ -1811,6 +1811,15 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
     return entry
 
 
+def _peek_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry | None:
+    try:
+        cache_key = _builder_project_cache_key(path)
+    except OSError:
+        return None
+    with _BUILDER_PROJECT_CACHE_LOCK:
+        return _BUILDER_PROJECT_CACHE.get(cache_key)
+
+
 def _project_match_score_for_sample(
     row: Mapping[str, Any],
     *,
@@ -11088,7 +11097,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def _read_builder_project_payload(self, path: Path) -> Any:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _read_builder_project_cache_entry(path).payload
 
     @staticmethod
     def _source_basename(source_path: str) -> str:
@@ -11471,7 +11480,13 @@ class MainWindow(QtWidgets.QMainWindow):
         request_key = self._project_import_request_key(path)
         self._builder_project_import_request_key = request_key
         self._builder_import_in_progress = True
-        self.label_project_status.setText(f"Loading saved Builder project in the background: {path.name}")
+        cached_suggestions_ready = self._apply_cached_builder_project_suggestions(path)
+        if cached_suggestions_ready:
+            self.label_project_status.setText(
+                f"Loading saved Builder project in the background: {path.name}; cached sample suggestions are ready."
+            )
+        else:
+            self.label_project_status.setText(f"Loading saved Builder project in the background: {path.name}")
         thread = QtCore.QThread(self)
         worker = BuilderProjectImportWorker(
             path,
@@ -11581,6 +11596,15 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
             return
+        self._apply_builder_project_suggestions(suggestions_obj)
+
+    def _apply_cached_builder_project_suggestions(self, path: Path) -> bool:
+        cache_entry = _peek_builder_project_cache_entry(path)
+        if cache_entry is None:
+            return False
+        return self._apply_builder_project_suggestions(cache_entry.suggestions)
+
+    def _apply_builder_project_suggestions(self, suggestions_obj: object) -> bool:
         suggestions = suggestions_obj if isinstance(suggestions_obj, dict) else {}
         self._builder_project_sample_suggestions = {
             str(composition).strip(): tuple(str(wire).strip() for wire in wires if str(wire).strip())
@@ -11588,6 +11612,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if str(composition).strip() and isinstance(wires, Sequence) and not isinstance(wires, (str, bytes))
         }
         self._refresh_fabrication_completers()
+        return any(self._builder_project_sample_suggestions.values())
 
     def _handle_builder_project_auto_import_no_match(self, path_obj: object, key_obj: object) -> None:
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
