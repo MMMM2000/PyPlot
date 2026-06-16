@@ -199,3 +199,36 @@ def test_run_quality_cli_can_generate_core_plot_batch_artifacts(tmp_path: Path) 
     assert payload["image_path"] == str(image)
     assert payload["summary_path"] == str(summary)
     assert payload["run_quality_path"] == str(run_dir / "run_quality.json")
+
+
+def test_run_quality_cli_keeps_batch_going_when_one_core_plot_fails(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    good_run = tmp_path / "run-good"
+    setup_only = tmp_path / "run-setup-only"
+    output_dir = tmp_path / "core-plots"
+    _write_run(good_run)
+    setup_only.mkdir()
+    (setup_only / "metadata.json").write_text(
+        json.dumps(
+            {
+                "sample_name": "setup only",
+                "name_fields": {"composition": "Ni50Fe27Ga23", "microwire": "setup"},
+                "stop": {"reason": "failed_setup"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert run_quality_main([str(tmp_path), "--write", "--core-plots", "--core-plot-dir", str(output_dir)]) == 0
+
+    captured = capsys.readouterr()
+    assert "run-good:" in captured.out
+    assert "plot=" in captured.out
+    assert "run-setup-only:" in captured.out
+    assert "plot_error=" in captured.out
+    assert (output_dir / "run-good_stress_time_strain_current.png").exists()
+    assert (good_run / "run_quality.json").exists()
+    setup_payload = json.loads((setup_only / "run_quality.json").read_text(encoding="utf-8"))
+    assert "missing:measurement.csv" in setup_payload["metadata_warnings"]

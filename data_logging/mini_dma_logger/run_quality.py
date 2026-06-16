@@ -692,14 +692,25 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir = Path(args.core_plot_dir)
                 image_path = output_dir / f"{run_path.name}_stress_time_strain_current.png"
                 summary_path = image_path.with_suffix(".json")
-            plot_summaries.append(
-                generate_core_run_plot(
-                    run_path,
-                    image_path=image_path,
-                    summary_path=summary_path,
-                    write_quality=True,
+            try:
+                plot_summaries.append(
+                    generate_core_run_plot(
+                        run_path,
+                        image_path=image_path,
+                        summary_path=summary_path,
+                        write_quality=True,
+                    )
                 )
-            )
+            except Exception as exc:
+                plot_summaries.append(
+                    {
+                        "run_dir": str(run_path),
+                        "image_path": None,
+                        "summary_path": None,
+                        "run_quality_path": str(run_path / "run_quality.json"),
+                        "plot_error": str(exc),
+                    }
+                )
     if args.json:
         payload: Any
         if args.core_plots:
@@ -708,6 +719,7 @@ def main(argv: list[str] | None = None) -> int:
                     **quality.to_dict(),
                     "core_plot_path": plot_summary["image_path"],
                     "core_plot_summary_path": plot_summary["summary_path"],
+                    "core_plot_error": plot_summary.get("plot_error"),
                 }
                 for quality, plot_summary in zip(qualities, plot_summaries)
             ]
@@ -719,7 +731,11 @@ def main(argv: list[str] | None = None) -> int:
             status = "include" if quality.include_in_optimization_summary else "exclude"
             plot_note = ""
             if args.core_plots and index < len(plot_summaries):
-                plot_note = f", plot={plot_summaries[index]['image_path']}"
+                plot_summary = plot_summaries[index]
+                if plot_summary.get("plot_error"):
+                    plot_note = f", plot_error={plot_summary['plot_error']}"
+                else:
+                    plot_note = f", plot={plot_summary['image_path']}"
             print(
                 f"{Path(quality.run_dir).name}: {status}, rows={quality.measurement_rows}, "
                 f"loops={quality.current_loop_count_estimate}, rms={quality.stress_error_rms_mpa}, "

@@ -122,6 +122,10 @@ uv run python scripts/mini_dma_run_quality.py <run-folder> --write --core-plots
 ```
 
 This writes `run_quality.json` next to `metadata.json` and creates the standard per-run PNG/JSON summary under `diagnostics/core_plots/`. The raw CSV files remain the source of truth; these outputs are derived caches that can be regenerated when the analyzer improves.
+When this command is run on a parent folder, setup-only or otherwise incomplete
+run folders still get `run_quality.json`; core-plot failures are reported per
+run as `plot_error=...` and do not prevent plots from being generated for the
+other runs in the batch.
 
 The quality summary records:
 
