@@ -4397,20 +4397,35 @@ class SharedBrokerSupplyController:
             return self.motor_voltage_limit_v, self.motor_current_limit_a
         return self.max_voltage_v, self.current_limit_a
 
+    @staticmethod
+    def _limit_matches(configured: object, desired: float | None) -> bool:
+        if desired is None:
+            return configured is None
+        try:
+            configured_value = float(configured)
+        except (TypeError, ValueError):
+            return False
+        return math.isclose(configured_value, float(desired), rel_tol=1e-9, abs_tol=1e-12)
+
     def _ensure_confirmed_role(self, channel: int) -> None:
         client = self._require_client()
         role = self._role_for_channel(channel)
+        voltage_limit_v, current_limit_a = self._limits_for_channel(channel)
         snapshot = client.request("snapshot").get("snapshot", {})
         bench_profile = snapshot.get("bench_profile", {}) if isinstance(snapshot, dict) else {}
         raw_channels = bench_profile.get("channels", {}) if isinstance(bench_profile, dict) else {}
         raw_config = raw_channels.get(str(channel), {}) if isinstance(raw_channels, dict) else {}
         configured_role = str(raw_config.get("role") or "unused") if isinstance(raw_config, dict) else "unused"
         confirmed = bool(raw_config.get("confirmed", False)) if isinstance(raw_config, dict) else False
-        if configured_role == role and confirmed:
+        limits_match = (
+            isinstance(raw_config, dict)
+            and self._limit_matches(raw_config.get("voltage_limit_v"), voltage_limit_v)
+            and self._limit_matches(raw_config.get("current_limit_a"), current_limit_a)
+        )
+        if configured_role == role and confirmed and limits_match:
             return
         if configured_role not in {"unused", role}:
             raise RuntimeError(f"Shared HMP broker CH{channel} is assigned to {configured_role}, not {role}.")
-        voltage_limit_v, current_limit_a = self._limits_for_channel(channel)
         client.request(
             "assign_role",
             channel=channel,

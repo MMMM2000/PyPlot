@@ -11733,6 +11733,70 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     ]
 
 
+def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "snapshot":
+                return {
+                    "ok": True,
+                    "snapshot": {
+                        "model": "hmp4040",
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.04,
+                                }
+                            }
+                        },
+                    },
+                }
+            return {"ok": True}
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=0.04,
+    )
+
+    controller.connect()
+    controller.set_current_limit_mA(60.0)
+
+    assign_calls = [call for call in clients[0].calls if call[0] == "assign_role"]
+    assert assign_calls == [
+        (
+            "assign_role",
+            {
+                "channel": 4,
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                "confirmed": True,
+                "voltage_limit_v": 32.05,
+                "current_limit_a": 0.06,
+            },
+        )
+    ]
+
+
 def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
