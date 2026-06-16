@@ -1953,13 +1953,20 @@ class MainWindow(CurrentAnnealingWindow):
         except RuntimeError:
             return
         fallback_reason = str(getattr(self, "_ac_output_path_fallback_reason", "") or "")
+        status_detail = self._format_ac_output_status_paths(path_text)
         if fallback_reason:
             label.setText(
                 "Output fallback: selected path is unavailable; "
-                f"using {path_text}. Reason: {fallback_reason}"
+                f"using {path_text}. Reason: {fallback_reason}\n{status_detail}"
             )
             return
-        label.setText(f"Output path ready: {path_text}")
+        label.setText(f"Output path ready: {path_text}\n{status_detail}")
+
+    def _format_ac_output_status_paths(self, output_path: str | Path) -> str:
+        path = Path(output_path)
+        status_path = sweep.ac_run_status_path_for_output(path)
+        fallback_path = sweep.ac_run_status_fallback_path_for_output(path)
+        return f"Run status sidecar: {status_path}; local fallback: {fallback_path}"
 
     def handle_browse_log_dir(self) -> None:  # type: ignore[override]
         start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, "lineEdit_log_dir") else str(AC_DEFAULT_LOG_DIR)

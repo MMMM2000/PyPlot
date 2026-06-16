@@ -4009,6 +4009,35 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         app.processEvents()
 
 
+def test_ac_logger_output_status_shows_run_status_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "output_status_paths")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+
+    window = ac_logger.MainWindow()
+    try:
+        output_dir = tmp_path / "ac"
+        window.ui.lineEdit_log_dir.setText(str(output_dir))
+        window.ui.lineEdit_log_file.setText("sweep01")
+        window.sync_full_log_path()
+
+        output_path = output_dir / "sweep01.tsv"
+        status_text = window.label_ac_output_status.text()
+        assert f"Output path ready: {output_path}" in status_text
+        assert f"Run status sidecar: {sweep.ac_run_status_path_for_output(output_path)}" in status_text
+        assert f"local fallback: {sweep.ac_run_status_fallback_path_for_output(output_path)}" in status_text
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_run_attempts_auto_connect_before_missing_hardware_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

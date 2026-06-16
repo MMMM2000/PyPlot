@@ -14,5 +14,6 @@
 - Added Mini DMA elastocaloric recipe JSON round-trip coverage and offscreen UI screenshot evidence for the fast strain-jump workflow.
 - Made AC run failures show run-status sidecar/fallback details in the status label and warning dialog, including rows written and local fallback status path when the primary output path disappears.
 - Made AC completed/stopped sweep messages show run-status sidecar details, including rows written and the status-file path.
+- Made the AC output section show the planned run-status sidecar and local fallback paths before a sweep starts.
 - Reused fresh Mini DMA Builder project cache entries for immediate sample/microwire suggestions while background exact-match imports continue.
 - Added a Mini DMA run-quality CLI option to generate the standard core PNG/JSON plot artifacts while writing `run_quality.json`.
