@@ -26,7 +26,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - `git diff --check` passed with only expected Windows CRLF warnings.
 - Mini DMA run-quality/core-plot/trace-replay focused tests: `12 passed`.
 - Shared HMP broker/setup focused tests: `17 passed`.
-- AC susceptibility logger tests: `122 passed`.
+- AC susceptibility logger tests: `123 passed`.
 - Combined Mini DMA tooling and shared HMP focused tests: `29 passed`.
 - Mini DMA sample/autofill focused tests: `11 passed`.
 - Mini DMA shared-broker focused tests: `12 passed`.
@@ -43,6 +43,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Mini DMA Builder project sample-cache/stale-result/cancel focused slice: `8 passed`.
 - Mini DMA elastocaloric recipe dropdown/build/JSON round-trip focused slice: `3 passed`.
 - AC worker-failure/run-status UI slice: `7 passed`.
+- AC sweep finish/stop status-summary UI slice: `5 passed`.
 - Mini DMA sample naming/project-cache/completer focused slice: `19 passed`.
 - Mini DMA run-quality/core-plot CLI focused slice: `10 passed`.
 
@@ -64,6 +65,7 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - Mini DMA run-quality CLI can now emit per-run core PNG/JSON artifacts in the same pass as `run_quality.json`, so optimization and normal-run follow-up can use one repeatable diagnostic command.
 - AC UI cleanup is a first coherent pass, not a full rewrite.
 - AC worker failures now surface run-status sidecar/fallback details in the UI, including rows written and local fallback status path when an output drive disappears.
+- AC completed and stopped sweep messages now also include run-status sidecar details, including rows written and status-file location.
 - Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine; the current branch now has software-only dropdown/build/round-trip coverage and screenshot evidence for that workflow.
 
 ## Remaining Work

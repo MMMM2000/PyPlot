@@ -4346,6 +4346,62 @@ def test_ac_logger_worker_failure_surfaces_local_status_fallback(
         app.processEvents()
 
 
+def test_ac_logger_finished_sweep_surfaces_run_status_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_finished_status_summary")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    infos: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, title, message: infos.append((title, message)),
+    )
+    output_path = tmp_path / "ac_sweep.tsv"
+    status_path = sweep.ac_run_status_path_for_output(output_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "completed",
+                "phase": "closed",
+                "rows_written": 1234,
+                "updated_utc": "2026-06-16T20:00:00Z",
+                "output_path": str(output_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_sweep_worker_finished(str(output_path), stopped=False)
+
+        status_text = window.label_lcr_status.text()
+        assert "AC sweep saved:" in status_text
+        assert "Run status: completed (closed)" in status_text
+        assert "Rows written: 1234" in status_text
+        assert f"Run status file: {status_path}" in status_text
+        assert infos and infos[-1][0] == "AC sweep saved"
+        assert "Rows written: 1234" in infos[-1][1]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_writes_optional_diagnostics(tmp_path: Path) -> None:
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     path = tmp_path / "ac_diag.jsonl"

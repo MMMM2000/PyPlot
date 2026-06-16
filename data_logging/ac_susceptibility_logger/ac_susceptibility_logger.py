@@ -3529,15 +3529,22 @@ class MainWindow(CurrentAnnealingWindow):
     def _handle_sweep_worker_finished(self, path_text: str, stopped: bool = False) -> None:
         self._finish_ac_worker_state()
         path = Path(path_text)
+        detail = self._format_ac_run_status_detail(path)
         if stopped:
-            self.label_lcr_status.setText(f"AC sweep stopped; partial file saved: {path}")
+            display_message = f"Saved partial AC sweep to:\n{path}"
+            if detail:
+                display_message = f"{display_message}\n\n{detail}"
+            self.label_lcr_status.setText(f"AC sweep stopped; partial file saved: {path}" + (f"\n{detail}" if detail else ""))
             self._set_ac_current_task("Current task: stopped")
-            QtWidgets.QMessageBox.information(self, "AC sweep stopped", f"Saved partial AC sweep to:\n{path}")
+            QtWidgets.QMessageBox.information(self, "AC sweep stopped", display_message)
             return
-        self.label_lcr_status.setText(f"AC sweep saved: {path}")
+        display_message = f"Saved AC sweep to:\n{path}"
+        if detail:
+            display_message = f"{display_message}\n\n{detail}"
+        self.label_lcr_status.setText(f"AC sweep saved: {path}" + (f"\n{detail}" if detail else ""))
         self._complete_ac_progress("Microwire sweep")
         self._set_ac_current_task("Current task: microwire sweep complete")
-        QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{path}")
+        QtWidgets.QMessageBox.information(self, "AC sweep saved", display_message)
 
     @QtCore.pyqtSlot(str)
     def _handle_ac_worker_failed(self, message: str) -> None:
@@ -3556,6 +3563,9 @@ class MainWindow(CurrentAnnealingWindow):
         QtWidgets.QMessageBox.warning(self, "AC run failed", display_message)
 
     def _format_ac_failure_status_detail(self, output_path: Path | None, message: str) -> str:
+        return self._format_ac_run_status_detail(output_path, message=message)
+
+    def _format_ac_run_status_detail(self, output_path: Path | None, *, message: str = "") -> str:
         if output_path is None:
             return ""
         try:
