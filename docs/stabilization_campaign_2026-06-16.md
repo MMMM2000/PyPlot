@@ -58,6 +58,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 
 - AC UI offscreen screenshot: `artifacts/ac_ui_screenshot/ac_logger_workflow_panel.png`.
 - Mini DMA elastocaloric recipe offscreen screenshot: `artifacts/elastocaloric_ui_screenshot/mini_dma_elastocaloric_recipe.png`.
+- AC UI redesign audit note: `docs/ac_susceptibility_ui_redesign.md`.
 
 Offscreen Qt font fallback renders text as boxes on this machine, but layout geometry is visible.
 
@@ -80,6 +81,7 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - AC shared-broker current-source failures now use the same operator-facing broker diagnostics as Mini DMA and Current Annealing.
 - AC sweep-start failures now leave the UI idle and show a warning when PSU preparation or worker startup fails.
 - AC empty-coil baseline startup now uses the same UI-state cleanup if baseline worker creation fails after the run has been marked active.
+- AC UI redesign notes are captured in `docs/ac_susceptibility_ui_redesign.md`; the real rewrite should wait until this branch is bench-tested.
 - Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine; the current branch now has software-only dropdown/build/round-trip coverage and screenshot evidence for that workflow.
 
 ## Remaining Work

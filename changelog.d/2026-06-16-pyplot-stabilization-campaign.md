@@ -23,3 +23,4 @@
 - Avoided redundant Mini DMA Builder project auto-imports and trusted-diameter flicker for condition-only sample-name edits.
 - Reset AC baseline UI state if empty-coil baseline worker startup fails after the run has been marked active.
 - Added cached power-supply setpoint/readback columns to Mini DMA control traces for easier electrical/mechanical fault forensics.
+- Added an AC susceptibility UI redesign note that separates safe stabilization work from the larger post-bench-test refactor.
