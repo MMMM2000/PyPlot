@@ -1276,7 +1276,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _fabrication_load_active(self) -> bool:
         thread = self._fabrication_thread
-        return thread is not None and thread.isRunning()
+        if thread is None:
+            return False
+        if thread.isRunning():
+            return True
+        worker = self._fabrication_worker
+        if worker is not None:
+            self._finish_fabrication_thread(thread, worker)
+        else:
+            self._fabrication_thread = None
+            self._set_fabrication_loading_ui(False)
+        return False
 
     def _set_fabrication_loading_ui(self, loading: bool) -> None:
         button = getattr(self.ui, "pushButton_load_fabrication", None)

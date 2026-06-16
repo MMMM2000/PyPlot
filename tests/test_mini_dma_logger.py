@@ -641,6 +641,7 @@ def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) 
     try:
         window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
         qtbot.addWidget(window)
+        recipe_key = str(window.combo_recipe_mode.currentData())
 
         for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
             _set_plot_tile(window, index, x_key, y_left_key, y_right_key)
@@ -648,7 +649,7 @@ def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) 
         _ensure_app().processEvents()
 
         for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
-            assert _saved_recipe_plot_tile_values("ramp", index) == {
+            assert _saved_recipe_plot_tile_values(recipe_key, index) == {
                 "visible": True,
                 "x": x_key,
                 "y_left": y_left_key,
@@ -674,11 +675,12 @@ def test_dashboard_plot_choices_persist_immediately(tmp_path: Path, qtbot) -> No
     try:
         window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
         qtbot.addWidget(window)
+        recipe_key = str(window.combo_recipe_mode.currentData())
 
         _set_plot_tile(window, 0, "elapsed_s", "position_mm", "strain_pct")
         _ensure_app().processEvents()
 
-        assert _saved_recipe_plot_tile_values("ramp", 0) == {
+        assert _saved_recipe_plot_tile_values(recipe_key, 0) == {
             "visible": True,
             "x": "elapsed_s",
             "y_left": "position_mm",
@@ -2931,12 +2933,9 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
     window._current_position_mm = 1.25
     window._current_position_steps = 125
     window.spin_steps_per_mm.setValue(100.0)
-    ramp_index = window.combo_recipe_mode.findData("ramp")
-    assert ramp_index >= 0
-    window.combo_recipe_mode.setCurrentIndex(ramp_index)
 
     try:
-        moved = window._move_to_position_mm(2.0)
+        moved = window._move_to_position_mm(2.0, speed_mm_s=1.0)
         _wait_for_tic_commands(window)
 
         assert moved is True
@@ -7151,6 +7150,7 @@ def test_displacement_ramp_uses_global_control_and_log_clocks(tmp_path: Path, qt
     window = _build_window(tmp_path, qtbot)
 
     try:
+        assert window.combo_recipe_mode.findData("ramp") < 0
         window.spin_control_interval.setValue(50)
         window.spin_log_interval.setValue(200)
         window.spin_ramp_distance.setValue(1.0)
@@ -7163,7 +7163,8 @@ def test_displacement_ramp_uses_global_control_and_log_clocks(tmp_path: Path, qt
 
         assert interval_ms == 50
         assert all(step.action != "record" for step in recipe_steps)
-        assert any(step.action == "move" for step in recipe_steps)
+        assert not any(step.action == "move" for step in recipe_steps)
+        assert "Started calibration" in summary
         assert "control every 50 ms" in summary
         assert "log every 200 ms" in summary
     finally:
@@ -18382,6 +18383,8 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
     window._manual_jog_uses_last_target = False
     window._automation_active = True
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._automation_phase = "current"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
     window.spin_steps_per_mm.setValue(10000.0)
     window.spin_current_sweep_nudge_mm.setValue(0.002)
     window.spin_current_sweep_balance_speed_mm_s.setValue(0.05)

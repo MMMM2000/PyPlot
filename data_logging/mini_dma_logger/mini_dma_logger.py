@@ -12080,13 +12080,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ir_worker = None
         self._ir_thread = None
         if worker is not None:
-            worker.stop()
+            try:
+                worker.stop()
+            except RuntimeError:
+                pass
         if thread is not None:
-            thread.quit()
-            thread.wait(1500)
-        self.button_ir_connect.setText("Connect IR")
+            try:
+                thread.quit()
+                thread.wait(1500)
+            except RuntimeError:
+                # Qt may already have deleted the C++ QThread after a natural
+                # worker finish; the logger reference is cleared above.
+                pass
+        if hasattr(self, "button_ir_connect"):
+            self.button_ir_connect.setText("Connect IR")
 
     def _handle_ir_thread_finished(self) -> None:
+        self._ir_worker = None
+        self._ir_thread = None
         self.button_ir_connect.setText("Connect IR")
         self._refresh_live_labels()
 
@@ -15459,6 +15470,11 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         seek_key: tuple[str, int, float],
     ) -> float:
+        if (
+            not self._predictive_seek_step_control_active()
+            and not self._explicit_seek_stiffness_available(seek_key)
+        ):
+            return self._seek_step_mm(error_value, tolerance, basis=basis)
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or sensitivity <= 0.0:
             if self._is_current_sweep_mode(self._automation_name):
@@ -15510,6 +15526,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 correction_caps.append(stress_cap_mm)
             max_step_mm = max(self._motor_step_mm(), min(correction_caps))
         return max(self._motor_step_mm(), min(max_step_mm, predicted_mm))
+
+    def _predictive_seek_step_control_active(self) -> bool:
+        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            return True
+        if self._automation_phase not in {"target_ramp", "current", "current_hold", "current_limit_unwind"}:
+            return False
+        mode = str(self._automation_name or "")
+        return mode in CURRENT_SWEEP_MODES or mode in {
+            CONSTANT_CURRENT_STRAIN_SWEEP,
+            CONSTANT_CURRENT_STRESS_RAMP,
+            ELASTOCALORIC_EFFECT,
+        }
+
+    def _explicit_seek_stiffness_available(self, seek_key: tuple[str, int, float] | None) -> bool:
+        if seek_key is not None:
+            candidate = self._seek_live_stiffness_by_key.get(seek_key)
+            if (
+                candidate is not None
+                and math.isfinite(float(candidate))
+                and float(candidate) > 0.0
+            ):
+                return True
+        return self._stored_calibration_stiffness_g_per_mm() is not None
 
     def _reverse_correction_is_worthwhile(
         self,
@@ -16154,6 +16193,8 @@ class MainWindow(QtWidgets.QMainWindow):
         cruise_mode: bool = False,
     ) -> float:
         if cruise_mode:
+            return max(self._motor_step_mm(), abs(float(nudge_mm)))
+        if not self._predictive_seek_step_control_active():
             return max(self._motor_step_mm(), abs(float(nudge_mm)))
         if (
             (

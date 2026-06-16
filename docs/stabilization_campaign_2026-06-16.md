@@ -31,6 +31,13 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Mini DMA sample/autofill focused tests: `11 passed`.
 - Mini DMA shared-broker focused tests: `12 passed`.
 - Current Annealing shared-broker focused tests: `26 passed`.
+- Iso-current worker behavior slice from `e54955f`: `8 passed` on this branch; the branch content was already present, so the old worker commit was not cherry-picked over the newer integration base.
+- Mini DMA wire-break/open-circuit focused slice: `13 passed`.
+- Mini DMA ordinary-seek regression slice after predictive-control scoping: `9 passed`.
+- Mini DMA adaptive current-sweep seek/control slice after predictive-control scoping: `10 passed`.
+- Mini DMA IR cleanup regression: `1 passed`.
+- Current Annealing fabrication-load UI responsiveness regression: `1 passed`.
+- Wide stabilization suite (`tests/test_mini_dma_logger.py`, `tests/test_ac_susceptibility_logger.py`, `tests/test_shared_power_supply_broker.py`, `tests/test_shared_power_supply_setup_ui.py`, `tests/test_current_annealing_logger.py`): `774 passed`.
 
 ## Artifacts
 
@@ -41,7 +48,9 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 ## Important Findings
 
 - Latest inspected Mini DMA run `Ni50Fe25Ga25 3_1 iso-stress_run02` stopped as `wire_break_or_contact_loss` after voltage limit and current collapse: set current about `25.4 mA`, measured current about `0.1 mA`, voltage about `32.054 V`.
-- Run forensics recommends a later controller fix: when measured current collapses near zero at the voltage limit, stop and record a terminal fault trace before any current-limit unwind seek or mechanical correction.
+- Mini DMA now stops current-sweep voltage-limit unwinds when measured current collapses near zero at the voltage limit, writes a terminal `wire_break_or_contact_loss` trace row, and avoids the mechanical recovery seek that previously kept moving after an electrical fault.
+- Mini DMA predictive stiffness control is now phase-scoped: active current-sweep/iso-current/elastocaloric/setup phases keep adaptive damping, while ordinary idle/manual seeks use the configured nudge unless explicit calibrated or live stiffness is available.
+- Mini DMA now clears naturally finished IR worker/thread references and tolerates already-deleted Qt wrappers during disconnect/close cleanup.
 - AC UI cleanup is a first coherent pass, not a full rewrite.
 - Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine.
 
@@ -50,6 +59,5 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - Add focused tests for the new shared-broker diagnostic helper and stale-lease retry paths.
 - Add tests for Mini DMA Builder project cache hits/cancellation if this partial cache change remains.
 - Add live validation only after the user explicitly authorizes bench work.
-- Implement the Mini DMA controller guard for voltage-limit current collapse before mechanical seek/unwind.
 - Finish elastocaloric recipe behavior/tests and screenshot-check its UI in a dedicated Mini DMA worker.
 - Consider a deeper AC UI rewrite after the user reviews this first pass.
