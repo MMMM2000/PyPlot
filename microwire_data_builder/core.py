@@ -4875,6 +4875,20 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("FMR", (FMR_ORIGIN_COLUMN,), (FMR_COLUMN,)),
 )
 
+
+@dataclass(frozen=True)
+class WordGraphSectionEvaluation:
+    title: str
+    included: bool
+    status: str
+    reason: str
+    accepted_origin_descriptors: Tuple[str, ...] = ()
+    accepted_references: Tuple[str, ...] = ()
+    invalid_origin_descriptors: Tuple[str, ...] = ()
+    missing_origin_descriptors: Tuple[str, ...] = ()
+    invalid_references: Tuple[str, ...] = ()
+
+
 _WORD_ALWAYS_OMIT_COLUMNS: Tuple[str, ...] = (
     *_WORD_PROVENANCE_COLUMNS,
     *_WORD_GRAPH_COLUMNS,
@@ -5303,6 +5317,164 @@ def _word_assemble_values(row: pd.Series) -> List[Tuple[str, str]]:
     return values
 
 
+def _word_normalise_sample_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _word_row_composition_token(row: pd.Series) -> str:
+    return _word_normalise_sample_text(row.get("Composition"))
+
+
+def _word_row_microwire_pair(row: pd.Series) -> Tuple[str, str] | None:
+    text = str(row.get("Microwire") or "").strip()
+    match = re.search(r"(\d+)\s*[/_\-]\s*(\d+)", text)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _word_reference_conflicts_with_sample(row: pd.Series, *values: object) -> bool:
+    text = " ".join(str(value or "") for value in values if value not in (None, ""))
+    if not text:
+        return False
+    lowered = text.casefold()
+    row_composition = _word_row_composition_token(row)
+    compositions = [
+        _word_normalise_sample_text(match.group(0))
+        for match in re.finditer(r"Ni\d+(?:[A-Za-z]{1,2}\d+)+", text)
+    ]
+    if row_composition and compositions:
+        if all(composition != row_composition for composition in compositions):
+            return True
+        pair = _word_row_microwire_pair(row)
+        if pair is not None:
+            microwire_matches = re.findall(r"(?<!\d)(\d+)\s*[/_\-]\s*(\d+)(?!\d)", lowered)
+            if microwire_matches and all(match != pair for match in microwire_matches):
+                return True
+    return False
+
+
+def _word_origin_artifact_is_usable(artifact: OriginArtifact | None) -> bool:
+    if artifact is None:
+        return False
+    if bool(getattr(artifact, "clipboard_fallback", False)):
+        return True
+    object_path = getattr(artifact, "object_path", None)
+    return object_path is not None
+
+
+def _word_origin_artifact_conflicts_with_sample(
+    row: pd.Series,
+    descriptor: str,
+    artifact: OriginArtifact | None,
+) -> bool:
+    values: List[object] = [descriptor]
+    if artifact is not None:
+        values.extend(
+            [
+                artifact.display_text,
+                artifact.object_path,
+                artifact.graph_name,
+                artifact.workbook_name,
+                artifact.worksheet_name,
+            ]
+        )
+    return _word_reference_conflicts_with_sample(row, *values)
+
+
+def _word_evaluate_graph_sections(
+    row: pd.Series,
+    origin_artifacts: Mapping[str, OriginArtifact],
+) -> List[WordGraphSectionEvaluation]:
+    evaluations: List[WordGraphSectionEvaluation] = []
+    for title, origin_columns, reference_columns in _WORD_GRAPH_SECTIONS:
+        accepted_origin: List[str] = []
+        invalid_origin: List[str] = []
+        missing_origin: List[str] = []
+        accepted_references: List[str] = []
+        invalid_references: List[str] = []
+
+        for column in origin_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                artifact = origin_artifacts.get(descriptor)
+                if _word_origin_artifact_conflicts_with_sample(row, descriptor, artifact):
+                    invalid_origin.append(descriptor)
+                    continue
+                if _word_origin_artifact_is_usable(artifact):
+                    if descriptor not in accepted_origin:
+                        accepted_origin.append(descriptor)
+                else:
+                    missing_origin.append(descriptor)
+
+        for column in reference_columns:
+            if column not in row.index:
+                continue
+            for descriptor in _asset_references(row.get(column)):
+                if _word_reference_conflicts_with_sample(row, descriptor):
+                    invalid_references.append(descriptor)
+                    continue
+                if descriptor not in accepted_references:
+                    accepted_references.append(descriptor)
+
+        included = bool(accepted_origin or accepted_references)
+        if accepted_origin:
+            status = "included"
+            reason = "accepted_origin_object"
+        elif accepted_references:
+            status = "included"
+            reason = "reference_content"
+        elif invalid_origin or invalid_references:
+            status = "invalid"
+            reason = "content_failed_sample_validation"
+        elif missing_origin:
+            status = "invalid"
+            reason = "origin_descriptor_missing_artifact"
+        else:
+            status = "skipped"
+            reason = "no_section_content"
+
+        evaluations.append(
+            WordGraphSectionEvaluation(
+                title=title,
+                included=included,
+                status=status,
+                reason=reason,
+                accepted_origin_descriptors=tuple(accepted_origin),
+                accepted_references=tuple(accepted_references),
+                invalid_origin_descriptors=tuple(dict.fromkeys(invalid_origin)),
+                missing_origin_descriptors=tuple(dict.fromkeys(missing_origin)),
+                invalid_references=tuple(dict.fromkeys(invalid_references)),
+            )
+        )
+    return evaluations
+
+
+def word_report_section_manifest_for_row(
+    row: pd.Series,
+    origin_artifacts: Mapping[str, OriginArtifact] | None = None,
+) -> List[Dict[str, object]]:
+    """Return data-driven Word measurement-section decisions for one report row."""
+
+    summaries: List[Dict[str, object]] = []
+    for evaluation in _word_evaluate_graph_sections(row, origin_artifacts or {}):
+        summaries.append(
+            {
+                "title": evaluation.title,
+                "included": bool(evaluation.included),
+                "status": evaluation.status,
+                "reason": evaluation.reason,
+                "origin_descriptors": list(evaluation.accepted_origin_descriptors),
+                "references": list(evaluation.accepted_references),
+                "invalid_origin_descriptors": list(evaluation.invalid_origin_descriptors),
+                "missing_origin_descriptors": list(evaluation.missing_origin_descriptors),
+                "invalid_references": list(evaluation.invalid_references),
+            }
+        )
+    return summaries
+
+
 def _word_graph_sections(
     row: pd.Series,
     origin_artifacts: Mapping[str, OriginArtifact],
@@ -5311,76 +5483,46 @@ def _word_graph_sections(
     parts: List[str] = []
     insertions: List[WordOleInsertion] = []
     bookmark_id = bookmark_start
-    for title, origin_columns, reference_columns in _WORD_GRAPH_SECTIONS:
+    for section in _word_evaluate_graph_sections(row, origin_artifacts):
+        if not section.included:
+            continue
         parts.append(_word_page_break())
-        parts.append(_word_paragraph(title, bold=True, size=28, spacing_after=120, style="Heading1"))
-        section_has_content = False
-        section_has_origin_descriptors = False
-        missing_origin_object = False
-        for column in origin_columns:
-            if column not in row.index:
+        parts.append(_word_paragraph(section.title, bold=True, size=28, spacing_after=120, style="Heading1"))
+        for descriptor in section.accepted_origin_descriptors:
+            artifact = origin_artifacts.get(descriptor)
+            if artifact is None:
                 continue
-            for descriptor in _asset_references(row.get(column)):
-                artifact = origin_artifacts.get(descriptor)
-                display = artifact.display_text if artifact and artifact.display_text else descriptor
-                section_has_origin_descriptors = True
-                bookmark_name = f"OriginGraph{bookmark_id}"
-                parts.append(
-                    _word_paragraph(
-                        f"[Origin object placeholder: {descriptor}]",
-                        spacing_after=220,
-                        bookmark_name=bookmark_name,
-                        bookmark_id=bookmark_id,
-                    )
+            display = artifact.display_text if artifact.display_text else descriptor
+            bookmark_name = f"OriginGraph{bookmark_id}"
+            parts.append(
+                _word_paragraph(
+                    f"[Origin object placeholder: {descriptor}]",
+                    spacing_after=220,
+                    bookmark_name=bookmark_name,
+                    bookmark_id=bookmark_id,
                 )
-                if artifact is not None and (
-                    artifact.object_path is not None
-                    or bool(getattr(artifact, "clipboard_fallback", False))
-                ):
-                    insertions.append(
-                        WordOleInsertion(
-                            bookmark_name=bookmark_name,
-                            object_path=(
-                                Path(artifact.object_path)
-                                if artifact.object_path is not None
-                                else Path(artifact.descriptor)
-                            ),
-                            label=str(display or descriptor),
-                            clipboard_fallback=bool(
-                                getattr(artifact, "clipboard_fallback", False)
-                            ),
-                            graph_name=artifact.graph_name,
-                        )
-                    )
-                else:
-                    missing_origin_object = True
-                bookmark_id += 1
-                section_has_content = True
-        reference_values: List[str] = []
-        for column in reference_columns:
-            if column not in row.index:
-                continue
-            for descriptor in _asset_references(row.get(column)):
-                if descriptor not in reference_values:
-                    reference_values.append(descriptor)
-        if reference_values and not section_has_origin_descriptors:
-            section_has_content = True
-            parts.append(_word_table([("Graphs in Assemble", ", ".join(reference_values))]))
+            )
+            insertions.append(
+                WordOleInsertion(
+                    bookmark_name=bookmark_name,
+                    object_path=(
+                        Path(artifact.object_path)
+                        if artifact.object_path is not None
+                        else Path(artifact.descriptor)
+                    ),
+                    label=str(display or descriptor),
+                    clipboard_fallback=bool(getattr(artifact, "clipboard_fallback", False)),
+                    graph_name=artifact.graph_name,
+                )
+            )
+            bookmark_id += 1
+        if section.accepted_references and not section.accepted_origin_descriptors:
+            parts.append(_word_table([("Graphs in Assemble", ", ".join(section.accepted_references))]))
             parts.append(
                 _word_paragraph(
                     "Editable Origin object was not generated for this graph yet."
-                    if origin_columns
-                    else "Editable Origin object export is not available for this graph type yet."
                 )
             )
-        if missing_origin_object:
-            parts.append(
-                _word_paragraph(
-                    "Editable Origin object export is not available for this graph type yet."
-                )
-            )
-        if not section_has_content:
-            parts.append(_word_paragraph("Not measured yet."))
     return "".join(parts), insertions, bookmark_id
 
 
@@ -8047,6 +8189,7 @@ __all__ = [
     "BuildResult",
     "BuildStats",
     "OriginArtifact",
+    "WordGraphSectionEvaluation",
     "WordOleInsertion",
     "WordPictureInsertion",
     "export_origin_graph_artifact",
@@ -8091,6 +8234,7 @@ __all__ = [
     "build_database",
     "build_fabrication_index",
     "export_word_reports",
+    "word_report_section_manifest_for_row",
     "_compute_ea_from_composition",
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",

@@ -5049,8 +5049,8 @@ def test_word_report_export_embeds_available_origin_objects(
     assert 'w:pStyle w:val="Heading1"' in document_xml
     assert "Microscope and dimensions" in document_xml
     assert "Current annealing" in document_xml
-    assert "VSM temperature scan" in document_xml
-    assert "DMA iso-stress" in document_xml
+    assert "VSM temperature scan" not in document_xml
+    assert "DMA iso-stress" not in document_xml
     assert "Measurement references" not in document_xml
     assert "Graph:" not in document_xml
     assert "Book:" not in document_xml
@@ -5221,8 +5221,139 @@ def test_word_report_sections_start_on_new_pages() -> None:
         {},
     )
 
-    assert xml.count('w:type="page"') >= 8
+    assert xml.count('w:type="page"') == 1
     assert xml.index("Microwire data") < xml.index('w:type="page"') < xml.index("Microscope and dimensions")
+
+
+def test_word_report_skips_empty_measurement_sections() -> None:
+    xml, origin_insertions, _picture_insertions = core._word_document_xml(
+        pd.Series({"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}),
+        0,
+        {},
+        {},
+    )
+
+    assert "Microwire data" in xml
+    assert "Microscope and dimensions" in xml
+    assert "Current annealing" not in xml
+    assert "Mini DMA" not in xml
+    assert "Not measured yet." in xml
+    assert origin_insertions == []
+
+
+def test_word_report_includes_reference_only_measurement_section() -> None:
+    xml, origin_insertions, _picture_insertions = core._word_document_xml(
+        pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                core.MINI_DMA_COLUMN: "Ni50Fe27Ga23 12_2 iso-current",
+            }
+        ),
+        0,
+        {},
+        {},
+    )
+
+    assert "Mini DMA" in xml
+    assert "Graphs in Assemble" in xml
+    assert "Ni50Fe27Ga23 12_2 iso-current" in xml
+    assert "Current annealing" not in xml
+    assert origin_insertions == []
+
+
+def test_word_report_rejects_mismatched_origin_descriptor() -> None:
+    descriptor = "Ni51Fe27Ga23_13-3_current.oggu"
+    xml, origin_insertions, _picture_insertions = core._word_document_xml(
+        pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                f"{core.FIGURE_COLUMNS[0]} (Origin)": descriptor,
+            }
+        ),
+        0,
+        {
+            descriptor: OriginArtifact(
+                descriptor=descriptor,
+                object_path=Path(descriptor),
+                display_text="Ni51Fe27Ga23 13/3 current annealing",
+            )
+        },
+        {},
+    )
+
+    assert "Current annealing" not in xml
+    assert "Origin object placeholder" not in xml
+    assert origin_insertions == []
+
+    manifest = core.word_report_section_manifest_for_row(
+        pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                f"{core.FIGURE_COLUMNS[0]} (Origin)": descriptor,
+            }
+        ),
+        {
+            descriptor: OriginArtifact(
+                descriptor=descriptor,
+                object_path=Path(descriptor),
+                display_text="Ni51Fe27Ga23 13/3 current annealing",
+            )
+        },
+    )
+    current_section = next(item for item in manifest if item["title"] == "Current annealing")
+    assert current_section["included"] is False
+    assert current_section["status"] == "invalid"
+    assert current_section["reason"] == "content_failed_sample_validation"
+    assert current_section["invalid_origin_descriptors"] == [descriptor]
+
+
+def test_word_export_manifest_records_skipped_and_invalid_sections(
+    tmp_path: Path,
+) -> None:
+    import launcher
+
+    descriptor = "Ni51Fe27Ga23_13-3_current.oggu"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                core.MINI_DMA_COLUMN: "Ni50Fe27Ga23 12_2 iso-current",
+                f"{core.FIGURE_COLUMNS[0]} (Origin)": descriptor,
+            }
+        ]
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+
+    manifest_json, _manifest_csv = launcher._write_microwire_word_manifest(
+        frame,
+        [output_dir / "Ni50Fe27Ga23_12-2.docx"],
+        output_dir,
+        source_path=tmp_path / "copy.pydpj",
+        copied_project=None,
+        include_origin=True,
+        origin_artifacts={
+            descriptor: OriginArtifact(
+                descriptor=descriptor,
+                object_path=Path(descriptor),
+                display_text="Ni51Fe27Ga23 13/3 current annealing",
+            )
+        },
+    )
+
+    payload = json.loads(manifest_json.read_text(encoding="utf-8"))
+    report = payload["reports"][0]
+    assert report["graph_sections"] == ["Mini DMA"]
+    assert "Mini DMA" in report["included_sections"]
+    assert "Current annealing" in report["invalid_sections"]
+    assert "R vs T" in report["skipped_sections"]
+    assert report["sections"]["Current annealing"]["status"] == "invalid"
+    assert report["sections"]["Current annealing"]["invalid_origin_descriptors"] == [descriptor]
+    assert report["sections"]["R vs T"]["reason"] == "no_section_content"
 
 
 def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
