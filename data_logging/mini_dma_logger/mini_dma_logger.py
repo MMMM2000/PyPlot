@@ -5357,6 +5357,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
+        self._builder_project_last_auto_import_state_key: tuple[tuple[str, int, int], str, str, str] | None = None
         self._builder_project_import_retry_pending = False
         self._builder_project_sample_suggestions: dict[str, tuple[str, ...]] = {}
         self._builder_project_import_timer = QtCore.QTimer(self)
@@ -11474,6 +11475,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_name_specimen.text(),
         )
 
+    def _builder_project_auto_import_state_key(
+        self,
+        path: Path,
+    ) -> tuple[tuple[str, int, int], str, str, str] | None:
+        try:
+            file_key = _builder_project_cache_key(path)
+        except OSError:
+            return None
+        _path_text, composition, microwire, specimen = self._project_import_request_key(path)
+        return (file_key, composition, microwire, specimen)
+
     def _start_saved_builder_project_auto_import(self, path: Path, *, quiet: bool = True) -> bool:
         if self._builder_project_import_thread is not None:
             return False
@@ -11576,6 +11588,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._mark_diameter_imported(False)
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
+            return
+        self._builder_project_last_auto_import_state_key = self._builder_project_auto_import_state_key(Path(path_obj))
 
     def _handle_builder_project_auto_import_failure(
         self,
@@ -11619,6 +11633,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._apply_fabrication_sample_if_possible(force=True):
             self._mark_diameter_imported(False)
+        self._builder_project_last_auto_import_state_key = self._builder_project_auto_import_state_key(Path(path_obj))
         self.label_project_status.setText(
             "Project loaded, but no matching sample row was found from the current naming fields."
         )
@@ -11637,13 +11652,23 @@ class MainWindow(QtWidgets.QMainWindow):
         path_text = self.edit_project_path.text().strip()
         if not path_text:
             self._mark_diameter_imported(False)
+            self._builder_project_last_auto_import_state_key = None
             return False
         path = Path(path_text)
         self._builder_project_path = path
         if not path.exists():
             self._mark_diameter_imported(False)
+            self._builder_project_last_auto_import_state_key = None
             self.label_project_status.setText("Builder project path is saved, but the file was not found.")
             return False
+        state_key = self._builder_project_auto_import_state_key(path)
+        if (
+            async_load
+            and not update_identity
+            and state_key is not None
+            and self._builder_project_last_auto_import_state_key == state_key
+        ):
+            return True
         if async_load and not update_identity:
             self._builder_project_import_retry_pending = False
             return self._start_saved_builder_project_auto_import(path, quiet=quiet)
@@ -11671,14 +11696,21 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_diameter_imported(False)
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return False
+        if not update_identity:
+            self._builder_project_last_auto_import_state_key = state_key
         return True
 
     def _schedule_builder_project_auto_import(self) -> None:
         if self._builder_import_in_progress:
             self._builder_project_import_retry_pending = True
             return
-        if not self.edit_project_path.text().strip():
+        path_text = self.edit_project_path.text().strip()
+        if not path_text:
             self._mark_diameter_imported(False)
+            self._builder_project_import_retry_pending = False
+            return
+        state_key = self._builder_project_auto_import_state_key(Path(path_text))
+        if state_key is not None and self._builder_project_last_auto_import_state_key == state_key:
             self._builder_project_import_retry_pending = False
             return
         self._builder_project_import_timer.start()
@@ -12438,8 +12470,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_auto_log_name = safe_name
             self._refresh_recipe_sample_label()
             self._update_fabrication_microwire_completer()
-            if self.edit_project_path.text().strip():
-                self._mark_diameter_imported(False)
             self._schedule_builder_project_auto_import()
             try:
                 self._apply_fabrication_sample_if_possible()

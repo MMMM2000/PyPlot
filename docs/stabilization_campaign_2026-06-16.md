@@ -47,6 +47,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - AC output-status run-status-path UI slice: `4 passed`.
 - AC/shared-HMP broker diagnostic slice: `8 passed`; full AC plus shared broker files: `142 passed`.
 - Mini DMA sample naming/project-cache/completer focused slice: `19 passed`.
+- Mini DMA sample/project condition-only import-skip slice: `10 passed`; broader sample/naming/project slice: `60 passed`.
 - Mini DMA run-quality/core-plot CLI focused slice: `11 passed`.
 - AC sweep-start failure cleanup slice: `6 passed`; full AC plus shared-broker files after cleanup: `149 passed`.
 
@@ -65,6 +66,7 @@ Offscreen Qt font fallback renders text as boxes on this machine, but layout geo
 - Mini DMA now clears naturally finished IR worker/thread references and tolerates already-deleted Qt wrappers during disconnect/close cleanup.
 - Mini DMA saved Builder project import cleanup now clears pending retry state and tolerates already-deleted Qt thread wrappers.
 - Mini DMA Builder project suggestions now reuse a fresh parsed-project cache immediately when background import starts, so microwire completers stay populated while exact diameter/current matching continues in the worker.
+- Mini DMA sample naming now keeps an already imported Builder-project diameter trusted and skips redundant exact-match imports when only condition text changes.
 - Mini DMA run-quality CLI can now emit per-run core PNG/JSON artifacts in the same pass as `run_quality.json`, so optimization and normal-run follow-up can use one repeatable diagnostic command.
 - Mini DMA run-quality batch core-plot generation now keeps going when one run folder is incomplete, reporting `plot_error=...` while still writing `run_quality.json`.
 - AC UI cleanup is a first coherent pass, not a full rewrite.

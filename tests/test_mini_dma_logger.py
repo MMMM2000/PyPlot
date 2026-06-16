@@ -5367,6 +5367,53 @@ def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_project_auto_import_skips_condition_only_name_changes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        state_key = window._builder_project_last_auto_import_state_key
+        assert state_key is not None
+        assert "#16a34a" in window.spin_diameter.styleSheet()
+
+        window.edit_name_condition.setText("temperature test")
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/3 temperature test"
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert "#16a34a" in window.spin_diameter.styleSheet()
+        assert window._builder_project_last_auto_import_state_key == state_key
+        assert window._builder_project_import_thread is None
+        assert not window._builder_project_import_timer.isActive()
+    finally:
+        _close_test_window(window)
+
+
 def test_project_diameter_invalidates_immediately_then_updates_for_changed_microwire(
     tmp_path: Path,
     qtbot,
