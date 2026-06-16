@@ -90,13 +90,21 @@ def _fmt(value: float | None, suffix: str = "", *, digits: int = 2) -> str:
 
 
 def _annotation(quality: RunQuality) -> str:
+    control = quality.control_logic_version or quality.control_logic_fingerprint or "n/a"
+    if quality.control_logic_version and quality.control_logic_fingerprint:
+        control = f"{quality.control_logic_version} / {quality.control_logic_fingerprint[:18]}"
     return "\n".join(
         [
             f"stop: {quality.stop_reason or 'n/a'}",
+            f"class: {quality.stop_classification}",
+            f"control: {control}",
             f"rms/p95/max: {_fmt(quality.stress_error_rms_mpa)} / "
             f"{_fmt(quality.stress_error_p95_abs_mpa)} / {_fmt(quality.stress_error_max_abs_mpa)} MPa",
+            f"hold recovery max: {_fmt(quality.current_hold_recovery_time_max_s, ' s')}, "
+            f"overshoot: {_fmt(quality.current_hold_overshoot_max_mpa, ' MPa')}",
             f"hold: {_fmt(quality.current_hold_fraction * 100.0 if quality.current_hold_fraction is not None else None, '%')}"
             f" of current phase",
+            f"limit/compliance events: {quality.voltage_limit_event_count}/{quality.current_compliance_event_count}",
             f"max I: {_fmt(quality.current_measured_max_mA, ' mA')}",
             f"d/L: {_fmt(quality.wire_diameter_mm, ' mm', digits=4)} / "
             f"{_fmt(quality.initial_length_mm, ' mm', digits=3)}",
@@ -112,7 +120,7 @@ def generate_core_run_plot(
     write_quality: bool = True,
 ) -> dict[str, Any]:
     run_path = Path(run_dir)
-    missing = [name for name in ("measurement.csv", "metadata.json") if not (run_path / name).exists()]
+    missing = [name for name in ("measurement.csv",) if not (run_path / name).exists()]
     if missing:
         raise FileNotFoundError(f"Mini DMA run folder is missing required file(s): {', '.join(missing)} in {run_path}")
     rows = _read_csv_rows(run_path / "measurement.csv")
@@ -130,7 +138,13 @@ def generate_core_run_plot(
     measured_current, strain = _row_xy(rows, "current_measured_mA", "strain_pct")
     if not measured_current:
         measured_current, strain = _row_xy(rows, "current_set_mA", "strain_pct")
-    hold_time_spans = _hold_spans(rows)
+    hold_time_spans = [
+        (float(window["start_s"]), float(window["end_s"]))
+        for window in quality.current_hold_windows
+        if window.get("start_s") is not None and window.get("end_s") is not None
+    ]
+    if not hold_time_spans:
+        hold_time_spans = _hold_spans(rows)
     hold_current, hold_strain = _hold_xy(rows)
 
     image.parent.mkdir(parents=True, exist_ok=True)
@@ -157,7 +171,7 @@ def generate_core_run_plot(
     ax.set_ylabel("Strain (%)")
     ax.grid(True, alpha=0.25)
 
-    fig.suptitle(run_path.name, fontsize=13, fontweight="bold")
+    fig.suptitle(f"{run_path.name}  |  {quality.stop_reason or 'stop n/a'}", fontsize=13, fontweight="bold")
     fig.text(
         0.015,
         0.025,
@@ -176,6 +190,8 @@ def generate_core_run_plot(
         "image_path": str(image),
         "run_quality_path": str(run_path / "run_quality.json") if write_quality else None,
         "hold_span_count": len(hold_time_spans),
+        "hold_spans": [{"start_s": start, "end_s": end, "duration_s": end - start} for start, end in hold_time_spans],
+        "metadata_warnings": list(quality.metadata_warnings),
         "quality": quality.to_dict(),
     }
     summary.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,55 @@
+# PyPlot Stabilization Campaign - 2026-06-16
+
+This is a coordination note for the overnight stabilization pass requested by the user. Do not treat this as a release PR. The user wants to test the resulting branch manually before any final PR or merge to `main`.
+
+## Scope
+
+- No final PR.
+- No merge to `main`.
+- No live hardware, serial-port, HMP, LCR, Tic, or camera commands from this campaign unless explicitly authorized later.
+- Current branch at the time of this note: `codex/ac-susceptibility-ui-stabilization`, based on commit `03f766c` from `codex/integration-mini-dma-ready-review`.
+
+## Agent Work
+
+- `019ed1d4-8f4a-7fb0-95a7-0284afe0168a`: read-only Mini DMA run forensics and controller audit.
+- `019ed1d4-a40e-7703-a4be-e906e1d5ec2f`: Mini DMA run-quality, core-plot, and trace-replay tooling.
+- `019ed1d4-ba94-72b3-9643-917e1a464334`: partial Mini DMA Builder project cache/autofill responsiveness.
+- `019ed1d4-cbee-7700-b5a7-0c6f4760213e`: shared HMP broker diagnostics and stale-lease retry handling.
+- `019ed1d4-e815-7541-96b6-796d2013b7bf`: partial AC susceptibility UI cleanup.
+- `019ed1d4-fd04-78b0-b43f-e469a91c5fc1`: read-only elastocaloric recipe design.
+
+The multi-agent workspace was not isolated as expected, so the resulting patch queue was stabilized as one branch instead of separate worker branches.
+
+## Verification So Far
+
+- `python -m py_compile` passed for touched logger/tooling modules.
+- `git diff --check` passed with only expected Windows CRLF warnings.
+- Mini DMA run-quality/core-plot/trace-replay focused tests: `12 passed`.
+- Shared HMP broker/setup focused tests: `17 passed`.
+- AC susceptibility logger tests: `121 passed`.
+- Combined Mini DMA tooling and shared HMP focused tests: `29 passed`.
+- Mini DMA sample/autofill focused tests: `11 passed`.
+- Mini DMA shared-broker focused tests: `12 passed`.
+- Current Annealing shared-broker focused tests: `26 passed`.
+
+## Artifacts
+
+- AC UI offscreen screenshot: `artifacts/ac_ui_screenshot/ac_logger_workflow_panel.png`.
+
+Offscreen Qt font fallback renders text as boxes on this machine, but layout geometry is visible.
+
+## Important Findings
+
+- Latest inspected Mini DMA run `Ni50Fe25Ga25 3_1 iso-stress_run02` stopped as `wire_break_or_contact_loss` after voltage limit and current collapse: set current about `25.4 mA`, measured current about `0.1 mA`, voltage about `32.054 V`.
+- Run forensics recommends a later controller fix: when measured current collapses near zero at the voltage limit, stop and record a terminal fault trace before any current-limit unwind seek or mechanical correction.
+- AC UI cleanup is a first coherent pass, not a full rewrite.
+- Elastocaloric recipe design recommends tightening the existing `ELASTOCALORIC_EFFECT` scaffold rather than adding another parallel recipe engine.
+
+## Remaining Work
+
+- Add focused tests for the new shared-broker diagnostic helper and stale-lease retry paths.
+- Add tests for Mini DMA Builder project cache hits/cancellation if this partial cache change remains.
+- Add live validation only after the user explicitly authorizes bench work.
+- Implement the Mini DMA controller guard for voltage-limit current collapse before mechanical seek/unwind.
+- Finish elastocaloric recipe behavior/tests and screenshot-check its UI in a dedicated Mini DMA worker.
+- Consider a deeper AC UI rewrite after the user reviews this first pass.

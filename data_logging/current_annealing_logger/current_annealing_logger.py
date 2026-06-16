@@ -32,7 +32,11 @@ from data_logging.data_logger.file_name_builder import composition_warning_state
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING, SharedPowerSupplyBroker
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, SupplyProfile
-from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
+from data_logging.shared_power_supply.protocol import (
+    BrokerJsonClient,
+    broker_failure_diagnostic,
+    start_broker_server,
+)
 from plotting.shared.power_guard import create_experiment_sleep_guard
 
 import numpy as np
@@ -2223,9 +2227,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 last_error = exc
         if snapshot is None or client is None:
             if not self._auto_detect_hmp_port(show_errors=False):
+                detail = (
+                    ""
+                    if last_error is None
+                    else " Last broker error: "
+                    + broker_failure_diagnostic(last_error, context="Current Annealing shared HMP broker")
+                )
                 raise RuntimeError(
                     "No existing shared HMP broker answered, and automatic HMP discovery did not "
                     "find a supported HMP4030/HMP4040 power supply."
+                    + detail
                 )
             self._start_owned_shared_broker()
             connected_port = configured_port
@@ -2541,7 +2552,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _format_shared_broker_start_error(self, port_name: str, exc: Exception) -> str:
         text = str(exc).strip()
         if "Access is denied" in text or "PermissionError" in text:
-            return f"{port_name}: port is busy or access was denied"
+            return (
+                f"{port_name}: "
+                + broker_failure_diagnostic(exc, context="Current Annealing shared HMP broker")
+            )
         if "Unsupported shared HMP response" in text:
             return f"{port_name}: not a supported HMP4030/HMP4040 response"
         return f"{port_name}: {text or exc.__class__.__name__}"

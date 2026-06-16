@@ -22,6 +22,7 @@ def _write_run(run_dir: Path, *, rows: int = 120, stop_reason: str = "recipe_com
                 "stop": {"reason": stop_reason, "detail": "done"},
                 "control_logic": {"version": "2026-06-01.1", "fingerprint": "sha256:test"},
                 "source_control": {"branch": "main", "commit": "abc123"},
+                "heating": {"voltage_limit_v": 5.0},
             }
         ),
         encoding="utf-8",
@@ -36,6 +37,7 @@ def _write_run(run_dir: Path, *, rows: int = 120, stop_reason: str = "recipe_com
                 "stress_mpa",
                 "current_set_mA",
                 "current_measured_mA",
+                "voltage_V",
             ],
         )
         writer.writeheader()
@@ -52,6 +54,7 @@ def _write_run(run_dir: Path, *, rows: int = 120, stop_reason: str = "recipe_com
                     "stress_mpa": stress,
                     "current_set_mA": current,
                     "current_measured_mA": current * 0.95,
+                    "voltage_V": 2.0,
                 }
             )
 
@@ -68,6 +71,11 @@ def test_run_quality_includes_completed_current_loop(tmp_path: Path) -> None:
     assert quality.stress_error_max_abs_mpa == 2.0
     assert quality.current_hold_elapsed_s > 0.0
     assert quality.control_logic_version == "2026-06-01.1"
+    assert quality.stop_classification == "completed"
+    assert quality.stress_error_by_phase["current"]["count"] > 0
+    assert quality.current_hold_window_count == 1
+    assert quality.current_hold_windows[0]["recovered_after_s"] is not None
+    assert "missing:control_trace.csv" in quality.metadata_warnings
 
 
 def test_run_quality_excludes_short_failed_run(tmp_path: Path) -> None:
@@ -91,6 +99,65 @@ def test_run_quality_includes_wire_break_after_useful_sweep_data(tmp_path: Path)
     assert quality.run_type == "normal_measurement"
     assert "stop_reason:wire_break_or_contact_loss" not in quality.exclusion_reasons
     assert "stopped:wire_break_or_contact_loss" in quality.biggest_problems
+    assert quality.stop_classification == "fault_wire_break_or_contact_loss"
+
+
+def test_run_quality_reports_limit_events_and_hold_overshoot(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-limit"
+    _write_run(run_dir)
+    (run_dir / "measurement.csv").write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_target_value,stress_mpa,current_set_mA,current_measured_mA,voltage_V",
+                "0,current,50,62,10,9,2",
+                "1,current_hold,50,60,20,5,4.95",
+                "2,current_hold,50,48,20,5,5.00",
+                "3,current_hold,50,50.5,20,19,2",
+                "4,current,50,50,10,10,2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "control_trace.csv").write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_basis,decision,result,reason",
+                "1.0,current_limit_unwind,stress_mpa,voltage_limit_unwind,current_limit,voltage_limit",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    quality = analyze_run_quality(run_dir, min_measurement_rows=1, min_current_loops=0)
+
+    assert quality.voltage_limit_event_count == 2
+    assert quality.current_compliance_event_count == 2
+    assert len(quality.voltage_current_limit_events) == 2
+    assert quality.current_hold_overshoot_max_mpa == 2.0
+    assert quality.current_hold_recovery_time_max_s == 1.0
+    assert "voltage_limit_events" in quality.biggest_problems
+    assert "current_compliance_events" in quality.biggest_problems
+
+
+def test_run_quality_degrades_with_missing_metadata(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-no-metadata"
+    run_dir.mkdir()
+    (run_dir / "measurement.csv").write_text(
+        "\n".join(
+            [
+                "elapsed_s,automation_phase,automation_target_value,stress_mpa,current_set_mA,current_measured_mA",
+                "0,current,50,51,1,1",
+                "1,current,50,50,2,2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    quality = analyze_run_quality(run_dir, min_measurement_rows=1, min_current_loops=0)
+
+    assert quality.measurement_rows == 2
+    assert "missing:metadata.json" in quality.metadata_warnings
+    assert quality.stop_classification == "unknown"
 
 
 def test_run_quality_writes_cache(tmp_path: Path) -> None:

@@ -3338,7 +3338,7 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert settings_action is not None
         assert settings_action.isVisible() is False
         assert window.pushButton_auto_setup.text() == "Auto-connect hardware"
-        assert window.groupBox_ac_hardware.title() == "Hardware"
+        assert window.groupBox_ac_hardware.title() == "2. Setup and hardware status"
         assert window.ui.groupBox_serial_settings.isHidden()
         assert window.frame_ac_hardware_details.isHidden()
         assert window.pushButton_ac_hardware_details.text() == "Show hardware details"
@@ -3357,8 +3357,8 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert not hasattr(window, "comboBox_ac_psu_backend")
         assert not hasattr(window, "comboBox_ac_psu_port")
         assert not hasattr(window, "comboBox_ac_psu_baud")
-        assert "Instrument setup" in window.groupBox_lcr_settings.title()
-        assert "Experiment plan" in window.groupBox_ac_plan.title()
+        assert "AC susceptibility workflow" in window.groupBox_lcr_settings.title()
+        assert "Measurement plan and live run" in window.groupBox_ac_plan.title()
         assert not hasattr(window, "label_ac_read_interval")
         assert not hasattr(window, "spinBox_ac_read_interval")
     finally:

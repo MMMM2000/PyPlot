@@ -41,7 +41,11 @@ from plotting.shared.utils import ensure_app_theme, install_standard_menu
 from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
 from data_logging.shared_power_supply.bench_guard import identify_hmp_with_blank_retry
 from data_logging.shared_power_supply.driver import HmpSerialDriver
-from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
+from data_logging.shared_power_supply.protocol import (
+    BrokerJsonClient,
+    broker_failure_diagnostic,
+    start_broker_server,
+)
 from data_logging.mini_dma_logger.run_cleanup import (
     MiniDmaRunCleanupCandidate,
     archive_cleanup_candidates,
@@ -1765,6 +1769,48 @@ class ProjectImportResult:
     matched_row: dict[str, Any]
 
 
+@dataclass
+class BuilderProjectCacheEntry:
+    payload: Any
+    suggestions: dict[str, tuple[str, ...]]
+
+
+_BUILDER_PROJECT_CACHE_LOCK = RLock()
+_BUILDER_PROJECT_CACHE: dict[tuple[str, int, int], BuilderProjectCacheEntry] = {}
+_BUILDER_PROJECT_CACHE_LIMIT = 4
+
+
+def _builder_project_cache_key(path: Path) -> tuple[str, int, int]:
+    stat_result = path.stat()
+    try:
+        path_text = str(path.resolve())
+    except Exception:
+        path_text = str(path)
+    return (path_text, int(stat_result.st_mtime_ns), int(stat_result.st_size))
+
+
+def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
+    cache_key = _builder_project_cache_key(path)
+    with _BUILDER_PROJECT_CACHE_LOCK:
+        cached = _BUILDER_PROJECT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    entry = BuilderProjectCacheEntry(
+        payload=payload,
+        suggestions=_project_sample_suggestions_from_payload(payload),
+    )
+    with _BUILDER_PROJECT_CACHE_LOCK:
+        _BUILDER_PROJECT_CACHE[cache_key] = entry
+        stale_keys = [key for key in _BUILDER_PROJECT_CACHE if key[0] == cache_key[0] and key != cache_key]
+        for key in stale_keys:
+            _BUILDER_PROJECT_CACHE.pop(key, None)
+        while len(_BUILDER_PROJECT_CACHE) > _BUILDER_PROJECT_CACHE_LIMIT:
+            oldest_key = next(iter(_BUILDER_PROJECT_CACHE))
+            _BUILDER_PROJECT_CACHE.pop(oldest_key, None)
+    return entry
+
+
 def _project_match_score_for_sample(
     row: Mapping[str, Any],
     *,
@@ -2991,23 +3037,32 @@ class BuilderProjectImportWorker(QtCore.QObject):
         self.microwire = microwire
         self.specimen = specimen
         self.request_key = request_key
+        self._cancel_event = Event()
+
+    @QtCore.pyqtSlot()
+    def cancel(self) -> None:
+        self._cancel_event.set()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
         try:
             path = self.path
+            if self._cancel_event.is_set():
+                return
             if not path.exists():
                 self.failed.emit(path, self.request_key, "Builder project path is saved, but the file was not found.")
                 return
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                cache_entry = _read_builder_project_cache_entry(path)
             except Exception as exc:
                 self.failed.emit(path, self.request_key, f"Failed to read saved project file: {exc}")
                 return
-            self.suggestions.emit(path, self.request_key, _project_sample_suggestions_from_payload(payload))
+            if self._cancel_event.is_set():
+                return
+            self.suggestions.emit(path, self.request_key, cache_entry.suggestions)
             try:
                 match = _find_project_sample_in_payload(
-                    payload,
+                    cache_entry.payload,
                     path,
                     composition=self.composition,
                     microwire=self.microwire,
@@ -3016,6 +3071,8 @@ class BuilderProjectImportWorker(QtCore.QObject):
                 )
             except Exception as exc:
                 self.failed.emit(path, self.request_key, f"Failed to match current sample in project file: {exc}")
+                return
+            if self._cancel_event.is_set():
                 return
             if match is None:
                 self.no_match.emit(path, self.request_key)
@@ -4357,7 +4414,12 @@ class SharedBrokerSupplyController:
     def connect(self) -> None:
         if self._client is None:
             self._client = BrokerJsonClient(host=self.host, port=self.port)
-        self._client.request("snapshot")
+        try:
+            self._client.request("snapshot")
+        except Exception as exc:
+            raise RuntimeError(
+                broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+            ) from exc
         self._connected = True
 
     def disconnect(self) -> None:
@@ -4456,6 +4518,14 @@ class SharedBrokerSupplyController:
         self._leases[channel] = lease_id
         return lease_id
 
+    @staticmethod
+    def _looks_like_stale_lease(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "valid lease" in text or "lease mismatch" in text
+
+    def _forget_lease(self, channel: int) -> None:
+        self._leases.pop(int(channel), None)
+
     def current_resolution_mA(self) -> float:
         return max(0.001, float(self.profile.get("current_resolution_mA", 1.0)))
 
@@ -4480,13 +4550,27 @@ class SharedBrokerSupplyController:
     ) -> None:
         with self._io_lock:
             lease_id = self._lease_channel(channel)
-            self._require_client().configure_channel(
-                channel=int(channel),
-                lease_id=lease_id,
-                voltage_v=max(0.0, float(voltage_v)),
-                current_a=max(0.0, float(current_a)),
-                output_on=bool(output_on),
-            )
+            try:
+                self._require_client().configure_channel(
+                    channel=int(channel),
+                    lease_id=lease_id,
+                    voltage_v=max(0.0, float(voltage_v)),
+                    current_a=max(0.0, float(current_a)),
+                    output_on=bool(output_on),
+                )
+            except Exception as exc:
+                if not self._looks_like_stale_lease(exc):
+                    raise RuntimeError(
+                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                    ) from exc
+                self._forget_lease(channel)
+                self._require_client().configure_channel(
+                    channel=int(channel),
+                    lease_id=self._lease_channel(channel),
+                    voltage_v=max(0.0, float(voltage_v)),
+                    current_a=max(0.0, float(current_a)),
+                    output_on=bool(output_on),
+                )
 
     def initialize_output(
         self,
@@ -4510,22 +4594,46 @@ class SharedBrokerSupplyController:
         if channel <= 0:
             raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
         with self._io_lock:
-            self._require_client().set_current(
-                channel=channel,
-                lease_id=self._lease_channel(channel),
-                current_mA=self.quantize_current_mA(current_mA),
-            )
+            try:
+                self._require_client().set_current(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    current_mA=self.quantize_current_mA(current_mA),
+                )
+            except Exception as exc:
+                if not self._looks_like_stale_lease(exc):
+                    raise RuntimeError(
+                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                    ) from exc
+                self._forget_lease(channel)
+                self._require_client().set_current(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    current_mA=self.quantize_current_mA(current_mA),
+                )
 
     def output_on(self) -> None:
         channel = self.selected_channel()
         if channel <= 0:
             raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
         with self._io_lock:
-            self._require_client().set_output(
-                channel=channel,
-                lease_id=self._lease_channel(channel),
-                output_on=True,
-            )
+            try:
+                self._require_client().set_output(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    output_on=True,
+                )
+            except Exception as exc:
+                if not self._looks_like_stale_lease(exc):
+                    raise RuntimeError(
+                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                    ) from exc
+                self._forget_lease(channel)
+                self._require_client().set_output(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    output_on=True,
+                )
 
     def output_off(self) -> None:
         channel = self.selected_channel()
@@ -4535,7 +4643,19 @@ class SharedBrokerSupplyController:
         if not lease_id:
             return
         with self._io_lock:
-            self._require_client().set_output(channel=channel, lease_id=lease_id, output_on=False)
+            try:
+                self._require_client().set_output(channel=channel, lease_id=lease_id, output_on=False)
+            except Exception as exc:
+                if not self._looks_like_stale_lease(exc):
+                    raise RuntimeError(
+                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                    ) from exc
+                self._forget_lease(channel)
+                self._require_client().set_output(
+                    channel=channel,
+                    lease_id=self._lease_channel(channel),
+                    output_on=False,
+                )
 
     def output_state(self, channel: int | None = None) -> bool | None:
         target_channel = self.selected_channel() if channel is None else int(channel)
@@ -4550,14 +4670,30 @@ class SharedBrokerSupplyController:
         with self._io_lock:
             lease_id = self._lease_channel(channel)
             client = self._require_client()
-            client.set_output(channel=channel, lease_id=lease_id, output_on=False)
-            client.configure_channel(
-                channel=channel,
-                lease_id=lease_id,
-                voltage_v=max(0.0, float(reset_voltage_v)),
-                current_a=max(0.0, float(reset_current_mA)) / 1000.0,
-                output_on=False,
-            )
+            try:
+                client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+                client.configure_channel(
+                    channel=channel,
+                    lease_id=lease_id,
+                    voltage_v=max(0.0, float(reset_voltage_v)),
+                    current_a=max(0.0, float(reset_current_mA)) / 1000.0,
+                    output_on=False,
+                )
+            except Exception as exc:
+                if not self._looks_like_stale_lease(exc):
+                    raise RuntimeError(
+                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                    ) from exc
+                self._forget_lease(channel)
+                lease_id = self._lease_channel(channel)
+                client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+                client.configure_channel(
+                    channel=channel,
+                    lease_id=lease_id,
+                    voltage_v=max(0.0, float(reset_voltage_v)),
+                    current_a=max(0.0, float(reset_current_mA)) / 1000.0,
+                    output_on=False,
+                )
 
     def measure(self) -> dict[str, float | None]:
         channel = self.selected_channel()
@@ -8308,7 +8444,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_log_name.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_log_dir.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_project_path.editingFinished.connect(
-            lambda: self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+            lambda: self._auto_import_builder_project_if_possible(
+                update_identity=False,
+                quiet=True,
+                async_load=True,
+            )
         )
         self.edit_project_path.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_fabrication_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
