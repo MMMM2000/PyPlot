@@ -16239,7 +16239,7 @@ def test_current_sweep_hold_fast_recovery_threshold_stays_at_default_when_hold_c
         _close_test_window(window)
 
 
-def test_current_sweep_hold_large_error_keeps_multi_step_correction_when_worsening(
+def test_current_sweep_hold_large_error_clamps_to_one_tic_when_worsening(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -16317,7 +16317,7 @@ def test_current_sweep_hold_large_error_keeps_multi_step_correction_when_worseni
         assert moves, window.log_output.toPlainText()
         target_mm, effective_mm = moves[-1]
         commanded_mm = abs(target_mm if effective_mm is None else effective_mm)
-        assert commanded_mm > window._motor_step_mm()
+        assert commanded_mm == pytest.approx(window._motor_step_mm())
     finally:
         _close_test_window(window)
 
@@ -16488,7 +16488,7 @@ def test_current_sweep_hold_unstable_response_decays_after_stable_samples(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_moving_away_keeps_multi_step_correction_when_worsening(
+def test_current_sweep_hold_moving_away_clamps_to_one_tic_when_worsening(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -16564,7 +16564,7 @@ def test_current_sweep_hold_moving_away_keeps_multi_step_correction_when_worseni
         assert moves, window.log_output.toPlainText()
         target_mm, effective_mm = moves[-1]
         commanded_mm = abs(target_mm if effective_mm is None else effective_mm)
-        assert commanded_mm > window._motor_step_mm()
+        assert commanded_mm == pytest.approx(window._motor_step_mm())
     finally:
         _close_test_window(window)
 
@@ -16874,6 +16874,177 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
         assert effective_mm is not None
         correction_mm = abs(effective_mm - 6.7)
         assert correction_mm <= (5.0 / 224.502066) + 1e-9
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_improving_recovery_can_grow_above_one_tic(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        20000.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    previous_position_mm = 6.70000
+    current_position_mm = previous_position_mm + window._motor_step_mm()
+    window._current_position_mm = current_position_mm
+    window._effective_position_mm = current_position_mm
+    window._last_move_target_mm = current_position_mm
+    window._last_effective_move_target_mm = current_position_mm
+    window._last_motion_command_time_s = now_s - 2.0
+    window._last_motion_expected_complete_time_s = now_s - 2.0
+    window._seek_last_error_by_key[seek_key] = 20.0
+    window._seek_last_value_by_key[seek_key] = 30.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 1.0
+    window._seek_last_filtered_value_by_key[seek_key] = 30.0
+    window._seek_last_effective_position_by_key[seek_key] = previous_position_mm
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = now_s - 1.0
+    window._seek_post_move_sample_count_by_key[seek_key] = 2
+    load_g = mini_dma_mod.load_g_from_stress_mpa(32.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(7):
+        timestamp_s = now_s - 1.2 + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves
+        _target_mm, effective_mm = moves[-1]
+        assert effective_mm is not None
+        correction_mm = abs(float(effective_mm) - current_position_mm)
+        assert correction_mm > window._motor_step_mm() * 1.25
+        assert correction_mm == pytest.approx(window._motor_step_mm() * 1.6)
+        assert trace_rows[-1]["reason"] == "gated;current_hold_improving_recovery"
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_worsening_recovery_clamps_back_to_one_tic(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        300.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    previous_position_mm = 6.70000
+    current_position_mm = previous_position_mm + window._motor_step_mm() * 4.0
+    window._current_position_mm = current_position_mm
+    window._effective_position_mm = current_position_mm
+    window._last_move_target_mm = current_position_mm
+    window._last_effective_move_target_mm = current_position_mm
+    window._last_motion_command_time_s = now_s - 2.0
+    window._last_motion_expected_complete_time_s = now_s - 2.0
+    window._seek_last_error_by_key[seek_key] = 10.0
+    window._seek_last_value_by_key[seek_key] = 40.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 1.0
+    window._seek_last_filtered_value_by_key[seek_key] = 40.0
+    window._seek_last_effective_position_by_key[seek_key] = previous_position_mm
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = now_s - 1.0
+    load_g = mini_dma_mod.load_g_from_stress_mpa(37.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(7):
+        timestamp_s = now_s - 1.2 + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves
+        _target_mm, effective_mm = moves[-1]
+        assert effective_mm is not None
+        correction_mm = abs(float(effective_mm) - current_position_mm)
+        assert correction_mm == pytest.approx(window._motor_step_mm())
+        assert trace_rows[-1]["reason"] == "gated;current_hold_worsened_single_step"
     finally:
         _close_test_window(window)
 
@@ -19961,7 +20132,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "unstable-current-hold-damping"
+        assert first_logic["profile"] == "adaptive-current-hold-recovery"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
@@ -19971,6 +20142,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
         assert "conservative_current_hold_response_stiffness" in first_logic["features"]
         assert "current_hold_unstable_response_damps_to_single_motor_steps" in first_logic["features"]
+        assert "current_hold_improving_recovery_scales_cautiously" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]

@@ -92,8 +92,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-16.1"
-CONTROL_LOGIC_PROFILE = "unstable-current-hold-damping"
+CONTROL_LOGIC_VERSION = "2026-06-16.2"
+CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -115,6 +115,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_large_error_bypasses_persistence",
     "current_hold_moving_away_bypasses_persistence",
     "current_hold_unstable_response_damps_to_single_motor_steps",
+    "current_hold_improving_recovery_scales_cautiously",
     "current_hold_large_error_not_masked_by_noise",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
@@ -549,6 +550,9 @@ SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
+SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH = 1.6
+SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH = 2.0
+SERVO_CURRENT_SWEEP_HOLD_IMPROVING_REMAINING_FRACTION = 0.35
 SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRAIN_PCT = 0.08
 SERVO_ISO_CURRENT_STRESS_RAMP_MAX_COMMAND_STRESS_MPA = 15.0
 SERVO_ISO_CURRENT_STRESS_RAMP_FEEDFORWARD_INTERVAL_S = 0.3
@@ -15461,6 +15465,86 @@ class MainWindow(QtWidgets.QMainWindow):
         violent_reversal_margin = max(abs(float(tolerance)) * 3.0, previous_abs * 0.5)
         return current_abs > previous_abs + violent_reversal_margin
 
+    def _current_sweep_hold_improving_recovery_step_mm(
+        self,
+        basis: str,
+        previous_error: float | None,
+        error_value: float,
+        tolerance: float,
+        base_step_mm: float,
+        current_effective_position_mm: float,
+        filtered_signal: ScaleControlSignal | None,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> float | None:
+        if (
+            self._automation_phase != "current_hold"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or previous_error is None
+            or filtered_signal is None
+            or self._current_sweep_hold_unstable_response_active(seek_key)
+        ):
+            return None
+        if float(previous_error) * float(error_value) <= 0.0:
+            return None
+        previous_abs = abs(float(previous_error))
+        current_abs = abs(float(error_value))
+        if previous_abs <= 0.0 or current_abs <= 0.0:
+            return None
+        improvement = previous_abs - current_abs
+        improvement_floor = max(
+            abs(float(tolerance)) * 0.2,
+            abs(float(filtered_signal.noise)) * 0.5,
+            1e-9,
+        )
+        if improvement <= improvement_floor:
+            return None
+        large_error_floor = max(
+            self._current_sweep_hold_entry_band_for_basis(tolerance),
+            self._current_sweep_hold_min_band_for_basis(
+                basis,
+                self._current_sweep_hold_min_pause_stress_mpa(),
+            ),
+        )
+        if current_abs <= large_error_floor:
+            return None
+        previous_position = self._seek_last_effective_position_by_key.get(seek_key)
+        if previous_position is None:
+            return None
+        last_step_mm = abs(float(current_effective_position_mm) - float(previous_position))
+        motor_step_mm = self._motor_step_mm()
+        if last_step_mm < motor_step_mm * 0.5:
+            return None
+        observed_sensitivity = improvement / max(last_step_mm, 1e-12)
+        if not math.isfinite(observed_sensitivity) or observed_sensitivity <= 0.0:
+            return None
+        improvement_fraction = improvement / previous_abs
+        growth = (
+            SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH
+            if improvement_fraction >= 0.25
+            else SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH
+        )
+        response_cap_value = min(
+            current_abs * SERVO_CURRENT_SWEEP_HOLD_IMPROVING_REMAINING_FRACTION,
+            self._current_sweep_basis_value_from_stress_cap(
+                basis,
+                self._current_sweep_hold_correction_stress_mpa(),
+            )
+            or current_abs,
+        )
+        response_cap_mm = response_cap_value / observed_sensitivity
+        hard_cap_mm = min(
+            self._current_sweep_max_correction_mm(),
+            self._current_sweep_hold_adaptive_command_cap_mm(),
+            max(motor_step_mm, response_cap_mm),
+        )
+        if hard_cap_mm <= motor_step_mm:
+            return None
+        next_step_mm = min(hard_cap_mm, max(abs(float(base_step_mm)), last_step_mm * growth))
+        if next_step_mm <= abs(float(base_step_mm)) + motor_step_mm * 0.25:
+            return None
+        return max(motor_step_mm, next_step_mm)
+
     def _current_sweep_travel_limit_exceeded(
         self,
         seek_key: tuple[str, int, float],
@@ -16806,6 +16890,7 @@ class MainWindow(QtWidgets.QMainWindow):
             > self._zero_return_acceptance_tolerance_g()
         )
         previous_error = self._seek_last_error_by_key.get(seek_key)
+        current_hold_correction_reason: str | None = None
         preliminary_speed_mm_s = self._seek_speed_mm_s(
             delta_value,
             effective_tolerance,
@@ -16883,6 +16968,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._note_current_sweep_hold_instability(seek_key)
                 if large_current_hold_overshoot:
                     self._note_current_sweep_hold_instability(seek_key)
+                current_hold_correction_reason = "current_hold_reversal_single_step"
             if (
                 filtered_signal is not None
                 and self._is_current_sweep_mode(self._automation_name)
@@ -16986,6 +17072,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._note_current_sweep_hold_instability(seek_key)
                     if count >= 2:
                         self._note_current_sweep_hold_instability(seek_key)
+                    current_hold_correction_reason = "current_hold_worsened_single_step"
                 travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
                 self._log(
                     f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
@@ -17002,6 +17089,16 @@ class MainWindow(QtWidgets.QMainWindow):
             and abs(float(filtered_signal.slope_per_s)) >= self._current_sweep_hold_min_slope_for_basis(basis)
         )
         if (
+            current_hold_correction_reason
+            in {"current_hold_reversal_single_step", "current_hold_worsened_single_step"}
+        ):
+            nudge_mm = min(nudge_mm, self._motor_step_mm())
+            if current_hold_correction_reason == "current_hold_worsened_single_step":
+                self._log(
+                    "Closed-loop response worsened after the previous correction; "
+                    "using a protective single-step correction."
+                )
+        elif (
             protective_single_step
             and not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
             and not current_hold_moving_away_fast
@@ -17013,9 +17110,24 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if self._current_sweep_hold_unstable_response_active(seek_key):
             nudge_mm = min(nudge_mm, self._motor_step_mm())
+            current_hold_correction_reason = "current_hold_unstable_single_step"
             self._log(
                 "Current-hold response is unstable; damping load/stress correction to one motor step."
             )
+        if current_hold_correction_reason is None:
+            improving_step_mm = self._current_sweep_hold_improving_recovery_step_mm(
+                basis,
+                previous_error,
+                delta_value,
+                acceptance_tolerance,
+                nudge_mm,
+                current_effective_tensile_position_mm,
+                filtered_signal,
+                seek_key=seek_key,
+            )
+            if improving_step_mm is not None:
+                nudge_mm = improving_step_mm
+                current_hold_correction_reason = "current_hold_improving_recovery"
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
@@ -17150,6 +17262,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis=basis,
                 cruise_mode=cruise_mode,
             )
+        correction_reason = "cruise" if cruise_mode else "gated"
+        if current_hold_correction_reason is not None:
+            correction_reason = f"{correction_reason};{current_hold_correction_reason}"
         if not self._move_to_position_mm(
             target_mm,
             chain_from_last_target=chain_from_last_target,
@@ -17177,6 +17292,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_mm=target_mm,
                 effective_target_mm=effective_target_mm,
                 result="move_blocked",
+                reason=correction_reason,
             )
             return False
         self._write_control_trace(
@@ -17200,7 +17316,7 @@ class MainWindow(QtWidgets.QMainWindow):
             target_mm=target_mm,
             effective_target_mm=effective_target_mm,
             result="move_sent",
-            reason="cruise" if cruise_mode else "gated",
+            reason=correction_reason,
         )
         self._seek_last_error_by_key[seek_key] = delta_value
         self._seek_last_value_by_key[seek_key] = current_value
@@ -19143,6 +19259,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_adaptive_large_error_mpa": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA,
                 "current_hold_adaptive_max_command_strain_pct": (
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+                ),
+                "current_hold_improving_step_growth": SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH,
+                "current_hold_improving_strong_step_growth": (
+                    SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH
+                ),
+                "current_hold_improving_remaining_fraction": (
+                    SERVO_CURRENT_SWEEP_HOLD_IMPROVING_REMAINING_FRACTION
                 ),
                 "current_hold_adaptive_min_samples": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES,
                 "current_hold_unstable_level": SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL,
