@@ -350,6 +350,10 @@ through the broker, reads back only that channel, and turns off/releases only
 that leased channel when the sweep stops or fails. The detached serial watchdog
 is not armed in broker mode because it cannot safely address a broker lease;
 the worker shutdown path performs the broker channel shutdown/release instead.
+Broker connection, stale lease, wrong-channel, and channel-limit failures use
+the shared broker diagnostic wording used by the other HMP-backed apps, so the
+run log and failure dialog should point to the operator action instead of only
+showing the raw TCP or lease exception.
 The broker channel starts as **Select channel...** on first use, and a sweep will
 not start until the operator explicitly chooses the wired HMP channel. On the
 current shared bench, choose `CH1` for AC susceptibility; Mini DMA uses `CH3`

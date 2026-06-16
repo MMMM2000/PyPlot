@@ -1052,6 +1052,36 @@ def test_shared_broker_current_source_leases_turns_off_and_releases_only_channel
     ]
 
 
+def test_shared_broker_current_source_reports_operator_diagnostics() -> None:
+    class FailingBrokerClient:
+        def __init__(self, *, host: str, port: int, timeout_s: float) -> None:
+            self.host = host
+            self.port = port
+            self.timeout_s = timeout_s
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            return {"snapshot": {}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            return {"lease_id": "lease-stale"}
+
+        def configure_channel(self, **_payload: object) -> None:
+            raise RuntimeError("valid lease required for CH1")
+
+    source = sweep.SharedBrokerCurrentSource(
+        host="127.0.0.1",
+        port=8765,
+        channel=1,
+        voltage_limit_v=32.0,
+        client_factory=FailingBrokerClient,
+    )
+
+    source.connect()
+
+    with pytest.raises(RuntimeError, match="AC shared HMP broker: stale channel lease detected"):
+        source.initialize(voltage_limit_v=32.0)
+
+
 def test_run_ac_sweep_writes_bounded_lcr_debug_sidecar(tmp_path: Path) -> None:
     class FakeLcr:
         def __init__(self) -> None:
