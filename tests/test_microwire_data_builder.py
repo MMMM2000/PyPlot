@@ -2380,6 +2380,16 @@ def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
     assert metadata.measurement_id
 
 
+def test_filename_parser_extracts_kosice_dat_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "Ni44Fe27Ga23Cu3Co3_1-5.dat"
+    path.write_text("Cycle\tIset_mA\tIreal_mA\tVoltage_V\tResistance_Ohm\tPower_W\n")
+    metadata = _metadata_from_path(path)
+    assert metadata.composition_token == "Ni44Fe27Ga23Cu3Co3"
+    assert metadata.draw_x == 1
+    assert metadata.piece_y == 5
+    assert metadata.setpoint_mA is None
+
+
 def test_split_microwire_key_rejects_non_integral_or_boolean_indices() -> None:
     assert _split_microwire_key(("Ni50Fe27Ga23", 3.25, 4, None)) is None
     assert _split_microwire_key(("Ni50Fe27Ga23", True, 4, None)) is None
@@ -2412,6 +2422,56 @@ def test_annealing_loader_and_sanity_check(tmp_path: Path) -> None:
     expected_A = [0.1, 0.2, 0.3]
     assert df["I_A"].tolist() == pytest.approx(expected_A)
     assert df["I_mA"].tolist() == pytest.approx([value * 1_000.0 for value in expected_A])
+    ok, error = _resistance_sanity_check(df)
+    assert ok is True
+    assert error is not None
+    assert error < 1e-6
+
+
+def test_annealing_loader_reads_kosice_cycle_dat(tmp_path: Path) -> None:
+    path = tmp_path / "Ni44Fe27Ga23Cu3Co3_1-5.dat"
+    path.write_text(
+        "\n".join(
+            [
+                "Cycle\tIset_mA\tIreal_mA\tVoltage_V\tResistance_Ohm\tPower_W",
+                "1\t1.00\t1.00\t0.09300\t93.00000\t0.00009",
+                "1\t2.00\t1.90\t0.20700\t108.94737\t0.00039",
+                "2\t3.00\t2.90\t0.31500\t108.62069\t0.00091",
+            ]
+        )
+        + "\n"
+    )
+    df = _load_annealing(path)
+    assert list(df.columns) == ["I_A", "V_V", "R_ohm", "I_mA", "Cycle"]
+    assert df["I_A"].tolist() == pytest.approx([0.001, 0.0019, 0.0029])
+    assert df["I_mA"].tolist() == pytest.approx([1.0, 1.9, 2.9])
+    assert df["R_ohm"].tolist() == pytest.approx([93.0, 108.94737, 108.62069])
+    assert df["Cycle"].tolist() == pytest.approx([1.0, 1.0, 2.0])
+    ok, error = _resistance_sanity_check(df)
+    assert ok is True
+    assert error is not None
+    assert error < 1e-6
+
+
+def test_annealing_loader_reads_kosice_legacy_four_column_dat(tmp_path: Path) -> None:
+    path = tmp_path / "Ni46Fe27Ga23Cu2Co2-2_1-No1.dat"
+    path.write_text(
+        "\n".join(
+            [
+                "ID",
+                "Iset(mA)      Ireal (mA)    Ureal (mA)    R(ohm)",
+                " 0.001         0.0013        0.413         317.692307692308",
+                " 0.002         0.0022        0.772         350.909090909091",
+                " 0.003         0.0032        1.1           343.75",
+            ]
+        )
+        + "\n"
+    )
+    df = _load_annealing(path)
+    assert list(df.columns) == ["I_A", "V_V", "R_ohm", "I_mA"]
+    assert df["I_A"].tolist() == pytest.approx([0.0013, 0.0022, 0.0032])
+    assert df["I_mA"].tolist() == pytest.approx([1.3, 2.2, 3.2])
+    assert df["R_ohm"].tolist() == pytest.approx([317.692307692308, 350.909090909091, 343.75])
     ok, error = _resistance_sanity_check(df)
     assert ok is True
     assert error is not None
