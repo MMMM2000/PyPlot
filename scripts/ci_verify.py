@@ -39,6 +39,20 @@ def _repo_path(raw: str) -> Path:
     return path.resolve()
 
 
+def _safe_path_token(raw: str) -> str:
+    token = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in raw)
+    return token[:48] or "run"
+
+
+def _temp_root_for_run(run_id: str, run_root: Path) -> Path:
+    if os.name == "nt":
+        # tests/conftest.py deliberately falls back to C:/tmp when the temp path
+        # is long. Use a short, ignored, workspace-local per-run root up front
+        # so Excel/xlsxwriter tests do not collide in a shared temp directory.
+        return REPO_ROOT / "artifacts" / "t" / _safe_path_token(run_id)
+    return run_root / "temp"
+
+
 def _has_pytest_target(args: Iterable[str]) -> bool:
     skip_next = False
     value_options = {
@@ -126,7 +140,7 @@ def prepare_environment(args: argparse.Namespace) -> tuple[dict[str, str], Path]
     run_id = args.run_id or _default_run_id()
     run_root = artifacts_dir / run_id
 
-    temp_root = run_root / "temp"
+    temp_root = _temp_root_for_run(run_id, run_root)
     basetemp = run_root / "pytest-basetemp"
     qsettings_root = run_root / "qsettings"
     builder_root = run_root / "microwire-builder-storage"
