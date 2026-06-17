@@ -4256,7 +4256,7 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         window.spin_current_sweep_step_mA.setValue(1.0)
         window.spin_current_sweep_fatigue_cycles.setValue(3)
         window.check_current_sweep_hold_on_error.setChecked(True)
-        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating.setChecked(False)
 
         steps, summary, interval_ms = window._build_automation_recipe()
 
@@ -4290,7 +4290,48 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         _close_test_window(window)
 
 
-def test_iso_stress_fatigue_ui_hides_ladder_and_preheat_controls(tmp_path: Path, qtbot) -> None:
+def test_iso_stress_fatigue_recipe_can_start_with_first_overheating(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+        window.spin_current_sweep_target_start.setValue(150.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(5.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(60.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.spin_current_sweep_fatigue_cycles.setValue(2)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(40.0)
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        set_current_steps = [step for step in steps if step.action == "set_current"]
+        ramp_steps = [step for step in steps if step.action == "ramp_target"]
+        sweep_steps = [step for step in steps if step.action == "sweep_current"]
+
+        assert [step.note for step in set_current_steps] == ["first_overheating", "1", "2"]
+        assert [step.note for step in ramp_steps] == ["first_overheating", "1", "2"]
+        assert [step.note for step in sweep_steps] == ["first_overheating", "first_overheating", "1", "1", "2", "2"]
+        assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps[:2]] == [
+            (pytest.approx(1.0), pytest.approx(40.0)),
+            (pytest.approx(40.0), pytest.approx(1.0)),
+        ]
+        assert ramp_steps[0].target_start_value == pytest.approx(0.0)
+        assert ramp_steps[0].target_end_value == pytest.approx(20.0)
+        assert ramp_steps[1].target_start_value == pytest.approx(20.0)
+        assert ramp_steps[1].target_end_value == pytest.approx(150.0)
+        assert "First overheating enabled" in summary
+        assert "40 mA" in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_stress_fatigue_ui_hides_ladder_and_keeps_preheat_controls(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
         mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
@@ -4305,8 +4346,12 @@ def test_iso_stress_fatigue_ui_hides_ladder_and_preheat_controls(tmp_path: Path,
         assert window.label_current_sweep_target_step.isHidden() is True
         assert window.label_current_sweep_fatigue_section.isHidden() is False
         assert window.spin_current_sweep_fatigue_cycles.isHidden() is False
-        assert window.check_current_sweep_first_overheating.isHidden() is True
-        assert window.label_current_sweep_first_overheating_section.isHidden() is True
+        assert window.check_current_sweep_first_overheating.isHidden() is False
+        assert window.label_current_sweep_first_overheating_section.isHidden() is False
+        assert window.row_current_sweep_first_overheating_target.isHidden() is True
+        window.check_current_sweep_first_overheating.setChecked(True)
+        assert window.row_current_sweep_first_overheating_target.isHidden() is False
+        assert window.check_current_sweep_first_overheating_use_normal_end.isHidden() is False
 
         stress_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
         window.combo_recipe_mode.setCurrentIndex(stress_index)
@@ -19980,6 +20025,14 @@ def test_iso_stress_fatigue_recipe_filename_is_concise_and_descriptive(tmp_path:
         assert window._suggest_recipe_filename() == (
             "iso-stress-fatigue_setup20MPa_stress150MPa_100cycles_current1-60mA_1mAps_hold.recipe.json"
         )
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_first_overheating_target_mpa.setValue(20.0)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(40.0)
+        assert window._suggest_recipe_filename() == (
+            "iso-stress-fatigue_setup20MPa_stress150MPa_100cycles_current1-60mA_1mAps_hold_"
+            "firstheat20MPa_firstmax40mA.recipe.json"
+        )
     finally:
         _close_test_window(window)
 
@@ -20082,13 +20135,14 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         assert current_sweep["basis"] == mini_dma_mod.HSW_BASIS_STRESS_MPA
         assert current_sweep["target_start"] == pytest.approx(150.0)
         assert current_sweep["fatigue_cycles"] == 12
-        assert current_sweep["first_overheating"] is False
+        assert current_sweep["first_overheating"] is True
 
         window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
         window.spin_current_sweep_target_start.setValue(50.0)
         window.spin_current_sweep_fatigue_cycles.setValue(1)
         window.spin_current_sweep_end_mA.setValue(5.0)
         window.check_current_sweep_hold_on_error.setChecked(False)
+        window.check_current_sweep_first_overheating.setChecked(False)
 
         window._load_recipe_from_path(recipe_path)
 
@@ -20097,7 +20151,7 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         assert window.spin_current_sweep_fatigue_cycles.value() == 12
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(60.0)
         assert window.check_current_sweep_hold_on_error.isChecked() is True
-        assert window.check_current_sweep_first_overheating.isChecked() is False
+        assert window.check_current_sweep_first_overheating.isChecked() is True
     finally:
         _close_test_window(window)
 

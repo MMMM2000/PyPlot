@@ -17706,16 +17706,11 @@ class MainWindow(QtWidgets.QMainWindow):
         fatigue_mode = mode == CURRENT_SWEEP_FATIGUE
         current_sweep_mode = self._is_current_sweep_mode(mode)
         if hasattr(self, "label_current_sweep_first_overheating_section"):
-            self.label_current_sweep_first_overheating_section.setVisible(
-                current_sweep_mode and not fatigue_mode
-            )
+            self.label_current_sweep_first_overheating_section.setVisible(current_sweep_mode)
         if hasattr(self, "check_current_sweep_first_overheating"):
-            self.check_current_sweep_first_overheating.setVisible(
-                current_sweep_mode and not fatigue_mode
-            )
+            self.check_current_sweep_first_overheating.setVisible(current_sweep_mode)
         first_overheating_enabled = (
             current_sweep_mode
-            and not fatigue_mode
             and self.check_current_sweep_first_overheating.isChecked()
         )
         first_overheating_current_editable = (
@@ -19996,10 +19991,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
-                "first_overheating": (
-                    self.check_current_sweep_first_overheating.isChecked()
-                    and str(self.combo_recipe_mode.currentData() or "") != CURRENT_SWEEP_FATIGUE
-                ),
+                "first_overheating": self.check_current_sweep_first_overheating.isChecked(),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
                 ),
@@ -21308,6 +21300,12 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_number_token(self.spin_current_sweep_end_mA.value())
             current_rate = self._recipe_number_token(self.spin_current_sweep_step_mA.value())
             flags = ["hold"] if self.check_current_sweep_hold_on_error.isChecked() else []
+            if self.check_current_sweep_first_overheating.isChecked():
+                preheat = self._recipe_number_token(self.spin_current_sweep_first_overheating_target_mpa.value())
+                flags.append(f"firstheat{preheat}MPa")
+                if not self.check_current_sweep_first_overheating_use_normal_end.isChecked():
+                    first_current = self._recipe_number_token(self.spin_current_sweep_first_overheating_end_mA.value())
+                    flags.append(f"firstmax{first_current}mA")
             flag_text = "" if not flags else "_" + "_".join(flags)
             return (
                 f"iso-stress-fatigue_setup{setup}MPa_stress{target}MPa_"
@@ -21441,10 +21439,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "mid_correction_stress_mpa": float(self.spin_current_sweep_mid_correction_stress_mpa.value()),
                 "near_correction_stress_mpa": float(self.spin_current_sweep_near_correction_stress_mpa.value()),
                 "return_target": bool(self.check_current_sweep_return_target.isChecked()),
-                "first_overheating": bool(
-                    self.check_current_sweep_first_overheating.isChecked()
-                    and mode != CURRENT_SWEEP_FATIGUE
-                ),
+                "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
                 ),
@@ -24940,10 +24935,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
-            first_overheating_enabled = (
-                self.check_current_sweep_first_overheating.isChecked()
-                and not is_fatigue_recipe
-            )
+            first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
             first_overheating_current_end = (
                 current_end
@@ -24999,6 +24991,36 @@ class MainWindow(QtWidgets.QMainWindow):
                         )
                     )
 
+            if first_overheating_enabled:
+                steps.append(
+                    AutomationStep(
+                        "set_current",
+                        target_value=first_overheating_target_mpa,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        current_mA=current_start,
+                        note="first_overheating",
+                    )
+                )
+                steps.append(
+                    AutomationStep(
+                        "ramp_target",
+                        target_value=first_overheating_target_mpa,
+                        target_start_value=previous_target,
+                        target_end_value=first_overheating_target_mpa,
+                        target_ramp_rate_value_s=target_ramp_rate,
+                        basis=HSW_BASIS_STRESS_MPA,
+                        note="first_overheating",
+                    )
+                )
+                _append_current_sweep_plateau(
+                    target=first_overheating_target_mpa,
+                    plateau_basis=HSW_BASIS_STRESS_MPA,
+                    note="first_overheating",
+                    plateau_current_end_mA=first_overheating_current_end,
+                )
+                if basis == HSW_BASIS_STRESS_MPA:
+                    previous_target = first_overheating_target_mpa
+
             if is_fatigue_recipe:
                 target = target_start
                 for cycle_index in range(1, fatigue_cycles + 1):
@@ -25037,39 +25059,19 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"resume inside {current_hold_resume_factor:.2f}x for "
                         f"{current_hold_resume_stable_s:.2f} s."
                     )
+                if first_overheating_enabled:
+                    summary += (
+                        " First overheating enabled: "
+                        f"{first_overheating_target_mpa:.4f} MPa preheat target before the fatigue cycles."
+                    )
+                    if not self.check_current_sweep_first_overheating_use_normal_end.isChecked():
+                        summary += (
+                            f" First overheating uses {_format_compact_unit(first_overheating_current_end, 'mA', decimals=2)} "
+                            "as its current maximum."
+                        )
                 summary += " Each cycle sweeps current up and back at the same stress target."
                 summary += self._recipe_setup_summary_sentence()
                 return steps, summary, control_interval_ms
-
-            if first_overheating_enabled:
-                steps.append(
-                    AutomationStep(
-                        "set_current",
-                        target_value=first_overheating_target_mpa,
-                        basis=HSW_BASIS_STRESS_MPA,
-                        current_mA=current_start,
-                        note="first_overheating",
-                    )
-                )
-                steps.append(
-                    AutomationStep(
-                        "ramp_target",
-                        target_value=first_overheating_target_mpa,
-                        target_start_value=previous_target,
-                        target_end_value=first_overheating_target_mpa,
-                        target_ramp_rate_value_s=target_ramp_rate,
-                        basis=HSW_BASIS_STRESS_MPA,
-                        note="first_overheating",
-                    )
-                )
-                _append_current_sweep_plateau(
-                    target=first_overheating_target_mpa,
-                    plateau_basis=HSW_BASIS_STRESS_MPA,
-                    note="first_overheating",
-                    plateau_current_end_mA=first_overheating_current_end,
-                )
-                if basis == HSW_BASIS_STRESS_MPA:
-                    previous_target = first_overheating_target_mpa
 
             for plateau_index, target in enumerate(targets, start=1):
                 steps.append(
