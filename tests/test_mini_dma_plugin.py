@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import matplotlib
 import numpy as np
@@ -756,6 +757,59 @@ def test_summarize_current_sweep_estimates_transition_currents_from_up_down_legs
     assert target.mf_current_mA == pytest.approx(25.0, abs=1.5)
     lines = core.format_current_sweep_transition_summary(summary)
     assert lines == ["50 MPa: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"]
+
+
+def test_summarize_current_sweep_large_multi_target_trace_stays_fast() -> None:
+    rows: list[dict[str, float | str | int]] = []
+
+    def piecewise(current: np.ndarray, start: float, finish: float, offset: float) -> np.ndarray:
+        before = offset + 12.0 - current * 0.002
+        start_value = offset + 12.0 - start * 0.002
+        transition = start_value - (current - start) * 0.04
+        finish_value = start_value - (finish - start) * 0.04
+        after = finish_value - (current - finish) * 0.003
+        return np.where(current < start, before, np.where(current <= finish, transition, after))
+
+    for target_index, target in enumerate((50.0, 100.0, 150.0, 200.0, 250.0, 300.0)):
+        heating_current = np.linspace(1.0, 120.0, 600)
+        cooling_current = np.linspace(120.0, 1.0, 600)
+        strain = np.concatenate(
+            [
+                piecewise(heating_current, 35.0, 80.0, target_index * 0.25),
+                piecewise(cooling_current, 30.0, 75.0, target_index * 0.25),
+            ]
+        )
+        current = np.concatenate([heating_current, cooling_current])
+        for index, (current_mA, strain_pct) in enumerate(zip(current, strain, strict=True)):
+            rows.append(
+                {
+                    "elapsed_s": float(len(rows)),
+                    "automation_phase": "current",
+                    "automation_target_value": target,
+                    "plateau_index": target_index,
+                    "strain_pct": float(strain_pct),
+                    "resistance_ohm": 100.0,
+                    "current_mA": float(current_mA),
+                    "current_set_mA": float(current_mA),
+                    "current_measured_mA": float(current_mA),
+                }
+            )
+    frame = pd.DataFrame(rows)
+    run = core.MiniDmaRun(
+        path=Path("large-run"),
+        measurement_path=Path("large-run") / "measurement.csv",
+        frame=frame,
+        sample_name="Ni50Fe27Ga23 12_2",
+    )
+
+    started = time.perf_counter()
+    summary = core.summarize_current_sweep(run)
+    elapsed_s = time.perf_counter() - started
+
+    assert len(summary.targets) == 6
+    assert summary.targets[0].as_current_mA == pytest.approx(35.0, abs=2.0)
+    assert summary.targets[0].af_current_mA == pytest.approx(80.0, abs=2.0)
+    assert elapsed_s < 5.0
 
 
 def test_summarize_current_sweep_prefers_horizontal_heating_after_fit() -> None:
