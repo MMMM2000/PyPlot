@@ -19,6 +19,7 @@ import socketserver
 import tempfile
 import threading
 import uuid
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1031,6 +1032,363 @@ def _run_builder_rebuild_assemble_command_lightweight(
     }
 
 
+_ASSEMBLE_PUBLIC_DROP_EXACT = {
+    "Data source",
+    "Source files",
+    "Possible mismatch",
+}
+_ASSEMBLE_PUBLIC_DROP_TOKENS = ("source", "provenance", "internal")
+
+
+def _assemble_public_drop_column(column: object) -> bool:
+    name = str(column)
+    if name.startswith("_"):
+        return True
+    if name in _ASSEMBLE_PUBLIC_DROP_EXACT:
+        return True
+    folded = name.casefold()
+    return any(token in folded for token in _ASSEMBLE_PUBLIC_DROP_TOKENS)
+
+
+def _serialise_assemble_export_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(_serialise_assemble_export_value(item)) for item in value)
+    if isinstance(value, Mapping):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return value
+
+
+def _assemble_export_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    assemble = sections.get("assemble")
+    if not isinstance(assemble, Mapping):
+        return pd.DataFrame()
+    rows = _project_section_rows(dict(assemble))
+    columns = assemble.get("columns")
+    if isinstance(columns, list):
+        column_names = [str(column) for column in columns]
+        return pd.DataFrame(rows, columns=column_names)
+    return pd.DataFrame(rows)
+
+
+def _serialise_assemble_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    export_frame = frame.copy()
+    for column in export_frame.columns:
+        series = export_frame[column]
+        if getattr(series, "dtype", None) == object:
+            export_frame[column] = series.map(_serialise_assemble_export_value)
+    return export_frame
+
+
+def _sections_represented_in_builder_project(sections: Mapping[str, object]) -> list[str]:
+    represented: list[str] = []
+    for section_name, payload in sections.items():
+        if section_name == "compare":
+            continue
+        if section_name == "assemble":
+            frame = _assemble_export_frame_from_sections(sections)
+            if not frame.empty:
+                represented.append(section_name)
+            continue
+        if _builder_section_has_payload(payload) or _project_section_rows(payload):
+            represented.append(str(section_name))
+    return sorted(dict.fromkeys(represented))
+
+
+def _current_git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
+def _write_assemble_workbook(
+    *,
+    output_path: Path,
+    frame: pd.DataFrame,
+    preset: str,
+) -> dict[str, Any]:
+    output_path = output_path.with_suffix(".xlsx")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    serialised = _serialise_assemble_export_frame(frame)
+    if preset == "public":
+        dropped_columns = [
+            str(column)
+            for column in serialised.columns
+            if _assemble_public_drop_column(column)
+        ]
+        visible_columns = [
+            str(column)
+            for column in serialised.columns
+            if str(column) not in dropped_columns
+        ]
+    else:
+        dropped_columns = []
+        visible_columns = [str(column) for column in serialised.columns]
+
+    main_frame = serialised.loc[:, visible_columns].copy() if visible_columns else pd.DataFrame(index=serialised.index)
+    identity_columns = [
+        column
+        for column in ("Composition", "Microwire")
+        if column in serialised.columns and column not in dropped_columns
+    ]
+    audit_columns = list(dict.fromkeys([*identity_columns, *dropped_columns]))
+    hidden_sheets: list[str] = []
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        main_frame.to_excel(writer, sheet_name="Assemble", index=False)
+        if audit_columns:
+            audit_frame = serialised.loc[:, audit_columns].copy()
+            audit_frame.to_excel(writer, sheet_name="Assemble audit", index=False)
+            try:
+                writer.book["Assemble audit"].sheet_state = "hidden"
+                hidden_sheets.append("Assemble audit")
+            except Exception:
+                pass
+
+    return {
+        "workbook": str(output_path.resolve()),
+        "sheet": "Assemble",
+        "audit_sheet": "Assemble audit" if audit_columns else None,
+        "hidden_sheets": hidden_sheets,
+        "visible_columns": visible_columns,
+        "dropped_columns": dropped_columns,
+        "row_count": int(len(main_frame.index)),
+        "column_count": int(len(main_frame.columns)),
+    }
+
+
+def _prepare_assemble_export_project_payload(
+    *,
+    source_project: Path,
+    output_path: Path,
+    working_copy_dir: Path | None,
+    copy_project: bool,
+    force_rebuild: bool,
+    rebuild_sections: Sequence[str] | None,
+) -> tuple[dict[str, Any], Path | None, dict[str, Any] | None]:
+    project_path = source_project.expanduser()
+    if not project_path.exists():
+        raise _AutomationRecipeError(f"Assemble export project does not exist: {project_path}")
+    source_payload = _load_json_object(project_path, label="Microwire Data Builder project")
+    _validate_builder_project_payload(source_payload, path=project_path)
+
+    copied_project: Path | None = None
+    payload = source_payload
+    if copy_project or force_rebuild:
+        copy_dir = working_copy_dir or (output_path.parent / "_assemble_export_project_copy")
+        copy_dir.mkdir(parents=True, exist_ok=True)
+        copied_project = _next_available_path(copy_dir / f"{project_path.stem}.assemble-export{project_path.suffix}")
+        shutil.copy2(project_path, copied_project)
+        payload = _load_json_object(copied_project, label="Microwire Data Builder project copy")
+        _validate_builder_project_payload(payload, path=copied_project)
+
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        sections = {}
+        payload["sections"] = sections
+
+    rebuild_result: dict[str, Any] | None = None
+    if force_rebuild:
+        os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+        from microwire_data_builder import storage as builder_storage
+        from microwire_data_builder import ui as builder_ui
+
+        store_root = (working_copy_dir or (output_path.parent / "_assemble_export_project_copy")) / "_builder_store"
+        if store_root.exists():
+            shutil.rmtree(store_root)
+        original_storage_root = builder_storage._storage_root
+        builder_storage._storage_root = lambda: store_root  # type: ignore[assignment]
+        builder_storage.MiniDatabaseStore._memory_data = {}
+        builder_storage.MiniDatabaseStore._memory_payloads = {}
+        builder_storage.MiniDatabaseStore._pending_sections = set()
+        builder_storage.MiniDatabaseStore._pending_payloads = set()
+        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+        try:
+            command: dict[str, Any] = {"action": "rebuild_assemble"}
+            if rebuild_sections:
+                command["sections"] = list(rebuild_sections)
+            rebuild_result = _run_builder_rebuild_assemble_command_lightweight(
+                builder_ui=builder_ui,
+                command=command,
+                command_index=0,
+                sections=sections,
+                output_project=copied_project or output_path.with_suffix(".pydpj"),
+            )
+        finally:
+            builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
+            builder_storage.MiniDatabaseStore._memory_data = {}
+            builder_storage.MiniDatabaseStore._memory_payloads = {}
+            builder_storage.MiniDatabaseStore._pending_sections = set()
+            builder_storage.MiniDatabaseStore._pending_payloads = set()
+            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+
+    return payload, copied_project, rebuild_result
+
+
+def _export_builder_assemble_workbook(
+    *,
+    source_project: Path,
+    output_path: Path,
+    manifest_path: Path | None = None,
+    preset: str = "public",
+    force_rebuild: bool = False,
+    rebuild_sections: Sequence[str] | None = None,
+    working_copy_dir: Path | None = None,
+    copy_project: bool = True,
+) -> dict[str, Any]:
+    preset = str(preset or "public").strip().casefold()
+    if preset not in {"public", "full"}:
+        raise _AutomationRecipeError("Assemble export preset must be 'public' or 'full'.")
+    output_path = output_path.expanduser().with_suffix(".xlsx")
+    payload, copied_project, rebuild_result = _prepare_assemble_export_project_payload(
+        source_project=source_project,
+        output_path=output_path,
+        working_copy_dir=working_copy_dir,
+        copy_project=copy_project,
+        force_rebuild=force_rebuild,
+        rebuild_sections=rebuild_sections,
+    )
+    sections = payload.get("sections")
+    if not isinstance(sections, Mapping):
+        sections = {}
+    frame = _assemble_export_frame_from_sections(sections)
+    if frame.empty:
+        raise _AutomationRecipeError(
+            "Builder project has no saved Assemble rows. Re-run with Assemble rebuild enabled."
+        )
+
+    workbook_info = _write_assemble_workbook(
+        output_path=output_path,
+        frame=frame,
+        preset=preset,
+    )
+    manifest_target = manifest_path.expanduser() if manifest_path is not None else output_path.with_suffix(".manifest.json")
+    export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    manifest = {
+        "kind": "builder_assemble_export",
+        "version": 1,
+        "status": "ok",
+        "preset": preset,
+        "source_project": str(source_project.expanduser().resolve()),
+        "copied_project": str(copied_project.resolve()) if copied_project is not None else None,
+        "source_saved_at": payload.get("saved_at"),
+        "exported_at": export_time,
+        "workbook": workbook_info["workbook"],
+        "manifest_path": str(manifest_target.resolve()),
+        "source_row_count": int(len(frame.index)),
+        "source_column_count": int(len(frame.columns)),
+        "row_count": workbook_info["row_count"],
+        "column_count": workbook_info["column_count"],
+        "sections_represented": _sections_represented_in_builder_project(sections),
+        "visible_columns": workbook_info["visible_columns"],
+        "dropped_columns": workbook_info["dropped_columns"],
+        "hidden_sheets": workbook_info["hidden_sheets"],
+        "audit_sheet": workbook_info["audit_sheet"],
+        "rebuild": rebuild_result,
+        "git_commit": _current_git_commit(),
+    }
+    _write_json(manifest_target, manifest)
+    return manifest
+
+
+def _run_builder_export_assemble_command(
+    *,
+    command: Mapping[str, Any],
+    command_index: int,
+    project_path: Path,
+    output_project: Path,
+    base_dir: Path,
+    sections: Mapping[str, object],
+) -> dict[str, Any]:
+    raw_output = command.get("output") or command.get("workbook") or command.get("output_path")
+    output_path = _resolve_recipe_path_value(
+        raw_output,
+        base_dir=base_dir,
+        field_name=f"commands[{command_index}].output",
+    )
+    if output_path is None:
+        output_path = output_project.with_suffix(".assemble.xlsx")
+    raw_manifest = command.get("manifest_path")
+    manifest_path = _resolve_recipe_path_value(
+        raw_manifest,
+        base_dir=base_dir,
+        field_name=f"commands[{command_index}].manifest_path",
+    )
+    preset = str(command.get("preset") or "public")
+    if preset not in {"public", "full"}:
+        raise _AutomationRecipeError(
+            f"Builder export_assemble command {command_index} preset must be 'public' or 'full'."
+        )
+    frame = _assemble_export_frame_from_sections(sections)
+    if frame.empty:
+        raise _AutomationRecipeError(
+            f"Builder export_assemble command {command_index} has no Assemble rows to export."
+        )
+    workbook_info = _write_assemble_workbook(
+        output_path=output_path,
+        frame=frame,
+        preset=preset,
+    )
+    manifest_target = manifest_path or output_path.with_suffix(".manifest.json")
+    payload = _load_json_object(output_project, label="Microwire Data Builder project copy") if output_project.exists() else {}
+    export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    manifest = {
+        "kind": "builder_assemble_export",
+        "version": 1,
+        "status": "ok",
+        "preset": preset,
+        "source_project": str(project_path.resolve()),
+        "copied_project": str(output_project.resolve()),
+        "source_saved_at": payload.get("saved_at") if isinstance(payload, Mapping) else None,
+        "exported_at": export_time,
+        "workbook": workbook_info["workbook"],
+        "manifest_path": str(manifest_target.resolve()),
+        "source_row_count": int(len(frame.index)),
+        "source_column_count": int(len(frame.columns)),
+        "row_count": workbook_info["row_count"],
+        "column_count": workbook_info["column_count"],
+        "sections_represented": _sections_represented_in_builder_project(sections),
+        "visible_columns": workbook_info["visible_columns"],
+        "dropped_columns": workbook_info["dropped_columns"],
+        "hidden_sheets": workbook_info["hidden_sheets"],
+        "audit_sheet": workbook_info["audit_sheet"],
+        "rebuild": None,
+        "git_commit": _current_git_commit(),
+    }
+    _write_json(manifest_target, manifest)
+    return {
+        "action": "export_assemble",
+        "status": "ok",
+        "preset": preset,
+        "workbook": workbook_info["workbook"],
+        "manifest": str(manifest_target.resolve()),
+        "row_count": workbook_info["row_count"],
+        "column_count": workbook_info["column_count"],
+        "dropped_columns": workbook_info["dropped_columns"],
+        "hidden_sheets": workbook_info["hidden_sheets"],
+    }
+
+
 def _timestamp_for_builder_database(recipe: Mapping[str, Any]) -> str:
     raw = recipe.get("timestamp")
     if raw is not None:
@@ -1242,6 +1600,18 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                             command_index=index,
                             sections=sections,
                             output_project=output_project,
+                        )
+                    )
+                    continue
+                if action == "export_assemble":
+                    command_results.append(
+                        _run_builder_export_assemble_command(
+                            command=command,
+                            command_index=index,
+                            project_path=project_path,
+                            output_project=output_project,
+                            base_dir=base_dir,
+                            sections=sections,
                         )
                     )
                     continue
@@ -1663,6 +2033,55 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         ),
     )
     parser.add_argument(
+        "--microwire-assemble-export",
+        default=None,
+        help="Export saved Assemble rows from a Builder .pydpj to an Excel workbook without opening the Builder UI.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-output",
+        default=None,
+        help="Output .xlsx path for --microwire-assemble-export. Defaults to <project>_assemble_public.xlsx.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-manifest",
+        default=None,
+        help="Manifest JSON path for --microwire-assemble-export. Defaults next to the workbook.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-preset",
+        choices=("public", "full"),
+        default="public",
+        help="Workbook preset for Assemble export. The public preset hides provenance/internal columns from the main sheet.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-rebuild",
+        action="store_true",
+        help="Rebuild Assemble rows transiently from section payloads before writing the workbook.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-rebuild-section",
+        action="append",
+        default=None,
+        help="Limit --microwire-assemble-rebuild to a section. Can be repeated.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-working-copy-dir",
+        default=None,
+        help="Directory for the disposable project copy used during Assemble export CLI runs.",
+    )
+    parser.add_argument(
+        "--microwire-assemble-copy-project",
+        dest="microwire_assemble_copy_project",
+        action="store_true",
+        help="Copy .pydpj inputs to a disposable working path before Assemble export (default).",
+    )
+    parser.add_argument(
+        "--no-microwire-assemble-copy-project",
+        dest="microwire_assemble_copy_project",
+        action="store_false",
+        help="Read the source .pydpj directly for Assemble export when no rebuild is requested.",
+    )
+    parser.add_argument(
         "--microwire-word-sample",
         default=None,
         help='Limit the Word export to one sample, e.g. "Ni50Fe27Ga23 12/2".',
@@ -1759,6 +2178,7 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         microwire_eda_composition_splits=True,
         microwire_eda_findings=True,
         microwire_eda_force_project_rebuild=False,
+        microwire_assemble_copy_project=True,
         microwire_word_origin=True,
     )
     args, qt_args = parser.parse_known_args(argv)
@@ -1801,12 +2221,62 @@ def _is_microwire_eda_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_eda", None))
 
 
+def _is_microwire_assemble_export_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_assemble_export", None))
+
+
 def _is_microwire_word_report_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_word_report", None))
 
 
 def _is_microwire_word_job_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_word_job", None))
+
+
+def _run_microwire_assemble_export_cli(args: argparse.Namespace) -> int:
+    try:
+        source_project = Path(str(getattr(args, "microwire_assemble_export", "")).strip()).expanduser()
+        output_value = getattr(args, "microwire_assemble_output", None)
+        out_dir_value = getattr(args, "out", None)
+        if output_value:
+            output_path = Path(str(output_value)).expanduser()
+        elif out_dir_value:
+            output_path = (
+                Path(str(out_dir_value)).expanduser()
+                / f"{source_project.stem}_assemble_public.xlsx"
+            )
+        else:
+            output_path = source_project.with_name(f"{source_project.stem}_assemble_public.xlsx")
+        manifest_value = getattr(args, "microwire_assemble_manifest", None)
+        manifest_path = Path(str(manifest_value)).expanduser() if manifest_value else None
+        working_copy_value = getattr(args, "microwire_assemble_working_copy_dir", None)
+        working_copy_dir = Path(str(working_copy_value)).expanduser() if working_copy_value else None
+        rebuild_sections = getattr(args, "microwire_assemble_rebuild_section", None)
+        manifest = _export_builder_assemble_workbook(
+            source_project=source_project,
+            output_path=output_path,
+            manifest_path=manifest_path,
+            preset=str(getattr(args, "microwire_assemble_preset", "public") or "public"),
+            force_rebuild=bool(getattr(args, "microwire_assemble_rebuild", False)),
+            rebuild_sections=[str(section) for section in rebuild_sections] if rebuild_sections else None,
+            working_copy_dir=working_copy_dir,
+            copy_project=bool(getattr(args, "microwire_assemble_copy_project", True)),
+        )
+    except _AutomationRecipeError as exc:
+        print(f"[microwire-assemble-export] {exc}")
+        return 2
+    except Exception as exc:
+        print(f"[microwire-assemble-export] {type(exc).__name__}: {exc}")
+        return 1
+    print(f"[microwire-assemble-export] workbook={manifest['workbook']}")
+    print(f"[microwire-assemble-export] manifest={manifest['manifest_path']}")
+    print(f"[microwire-assemble-export] rows={manifest['row_count']}")
+    print(f"[microwire-assemble-export] columns={manifest['column_count']}")
+    if manifest.get("copied_project"):
+        print(f"[microwire-assemble-export] copied_project={manifest['copied_project']}")
+    if manifest.get("rebuild"):
+        print("[microwire-assemble-export] rebuilt_assemble=true")
+    return 0
 
 
 def _run_microwire_eda_cli(args: argparse.Namespace) -> int:
@@ -5383,6 +5853,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_experiment_process(args))
     if _is_microwire_word_job_requested(args):
         raise SystemExit(_run_microwire_word_job_cli(args))
+    if _is_microwire_assemble_export_requested(args):
+        raise SystemExit(_run_microwire_assemble_export_cli(args))
     if _is_microwire_word_report_requested(args):
         raise SystemExit(_run_microwire_word_report_cli(args))
     if _is_microwire_eda_requested(args):

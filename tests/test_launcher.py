@@ -47,6 +47,178 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def _write_synthetic_assemble_project(path: Path) -> Path:
+    payload = {
+        "version": 1,
+        "kind": "MicrowireDataBuilder",
+        "saved_at": "2026-06-17 09:30",
+        "sections": {
+            "mini_dma": {
+                "section": "mini_dma",
+                "columns": ["Composition", "Microwire", "Mini DMA transition currents by stress/load"],
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Mini DMA transition currents by stress/load": [
+                            "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+                        ],
+                    }
+                ],
+            },
+            "transition_temps": {
+                "section": "transition_temps",
+                "columns": ["Composition", "Microwire", "As (C)", "Af (C)"],
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "As (C)": -23.5,
+                        "Af (C)": 18.25,
+                    }
+                ],
+            },
+            "assemble": {
+                "section": "assemble",
+                "title": "Assemble",
+                "columns": [
+                    "Composition",
+                    "Microwire",
+                    "Mini DMA graphs",
+                    "Mini DMA transition currents by stress/load",
+                    "As (C)",
+                    "Af (C)",
+                    "Data source",
+                    "_sources",
+                    "internal review note",
+                    "provenance file",
+                    "object summary",
+                ],
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Mini DMA graphs": ["run01", "run02"],
+                        "Mini DMA transition currents by stress/load": [
+                            "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+                        ],
+                        "As (C)": -23.5,
+                        "Af (C)": 18.25,
+                        "Data source": "Measured",
+                        "_sources": ["G:/internal/run01"],
+                        "internal review note": "needs source check",
+                        "provenance file": "G:/internal/provenance.json",
+                        "object summary": {"fit": "accepted", "points": 120},
+                    }
+                ],
+            },
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    project_path = _write_synthetic_assemble_project(tmp_path / "synthetic.pydpj")
+    workbook_path = tmp_path / "public.xlsx"
+
+    exit_code = launcher_module._run_microwire_assemble_export_cli(  # noqa: SLF001
+        argparse.Namespace(
+            microwire_assemble_export=str(project_path),
+            microwire_assemble_output=str(workbook_path),
+            microwire_assemble_manifest=None,
+            microwire_assemble_preset="public",
+            microwire_assemble_rebuild=False,
+            microwire_assemble_rebuild_section=None,
+            microwire_assemble_working_copy_dir=str(tmp_path / "working"),
+            microwire_assemble_copy_project=True,
+            out=None,
+        )
+    )
+
+    assert exit_code == 0
+    manifest_path = workbook_path.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_project"] == str(project_path.resolve())
+    assert manifest["source_saved_at"] == "2026-06-17 09:30"
+    assert manifest["row_count"] == 1
+    assert manifest["column_count"] == 7
+    assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
+    assert "Data source" in manifest["dropped_columns"]
+    assert "_sources" in manifest["dropped_columns"]
+    assert "internal review note" in manifest["dropped_columns"]
+    assert "provenance file" in manifest["dropped_columns"]
+    assert manifest["hidden_sheets"] == ["Assemble audit"]
+    assert manifest["git_commit"]
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook["Assemble audit"].sheet_state == "hidden"
+    headers = [cell.value for cell in workbook["Assemble"][1]]
+    assert "Data source" not in headers
+    assert "_sources" not in headers
+    assert "internal review note" not in headers
+    assert "provenance file" not in headers
+    assert "Mini DMA transition currents by stress/load" in headers
+    row = [cell.value for cell in workbook["Assemble"][2]]
+    assert "run01, run02" in row
+    assert "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA" in row
+    assert '{"fit": "accepted", "points": 120}' in row
+    audit_headers = [cell.value for cell in workbook["Assemble audit"][1]]
+    audit_row = [cell.value for cell in workbook["Assemble audit"][2]]
+    assert "Data source" in audit_headers
+    assert "provenance file" in audit_headers
+    assert "Measured" in audit_row
+    assert "G:/internal/provenance.json" in audit_row
+
+
+def test_builder_automation_recipe_exports_assemble_public_workbook(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    project_path = _write_synthetic_assemble_project(tmp_path / "synthetic.pydpj")
+    output_project = tmp_path / "working" / "updated.pydpj"
+    workbook_path = tmp_path / "exports" / "assemble_public.xlsx"
+    manifest_path = tmp_path / "exports" / "assemble_public.manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "export_assemble",
+                        "preset": "public",
+                        "output": str(workbook_path),
+                        "manifest_path": str(manifest_path),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["workbook"] == str(workbook_path.resolve())
+    assert manifest["row_count"] == 1
+    assert "Data source" in manifest["dropped_columns"]
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook["Assemble audit"].sheet_state == "hidden"
+    assert [cell.value for cell in workbook["Assemble"][1]][:2] == ["Composition", "Microwire"]
+
+
 def test_builder_update_filters_existing_records_under_refresh_root(tmp_path: Path) -> None:
     refresh_root = tmp_path / "mini DMA"
     stale_path = refresh_root / "Ni46Fe27Ga23Co2Cu2 2_8 iso-stress" / "measurement.csv"
