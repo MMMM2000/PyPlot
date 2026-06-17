@@ -1500,9 +1500,31 @@ def test_mini_dma_section_collect_candidates_uses_only_report_measurements(
     automated = tmp_path / "automated" / "Ni50Fe27Ga23 12_2 draft_run" / "measurement.csv"
     control_test = tmp_path / "automated_control_tests" / "probe_run" / "measurement.csv"
     history = tmp_path / "automation_history" / "campaign" / "history_run" / "measurement.csv"
-    for path in (good, sidecar, archived, automated, control_test, history):
+    tests_fixture = tmp_path / "tests" / "fixture_run" / "measurement.csv"
+    cache_fixture = tmp_path / "cache" / "scratch_run" / "measurement.csv"
+    invalid = tmp_path / "Ni50Fe27Ga23 12_3 notes" / "measurement.csv"
+    mini_dma_csv = (
+        "elapsed_s,automation_phase,automation_target_value,plateau_index,"
+        "strain_pct,resistance_ohm,current_measured_mA,current_set_mA\n"
+        "0,current,50,1,0.1,100,10,10\n"
+    )
+    for path in (
+        good,
+        sidecar,
+        archived,
+        automated,
+        control_test,
+        history,
+        tests_fixture,
+        cache_fixture,
+        invalid,
+    ):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("placeholder", encoding="utf-8")
+    good.write_text(mini_dma_csv, encoding="utf-8")
+    for path in (archived, automated, control_test, history, tests_fixture, cache_fixture):
+        path.write_text(mini_dma_csv, encoding="utf-8")
+    sidecar.write_text("placeholder", encoding="utf-8")
+    invalid.write_text("not,a,mini,dma\n1,2,3,4\n", encoding="utf-8")
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
     try:
         section.data = MiniDatabaseData(sources=[str(tmp_path)])
