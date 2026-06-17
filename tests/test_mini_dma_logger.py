@@ -16511,16 +16511,22 @@ def test_current_sweep_large_overshoot_falls_back_to_single_motor_step(
         _close_test_window(window)
 
 
-def test_current_sweep_stops_when_correction_travel_exceeds_limit(
+def test_current_sweep_ignores_accumulated_correction_travel_limit(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
 
-    def _fail_move(*_args: object, **_kwargs: object) -> bool:
-        pytest.fail("travel-limit stop should happen before sending a move")
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_target_mm")))
+        window._current_position_mm = target_mm
+        effective = kwargs.get("effective_target_mm")
+        if effective is not None:
+            window._effective_position_mm = float(effective)
+        return True
 
-    window._move_to_position_mm = _fail_move  # type: ignore[method-assign]
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_zero_load_scale_g.setValue(0.0)
@@ -16564,15 +16570,9 @@ def test_current_sweep_stops_when_correction_travel_exceeds_limit(
         )
 
         assert reached is False
-        assert window._automation_active is False
-        assert "exceeded the correction travel limit" in window.log_output.toPlainText()
-        stop = window._session_stop_metadata()
-        assert stop["reason"] == "correction_travel_limit"
-        assert stop["category"] == "fault"
-        assert stop["label"] == "Correction travel limit"
-        assert "stress_mpa target 50 plateau 1" in str(stop["detail"])
-        assert "previous" in str(stop["detail"])
-        assert "next" in str(stop["detail"])
+        assert window._automation_active is True
+        assert moves
+        assert "exceeded the correction travel limit" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 

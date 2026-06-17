@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-16.3"
+CONTROL_LOGIC_VERSION = "2026-06-17.1"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -141,6 +141,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
     "automation_controller_boundary",
+    "current_sweep_accumulated_correction_travel_no_abort",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -15874,13 +15875,7 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float],
         next_travel_mm: float,
     ) -> bool:
-        if not self._current_sweep_freezes_live_stiffness():
-            return False
-        if self._automation_phase == "current_hold":
-            return False
-        limit_mm = self._seek_max_travel_mm()
-        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
-        return current_travel_mm + abs(float(next_travel_mm)) > limit_mm
+        return False
 
     def _stop_for_current_sweep_travel_limit(
         self,
