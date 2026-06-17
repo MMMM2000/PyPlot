@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-17.2"
+CONTROL_LOGIC_VERSION = "2026-06-17.3"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -121,6 +121,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_unstable_response_damps_to_single_motor_steps",
     "current_hold_improving_recovery_scales_cautiously",
     "current_hold_unstable_improving_recovery_can_escape_single_step",
+    "current_hold_same_sign_drift_recovery_uses_dynamic_steps",
     "current_hold_large_error_not_masked_by_noise",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
@@ -138,6 +139,8 @@ CONTROL_LOGIC_FEATURES = [
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "control_trace_supply_snapshot",
+    "control_trace_filtered_signal_slope",
+    "current_sweep_progress_uses_current_fraction",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
@@ -157,6 +160,9 @@ CONTROL_TRACE_FIELDNAMES = [
     "current_value",
     "error_value",
     "tolerance",
+    "filtered_slope_per_s",
+    "filtered_noise",
+    "filtered_sample_count",
     "sensitivity_per_mm",
     "motor_step_mm",
     "correction_mm",
@@ -15870,6 +15876,82 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return max(motor_step_mm, next_step_mm)
 
+    def _current_sweep_hold_drift_recovery_step_mm(
+        self,
+        basis: str,
+        previous_error: float | None,
+        error_value: float,
+        tolerance: float,
+        base_step_mm: float,
+        filtered_signal: ScaleControlSignal | None,
+        *,
+        seek_key: tuple[str, int, float],
+    ) -> float | None:
+        if (
+            self._automation_phase != "current_hold"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or previous_error is None
+            or filtered_signal is None
+        ):
+            return None
+        if float(previous_error) * float(error_value) <= 0.0:
+            return None
+        slope = float(filtered_signal.slope_per_s)
+        if float(error_value) * slope >= 0.0:
+            return None
+        if abs(slope) < self._current_sweep_hold_min_slope_for_basis(basis):
+            return None
+        previous_abs = abs(float(previous_error))
+        current_abs = abs(float(error_value))
+        growth_margin = max(
+            abs(float(tolerance)) * 0.2,
+            abs(float(filtered_signal.noise)) * 0.5,
+            1e-9,
+        )
+        if current_abs <= previous_abs + growth_margin:
+            return None
+        large_error_floor = max(
+            self._current_sweep_hold_entry_band_for_basis(tolerance),
+            self._current_sweep_hold_min_band_for_basis(
+                basis,
+                self._current_sweep_hold_min_pause_stress_mpa(),
+            ),
+            abs(float(filtered_signal.noise)) * self._current_sweep_hold_noise_sigma(),
+        )
+        if current_abs <= large_error_floor:
+            return None
+        sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
+        if sensitivity is None:
+            return None
+        sensitivity = abs(float(sensitivity))
+        if not math.isfinite(sensitivity) or sensitivity <= 0.0:
+            return None
+        hold_cap_value = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            self._current_sweep_hold_correction_stress_mpa(),
+        )
+        if hold_cap_value is None or not math.isfinite(float(hold_cap_value)) or float(hold_cap_value) <= 0.0:
+            hold_cap_value = current_abs
+        large_error = max(
+            0.0,
+            current_abs - max(large_error_floor, SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA),
+        )
+        fraction = SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION + (
+            SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION
+            - SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION
+        ) * (1.0 - math.exp(-large_error / SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA))
+        cap_value = min(abs(float(hold_cap_value)), max(large_error_floor, current_abs * fraction))
+        drift_step_mm = cap_value / sensitivity
+        hard_cap_mm = min(
+            self._current_sweep_max_correction_mm(),
+            self._current_sweep_hold_adaptive_command_cap_mm(),
+            max(self._motor_step_mm(), drift_step_mm),
+        )
+        minimum_escape_mm = max(abs(float(base_step_mm)), self._motor_step_mm() * 1.25)
+        if hard_cap_mm <= minimum_escape_mm:
+            return None
+        return max(self._motor_step_mm(), hard_cap_mm)
+
     def _current_sweep_travel_limit_exceeded(
         self,
         seek_key: tuple[str, int, float],
@@ -17273,6 +17355,13 @@ class MainWindow(QtWidgets.QMainWindow):
             and previous_error * delta_value < 0.0
             and not self._is_iso_current_stress_target_ramp(basis)
         )
+        current_hold_moving_away_fast = (
+            self._automation_phase == "current_hold"
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and filtered_signal is not None
+            and float(delta_value) * float(filtered_signal.slope_per_s) < 0.0
+            and abs(float(filtered_signal.slope_per_s)) >= self._current_sweep_hold_min_slope_for_basis(basis)
+        )
         large_current_hold_overshoot = self._current_sweep_hold_large_overshoot(
             basis,
             previous_error,
@@ -17387,28 +17476,39 @@ class MainWindow(QtWidgets.QMainWindow):
         elif previous_error is not None:
             error_worsened = abs(delta_value) > abs(previous_error) + max(effective_tolerance * 0.2, 1e-9)
             if error_worsened:
-                count = self._seek_no_response_count_by_key.get(seek_key, 0) + 1
-                self._seek_no_response_count_by_key[seek_key] = count
-                if self._automation_phase == "current_hold":
-                    self._note_current_sweep_hold_instability(seek_key)
-                    if count >= 2:
-                        self._note_current_sweep_hold_instability(seek_key)
-                    current_hold_correction_reason = "current_hold_worsened_single_step"
-                travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
-                self._log(
-                    f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
-                    f"from target ({count}; correction travel {_format_compact_unit(travel_mm, 'mm')})."
+                drift_recovery_step_mm = self._current_sweep_hold_drift_recovery_step_mm(
+                    basis,
+                    previous_error,
+                    delta_value,
+                    acceptance_tolerance,
+                    nudge_mm,
+                    filtered_signal,
+                    seek_key=seek_key,
                 )
+                if drift_recovery_step_mm is not None:
+                    nudge_mm = drift_recovery_step_mm
+                    self._seek_no_response_count_by_key[seek_key] = 0
+                    current_hold_correction_reason = "current_hold_drift_recovery"
+                    self._log(
+                        "Current-hold error is drifting away from target; "
+                        "using a bounded dynamic recovery correction."
+                    )
+                else:
+                    count = self._seek_no_response_count_by_key.get(seek_key, 0) + 1
+                    self._seek_no_response_count_by_key[seek_key] = count
+                    if self._automation_phase == "current_hold":
+                        self._note_current_sweep_hold_instability(seek_key)
+                        if count >= 2:
+                            self._note_current_sweep_hold_instability(seek_key)
+                        current_hold_correction_reason = "current_hold_worsened_single_step"
+                    travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+                    self._log(
+                        f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
+                        f"from target ({count}; correction travel {_format_compact_unit(travel_mm, 'mm')})."
+                    )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
                 self._note_current_sweep_hold_stable_response(seek_key)
-        current_hold_moving_away_fast = (
-            self._automation_phase == "current_hold"
-            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-            and filtered_signal is not None
-            and float(delta_value) * float(filtered_signal.slope_per_s) < 0.0
-            and abs(float(filtered_signal.slope_per_s)) >= self._current_sweep_hold_min_slope_for_basis(basis)
-        )
         protective_current_hold_single_step = False
         if (
             current_hold_correction_reason
@@ -17451,6 +17551,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(
                     "Current-hold response is still flagged unstable, but the last correction "
                     "reduced a persistent same-sign error; cautiously widening the next correction."
+                )
+            elif current_hold_correction_reason == "current_hold_drift_recovery":
+                current_hold_correction_reason = "current_hold_unstable_drift_recovery"
+                self._log(
+                    "Current-hold response is still flagged unstable, but stress/load is drifting "
+                    "away from target; keeping the bounded dynamic recovery correction."
                 )
             else:
                 nudge_mm = min(nudge_mm, self._motor_step_mm())
@@ -20388,6 +20494,9 @@ class MainWindow(QtWidgets.QMainWindow):
             snapshot_started_s = 0.0
         if snapshot_started_s > 0.0:
             supply_snapshot_age_s = max(0.0, now_s - snapshot_started_s)
+        filtered_signal: ScaleControlSignal | None = None
+        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            filtered_signal = self._seek_filtered_control_signal(basis)
         try:
             voltage_limit_v = float(self.spin_supply_voltage_limit.value())
         except (AttributeError, RuntimeError, TypeError, ValueError):
@@ -20406,6 +20515,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_value": _number(current_value),
                 "error_value": _number(error_value),
                 "tolerance": _number(tolerance),
+                "filtered_slope_per_s": _number(
+                    None if filtered_signal is None else filtered_signal.slope_per_s
+                ),
+                "filtered_noise": _number(None if filtered_signal is None else filtered_signal.noise),
+                "filtered_sample_count": (
+                    "" if filtered_signal is None else int(filtered_signal.sample_count)
+                ),
                 "sensitivity_per_mm": _number(sensitivity_per_mm),
                 "motor_step_mm": _number(self._motor_step_mm()),
                 "correction_mm": _number(correction_mm),
@@ -21942,6 +22058,44 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_recipe_banner.setVisible(self._automation_active)
         self._set_dashboard_value("task", task_text)
 
+    def _active_current_sweep_progress(self) -> tuple[int, str] | None:
+        if (
+            not self._automation_active
+            or not self._is_current_sweep_mode(self._automation_name)
+            or self._active_current_sweep_step_index is None
+            or self._active_current_sweep_step_index < 0
+            or self._active_current_sweep_step_index >= len(self._automation_steps)
+        ):
+            return None
+        step = self._automation_steps[self._active_current_sweep_step_index]
+        if step.action != "sweep_current" or step.current_start_mA is None or step.current_end_mA is None:
+            return None
+        start_mA = self._recipe_current_setpoint_mA(float(step.current_start_mA))
+        end_mA = self._recipe_current_setpoint_mA(float(step.current_end_mA))
+        span_mA = abs(end_mA - start_mA)
+        if span_mA <= 1e-12:
+            return None
+        setpoint_mA = self._active_current_sweep_last_setpoint_mA
+        if setpoint_mA is None:
+            setpoint_mA = self._supply_last_setpoint_mA
+        if setpoint_mA is None:
+            setpoint_mA = start_mA
+        fraction = abs(float(setpoint_mA) - start_mA) / span_mA
+        fraction = max(0.0, min(1.0, fraction))
+        bar_value = max(0, min(999, int(math.floor(fraction * 1000.0))))
+        percent = max(0, min(99, int(math.floor(fraction * 100.0))))
+        current_text = self._automation_current_target_text(float(setpoint_mA))
+        end_text = self._automation_current_target_text(end_mA)
+        progress_text = f"Recipe progress: current {percent}% ({current_text}/{end_text})"
+        if self._automation_phase == "current_hold":
+            progress_text += ", holding for target recovery"
+            return bar_value, progress_text
+        ramp_rate = max(1e-9, abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())))
+        remaining_s = max(0.0, abs(end_mA - float(setpoint_mA)) / ramp_rate)
+        if remaining_s > 0.0:
+            progress_text += f", {_format_duration(remaining_s)} current ramp remaining"
+        return bar_value, progress_text
+
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if not self._is_ui_thread():
             self._recipe_progress_pending_complete = self._recipe_progress_pending_complete or bool(complete)
@@ -21965,15 +22119,32 @@ class MainWindow(QtWidgets.QMainWindow):
             total = self._automation_completed_ticks + 1
             self._automation_total_steps = total
         value = total if complete else min(self._automation_completed_ticks, max(0, total - 1))
-        self.recipe_progress.setRange(0, total)
-        self.recipe_progress.setValue(value)
-        percent = int(round((value / total) * 100.0))
         if complete:
+            self.recipe_progress.setRange(0, total)
+            self.recipe_progress.setValue(total)
+            percent = 100
             self.recipe_progress.setFormat(f"Recipe progress: complete ({total}/{total})")
         elif self._automation_active:
             now_s = time.monotonic()
             if self._automation_progress_started_s <= 0.0:
                 self._automation_progress_started_s = now_s
+            current_sweep_progress = self._active_current_sweep_progress()
+            if current_sweep_progress is not None:
+                progress_value, progress_text = current_sweep_progress
+                self.recipe_progress.setRange(0, 1000)
+                self.recipe_progress.setValue(progress_value)
+                self.recipe_progress.setFormat(progress_text)
+                self._update_current_task_display()
+                self._update_length_setup_progress(
+                    value=progress_value,
+                    total=1000,
+                    complete=False,
+                    percent=int(math.floor((progress_value / 1000.0) * 100.0)),
+                )
+                return
+            self.recipe_progress.setRange(0, total)
+            self.recipe_progress.setValue(value)
+            percent = min(99, int(math.floor((value / total) * 100.0)))
             should_update_format = (
                 self._automation_progress_last_format_update_s <= 0.0
                 or now_s - self._automation_progress_last_format_update_s >= 1.0
@@ -21994,6 +22165,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     progress_text += f", {_format_duration(remaining_s)} remaining"
                 self.recipe_progress.setFormat(progress_text)
         else:
+            self.recipe_progress.setRange(0, total)
+            self.recipe_progress.setValue(value)
+            percent = int(round((value / total) * 100.0))
             self._automation_progress_started_s = 0.0
             self._automation_progress_last_format_update_s = 0.0
             self.recipe_progress.setFormat(getattr(self, "_recipe_idle_progress_text", "Recipe progress: idle"))

@@ -42,6 +42,8 @@ class MiniDmaBenchGuardrails:
     wire_break_stops_plan: bool = True
     allow_mechanical_slack_takeup: bool = False
     mechanical_slack_max_seek_mm: float | None = None
+    current_hold_quality_timeout_s: float | None = None
+    current_hold_quality_error_mpa: float | None = None
 
 
 @dataclass(frozen=True)
@@ -197,12 +199,24 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     mechanical_slack_max_seek_mm = _optional_float(raw_guardrails, "mechanical_slack_max_seek_mm")
     if mechanical_slack_max_seek_mm is not None and mechanical_slack_max_seek_mm <= 0.0:
         raise MiniDmaBenchAutomationError("Mini DMA bench plan guardrail mechanical_slack_max_seek_mm must be positive.")
+    current_hold_quality_timeout_s = _optional_float(raw_guardrails, "current_hold_quality_timeout_s")
+    if current_hold_quality_timeout_s is not None and current_hold_quality_timeout_s <= 0.0:
+        raise MiniDmaBenchAutomationError(
+            "Mini DMA bench plan guardrail current_hold_quality_timeout_s must be positive."
+        )
+    current_hold_quality_error_mpa = _optional_float(raw_guardrails, "current_hold_quality_error_mpa")
+    if current_hold_quality_error_mpa is not None and current_hold_quality_error_mpa <= 0.0:
+        raise MiniDmaBenchAutomationError(
+            "Mini DMA bench plan guardrail current_hold_quality_error_mpa must be positive."
+        )
     guardrails = MiniDmaBenchGuardrails(
         max_stress_mpa=max_stress_mpa,
         recovery_stress_mpa=recovery_stress_mpa,
         wire_break_stops_plan=bool(raw_guardrails.get("wire_break_stops_plan", True)),
         allow_mechanical_slack_takeup=bool(raw_guardrails.get("allow_mechanical_slack_takeup", False)),
         mechanical_slack_max_seek_mm=mechanical_slack_max_seek_mm,
+        current_hold_quality_timeout_s=current_hold_quality_timeout_s,
+        current_hold_quality_error_mpa=current_hold_quality_error_mpa,
     )
     raw_bench_lock = payload.get("bench_lock", {})
     if raw_bench_lock is None:
@@ -608,6 +622,64 @@ def _call_window_method(window: Any, name: str, *args: Any, **kwargs: Any) -> An
     return None
 
 
+def _check_current_hold_quality_guard(
+    window: Any,
+    guardrails: MiniDmaBenchGuardrails,
+) -> dict[str, Any] | None:
+    timeout_s = guardrails.current_hold_quality_timeout_s
+    error_threshold_mpa = guardrails.current_hold_quality_error_mpa
+    if timeout_s is None or error_threshold_mpa is None:
+        return None
+    if getattr(window, "_automation_phase", None) != "current_hold":
+        return None
+    if getattr(window, "_automation_basis", None) != "stress_mpa":
+        return None
+    try:
+        hold_started_s = float(getattr(window, "_current_sweep_ramp_hold_started_s", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        hold_started_s = 0.0
+    if hold_started_s <= 0.0:
+        return None
+    hold_elapsed_s = max(0.0, time.monotonic() - hold_started_s)
+    if hold_elapsed_s < float(timeout_s):
+        return None
+    target_mpa = getattr(window, "_automation_target_value", None)
+    stress_mpa = _latest_stress_mpa(window)
+    if target_mpa is None or stress_mpa is None:
+        return None
+    error_mpa = float(stress_mpa) - float(target_mpa)
+    if abs(error_mpa) <= float(error_threshold_mpa):
+        return None
+    detail = (
+        "Bench automation stopped the candidate because current-hold recovery stayed outside "
+        f"{float(error_threshold_mpa):.3g} MPa for {hold_elapsed_s:.1f} s."
+    )
+    _call_window_method(
+        window,
+        "_stop_auto_ramp",
+        log_completion=False,
+        user_initiated=False,
+        offer_recovery=False,
+        stop_reason="current_hold_quality_timeout",
+        stop_detail=detail,
+    )
+    _call_window_method(
+        window,
+        "_stop_session",
+        reason="current_hold_quality_timeout",
+        detail=detail,
+    )
+    return {
+        "type": "current_hold_quality_timeout",
+        "hold_elapsed_s": hold_elapsed_s,
+        "stress_mpa": float(stress_mpa),
+        "target_mpa": float(target_mpa),
+        "error_mpa": error_mpa,
+        "error_threshold_mpa": float(error_threshold_mpa),
+        "timeout_s": float(timeout_s),
+    }
+
+
 def _check_guardrails(
     window: Any,
     guardrails: MiniDmaBenchGuardrails,
@@ -631,6 +703,10 @@ def _check_guardrails(
             detail="Bench automation detected wire break or contact loss.",
         )
         return {"type": "wire_break"}
+
+    hold_quality_event = _check_current_hold_quality_guard(window, guardrails)
+    if hold_quality_event is not None:
+        return hold_quality_event
 
     if guardrails.max_stress_mpa is None:
         return None
@@ -702,6 +778,9 @@ def _execute_run(
                 break
             if guard_event["type"] == "high_stress":
                 status = "guard_recovered" if guard_event.get("recovery_started") else "guard_tripped"
+                break
+            if guard_event["type"] == "current_hold_quality_timeout":
+                status = "quality_stopped"
                 break
         if (
             bool(getattr(window, "_session_active", False))
