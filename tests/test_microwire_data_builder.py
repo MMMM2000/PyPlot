@@ -136,6 +136,59 @@ def _ensure_qapp() -> QtWidgets.QApplication:
     return app
 
 
+def test_dataframe_model_sort_invalidates_cached_decoration_rows() -> None:
+    _ensure_qapp()
+    frame = pd.DataFrame(
+        {
+            "Name": ["alpha", "beta"],
+            "Sort": [2, 1],
+            "Preview": ["", ""],
+        }
+    )
+    model = builder_ui.DataFrameModel(frame)
+    pixmaps = {
+        "alpha": QtGui.QPixmap(4, 4),
+        "beta": QtGui.QPixmap(4, 4),
+    }
+    seen: list[str] = []
+
+    def decoration_provider(row: pd.Series, column: str) -> QtGui.QPixmap | None:
+        if column != "Preview":
+            return None
+        name = str(row.get("Name"))
+        seen.append(name)
+        return pixmaps[name]
+
+    model.set_decoration_provider(decoration_provider)
+
+    assert (
+        model.data(
+            model.index(0, 2),
+            QtCore.Qt.ItemDataRole.DecorationRole,
+        )
+        is pixmaps["alpha"]
+    )
+    assert seen == ["alpha"]
+
+    model.sort(1, QtCore.Qt.SortOrder.AscendingOrder)
+
+    assert (
+        model.data(
+            model.index(0, 0),
+            QtCore.Qt.ItemDataRole.DisplayRole,
+        )
+        == "beta"
+    )
+    assert (
+        model.data(
+            model.index(0, 2),
+            QtCore.Qt.ItemDataRole.DecorationRole,
+        )
+        is pixmaps["beta"]
+    )
+    assert seen[-1] == "beta"
+
+
 def test_vsm_temperature_preview_keeps_dual_axis_legend_in_section_order() -> None:
     processor = VSMTemperatureScanProcessor()
     frame = pd.DataFrame(

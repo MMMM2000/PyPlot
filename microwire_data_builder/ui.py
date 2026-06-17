@@ -2946,6 +2946,32 @@ class SectionProcessResult:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+_SOURCE_RECORD_CACHE_ATTRS: Tuple[Tuple[str, Callable[[], object]], ...] = (
+    ("_cached_annealing_records", list),
+    ("_cached_annealing_groups", dict),
+    ("_cached_vsm_hysteresis_records", list),
+    ("_cached_vsm_hysteresis_groups", dict),
+    ("_cached_vsm_temperature_records", list),
+    ("_cached_vsm_temperature_groups", dict),
+    ("_cached_dma_isostress_records", list),
+    ("_cached_dma_isostress_groups", dict),
+    ("_cached_mini_dma_records", list),
+    ("_cached_mini_dma_groups", dict),
+    ("_cached_shape_memory_stress_strain_records", list),
+    ("_cached_shape_memory_stress_strain_groups", dict),
+    ("_cached_shape_memory_entries", dict),
+    ("_cached_shape_memory_record_entries", dict),
+    ("_cached_fmr_records", list),
+    ("_cached_fmr_groups", dict),
+)
+
+
+def _clear_source_record_caches(owner: object) -> None:
+    for attr, factory in _SOURCE_RECORD_CACHE_ATTRS:
+        if hasattr(owner, attr):
+            setattr(owner, attr, factory())
+
+
 class DataFrameModel(QtCore.QAbstractTableModel):
     """Expose a pandas DataFrame to Qt view widgets."""
 
@@ -2984,13 +3010,16 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             except Exception:
                 return pd.DataFrame()
 
+    def _invalidate_frame_caches(self) -> None:
+        self._row_series_cache = {}
+        self._column_label_cache = tuple(str(column) for column in self._frame.columns)
+
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         self.beginResetModel()
         self._frame = self._coerce_frame(frame)
         self._recent_edits = {}
         self._recent_old_values = {}
-        self._row_series_cache = {}
-        self._column_label_cache = tuple(str(column) for column in self._frame.columns)
+        self._invalidate_frame_caches()
         self.endResetModel()
         try:
             self.layoutChanged.emit()
@@ -3290,8 +3319,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             # Normalize back to a plain object-backed frame after in-place edits so
             # follow-up Qt handlers don't trip over pandas extension-dtype internals.
             self._frame = self._coerce_frame(self._frame)
-            self._row_series_cache = {}
-            self._column_label_cache = tuple(str(column) for column in self._frame.columns)
+            self._invalidate_frame_caches()
         except Exception:
             return False
         try:
@@ -3348,6 +3376,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return
         self.beginResetModel()
         self._frame = sorted_frame.reset_index(drop=True)
+        self._invalidate_frame_caches()
         self.endResetModel()
 
 
@@ -24503,6 +24532,18 @@ class CompareSection(MiniDatabaseSection):
     def refresh(self) -> None:
         return
 
+    def invalidate_source_caches(self) -> None:
+        _clear_source_record_caches(self)
+        self._matrix_pixmap_cache.clear()
+        self._matrix_view_dirty = True
+        for model_name in ("model", "matrix_model"):
+            model = getattr(self, model_name, None)
+            if isinstance(model, DataFrameModel):
+                try:
+                    model.layoutChanged.emit()
+                except Exception:
+                    pass
+
     def add_rows_from_frame(self, frame: pd.DataFrame, row_indices: Sequence[int]) -> int:
         if not isinstance(frame, pd.DataFrame) or frame.empty or not row_indices:
             return 0
@@ -25393,6 +25434,16 @@ class AssemblySection(QtWidgets.QWidget):
 
     def attach_project_context(self, path_getter: Callable[[], Optional[Path]]) -> None:
         self._project_path_getter = path_getter
+
+    def invalidate_source_caches(self) -> None:
+        _clear_source_record_caches(self)
+        self._graph_pixmap_cache.clear()
+        model = getattr(self, "preview_model", None)
+        if isinstance(model, DataFrameModel):
+            try:
+                model.layoutChanged.emit()
+            except Exception:
+                pass
 
     def _analysis_filtered_rows(self) -> tuple[int, ...]:
         raw_frame = self._raw_preview_frame
@@ -30340,7 +30391,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             section.status_changed.connect(partial(self._handle_section_status_changed, key))
             section.sources_changed.connect(partial(self._handle_section_sources_changed, key))
             try:
-                section.data_updated.connect(self._handle_section_data_updated)
+                section.data_updated.connect(partial(self._handle_section_data_updated, key))
             except Exception:
                 pass
             initial_sources: Iterable[str] = []
@@ -30920,7 +30971,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._update_project_actions()
         self._mark_dirty()
 
-    def _handle_section_data_updated(self) -> None:
+    def _handle_section_data_updated(self, key: str | None = None) -> None:
+        if key and key != "compare":
+            assembly = getattr(self, "assembly_section", None)
+            if isinstance(assembly, AssemblySection):
+                assembly.invalidate_source_caches()
+            compare = getattr(self, "compare_section", None)
+            if isinstance(compare, CompareSection):
+                compare.invalidate_source_caches()
         self._mark_dirty()
         self._update_project_actions()
 
