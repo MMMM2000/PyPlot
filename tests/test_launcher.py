@@ -1139,6 +1139,31 @@ def test_automation_recipe_validation_errors(
     assert message_fragment in capsys.readouterr().out
 
 
+def test_write_json_keeps_existing_valid_json_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "project.pydpj"
+    target.write_text(json.dumps({"kind": "old", "version": 1}), encoding="utf-8")
+    real_replace = launcher_module.os.replace
+
+    def fail_target_replace(source: object, destination: object) -> None:
+        if Path(destination) == target:
+            raise OSError("simulated replace failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(launcher_module.os, "replace", fail_target_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        launcher_module._write_json(  # noqa: SLF001 - exercise atomic writer
+            target,
+            {"kind": "new", "version": 1},
+        )
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"kind": "old", "version": 1}
+    assert not list(tmp_path.glob(".project.pydpj.*.tmp"))
+
+
 def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2053,6 +2078,70 @@ def test_builder_automation_recipe_promotes_database_latest_and_archives_previou
     )
     assert latest_manifest_payload["database"]["latest_project"] == str(latest_project.resolve())
     assert latest_manifest_payload["database"]["archived_project"] == str(archived_project.resolve())
+
+
+def test_builder_database_promotion_keeps_latest_when_project_copy_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_dir = tmp_path / "microwire_database"
+    latest_project = database_dir / "microwire_database_latest.pydpj"
+    latest_manifest = database_dir / "update_manifest_latest.json"
+    output_project = tmp_path / "working" / "microwire_database_2026-05-26_1512.pydpj"
+    manifest_path = tmp_path / "working" / "update_manifest_2026-05-26_1512.json"
+    database_paths = {
+        "database_dir": database_dir,
+        "database_name": "microwire_database",
+        "timestamp": "2026-05-26_1512",
+        "latest_project": latest_project,
+        "latest_manifest": latest_manifest,
+        "archive_dir": database_dir / "archive",
+        "archive_project": database_dir / "archive" / "microwire_database_2026-05-26_1512.pydpj",
+        "archive_manifest": database_dir / "archive" / "update_manifest_2026-05-26_1512.json",
+    }
+    old_payload = {
+        "version": 1,
+        "kind": "MicrowireDataBuilder",
+        "saved_at": "2026-05-25 10:00",
+        "sections": {},
+    }
+    new_payload = {
+        "version": 1,
+        "kind": "MicrowireDataBuilder",
+        "saved_at": "2026-05-26 15:12",
+        "sections": {"vsm_temperature_scan": {"rows": [{"Sample": "Ni50Fe27Ga23 5-4"}]}},
+    }
+    launcher_module._write_json(latest_project, old_payload)  # noqa: SLF001
+    launcher_module._write_json(latest_manifest, {"kind": "builder", "status": "old"})  # noqa: SLF001
+    launcher_module._write_json(output_project, new_payload)  # noqa: SLF001
+    real_copy_file_atomic = launcher_module._copy_file_atomic  # noqa: SLF001
+
+    def fail_latest_project_copy(source: Path, target: Path) -> None:
+        if target == latest_project:
+            raise OSError("simulated latest project copy failure")
+        real_copy_file_atomic(source, target)
+
+    monkeypatch.setattr(launcher_module, "_copy_file_atomic", fail_latest_project_copy)
+
+    with pytest.raises(OSError, match="simulated latest project copy failure"):
+        launcher_module._promote_builder_database_latest(  # noqa: SLF001
+            database_paths=database_paths,
+            output_project=output_project,
+            manifest_path=manifest_path,
+            manifest={
+                "kind": "builder",
+                "version": 1,
+                "status": "ok",
+                "source_project": str(latest_project),
+                "copied_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [],
+            },
+        )
+
+    assert json.loads(latest_project.read_text(encoding="utf-8")) == old_payload
+    assert latest_manifest.exists()
+    assert not (database_dir / "archive" / "microwire_database_2026-05-26_1512.pydpj").exists()
 
 
 def test_builder_automation_recipe_can_exclude_named_subdirectories(

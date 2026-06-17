@@ -388,6 +388,102 @@ def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
     return payload
 
 
+@dataclass(frozen=True)
+class _PreparedFileArchive:
+    temp_path: Path
+    archive_path: Path
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _temporary_sibling_path(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, raw_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    os.close(handle)
+    return Path(raw_path)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _write_text_atomic(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    temp_path = _temporary_sibling_path(path)
+    try:
+        with temp_path.open("w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        _unlink_quietly(temp_path)
+        raise
+
+
+def _copy_file_atomic(source: Path, target: Path) -> None:
+    temp_path = _temporary_sibling_path(target)
+    try:
+        shutil.copyfile(source, temp_path)
+        _fsync_file(temp_path)
+        os.replace(temp_path, target)
+    except Exception:
+        _unlink_quietly(temp_path)
+        raise
+
+
+def _next_available_path(path: Path) -> Path:
+    target = path
+    counter = 1
+    while target.exists():
+        target = path.with_name(f"{path.stem}_{counter}{path.suffix}")
+        counter += 1
+    return target
+
+
+def _prepare_file_archive(source: Path, archive_path: Path) -> _PreparedFileArchive | None:
+    if not source.exists():
+        return None
+    target = _next_available_path(archive_path)
+    temp_path = _temporary_sibling_path(target)
+    try:
+        shutil.copyfile(source, temp_path)
+        _fsync_file(temp_path)
+    except Exception:
+        _unlink_quietly(temp_path)
+        raise
+    return _PreparedFileArchive(temp_path=temp_path, archive_path=target)
+
+
+def _prepared_archive_path(prepared: _PreparedFileArchive | None) -> str | None:
+    if prepared is None:
+        return None
+    return _absolute_path(prepared.archive_path)
+
+
+def _finish_prepared_file_archive(prepared: _PreparedFileArchive | None) -> str | None:
+    if prepared is None:
+        return None
+    os.replace(prepared.temp_path, prepared.archive_path)
+    return _absolute_path(prepared.archive_path)
+
+
+def _discard_prepared_file_archive(prepared: _PreparedFileArchive | None) -> None:
+    if prepared is not None:
+        _unlink_quietly(prepared.temp_path)
+
+
 def _validate_pyplot_project_file(path: Path) -> None:
     payload = _load_json_object(path, label="PyPlot project")
     if payload.get("kind") != "pyplot":
@@ -910,35 +1006,49 @@ def _builder_database_paths(
     }
 
 
-def _archive_existing_builder_database_latest(database_paths: Mapping[str, Path | str]) -> dict[str, str | None]:
+def _promote_builder_database_latest(
+    *,
+    database_paths: Mapping[str, Path | str],
+    output_project: Path,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+) -> None:
+    database_dir = cast(Path, database_paths["database_dir"])
     latest_project = cast(Path, database_paths["latest_project"])
     latest_manifest = cast(Path, database_paths["latest_manifest"])
     archive_project = cast(Path, database_paths["archive_project"])
     archive_manifest = cast(Path, database_paths["archive_manifest"])
     archive_dir = cast(Path, database_paths["archive_dir"])
+
+    database_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
-    archived_project: str | None = None
-    archived_manifest: str | None = None
-    if latest_project.exists():
-        target = archive_project
-        counter = 1
-        while target.exists():
-            target = archive_project.with_name(f"{archive_project.stem}_{counter}{archive_project.suffix}")
-            counter += 1
-        shutil.move(str(latest_project), str(target))
-        archived_project = str(target.resolve())
-    if latest_manifest.exists():
-        target = archive_manifest
-        counter = 1
-        while target.exists():
-            target = archive_manifest.with_name(f"{archive_manifest.stem}_{counter}{archive_manifest.suffix}")
-            counter += 1
-        shutil.move(str(latest_manifest), str(target))
-        archived_manifest = str(target.resolve())
-    return {
-        "archived_project": archived_project,
-        "archived_manifest": archived_manifest,
-    }
+    project_archive = _prepare_file_archive(latest_project, archive_project)
+    manifest_archive = _prepare_file_archive(latest_manifest, archive_manifest)
+    project_promoted = False
+    manifest_promoted = False
+    try:
+        _copy_file_atomic(output_project, latest_project)
+        project_promoted = True
+        archived_project = _finish_prepared_file_archive(project_archive)
+        manifest["database"] = {
+            "database_dir": str(database_dir.resolve()),
+            "database_name": str(database_paths["database_name"]),
+            "timestamp": str(database_paths["timestamp"]),
+            "latest_project": str(latest_project.resolve()),
+            "latest_manifest": str(latest_manifest.resolve()),
+            "archived_project": archived_project,
+            "archived_manifest": _prepared_archive_path(manifest_archive),
+        }
+        _write_json(manifest_path, manifest)
+        _write_json(latest_manifest, manifest)
+        manifest_promoted = True
+        _finish_prepared_file_archive(manifest_archive)
+    except Exception:
+        if not project_promoted:
+            _discard_prepared_file_archive(project_archive)
+        if not manifest_promoted:
+            _discard_prepared_file_archive(manifest_archive)
+        raise
 
 
 def _run_builder_automation_recipe(recipe_path: Path) -> int:
@@ -1091,10 +1201,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
 
         project_payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        output_project.write_text(
-            json.dumps(project_payload, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_json(output_project, project_payload)
         manifest = {
             "kind": "builder",
             "version": 1,
@@ -1105,24 +1212,14 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             "commands": command_results,
         }
         if database_paths is not None:
-            database_dir = cast(Path, database_paths["database_dir"])
-            latest_project = cast(Path, database_paths["latest_project"])
-            latest_manifest = cast(Path, database_paths["latest_manifest"])
-            database_dir.mkdir(parents=True, exist_ok=True)
-            archive_result = _archive_existing_builder_database_latest(database_paths)
-            shutil.copy2(output_project, latest_project)
-            manifest["database"] = {
-                "database_dir": str(database_dir.resolve()),
-                "database_name": str(database_paths["database_name"]),
-                "timestamp": str(database_paths["timestamp"]),
-                "latest_project": str(latest_project.resolve()),
-                "latest_manifest": str(latest_manifest.resolve()),
-                **archive_result,
-            }
-        _write_json(manifest_path, manifest)
-        if database_paths is not None:
-            latest_manifest = cast(Path, database_paths["latest_manifest"])
-            _write_json(latest_manifest, manifest)
+            _promote_builder_database_latest(
+                database_paths=database_paths,
+                output_project=output_project,
+                manifest_path=manifest_path,
+                manifest=manifest,
+            )
+        else:
+            _write_json(manifest_path, manifest)
         print(json.dumps(manifest, ensure_ascii=False))
         return 0
     except _AutomationRecipeError as exc:
@@ -3504,8 +3601,11 @@ def _pyplot_summary(window: "PyPlotWorkbench", plugin_name: str | None) -> dict[
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _write_text_atomic(
+        path,
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _select_pyplot_plugin(window: "PyPlotWorkbench", plugin_name: str) -> None:
