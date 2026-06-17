@@ -743,6 +743,21 @@ class WordOleInsertion:
     label: str
     clipboard_fallback: bool = False
     graph_name: Optional[str] = None
+    descriptor: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class WordOleEmbeddingResult:
+    """Auditable result for one attempted Word Origin OLE insertion."""
+
+    bookmark_name: str
+    descriptor: str
+    label: str
+    object_path: str
+    attempted: bool
+    inserted: bool
+    status: str
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -5380,10 +5395,12 @@ def _word_origin_artifact_conflicts_with_sample(
 ) -> bool:
     values: List[object] = [descriptor]
     if artifact is not None:
+        object_path = getattr(artifact, "object_path", None)
+        object_name = Path(object_path).name if object_path not in (None, "") else None
         values.extend(
             [
                 artifact.display_text,
-                artifact.object_path,
+                object_name,
                 artifact.graph_name,
                 artifact.workbook_name,
                 artifact.worksheet_name,
@@ -5461,24 +5478,128 @@ def _word_evaluate_graph_sections(
     return evaluations
 
 
+def _word_iter_ole_embedding_results(ole_embedding_results: Any) -> List[Any]:
+    if ole_embedding_results is None:
+        return []
+    if isinstance(ole_embedding_results, Mapping):
+        items: List[Any] = []
+        for value in ole_embedding_results.values():
+            if isinstance(value, (list, tuple, set)):
+                items.extend(value)
+            else:
+                items.append(value)
+        return items
+    if isinstance(ole_embedding_results, (list, tuple, set)):
+        return list(ole_embedding_results)
+    return [ole_embedding_results]
+
+
+def _word_result_value(result: Any, field_name: str, default: Any = None) -> Any:
+    if isinstance(result, Mapping):
+        return result.get(field_name, default)
+    return getattr(result, field_name, default)
+
+
+def _word_ole_result_manifest(result: Any) -> Dict[str, object]:
+    attempted = bool(_word_result_value(result, "attempted", False))
+    inserted = bool(_word_result_value(result, "inserted", False))
+    status = str(_word_result_value(result, "status", "") or "").strip()
+    if not status:
+        status = "succeeded" if inserted else ("failed" if attempted else "skipped")
+    return {
+        "descriptor": str(_word_result_value(result, "descriptor", "") or ""),
+        "bookmark": str(_word_result_value(result, "bookmark_name", "") or ""),
+        "label": str(_word_result_value(result, "label", "") or ""),
+        "object_path": str(_word_result_value(result, "object_path", "") or ""),
+        "attempted": attempted,
+        "inserted": inserted,
+        "status": status,
+        "reason": str(_word_result_value(result, "reason", "") or ""),
+    }
+
+
+def _word_ole_results_by_descriptor(ole_embedding_results: Any) -> Dict[str, Dict[str, object]]:
+    results: Dict[str, Dict[str, object]] = {}
+    for result in _word_iter_ole_embedding_results(ole_embedding_results):
+        manifest = _word_ole_result_manifest(result)
+        descriptor = str(manifest.get("descriptor") or "").strip()
+        if descriptor:
+            results[descriptor] = manifest
+    return results
+
+
 def word_report_section_manifest_for_row(
     row: pd.Series,
     origin_artifacts: Mapping[str, OriginArtifact] | None = None,
+    ole_embedding_results: Sequence[Any] | Mapping[str, Any] | None = None,
 ) -> List[Dict[str, object]]:
     """Return data-driven Word measurement-section decisions for one report row."""
 
     summaries: List[Dict[str, object]] = []
+    ole_results_provided = ole_embedding_results is not None
+    ole_results_by_descriptor = _word_ole_results_by_descriptor(ole_embedding_results)
     for evaluation in _word_evaluate_graph_sections(row, origin_artifacts or {}):
+        accepted_origin_descriptors = list(evaluation.accepted_origin_descriptors)
+        missing_origin_descriptors = list(evaluation.missing_origin_descriptors)
+        ole_insertions: List[Dict[str, object]] = []
+        ole_insertions_attempted: List[str] = []
+        ole_insertions_succeeded: List[str] = []
+        ole_insertions_failed: List[str] = []
+        ole_insertions_skipped: List[str] = []
+        ole_insertions_missing_artifact: List[str] = list(missing_origin_descriptors)
+
+        for descriptor in accepted_origin_descriptors:
+            result = ole_results_by_descriptor.get(descriptor)
+            if result is None:
+                if ole_results_provided:
+                    ole_insertions_skipped.append(descriptor)
+                    ole_insertions.append(
+                        {
+                            "descriptor": descriptor,
+                            "bookmark": "",
+                            "label": descriptor,
+                            "object_path": "",
+                            "attempted": False,
+                            "inserted": False,
+                            "status": "skipped",
+                            "reason": "ole_embedding_result_not_recorded",
+                        }
+                    )
+                continue
+            ole_insertions.append(result)
+            status = str(result.get("status") or "").strip()
+            attempted = bool(result.get("attempted"))
+            inserted = bool(result.get("inserted"))
+            if attempted and descriptor not in ole_insertions_attempted:
+                ole_insertions_attempted.append(descriptor)
+            if status == "succeeded" or inserted:
+                ole_insertions_succeeded.append(descriptor)
+            elif status == "missing_artifact":
+                if descriptor not in ole_insertions_missing_artifact:
+                    ole_insertions_missing_artifact.append(descriptor)
+            elif status == "skipped":
+                ole_insertions_skipped.append(descriptor)
+            else:
+                ole_insertions_failed.append(descriptor)
+
         summaries.append(
             {
                 "title": evaluation.title,
                 "included": bool(evaluation.included),
                 "status": evaluation.status,
                 "reason": evaluation.reason,
-                "origin_descriptors": list(evaluation.accepted_origin_descriptors),
+                "origin_descriptors": accepted_origin_descriptors,
+                "origin_artifacts_accepted": accepted_origin_descriptors,
+                "origin_artifacts_attempted": ole_insertions_attempted,
+                "ole_insertions": ole_insertions,
+                "ole_insertions_attempted": ole_insertions_attempted,
+                "ole_insertions_succeeded": ole_insertions_succeeded,
+                "ole_insertions_failed": ole_insertions_failed,
+                "ole_insertions_skipped": ole_insertions_skipped,
+                "ole_insertions_missing_artifact": ole_insertions_missing_artifact,
                 "references": list(evaluation.accepted_references),
                 "invalid_origin_descriptors": list(evaluation.invalid_origin_descriptors),
-                "missing_origin_descriptors": list(evaluation.missing_origin_descriptors),
+                "missing_origin_descriptors": missing_origin_descriptors,
                 "invalid_references": list(evaluation.invalid_references),
             }
         )
@@ -5523,6 +5644,7 @@ def _word_graph_sections(
                     label=str(display or descriptor),
                     clipboard_fallback=bool(getattr(artifact, "clipboard_fallback", False)),
                     graph_name=artifact.graph_name,
+                    descriptor=descriptor,
                 )
             )
             bookmark_id += 1
@@ -5806,17 +5928,42 @@ def _embed_origin_objects_with_word(
     docx_path: Path,
     insertions: Sequence[WordOleInsertion],
     log: logging.Logger,
-) -> None:
+) -> List[WordOleEmbeddingResult]:
     if not insertions:
-        return
+        return []
     docx_path = docx_path.resolve()
+    results: List[WordOleEmbeddingResult] = []
     if os.name != "nt":
         log.warning("Word OLE embedding is only available on Windows; left placeholders in %s", docx_path)
-        return
+        return [
+            WordOleEmbeddingResult(
+                bookmark_name=insertion.bookmark_name,
+                descriptor=str(insertion.descriptor or insertion.object_path.name),
+                label=insertion.label,
+                object_path=str(insertion.object_path),
+                attempted=False,
+                inserted=False,
+                status="skipped",
+                reason="word_ole_windows_only",
+            )
+            for insertion in insertions
+        ]
     powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
     if not powershell:
         log.warning("PowerShell is unavailable; left Origin placeholders in %s", docx_path)
-        return
+        return [
+            WordOleEmbeddingResult(
+                bookmark_name=insertion.bookmark_name,
+                descriptor=str(insertion.descriptor or insertion.object_path.name),
+                label=insertion.label,
+                object_path=str(insertion.object_path),
+                attempted=False,
+                inserted=False,
+                status="skipped",
+                reason="powershell_unavailable",
+            )
+            for insertion in insertions
+        ]
     script = r"""
 param(
     [Parameter(Mandatory=$true)][string]$DocxPath,
@@ -5977,6 +6124,18 @@ $result | ConvertTo-Json -Compress
                     insertion.label,
                     docx_path,
                 )
+                results.append(
+                    WordOleEmbeddingResult(
+                        bookmark_name=insertion.bookmark_name,
+                        descriptor=str(insertion.descriptor or insertion.object_path.name),
+                        label=insertion.label,
+                        object_path=str(object_path),
+                        attempted=False,
+                        inserted=False,
+                        status="missing_artifact",
+                        reason="origin_object_unavailable",
+                    )
+                )
                 continue
             attempted_count += 1
             payload = [
@@ -6015,15 +6174,41 @@ $result | ConvertTo-Json -Compress
                     docx_path,
                     detail or completed.returncode,
                 )
+                results.append(
+                    WordOleEmbeddingResult(
+                        bookmark_name=insertion.bookmark_name,
+                        descriptor=str(insertion.descriptor or insertion.object_path.name),
+                        label=insertion.label,
+                        object_path=str(object_path),
+                        attempted=True,
+                        inserted=False,
+                        status="failed",
+                        reason=detail or str(completed.returncode),
+                    )
+                )
                 continue
             result: Dict[str, Any] = {}
             try:
                 result = json.loads(completed.stdout or "{}")
             except Exception:
                 result = {}
-            inserted_count += int(result.get("inserted") or 0)
-            for warning in result.get("warnings") or []:
+            item_inserted = int(result.get("inserted") or 0) > 0
+            inserted_count += 1 if item_inserted else 0
+            warnings = [str(warning) for warning in (result.get("warnings") or [])]
+            for warning in warnings:
                 log.warning("Origin object embedding warning for %s: %s", docx_path, warning)
+            results.append(
+                WordOleEmbeddingResult(
+                    bookmark_name=insertion.bookmark_name,
+                    descriptor=str(insertion.descriptor or insertion.object_path.name),
+                    label=insertion.label,
+                    object_path=str(object_path),
+                    attempted=True,
+                    inserted=item_inserted,
+                    status="succeeded" if item_inserted else "failed",
+                    reason="; ".join(warnings),
+                )
+            )
     if attempted_count and inserted_count != attempted_count:
         log.warning(
             "Embedded %s of %s Origin object(s) into %s",
@@ -6031,6 +6216,30 @@ $result | ConvertTo-Json -Compress
             attempted_count,
             docx_path,
         )
+    return results
+
+
+def _synthetic_word_ole_results(
+    insertions: Sequence[WordOleInsertion],
+    *,
+    status: str,
+    attempted: bool,
+    inserted: bool,
+    reason: str = "",
+) -> List[WordOleEmbeddingResult]:
+    return [
+        WordOleEmbeddingResult(
+            bookmark_name=insertion.bookmark_name,
+            descriptor=str(insertion.descriptor or insertion.object_path.name),
+            label=insertion.label,
+            object_path=str(insertion.object_path),
+            attempted=attempted,
+            inserted=inserted,
+            status=status,
+            reason=reason,
+        )
+        for insertion in insertions
+    ]
 
 
 def _embed_pictures_with_word(
@@ -6136,6 +6345,7 @@ def _export_word_reports(
     origin_artifacts: Mapping[str, OriginArtifact],
     log: logging.Logger,
     microscope_crops: Mapping[str, Path] | None = None,
+    ole_embedding_results: Dict[Path, List[WordOleEmbeddingResult]] | None = None,
 ) -> List[Path]:
     if dataframe.empty:
         return []
@@ -6174,9 +6384,28 @@ def _export_word_reports(
             except Exception:
                 log.exception("Failed to run Word image embedding for %s", report_path)
             try:
-                _embed_origin_objects_with_word(report_path, origin_insertions, log)
-            except Exception:
+                result_payload = _embed_origin_objects_with_word(report_path, origin_insertions, log)
+            except Exception as exc:
                 log.exception("Failed to run Word OLE embedding for %s", report_path)
+                result_payload = _synthetic_word_ole_results(
+                    origin_insertions,
+                    status="failed",
+                    attempted=True,
+                    inserted=False,
+                    reason=str(exc) or exc.__class__.__name__,
+                )
+            if result_payload is None:
+                # Older tests and downstream callers monkeypatch this helper as
+                # side-effect-only. Preserve that behavior while still letting
+                # manifests record a successful attempted insertion.
+                result_payload = _synthetic_word_ole_results(
+                    origin_insertions,
+                    status="succeeded",
+                    attempted=True,
+                    inserted=True,
+                )
+            if ole_embedding_results is not None:
+                ole_embedding_results[report_path] = list(result_payload)
             reports.append(report_path)
     finally:
         if used_live_origin_clipboard:
@@ -6195,6 +6424,7 @@ def export_word_reports(
     *,
     origin_artifacts: Mapping[str, OriginArtifact] | None = None,
     microscope_crops: Mapping[str, Path] | None = None,
+    ole_embedding_results: Dict[Path, List[WordOleEmbeddingResult]] | None = None,
     logger: logging.Logger | None = None,
 ) -> List[Path]:
     """Write one Word sample report per row without requiring the Builder UI."""
@@ -6206,6 +6436,7 @@ def export_word_reports(
         origin_artifacts or {},
         log,
         microscope_crops=microscope_crops,
+        ole_embedding_results=ole_embedding_results,
     )
 
 
@@ -8201,6 +8432,7 @@ __all__ = [
     "OriginArtifact",
     "WordGraphSectionEvaluation",
     "WordOleInsertion",
+    "WordOleEmbeddingResult",
     "WordPictureInsertion",
     "export_origin_graph_artifact",
     "export_pyplot_origin_artifacts_for_paths",

@@ -5433,6 +5433,68 @@ def test_word_export_manifest_records_skipped_and_invalid_sections(
     assert report["sections"]["R vs T"]["reason"] == "no_section_content"
 
 
+def test_word_export_manifest_records_ole_embedding_results(
+    tmp_path: Path,
+) -> None:
+    import launcher
+
+    descriptor = "current.oggu"
+    artifact_path = tmp_path / descriptor
+    artifact_path.write_bytes(b"origin graph object")
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                f"{core.FIGURE_COLUMNS[0]} (Origin)": descriptor,
+            }
+        ]
+    )
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    report_path = output_dir / "Ni50Fe27Ga23_12-2.docx"
+
+    manifest_json, _manifest_csv = launcher._write_microwire_word_manifest(
+        frame,
+        [report_path],
+        output_dir,
+        source_path=tmp_path / "copy.pydpj",
+        copied_project=None,
+        include_origin=True,
+        origin_artifacts={
+            descriptor: OriginArtifact(
+                descriptor=descriptor,
+                object_path=artifact_path,
+                display_text="Current annealing Origin graph",
+            )
+        },
+        ole_embedding_results={
+            report_path: [
+                core.WordOleEmbeddingResult(
+                    bookmark_name="OriginGraph1",
+                    descriptor=descriptor,
+                    label="Current annealing Origin graph",
+                    object_path=str(artifact_path),
+                    attempted=True,
+                    inserted=True,
+                    status="succeeded",
+                )
+            ]
+        },
+    )
+
+    payload = json.loads(manifest_json.read_text(encoding="utf-8"))
+    current = payload["reports"][0]["sections"]["Current annealing"]
+    assert current["included"] is True, current
+    assert current["origin_artifacts_accepted"] == [descriptor]
+    assert current["origin_artifacts_attempted"] == [descriptor]
+    assert current["ole_insertions_attempted"] == [descriptor]
+    assert current["ole_insertions_succeeded"] == [descriptor]
+    assert current["ole_insertions_failed"] == []
+    assert current["ole_insertions"][0]["status"] == "succeeded"
+    assert current["ole_insertions"][0]["bookmark"] == "OriginGraph1"
+
+
 def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5510,7 +5572,10 @@ def test_build_database_word_export_uses_pyplot_origin_for_measurement_sections(
     assert {item.object_path.name for item in captured_insertions} == {
         "current.oggu",
         "vsm-temperature.oggu",
-    }
+    }, (
+        result.dataframe.iloc[0].dropna().to_dict(),
+        result.origin_artifacts,
+    )
 
 
 def test_word_report_export_embeds_microscope_images(

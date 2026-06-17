@@ -3063,6 +3063,7 @@ def _microwire_word_graph_sections_for_row(
     origin_artifacts: Mapping[str, Any] | None = None,
     *,
     include_all: bool = False,
+    ole_embedding_results: Sequence[Any] | Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     from microwire_data_builder.core import word_report_section_manifest_for_row
 
@@ -3070,7 +3071,11 @@ def _microwire_word_graph_sections_for_row(
     sections: dict[str, dict[str, Any]] = {}
     evaluated = {
         str(item.get("title") or ""): item
-        for item in word_report_section_manifest_for_row(row_data, origin_artifacts or {})
+        for item in word_report_section_manifest_for_row(
+            row_data,
+            origin_artifacts or {},
+            ole_embedding_results=ole_embedding_results,
+        )
     }
     for section_name, source_columns, graph_columns in _WORD_REPORT_GRAPH_MANIFEST_SECTIONS:
         source_values: list[str] = []
@@ -3090,6 +3095,14 @@ def _microwire_word_graph_sections_for_row(
                 "reason": str(summary.get("reason") or ""),
                 "sources": source_values,
                 "graphs": list(summary.get("origin_descriptors") or []),
+                "origin_artifacts_accepted": list(summary.get("origin_artifacts_accepted") or []),
+                "origin_artifacts_attempted": list(summary.get("origin_artifacts_attempted") or []),
+                "ole_insertions": list(summary.get("ole_insertions") or []),
+                "ole_insertions_attempted": list(summary.get("ole_insertions_attempted") or []),
+                "ole_insertions_succeeded": list(summary.get("ole_insertions_succeeded") or []),
+                "ole_insertions_failed": list(summary.get("ole_insertions_failed") or []),
+                "ole_insertions_skipped": list(summary.get("ole_insertions_skipped") or []),
+                "ole_insertions_missing_artifact": list(summary.get("ole_insertions_missing_artifact") or []),
                 "references": list(summary.get("references") or []),
                 "invalid_origin_descriptors": list(summary.get("invalid_origin_descriptors") or []),
                 "missing_origin_descriptors": list(summary.get("missing_origin_descriptors") or []),
@@ -3178,6 +3191,7 @@ def _write_microwire_word_manifest(
     copied_project: str | None,
     include_origin: bool,
     origin_artifacts: Mapping[str, Any] | None = None,
+    ole_embedding_results: Mapping[Path, Sequence[Any]] | None = None,
 ) -> tuple[Path, Path]:
     exported_at = datetime.now(timezone.utc).isoformat()
     rows: list[dict[str, Any]] = []
@@ -3187,6 +3201,11 @@ def _write_microwire_word_manifest(
             row,
             origin_artifacts,
             include_all=True,
+            ole_embedding_results=(
+                ole_embedding_results.get(report_path)
+                if ole_embedding_results is not None
+                else None
+            ),
         )
         included_sections = sorted(
             section_name
@@ -3357,7 +3376,14 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
         archived_reports = _archive_existing_microwire_word_reports(frame, output_dir)
         for archived in archived_reports:
             print(f"[microwire-word] archived={archived}")
-        reports = export_word_reports(frame, output_dir, origin_artifacts=origin_artifacts, logger=LOGGER)
+        ole_embedding_results: dict[Path, list[Any]] = {}
+        reports = export_word_reports(
+            frame,
+            output_dir,
+            origin_artifacts=origin_artifacts,
+            ole_embedding_results=ole_embedding_results,
+            logger=LOGGER,
+        )
         manifest_json, manifest_csv = _write_microwire_word_manifest(
             frame,
             reports,
@@ -3366,6 +3392,7 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
             copied_project=getattr(args, "_microwire_word_copied_project", None),
             include_origin=bool(getattr(args, "microwire_word_origin", True)),
             origin_artifacts=origin_artifacts,
+            ole_embedding_results=ole_embedding_results,
         )
         print(f"[microwire-word] output_dir={output_dir}")
         print(f"[microwire-word] reports={len(reports)}")
