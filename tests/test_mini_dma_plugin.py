@@ -30,6 +30,26 @@ def _ensure_qapp() -> QtWidgets.QApplication:
     return app
 
 
+def _write_minimal_mini_dma_measurement(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "elapsed_s": 0.0,
+                "automation_phase": "current",
+                "automation_target_value": 50.0,
+                "plateau_index": 1,
+                "strain_pct": 0.0,
+                "stress_mpa": 50.0,
+                "load_g": 1.0,
+                "resistance_ohm": 100.0,
+                "current_measured_mA": 10.0,
+                "current_set_mA": 10.0,
+            }
+        ]
+    ).to_csv(path, index=False)
+
+
 def _write_iso_current_run(tmp_path: Path) -> Path:
     run_path = tmp_path / "Ni50Fe27Ga23 12_2 iso-current"
     run_path.mkdir()
@@ -206,17 +226,35 @@ def test_iter_measurement_paths_discovers_run_folders_under_parent(tmp_path: Pat
     parent = tmp_path / "mini_dma_runs"
     first_run = parent / "sample_run01"
     second_run = parent / "sample_run02"
-    first_run.mkdir(parents=True)
-    second_run.mkdir(parents=True)
     first_measurement = first_run / "measurement.csv"
     second_measurement = second_run / "measurement.csv"
-    first_measurement.write_text("", encoding="utf-8")
-    second_measurement.write_text("", encoding="utf-8")
+    _write_minimal_mini_dma_measurement(first_measurement)
+    _write_minimal_mini_dma_measurement(second_measurement)
     (parent / "notes.txt").write_text("not a run", encoding="utf-8")
 
     paths = core.iter_measurement_paths([parent, first_run, second_measurement])
 
     assert paths == [first_measurement.resolve(), second_measurement.resolve()]
+
+
+def test_iter_measurement_paths_skips_archive_test_and_non_measurement_csvs(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "mini_dma_runs"
+    valid = parent / "Ni50Fe27Ga23 12_2 run01" / "measurement.csv"
+    archived = parent / "archive" / "Ni50Fe27Ga23 12_2 old_run" / "measurement.csv"
+    tests = parent / "tests" / "fixture_run" / "measurement.csv"
+    scratch = parent / "scratch" / "draft_run" / "measurement.csv"
+    automation = parent / "automation_history" / "campaign" / "measurement.csv"
+    bogus = parent / "Ni50Fe27Ga23 12_2 sidecar" / "measurement.csv"
+    for path in (valid, archived, tests, scratch, automation):
+        _write_minimal_mini_dma_measurement(path)
+    bogus.parent.mkdir(parents=True)
+    bogus.write_text("timestamp,value\n0,1\n", encoding="utf-8")
+
+    paths = core.iter_measurement_paths([parent])
+
+    assert paths == [valid.resolve()]
 
 
 def test_current_sweep_groups_by_target_mpa() -> None:
@@ -333,8 +371,9 @@ def test_iso_current_figure_uses_strain_stress_axes_and_current_legend(tmp_path:
         assert ax.lines[0].get_ydata().tolist() == pytest.approx([35.0, 45.5, 56.0, 66.5])
         assert ax.lines[0].get_label() == "20 mA / 64 A/mm\u00b2"
         assert ax.get_legend().get_title().get_text() == "Current / current density"
-        assert len(fig.axes) == 2
-        assert fig.axes[1].get_xlabel() == "Load [g]"
+        assert len(fig.axes) == 3
+        assert fig.axes[1].get_xlabel() == "Displacement [mm]"
+        assert fig.axes[2].get_ylabel() == "Load [g]"
     finally:
         plt.close(fig)
 

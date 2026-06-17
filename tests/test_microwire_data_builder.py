@@ -1497,12 +1497,39 @@ def test_mini_dma_section_collect_candidates_uses_only_report_measurements(
     good = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "measurement.csv"
     sidecar = tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01" / "control_trace_replay.csv"
     archived = tmp_path / "archive" / "Ni50Fe27Ga23 12_2 old_run" / "measurement.csv"
+    tests = tmp_path / "tests" / "fixture_run" / "measurement.csv"
+    scratch = tmp_path / "scratch" / "draft_run" / "measurement.csv"
+    cache = tmp_path / "cache" / "cached_run" / "measurement.csv"
     automated = tmp_path / "automated" / "Ni50Fe27Ga23 12_2 draft_run" / "measurement.csv"
     control_test = tmp_path / "automated_control_tests" / "probe_run" / "measurement.csv"
     history = tmp_path / "automation_history" / "campaign" / "history_run" / "measurement.csv"
-    for path in (good, sidecar, archived, automated, control_test, history):
+    bogus = tmp_path / "Ni50Fe27Ga23 12_2 sidecar" / "measurement.csv"
+
+    def _write_valid(path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("placeholder", encoding="utf-8")
+        pd.DataFrame(
+            [
+                {
+                    "elapsed_s": 0.0,
+                    "automation_phase": "current",
+                    "automation_target_value": 50.0,
+                    "plateau_index": 1,
+                    "strain_pct": 0.0,
+                    "stress_mpa": 50.0,
+                    "load_g": 1.0,
+                    "resistance_ohm": 100.0,
+                    "current_measured_mA": 10.0,
+                    "current_set_mA": 10.0,
+                }
+            ]
+        ).to_csv(path, index=False)
+
+    for path in (good, archived, tests, scratch, cache, automated, control_test, history):
+        _write_valid(path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("placeholder", encoding="utf-8")
+    bogus.parent.mkdir(parents=True, exist_ok=True)
+    bogus.write_text("timestamp,value\n0,1\n", encoding="utf-8")
     section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
     try:
         section.data = MiniDatabaseData(sources=[str(tmp_path)])

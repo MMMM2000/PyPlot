@@ -121,7 +121,7 @@ class MiniDmaPlugin(PyPlotPlugin):
             return
 
         measurement_paths = core.iter_measurement_paths(Path(path) for path in paths)
-        candidate_paths = measurement_paths or [Path(path) for path in paths]
+        candidate_paths = measurement_paths
 
         runs: list[core.MiniDmaRun] = []
         failures: list[str] = []

@@ -19213,10 +19213,21 @@ class MiniDmaSection(MiniDatabaseSection):
     section_title = "Mini DMA"
     supported_suffixes = (".csv",)
     excluded_refresh_dirs = {
+        ".cache",
+        ".pytest_cache",
+        "__pycache__",
+        "_cache",
+        "_scratch",
         "archive",
+        "automation",
         "automation_history",
         "automated_control_tests",
         "automated",
+        "cache",
+        "cached",
+        "scratch",
+        "test",
+        "tests",
     }
 
     def __init__(
@@ -19326,6 +19337,8 @@ class MiniDmaSection(MiniDatabaseSection):
                 if path.name.casefold() != "measurement.csv":
                     continue
                 if any(part.casefold() in self.excluded_refresh_dirs for part in path.parts):
+                    continue
+                if mini_dma_core is not None and not mini_dma_core.looks_like_mini_dma_measurement(path):
                     continue
                 try:
                     resolved = str(path.resolve())

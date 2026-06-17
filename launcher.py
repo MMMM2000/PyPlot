@@ -1797,10 +1797,21 @@ _MINI_DMA_REQUIRED_COLUMNS = {
     "resistance_ohm",
 }
 _MINI_DMA_EXCLUDED_SCAN_DIRS = {
+    ".cache",
+    ".pytest_cache",
+    "__pycache__",
+    "_cache",
+    "_scratch",
     "archive",
+    "automation",
     "automation_history",
     "automated_control_tests",
     "automated",
+    "cache",
+    "cached",
+    "scratch",
+    "test",
+    "tests",
 }
 
 
@@ -1848,7 +1859,8 @@ def _looks_like_mini_dma_measurement(path: Path) -> bool:
     except (OSError, IndexError):
         return False
     columns = {column.strip().casefold() for column in header.split(",")}
-    return _MINI_DMA_REQUIRED_COLUMNS.issubset(columns)
+    current_columns = {"current_measured_ma", "current_set_ma"}
+    return _MINI_DMA_REQUIRED_COLUMNS.issubset(columns) and bool(columns.intersection(current_columns))
 
 
 def _is_active_mini_dma_measurement(path: Path) -> bool:
@@ -2703,8 +2715,10 @@ def _load_project_word_report_frame(
             if not mini_root.exists():
                 continue
             for path in mini_root.rglob("measurement.csv"):
-                excluded_parts = {"archive", "automated", "automated_control_tests", "automation_history"}
-                if any(part.casefold() in excluded_parts for part in path.relative_to(mini_root).parts[:-1]):
+                if any(
+                    part.casefold() in _MINI_DMA_EXCLUDED_SCAN_DIRS
+                    for part in path.relative_to(mini_root).parts[:-1]
+                ):
                     continue
                 try:
                     resolved = path.resolve()
