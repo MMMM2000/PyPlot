@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-17.1"
+CONTROL_LOGIC_VERSION = "2026-06-17.2"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -120,6 +120,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_moving_away_bypasses_persistence",
     "current_hold_unstable_response_damps_to_single_motor_steps",
     "current_hold_improving_recovery_scales_cautiously",
+    "current_hold_unstable_improving_recovery_can_escape_single_step",
     "current_hold_large_error_not_masked_by_noise",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
@@ -15807,7 +15808,6 @@ class MainWindow(QtWidgets.QMainWindow):
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             or previous_error is None
             or filtered_signal is None
-            or self._current_sweep_hold_unstable_response_active(seek_key)
         ):
             return None
         if float(previous_error) * float(error_value) <= 0.0:
@@ -17409,6 +17409,7 @@ class MainWindow(QtWidgets.QMainWindow):
             and float(delta_value) * float(filtered_signal.slope_per_s) < 0.0
             and abs(float(filtered_signal.slope_per_s)) >= self._current_sweep_hold_min_slope_for_basis(basis)
         )
+        protective_current_hold_single_step = False
         if (
             current_hold_correction_reason
             in {"current_hold_reversal_single_step", "current_hold_worsened_single_step"}
@@ -17425,17 +17426,12 @@ class MainWindow(QtWidgets.QMainWindow):
             and not current_hold_moving_away_fast
         ):
             nudge_mm = min(nudge_mm, self._motor_step_mm())
+            protective_current_hold_single_step = True
             self._log(
                 "Closed-loop response worsened after the previous correction; "
                 "using a protective single-step correction."
             )
-        if self._current_sweep_hold_unstable_response_active(seek_key):
-            nudge_mm = min(nudge_mm, self._motor_step_mm())
-            current_hold_correction_reason = "current_hold_unstable_single_step"
-            self._log(
-                "Current-hold response is unstable; damping load/stress correction to one motor step."
-            )
-        if current_hold_correction_reason is None:
+        if current_hold_correction_reason is None and not protective_current_hold_single_step:
             improving_step_mm = self._current_sweep_hold_improving_recovery_step_mm(
                 basis,
                 previous_error,
@@ -17449,6 +17445,20 @@ class MainWindow(QtWidgets.QMainWindow):
             if improving_step_mm is not None:
                 nudge_mm = improving_step_mm
                 current_hold_correction_reason = "current_hold_improving_recovery"
+        if self._current_sweep_hold_unstable_response_active(seek_key):
+            if current_hold_correction_reason == "current_hold_improving_recovery":
+                current_hold_correction_reason = "current_hold_unstable_improving_recovery"
+                self._log(
+                    "Current-hold response is still flagged unstable, but the last correction "
+                    "reduced a persistent same-sign error; cautiously widening the next correction."
+                )
+            else:
+                nudge_mm = min(nudge_mm, self._motor_step_mm())
+                if current_hold_correction_reason is None:
+                    current_hold_correction_reason = "current_hold_unstable_single_step"
+                self._log(
+                    "Current-hold response is unstable; damping load/stress correction to one motor step."
+                )
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
@@ -17465,6 +17475,7 @@ class MainWindow(QtWidgets.QMainWindow):
             and (
                 nudge_mm <= self._motor_step_mm() + 1e-12
                 or self._current_sweep_hold_unstable_response_active(seek_key)
+                or current_hold_correction_reason == "current_hold_unstable_improving_recovery"
             )
         ):
             backlash_takeup_mm = 0.0
