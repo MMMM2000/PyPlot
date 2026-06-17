@@ -9603,7 +9603,7 @@ def test_current_sweep_first_overheating_can_use_independent_max_current(tmp_pat
         _close_test_window(window)
 
 
-def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_returns_current_to_start_by_default(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -9611,7 +9611,6 @@ def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) ->
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
-        window.check_current_sweep_reverse_current.setChecked(False)
 
         steps, _summary, _interval_ms = window._build_automation_recipe()
 
@@ -9623,6 +9622,50 @@ def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) ->
             (3.0, 1.0),
         ]
         assert all(step.current_end_mA == pytest.approx(1.0) for step in current_sweep_steps[1::2])
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_can_skip_nominal_reverse_current_steps(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.check_current_sweep_reverse_current.setChecked(False)
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+
+        assert len(current_sweep_steps) == 4
+        assert all(step.current_start_mA == pytest.approx(1.0) for step in current_sweep_steps)
+        assert all(step.current_end_mA == pytest.approx(3.0) for step in current_sweep_steps)
+        assert "Nominal current reverse sweeps are disabled." in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_recipe_payload_preserves_reverse_current_false(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.check_current_sweep_reverse_current.setChecked(False)
+
+        payload = window._current_recipe_payload()
+
+        assert payload["recipe"]["current_sweep"]["reverse_current"] is False
+
+        window.check_current_sweep_reverse_current.setChecked(True)
+        window._apply_recipe_payload(payload)
+
+        assert window.check_current_sweep_reverse_current.isChecked() is False
     finally:
         _close_test_window(window)
 
@@ -17733,6 +17776,60 @@ def test_current_sweep_hold_same_sign_drift_uses_dynamic_recovery(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_drift_recovery_scales_down_for_stiff_response(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = time.time()
+
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    drift_signal = mini_dma_mod.ScaleControlSignal(
+        value=67.0,
+        latest_value=73.0,
+        noise=0.1,
+        slope_per_s=8.0,
+        sample_count=7,
+        timestamp_s=now_s,
+    )
+
+    def drift_step_for_sensitivity(sensitivity_per_mm: float) -> float | None:
+        window._basis_sensitivity_per_mm = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: sensitivity_per_mm
+        )
+        return window._current_sweep_hold_drift_recovery_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            -10.0,
+            -17.0,
+            0.171,
+            window._motor_step_mm(),
+            drift_signal,
+            seek_key=seek_key,
+        )
+
+    try:
+        soft_step_mm = drift_step_for_sensitivity(300.0)
+        stiff_step_mm = drift_step_for_sensitivity(3000.0)
+
+        assert soft_step_mm is not None
+        assert stiff_step_mm is not None
+        assert soft_step_mm > window._motor_step_mm() * 10.0
+        assert stiff_step_mm < soft_step_mm * 0.2
+        assert stiff_step_mm < 0.005
+        assert stiff_step_mm > window._motor_step_mm() * 1.25
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_worsening_recovery_clamps_back_to_one_tic(
     tmp_path: Path,
     qtbot,
@@ -20982,6 +21079,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "conservative_current_hold_response_stiffness" in first_logic["features"]
         assert "current_hold_unstable_response_damps_to_single_motor_steps" in first_logic["features"]
         assert "current_hold_improving_recovery_scales_cautiously" in first_logic["features"]
+        assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]

@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-17.3"
+CONTROL_LOGIC_VERSION = "2026-06-17.4"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -141,6 +141,7 @@ CONTROL_LOGIC_FEATURES = [
     "control_trace_supply_snapshot",
     "control_trace_filtered_signal_slope",
     "current_sweep_progress_uses_current_fraction",
+    "current_sweep_reverse_current_recipe_flag",
     "single_prompt_length_setup",
     "current_sweep_pending_recipe_overrides",
     "length_setup_commits_run_zero_load_reference",
@@ -20038,7 +20039,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_current_end_mA": float(
                     self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
-                "reverse_current": True,
+                "reverse_current": bool(self.check_current_sweep_reverse_current.isChecked()),
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -25009,6 +25010,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
+            reverse_current = self.check_current_sweep_reverse_current.isChecked()
             first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
             first_overheating_current_end = (
@@ -25038,7 +25040,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 plateau_current_end_mA: float = current_end,
             ) -> None:
                 sweep_ranges = [(current_start, plateau_current_end_mA)]
-                if abs(plateau_current_end_mA - current_start) > 1e-12:
+                if reverse_current and abs(plateau_current_end_mA - current_start) > 1e-12:
                     sweep_ranges.append((plateau_current_end_mA, current_start))
                 for sweep_start_mA, sweep_end_mA in sweep_ranges:
                     steps.append(
@@ -25152,6 +25154,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"resume inside {current_hold_resume_factor:.2f}x for "
                     f"{current_hold_resume_stable_s:.2f} s."
                 )
+            if not reverse_current:
+                summary += " Nominal current reverse sweeps are disabled."
             if first_overheating_enabled:
                 summary += (
                     " First overheating enabled: "
