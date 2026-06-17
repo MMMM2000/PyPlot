@@ -89,6 +89,7 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                     "As (C)",
                     "Af (C)",
                     "Data source",
+                    "Source label",
                     "_sources",
                     "internal review note",
                     "provenance file",
@@ -105,6 +106,7 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                         "As (C)": -23.5,
                         "Af (C)": 18.25,
                         "Data source": "Measured",
+                        "Source label": "Ko\u0161ice",
                         "_sources": ["G:/internal/run01"],
                         "internal review note": "needs source check",
                         "provenance file": "G:/internal/provenance.json",
@@ -148,6 +150,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert manifest["column_count"] == 7
     assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
     assert "Data source" in manifest["dropped_columns"]
+    assert "Source label" in manifest["dropped_columns"]
     assert "_sources" in manifest["dropped_columns"]
     assert "internal review note" in manifest["dropped_columns"]
     assert "provenance file" in manifest["dropped_columns"]
@@ -158,6 +161,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert workbook["Assemble audit"].sheet_state == "hidden"
     headers = [cell.value for cell in workbook["Assemble"][1]]
     assert "Data source" not in headers
+    assert "Source label" not in headers
     assert "_sources" not in headers
     assert "internal review note" not in headers
     assert "provenance file" not in headers
@@ -169,8 +173,10 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     audit_headers = [cell.value for cell in workbook["Assemble audit"][1]]
     audit_row = [cell.value for cell in workbook["Assemble audit"][2]]
     assert "Data source" in audit_headers
+    assert "Source label" in audit_headers
     assert "provenance file" in audit_headers
     assert "Measured" in audit_row
+    assert "Ko\u0161ice" in audit_row
     assert "G:/internal/provenance.json" in audit_row
 
 

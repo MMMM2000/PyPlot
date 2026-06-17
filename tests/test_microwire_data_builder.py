@@ -1101,11 +1101,12 @@ def test_search_filters_mini_database_section_rows(tmp_path: Path) -> None:
     )
     try:
         paths = []
-        for name in [
-            "Ni50Fe27Ga23 5-4 s1 loop.txt",
-            "Ni50Fe27Ga23 6-4 s1 loop.txt",
+        for source_name, name in [
+            ("Praha", "Ni50Fe27Ga23 5-4 s1 loop.txt"),
+            ("Kosice", "Ni50Fe27Ga23 6-4 s1 loop.txt"),
         ]:
-            path = tmp_path / name
+            path = tmp_path / source_name / name
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 "\n".join(
                     [
@@ -1123,11 +1124,61 @@ def test_search_filters_mini_database_section_rows(tmp_path: Path) -> None:
         result = section.process(paths)
         section._handle_worker_finished(result)
 
+        frame = section.model.frame()
+        assert builder_ui.SOURCE_LABEL_COLUMN in frame.columns
+        assert set(frame[builder_ui.SOURCE_LABEL_COLUMN].tolist()) == {"Praha", "Ko\u0161ice"}
+
         section.search_edit.setText("6/4")
         assert section.table_view.model().rowCount() == 1
+
+        section.search_edit.clear()
+        index = section.source_filter_combo.findText("Ko\u0161ice")
+        assert index >= 0
+        section.source_filter_combo.setCurrentIndex(index)
+        assert section.table_view.model().rowCount() == 1
+        source_row = section._search_proxy.map_row_to_source(0)
+        assert source_row is not None
+        assert section.model.frame().iloc[source_row]["Microwire"] == "6/4"
     finally:
         section._shutdown_background_threads()
         section.close()
+
+
+def test_assemble_preview_filters_by_source_label() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection(
+        {},
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "_sources": ["G:/My Drive/1 Projects/Praha/mini DMA/run01"],
+                },
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/3",
+                    "_sources": [
+                        "G:/Shared drives/Charakterizacia mikrodrotov/shape memory database/Kosice/run01"
+                    ],
+                },
+            ]
+        )
+
+        assembly._update_preview(frame)
+
+        assert builder_ui.SOURCE_LABEL_COLUMN in assembly.preview_model.frame().columns
+        index = assembly.source_filter_combo.findText("Ko\u0161ice")
+        assert index >= 0
+        assembly.source_filter_combo.setCurrentIndex(index)
+        assert assembly.preview_model.rowCount() == 1
+        assert assembly.preview_model.frame().iloc[0]["Microwire"] == "12/3"
+    finally:
+        assembly.close()
 
 
 def test_annealing_section_migrates_low_graph_column_to_other_annealing() -> None:

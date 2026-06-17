@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import traceback
+import unicodedata
 import warnings
 from datetime import UTC, datetime
 from dataclasses import dataclass, field
@@ -376,6 +377,114 @@ _STAGE_LABELS = {
 }
 
 _TEST_PATH_TOKENS = ("pytest-of-", "pyplot-tests", ".pytest_cache")
+SOURCE_LABEL_COLUMN = "Source label"
+SOURCE_LABEL_ALL = "All sources"
+_SOURCE_PROVENANCE_COLUMNS = (
+    "_sources",
+    "_source_paths",
+    "_source_path",
+    "Source path",
+    "Source files",
+    "Sources",
+    "Data source",
+)
+
+
+def _fold_source_text(value: object) -> str:
+    text = str(value or "").replace("\\", "/").casefold()
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in text if not unicodedata.combining(char))
+
+
+def _iter_source_text_values(value: object) -> Iterable[str]:
+    if value is None:
+        return
+    try:
+        if bool(pd.isna(value)):
+            return
+    except Exception:
+        pass
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _iter_source_text_values(item)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _iter_source_text_values(item)
+        return
+    text = str(value).strip()
+    if text:
+        yield text
+
+
+def _source_label_from_text(value: object) -> Optional[str]:
+    folded = _fold_source_text(value)
+    if not folded:
+        return None
+    if "kosice" in folded or "košice" in folded:
+        return "Ko\u0161ice"
+    if "praha" in folded:
+        return "Praha"
+    if "imported" in folded:
+        return "Imported"
+    if folded in {"manual", "manual entry", "manual_entry"}:
+        return "Manual"
+    if ":/" in folded or folded.startswith("//"):
+        return "Other"
+    return None
+
+
+def _source_labels_from_row(row: Mapping[str, Any] | pd.Series) -> List[str]:
+    labels: List[str] = []
+
+    def add(label: Optional[str]) -> None:
+        if label and label not in labels:
+            labels.append(label)
+
+    try:
+        existing = row.get(SOURCE_LABEL_COLUMN)  # type: ignore[arg-type]
+    except Exception:
+        existing = None
+    for value in _iter_source_text_values(existing):
+        add(str(value).strip())
+    for column in _SOURCE_PROVENANCE_COLUMNS:
+        try:
+            value = row.get(column)  # type: ignore[arg-type]
+        except Exception:
+            value = None
+        for item in _iter_source_text_values(value):
+            add(_source_label_from_text(item))
+    return labels
+
+
+def _source_label_for_row(row: Mapping[str, Any] | pd.Series) -> str:
+    return ", ".join(_source_labels_from_row(row))
+
+
+def _with_source_label_column(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if not any(str(column) in _SOURCE_PROVENANCE_COLUMNS or str(column) == SOURCE_LABEL_COLUMN for column in frame.columns):
+        return frame
+    updated = frame.copy()
+    labels = [_source_label_for_row(row) for _, row in updated.iterrows()]
+    if not any(label for label in labels):
+        return updated
+    updated[SOURCE_LABEL_COLUMN] = labels
+    columns = [column for column in updated.columns if str(column) != SOURCE_LABEL_COLUMN]
+    insert_after = None
+    for preferred in ("Data source", "Sources", "Source files"):
+        if preferred in columns:
+            insert_after = columns.index(preferred) + 1
+            break
+    if insert_after is None:
+        first_internal = next(
+            (idx for idx, column in enumerate(columns) if str(column).startswith("_")),
+            len(columns),
+        )
+        insert_after = first_internal
+    columns.insert(insert_after, SOURCE_LABEL_COLUMN)
+    return updated.loc[:, columns]
 
 
 def _builder_settings() -> QtCore.QSettings:
@@ -8461,6 +8570,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.search_clear_button.setEnabled(False)
         self.search_clear_button.clicked.connect(self._clear_search)
         search_row.addWidget(self.search_clear_button)
+        search_row.addWidget(QtWidgets.QLabel("Source:"))
+        self.source_filter_combo = QtWidgets.QComboBox(self)
+        self.source_filter_combo.addItem(SOURCE_LABEL_ALL)
+        self.source_filter_combo.setEnabled(False)
+        self.source_filter_combo.currentTextChanged.connect(
+            self._handle_source_filter_changed
+        )
+        search_row.addWidget(self.source_filter_combo)
         layout.addLayout(search_row)
 
         self.status_label = QtWidgets.QLabel()
@@ -8491,12 +8608,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         layout.addWidget(right_panel, 1)
         if isinstance(self.table_view, QtWidgets.QTableView):
             self._search_proxy.setSourceModel(self.model)
-            self._search_proxy.set_row_predicate(self._row_visible)
+            self._search_proxy.set_row_predicate(self._row_filter_accepts)
             self.table_view.setModel(self._search_proxy)
         self._configure_table_view()
 
         self._populate_sources_list()
+        self.data.table = _with_source_label_column(self.data.table)
         self.model.set_frame(self.data.table)
+        self._refresh_source_filter_options()
         self._auto_fit_columns()
         self._update_status()
         self._reset_progress_ui()
@@ -8719,6 +8838,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def apply_data(self, data: MiniDatabaseData) -> None:
         self.data = data
+        self.data.table = _with_source_label_column(self.data.table)
         try:
             self.store.save(self.data)
         except Exception:
@@ -8727,6 +8847,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._close_active_editor()
         self.model.set_frame(self.data.table)
         self._populate_sources_list()
+        self._refresh_source_filter_options()
         self._auto_fit_columns()
         self._update_status()
         self._reset_progress_ui()
@@ -8829,6 +8950,54 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def _row_visible(self, row: pd.Series) -> bool:
         _ = row
         return True
+
+    def _row_source_filter_accepts(self, row: pd.Series) -> bool:
+        combo = getattr(self, "source_filter_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return True
+        selected = str(combo.currentText() or "").strip()
+        if not selected or selected == SOURCE_LABEL_ALL:
+            return True
+        return selected in _source_labels_from_row(row)
+
+    def _row_filter_accepts(self, row: pd.Series) -> bool:
+        return self._row_visible(row) and self._row_source_filter_accepts(row)
+
+    def _refresh_source_filter_options(self) -> None:
+        combo = getattr(self, "source_filter_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        current = str(combo.currentText() or SOURCE_LABEL_ALL)
+        frame = self.model.frame()
+        labels: List[str] = []
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for _, row in frame.iterrows():
+                for label in _source_labels_from_row(row):
+                    if label and label not in labels:
+                        labels.append(label)
+        labels = sorted(labels, key=str.casefold)
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(SOURCE_LABEL_ALL)
+            for label in labels:
+                combo.addItem(label)
+            target = current if current in labels else SOURCE_LABEL_ALL
+            combo.setCurrentText(target)
+            combo.setEnabled(bool(labels))
+        finally:
+            combo.blockSignals(False)
+        try:
+            self._search_proxy.invalidateFilter()
+        except Exception:
+            pass
+
+    def _handle_source_filter_changed(self, _text: str) -> None:
+        try:
+            self._search_proxy.invalidateFilter()
+        except Exception:
+            pass
+        self._update_open_sources_enabled()
 
     def _handle_search_changed(self, text: str) -> None:
         self._search_proxy.set_search_text(text)
@@ -9394,6 +9563,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data = MiniDatabaseData()
         self.model.set_frame(pd.DataFrame())
         self.sources_list.clear()
+        self._refresh_source_filter_options()
         self._sync_sources()
         self.store.clear_table()
         self.store.save(self.data)
@@ -9413,6 +9583,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def export_project_payload(self) -> Dict[str, Any]:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        frame = _with_source_label_column(frame)
         columns = [str(col) for col in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
         if isinstance(frame, pd.DataFrame) and not frame.empty:
@@ -9508,8 +9679,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 except (TypeError, ValueError):
                     continue
 
+        frame = _with_source_label_column(frame)
         self.data = MiniDatabaseData(sources=sources, processed=processed, table=frame, extra=extra)
         self.model.set_frame(frame)
+        self._refresh_source_filter_options()
         self._pending_count_cache = 0
         self.store.save(self.data)
         project_payloads = payload.get("payloads")
@@ -9784,10 +9957,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if result.extra:
             self.data.extra.update(result.extra)
         self.data.processed = result.processed
-        self.data.table = result.table
+        self.data.table = _with_source_label_column(result.table)
         self.store.save(self.data)
         self._close_active_editor()
-        self.model.set_frame(result.table)
+        self.model.set_frame(self.data.table)
+        self._refresh_source_filter_options()
         self._auto_fit_columns()
         self._update_status()
         processed_count = len(self._active_candidates)
@@ -25205,6 +25379,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._show_imported = True
         self._show_oe_samples = False
         self._preview_search_text: str = ""
+        self._preview_source_filter_text: str = SOURCE_LABEL_ALL
         self._project_path_getter: Callable[[], Optional[Path]] | None = None
         self._preview_background_cache: Dict[Any, QtGui.QBrush] = {}
 
@@ -25337,6 +25512,14 @@ class AssemblySection(QtWidgets.QWidget):
         self.search_clear_button.setEnabled(False)
         self.search_clear_button.clicked.connect(self._clear_preview_search)
         search_row.addWidget(self.search_clear_button)
+        search_row.addWidget(QtWidgets.QLabel("Source:"))
+        self.source_filter_combo = QtWidgets.QComboBox()
+        self.source_filter_combo.addItem(SOURCE_LABEL_ALL)
+        self.source_filter_combo.setEnabled(False)
+        self.source_filter_combo.currentTextChanged.connect(
+            self._handle_preview_source_filter_changed
+        )
+        search_row.addWidget(self.source_filter_combo)
         layout.addLayout(search_row)
 
         self.preview_model = DataFrameModel()
@@ -25585,6 +25768,7 @@ class AssemblySection(QtWidgets.QWidget):
 
     def export_project_payload(self) -> Dict[str, Any]:
         frame = self._raw_preview_frame if isinstance(self._raw_preview_frame, pd.DataFrame) else pd.DataFrame()
+        frame = _with_source_label_column(frame)
         frame = self._dedupe_frame_columns(frame)
         columns = [str(col) for col in getattr(frame, "columns", [])]
         rows: List[Dict[str, Any]] = []
@@ -25608,6 +25792,7 @@ class AssemblySection(QtWidgets.QWidget):
             "column_order": list(self._column_order),
             "sort_spec": list(self._sort_spec),
             "search_query": self._preview_search_text,
+            "source_filter": self._preview_source_filter_text,
             "export_settings": self._export_settings_payload(),
             "graph_preview": bool(self.graph_panel_checkbox.isChecked()),
             "imported_rows": [
@@ -25678,6 +25863,12 @@ class AssemblySection(QtWidgets.QWidget):
             self.search_edit.blockSignals(False)
         if hasattr(self, "search_clear_button"):
             self.search_clear_button.setEnabled(bool(self._preview_search_text))
+        source_filter = payload.get("source_filter")
+        self._preview_source_filter_text = (
+            str(source_filter).strip()
+            if isinstance(source_filter, str) and source_filter.strip()
+            else SOURCE_LABEL_ALL
+        )
 
         columns_payload = payload.get("columns")
         if isinstance(columns_payload, (list, tuple)):
@@ -25702,6 +25893,7 @@ class AssemblySection(QtWidgets.QWidget):
                 pass
         if isinstance(frame, pd.DataFrame):
             frame = self._apply_column_universe(frame)
+            frame = _with_source_label_column(frame)
         if self._selected_columns is not None:
             self._sync_section_states_from_columns(self._selected_columns, frame.columns)
         imported_rows = payload.get("imported_rows")
@@ -25731,6 +25923,7 @@ class AssemblySection(QtWidgets.QWidget):
                 self.oe_samples_checkbox.blockSignals(False)
         self._measured_preview_frame = None
         self._raw_preview_frame = frame
+        self._refresh_preview_source_filter_options()
         self._refresh_preview_frame()
 
     def _open_export_dialog(self) -> None:
@@ -26608,9 +26801,11 @@ class AssemblySection(QtWidgets.QWidget):
         if isinstance(frame, pd.DataFrame):
             frame = self._expand_shape_memory_preview_rows(frame)
             frame = self._apply_column_universe(frame)
+            frame = _with_source_label_column(frame)
             self._raw_preview_frame = frame.copy()
         else:
             self._raw_preview_frame = pd.DataFrame()
+        self._refresh_preview_source_filter_options()
         self._refresh_preview_frame()
 
     def _column_universe(self) -> List[str]:
@@ -27215,6 +27410,7 @@ class AssemblySection(QtWidgets.QWidget):
                 row_map = keep_positions
             sorted_frame, sorted_row_map = self._apply_sort_spec(working_frame)
             row_map = [row_map[idx] for idx in sorted_row_map if 0 <= int(idx) < len(row_map)]
+            sorted_frame, row_map = self._apply_source_filter(sorted_frame, row_map)
             selected_columns = self._resolve_selected_columns(sorted_frame.columns)
             display_frame = sorted_frame.loc[:, selected_columns] if selected_columns else sorted_frame.loc[:, []]
             total_rows = len(display_frame.index)
@@ -27270,14 +27466,14 @@ class AssemblySection(QtWidgets.QWidget):
         self._update_graph_preview_panel()
         row_count = len(display_frame.index) if isinstance(display_frame, pd.DataFrame) else 0
         if row_count:
-            if self._preview_search_text and total_rows != row_count:
+            if (self._preview_search_text or self._preview_source_filter_text != SOURCE_LABEL_ALL) and total_rows != row_count:
                 self.status_label.setText(
                     f"Preview ready - {row_count} of {total_rows} row(s) shown."
                 )
             else:
                 self.status_label.setText(f"Preview ready - {row_count} row(s).")
         else:
-            if self._preview_search_text and total_rows:
+            if (self._preview_search_text or self._preview_source_filter_text != SOURCE_LABEL_ALL) and total_rows:
                 self.status_label.setText("No preview rows match the current search.")
             else:
                 self.status_label.setText("Preview is empty.")
@@ -27315,6 +27511,55 @@ class AssemblySection(QtWidgets.QWidget):
     def _clear_preview_search(self) -> None:
         if hasattr(self, "search_edit"):
             self.search_edit.clear()
+
+    def _refresh_preview_source_filter_options(self) -> None:
+        combo = getattr(self, "source_filter_combo", None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        frame = self._raw_preview_frame
+        labels: List[str] = []
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for _, row in frame.iterrows():
+                for label in _source_labels_from_row(row):
+                    if label and label not in labels:
+                        labels.append(label)
+        labels = sorted(labels, key=str.casefold)
+        current = self._preview_source_filter_text or SOURCE_LABEL_ALL
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(SOURCE_LABEL_ALL)
+            for label in labels:
+                combo.addItem(label)
+            target = current if current in labels else SOURCE_LABEL_ALL
+            combo.setCurrentText(target)
+            combo.setEnabled(bool(labels))
+            self._preview_source_filter_text = target
+        finally:
+            combo.blockSignals(False)
+
+    def _handle_preview_source_filter_changed(self, text: str) -> None:
+        selected = str(text or "").strip() or SOURCE_LABEL_ALL
+        self._preview_source_filter_text = selected
+        self._refresh_preview_frame()
+
+    def _apply_source_filter(
+        self,
+        frame: pd.DataFrame,
+        row_map: Sequence[int],
+    ) -> Tuple[pd.DataFrame, List[int]]:
+        selected = self._preview_source_filter_text
+        if not selected or selected == SOURCE_LABEL_ALL:
+            return frame, list(row_map)
+        keep_rows: List[int] = []
+        for idx, row in frame.iterrows():
+            if selected in _source_labels_from_row(row):
+                keep_rows.append(int(idx))
+        if not keep_rows:
+            return frame.iloc[0:0].copy(), []
+        filtered = frame.iloc[keep_rows].reset_index(drop=True)
+        mapped_rows = [int(row_map[idx]) for idx in keep_rows if idx < len(row_map)]
+        return filtered, mapped_rows
 
     def _apply_search_filter(
         self,
