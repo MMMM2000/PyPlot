@@ -911,6 +911,32 @@ def run_mini_dma_bench_plan(
 
     run_summaries: list[dict[str, Any]] = []
     total_start_s = time.monotonic()
+
+    def _execute_summary(state: str) -> dict[str, Any]:
+        return {
+            "kind": PLAN_KIND,
+            "schema_version": PLAN_SCHEMA_VERSION,
+            "mode": "execute",
+            "state": state,
+            "plan_path": str(plan.path),
+            "log_dir": None if plan.log_dir is None else str(plan.log_dir),
+            "bench_lock": {
+                "enabled": plan.bench_lock.enabled,
+                "timeout_s": plan.bench_lock.timeout_s,
+                "owner": plan.bench_lock.owner,
+                "purpose": plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+                "lock_path": None if plan.bench_lock.lock_path is None else str(plan.bench_lock.lock_path),
+            },
+            "planned_run_count": len(plan.runs),
+            "run_count": len(run_summaries),
+            "elapsed_s": max(0.0, time.monotonic() - total_start_s),
+            "runs": list(run_summaries),
+        }
+
+    def _write_execute_summary(state: str = "running") -> None:
+        _write_summary(plan.summary_path, _execute_summary(state))
+
+    _write_execute_summary()
     total_deadline_s = None
     if plan.max_total_duration_s is not None:
         total_deadline_s = total_start_s + plan.max_total_duration_s
@@ -943,6 +969,7 @@ def run_mini_dma_bench_plan(
                             "status": "skipped_after_wire_break",
                         }
                     )
+                    _write_execute_summary()
                     continue
                 if total_deadline_s is not None and time.monotonic() >= total_deadline_s:
                     run_summaries.append(
@@ -953,6 +980,7 @@ def run_mini_dma_bench_plan(
                             "status": "skipped_total_timeout",
                         }
                     )
+                    _write_execute_summary()
                     continue
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
@@ -973,6 +1001,7 @@ def run_mini_dma_bench_plan(
                         and plan.guardrails.wire_break_stops_plan
                     ):
                         stop_after_wire_break = True
+                    _write_execute_summary()
                 finally:
                     close = getattr(window, "close", None)
                     if callable(close):
@@ -994,16 +1023,7 @@ def run_mini_dma_bench_plan(
         except Exception:
             pass
 
-    summary = {
-        "kind": PLAN_KIND,
-        "schema_version": PLAN_SCHEMA_VERSION,
-        "mode": "execute",
-        "plan_path": str(plan.path),
-        "log_dir": None if plan.log_dir is None else str(plan.log_dir),
-        "bench_lock": bench_lock_summary,
-        "run_count": len(run_summaries),
-        "elapsed_s": max(0.0, time.monotonic() - total_start_s),
-        "runs": run_summaries,
-    }
+    summary = _execute_summary("completed")
+    summary["bench_lock"] = bench_lock_summary
     _write_summary(plan.summary_path, summary)
     return summary
