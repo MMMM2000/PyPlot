@@ -3639,6 +3639,24 @@ def _load_annealing_dat(path: Path) -> pd.DataFrame:
     )
 
 
+def _annealing_text_current_unit(path: Path) -> Optional[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines[:10]:
+        text = line.strip().lstrip("#").strip().casefold()
+        if not text:
+            continue
+        if "current" not in text and "ireal" not in text and "iset" not in text:
+            continue
+        if re.search(r"(?:^|[^a-z])m\s*a(?:[^a-z]|$)", text) or "_ma" in text:
+            return "mA"
+        if re.search(r"(?:^|[^a-z])a(?:[^a-z]|$)", text):
+            return "A"
+    return None
+
+
 def _trim_annealing_burnthrough(df: pd.DataFrame) -> pd.DataFrame:
     try:
         from plotting.plugins.current_annealing.burnthrough import trim_burnthrough_glitch
@@ -3683,10 +3701,13 @@ def _load_annealing(
     currents = df["I_A"].to_numpy(dtype=float)
     finite = currents[np.isfinite(currents)]
     scale = 1.0
+    current_unit = _annealing_text_current_unit(path)
+    if current_unit == "mA":
+        scale = 1e-3
     if finite.size:
         max_abs = float(np.nanmax(np.abs(finite)))
         median_abs = float(np.nanmedian(np.abs(finite)))
-        if expected_setpoint_mA and expected_setpoint_mA > 0:
+        if scale == 1.0 and expected_setpoint_mA and expected_setpoint_mA > 0:
             expected_amp = expected_setpoint_mA / 1000.0
             if expected_amp > 0 and max_abs > expected_amp * 5:
                 scale = 1e-3

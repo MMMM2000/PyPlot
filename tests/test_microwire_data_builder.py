@@ -2428,6 +2428,18 @@ def test_annealing_loader_and_sanity_check(tmp_path: Path) -> None:
     assert error < 1e-6
 
 
+def test_annealing_loader_respects_text_header_current_milliamp_units(tmp_path: Path) -> None:
+    path = tmp_path / "Ni46Fe23Ga23Co8 2_1 30mA for VSM with glass 2loops.txt"
+    path.write_text("# Current (mA)\tVoltage (V)\tResistance (Ohm)\n0.1\t22.231\t222310\n")
+    df = _load_annealing(path)
+    assert df["I_A"].tolist() == pytest.approx([0.0001])
+    assert df["I_mA"].tolist() == pytest.approx([0.1])
+    ok, error = _resistance_sanity_check(df)
+    assert ok is True
+    assert error is not None
+    assert error < 1e-6
+
+
 def test_annealing_loader_reads_kosice_cycle_dat(tmp_path: Path) -> None:
     path = tmp_path / "Ni44Fe27Ga23Cu3Co3_1-5.dat"
     path.write_text(
