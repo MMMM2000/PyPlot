@@ -2165,6 +2165,11 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
     data_root = tmp_path / "mini_dma"
     good_run = _write_mini_dma_run(data_root / "good_run")
     archived_run = _write_mini_dma_run(data_root / "archive" / "old_run", sample_name="Ni50Fe27Ga23 12_3")
+    tests_run = _write_mini_dma_run(data_root / "tests" / "fixture_run", sample_name="Ni50Fe27Ga23 12_4")
+    cache_run = _write_mini_dma_run(data_root / "cache" / "scratch_run", sample_name="Ni50Fe27Ga23 12_5")
+    invalid_run = data_root / "Ni50Fe27Ga23 12_6 notes"
+    invalid_run.mkdir(parents=True)
+    (invalid_run / "measurement.csv").write_text("not,a,mini,dma\n1,2,3,4\n", encoding="utf-8")
     output_project = tmp_path / "out" / "updated.pydpj"
     recipe_path = tmp_path / "builder_recipe.json"
     recipe_path.write_text(
@@ -2198,6 +2203,9 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
     assert len(rows) == 1
     assert str(good_run) in rows[0]["_sources"]
     assert str(archived_run) not in rows[0]["_sources"]
+    assert str(tests_run) not in rows[0]["_sources"]
+    assert str(cache_run) not in rows[0]["_sources"]
+    assert str(invalid_run) not in rows[0]["_sources"]
 
 
 def test_automation_recipe_rejects_origin_when_unavailable(

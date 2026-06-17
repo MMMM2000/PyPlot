@@ -659,12 +659,28 @@ def _run_builder_update_section_command(
         raise _AutomationRecipeError(
             f"{section_name} update field 'exclude_dir_names' must be an array when provided."
         )
-    candidates = _collect_builder_paths(
-        input_paths,
-        supported_suffixes=supported_suffixes,
-        exclude_dir_names=[str(name) for name in raw_exclude_dir_names],
-    )
     section = section_class(LOGGER, lambda *_args: None)
+    exclude_names = [str(name) for name in raw_exclude_dir_names]
+    if section_name == "mini_dma":
+        mini_dma_core = getattr(builder_ui, "mini_dma_core", None)
+        default_excludes = getattr(section_class, "excluded_refresh_dirs", ())
+        if mini_dma_core is not None and hasattr(mini_dma_core, "iter_measurement_paths"):
+            candidates = mini_dma_core.iter_measurement_paths(
+                input_paths,
+                exclude_dir_names=[*default_excludes, *exclude_names],
+            )
+        else:
+            candidates = _collect_builder_paths(
+                input_paths,
+                supported_suffixes=supported_suffixes,
+                exclude_dir_names=[*default_excludes, *exclude_names],
+            )
+    else:
+        candidates = _collect_builder_paths(
+            input_paths,
+            supported_suffixes=supported_suffixes,
+            exclude_dir_names=exclude_names,
+        )
     try:
         section.import_project_payload(sections.get(section_name, {}))
         existing_payload = section.store.load_payload(payload_name)

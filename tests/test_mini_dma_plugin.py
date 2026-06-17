@@ -192,6 +192,50 @@ def _write_iso_strain_named_current_sweep(tmp_path: Path) -> Path:
     return run_path
 
 
+def _write_minimal_mini_dma_run(run_path: Path, *, sample_name: str | None = None) -> Path:
+    run_path.mkdir(parents=True)
+    (run_path / "metadata.json").write_text(
+        "{"
+        f'"sample_name": "{sample_name or run_path.name}", '
+        '"initial_length_mm": 58.0, '
+        '"wire_diameter_mm": 0.02, '
+        '"recipe": {"recipe_mode": "current_sweep_stress"}'
+        "}",
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "elapsed_s": 0.0,
+                "recipe_mode": "current_sweep_stress",
+                "automation_phase": "current",
+                "automation_target_value": 50.0,
+                "plateau_index": 1,
+                "strain_pct": 0.1,
+                "stress_mpa": 50.0,
+                "load_g": 1.0,
+                "resistance_ohm": 100.0,
+                "current_measured_mA": 10.0,
+                "current_set_mA": 10.0,
+            },
+            {
+                "elapsed_s": 1.0,
+                "recipe_mode": "current_sweep_stress",
+                "automation_phase": "current",
+                "automation_target_value": 50.0,
+                "plateau_index": 1,
+                "strain_pct": 0.4,
+                "stress_mpa": 50.0,
+                "load_g": 1.0,
+                "resistance_ohm": 101.0,
+                "current_measured_mA": 20.0,
+                "current_set_mA": 20.0,
+            },
+        ]
+    ).to_csv(run_path / "measurement.csv", index=False)
+    return run_path
+
+
 def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
     run = core.load_run(SAMPLE_RUN)
 
@@ -204,19 +248,34 @@ def test_load_run_accepts_folder_and_metadata_sample_name() -> None:
 
 def test_iter_measurement_paths_discovers_run_folders_under_parent(tmp_path: Path) -> None:
     parent = tmp_path / "mini_dma_runs"
-    first_run = parent / "sample_run01"
-    second_run = parent / "sample_run02"
-    first_run.mkdir(parents=True)
-    second_run.mkdir(parents=True)
-    first_measurement = first_run / "measurement.csv"
-    second_measurement = second_run / "measurement.csv"
-    first_measurement.write_text("", encoding="utf-8")
-    second_measurement.write_text("", encoding="utf-8")
+    first_run = _write_minimal_mini_dma_run(parent / "sample_run01")
+    second_run = _write_minimal_mini_dma_run(parent / "sample_run02")
     (parent / "notes.txt").write_text("not a run", encoding="utf-8")
 
-    paths = core.iter_measurement_paths([parent, first_run, second_measurement])
+    paths = core.iter_measurement_paths([parent, first_run, second_run / "measurement.csv"])
 
-    assert paths == [first_measurement.resolve(), second_measurement.resolve()]
+    assert paths == [
+        (first_run / "measurement.csv").resolve(),
+        (second_run / "measurement.csv").resolve(),
+    ]
+
+
+def test_iter_measurement_paths_skips_sidecar_and_invalid_measurements(tmp_path: Path) -> None:
+    parent = tmp_path / "mini_dma_runs"
+    valid_run = _write_minimal_mini_dma_run(parent / "Ni50Fe27Ga23 12_2 iso-stress_run01")
+    archived_run = _write_minimal_mini_dma_run(parent / "archive" / "old_run")
+    tests_run = _write_minimal_mini_dma_run(parent / "tests" / "fixture_run")
+    automation_run = _write_minimal_mini_dma_run(parent / "automation_history" / "campaign_run")
+    invalid_run = parent / "Ni50Fe27Ga23 12_3 notes"
+    invalid_run.mkdir(parents=True)
+    (invalid_run / "measurement.csv").write_text("not,a,mini,dma\n1,2,3,4\n", encoding="utf-8")
+
+    paths = core.iter_measurement_paths([parent])
+
+    assert paths == [(valid_run / "measurement.csv").resolve()]
+    assert (archived_run / "measurement.csv").resolve() not in paths
+    assert (tests_run / "measurement.csv").resolve() not in paths
+    assert (automation_run / "measurement.csv").resolve() not in paths
 
 
 def test_current_sweep_groups_by_target_mpa() -> None:
@@ -333,8 +392,13 @@ def test_iso_current_figure_uses_strain_stress_axes_and_current_legend(tmp_path:
         assert ax.lines[0].get_ydata().tolist() == pytest.approx([35.0, 45.5, 56.0, 66.5])
         assert ax.lines[0].get_label() == "20 mA / 64 A/mm\u00b2"
         assert ax.get_legend().get_title().get_text() == "Current / current density"
-        assert len(fig.axes) == 2
-        assert fig.axes[1].get_xlabel() == "Load [g]"
+        assert len(fig.axes) == 3
+        top_ax = fig.axes[1]
+        right_ax = fig.axes[2]
+        assert top_ax.get_xlabel() == "Displacement [mm]"
+        assert top_ax.get_ylabel() == ""
+        assert right_ax.get_xlabel() == ""
+        assert right_ax.get_ylabel() == "Load [g]"
     finally:
         plt.close(fig)
 

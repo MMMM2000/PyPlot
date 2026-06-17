@@ -18,6 +18,24 @@ from plotting.shared.transition_analysis import (
 )
 
 MEASUREMENT_FILE = "measurement.csv"
+MINI_DMA_EXCLUDED_DISCOVERY_DIR_NAMES = frozenset(
+    {
+        ".cache",
+        ".pytest_cache",
+        "__pycache__",
+        "archive",
+        "archives",
+        "automated",
+        "automated_control_tests",
+        "automation_history",
+        "cache",
+        "scratch",
+        "temp",
+        "test",
+        "tests",
+        "tmp",
+    }
+)
 PLOT_PHASES = {"current"}
 SUMMARY_PHASES = {"current", "current_hold"}
 ISO_CURRENT_RECIPE_MODES = {"constant_current_strain_sweep", "iso-current", "iso_current"}
@@ -105,6 +123,24 @@ def resolve_measurement_path(path: Path) -> Path:
     if not candidate.exists() or not candidate.is_file():
         raise ValueError(f"Mini DMA measurement file not found: {candidate}")
     return candidate
+
+
+def looks_like_measurement_file(path: Path) -> bool:
+    """Return true for CSV files with the required Mini DMA measurement shape."""
+    candidate = Path(path)
+    if candidate.name.casefold() != MEASUREMENT_FILE.casefold():
+        return False
+    if not candidate.exists() or not candidate.is_file():
+        return False
+    try:
+        frame = pd.read_csv(candidate, nrows=1)
+    except Exception:
+        return False
+    if frame.empty:
+        return False
+    if not REQUIRED_COLUMNS.issubset(frame.columns):
+        return False
+    return any(column in frame.columns for column in CURRENT_COLUMNS)
 
 
 def load_run(path: Path) -> MiniDmaRun:
@@ -318,6 +354,7 @@ def make_iso_current_figure(run: MiniDmaRun) -> Figure:
 
     fig = Figure(figsize=(8.0, 5.0), constrained_layout=True)
     ax = fig.add_subplot(111)
+    displacement_points: list[tuple[float, float]] = []
     load_points: list[tuple[float, float]] = []
     l0_values: list[float] = []
     for current_mA, group in groups:
@@ -331,11 +368,19 @@ def make_iso_current_figure(run: MiniDmaRun) -> Figure:
             marker="o",
             markersize=3.5,
         )
+        displacement = _iso_current_displacement_series(run, group, strain)
+        for x_value, displacement_value in zip(
+            strain.tolist(),
+            displacement.tolist(),
+            strict=False,
+        ):
+            if pd.notna(x_value) and pd.notna(displacement_value):
+                displacement_points.append((float(x_value), float(displacement_value)))
         if "load_g" in group.columns:
             load = pd.to_numeric(group["load_g"], errors="coerce")
-            for x_value, load_value in zip(strain.tolist(), load.tolist(), strict=False):
-                if pd.notna(x_value) and pd.notna(load_value):
-                    load_points.append((float(x_value), float(load_value)))
+            for stress_value, load_value in zip(stress.tolist(), load.tolist(), strict=False):
+                if pd.notna(stress_value) and pd.notna(load_value):
+                    load_points.append((float(stress_value), float(load_value)))
         l0_values.extend(_iso_current_l0_values(group))
 
     ax.set_title(f"{run.sample_name} - Iso-current Stress vs Strain")
@@ -343,7 +388,8 @@ def make_iso_current_figure(run: MiniDmaRun) -> Figure:
     ax.set_ylabel(_iso_current_stress_axis_label(run))
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best", fontsize=9, title="Current / current density", title_fontsize=9)
-    _add_load_top_axis(ax, load_points)
+    _add_displacement_top_axis(ax, displacement_points)
+    _add_load_right_axis(ax, load_points)
     return fig
 
 
@@ -801,6 +847,29 @@ def _iso_current_l0_values(group: pd.DataFrame) -> list[float]:
     return values
 
 
+def _iso_current_displacement_series(
+    run: MiniDmaRun,
+    group: pd.DataFrame,
+    strain: pd.Series,
+) -> pd.Series:
+    if "current_relative_position_mm" in group.columns:
+        values = pd.to_numeric(group["current_relative_position_mm"], errors="coerce")
+        if values.notna().any():
+            return values
+    if "current_l0_mm" in group.columns:
+        l0 = pd.to_numeric(group["current_l0_mm"], errors="coerce")
+        values = pd.to_numeric(strain, errors="coerce") / 100.0 * l0
+        if values.notna().any():
+            return values
+    if run.initial_length_mm is not None and run.initial_length_mm > 0.0:
+        return pd.to_numeric(strain, errors="coerce") / 100.0 * run.initial_length_mm
+    if "position_mm" in group.columns:
+        values = pd.to_numeric(group["position_mm"], errors="coerce")
+        if values.notna().any():
+            return values - values.min(skipna=True)
+    return pd.Series([math.nan] * len(group.index), index=group.index)
+
+
 def _iso_current_strain_axis_label(run: MiniDmaRun, l0_values: Sequence[float]) -> str:
     finite_values = [float(value) for value in l0_values if math.isfinite(float(value))]
     if finite_values:
@@ -831,12 +900,10 @@ def _format_current_density_label(run: MiniDmaRun, current_mA: float) -> str:
     )
 
 
-def _add_load_top_axis(ax: object, points: Sequence[tuple[float, float]]) -> None:
+def _add_displacement_top_axis(ax: object, points: Sequence[tuple[float, float]]) -> None:
     if not points:
         return
-    sorted_points = sorted(points, key=lambda item: item[0])
-    x_values = [item[0] for item in sorted_points]
-    load_values = [item[1] for item in sorted_points]
+    x_values, displacement_values = _averaged_axis_lookup(points)
     if len(set(x_values)) < 2:
         return
     top_ax = ax.twiny()
@@ -855,33 +922,72 @@ def _add_load_top_axis(ax: object, points: Sequence[tuple[float, float]]) -> Non
     top_ax.set_xticks(ticks)
     labels: list[str] = []
     for tick in ticks:
-        load = _interpolate_nearest_load(tick, x_values, load_values)
-        labels.append(_format_compact_number(load, max_decimals=2))
+        displacement = _interpolate_axis_value(tick, x_values, displacement_values)
+        labels.append(_format_compact_number(displacement, max_decimals=3))
     top_ax.set_xticklabels(labels)
-    top_ax.set_xlabel("Load [g]")
+    top_ax.set_xlabel("Displacement [mm]")
 
 
-def _interpolate_nearest_load(
+def _add_load_right_axis(ax: object, points: Sequence[tuple[float, float]]) -> None:
+    if not points:
+        return
+    stress_values, load_values = _averaged_axis_lookup(points)
+    if len(set(stress_values)) < 2:
+        return
+    right_ax = ax.twinx()
+    right_ax.set_ylim(ax.get_ylim())
+    ticks = [
+        float(tick)
+        for tick in ax.get_yticks()
+        if stress_values[0] <= float(tick) <= stress_values[-1]
+    ]
+    if not ticks:
+        ticks = [
+            stress_values[0],
+            stress_values[len(stress_values) // 2],
+            stress_values[-1],
+        ]
+    right_ax.set_yticks(ticks)
+    labels: list[str] = []
+    for tick in ticks:
+        load = _interpolate_axis_value(tick, stress_values, load_values)
+        labels.append(_format_compact_number(load, max_decimals=2))
+    right_ax.set_yticklabels(labels)
+    right_ax.set_ylabel("Load [g]")
+
+
+def _averaged_axis_lookup(points: Sequence[tuple[float, float]]) -> tuple[list[float], list[float]]:
+    grouped: dict[float, list[float]] = {}
+    for axis_value, display_value in points:
+        if not math.isfinite(axis_value) or not math.isfinite(display_value):
+            continue
+        grouped.setdefault(float(axis_value), []).append(float(display_value))
+    x_values = sorted(grouped)
+    y_values = [float(np.mean(grouped[x_value])) for x_value in x_values]
+    return x_values, y_values
+
+
+def _interpolate_axis_value(
     x_value: float,
     x_values: Sequence[float],
-    load_values: Sequence[float],
+    y_values: Sequence[float],
 ) -> float:
     if x_value <= x_values[0]:
-        return load_values[0]
+        return y_values[0]
     if x_value >= x_values[-1]:
-        return load_values[-1]
+        return y_values[-1]
     for index in range(1, len(x_values)):
         left_x = x_values[index - 1]
         right_x = x_values[index]
         if x_value > right_x:
             continue
-        left_load = load_values[index - 1]
-        right_load = load_values[index]
+        left_y = y_values[index - 1]
+        right_y = y_values[index]
         if math.isclose(right_x, left_x, abs_tol=1e-12):
-            return right_load
+            return right_y
         ratio = (x_value - left_x) / (right_x - left_x)
-        return left_load + ratio * (right_load - left_load)
-    return load_values[-1]
+        return left_y + ratio * (right_y - left_y)
+    return y_values[-1]
 
 
 def _choose_current_column(frame: pd.DataFrame) -> str | None:
@@ -1420,14 +1526,35 @@ def _target_token(value: float) -> str:
     return "".join(char if char.isalnum() or char == "_" else "_" for char in label)
 
 
-def iter_measurement_paths(paths: Iterable[Path]) -> list[Path]:
+def _normalised_excluded_dir_names(exclude_dir_names: Collection[str] | None) -> set[str]:
+    names = MINI_DMA_EXCLUDED_DISCOVERY_DIR_NAMES if exclude_dir_names is None else exclude_dir_names
+    return {str(name).strip().casefold() for name in names if str(name).strip()}
+
+
+def _path_has_excluded_dir(path: Path, excluded_names: Collection[str]) -> bool:
+    if not excluded_names:
+        return False
+    return any(part.casefold() in excluded_names for part in path.parts[:-1])
+
+
+def iter_measurement_paths(
+    paths: Iterable[Path],
+    *,
+    exclude_dir_names: Collection[str] | None = None,
+    require_measurement_data: bool = True,
+) -> list[Path]:
     resolved: list[Path] = []
     seen: set[Path] = set()
+    excluded_names = _normalised_excluded_dir_names(exclude_dir_names)
 
     def _add(candidate: Path) -> None:
         try:
             measurement = resolve_measurement_path(candidate).resolve()
         except ValueError:
+            return
+        if _path_has_excluded_dir(measurement, excluded_names):
+            return
+        if require_measurement_data and not looks_like_measurement_file(measurement):
             return
         if measurement in seen:
             return
@@ -1444,5 +1571,7 @@ def iter_measurement_paths(paths: Iterable[Path]) -> list[Path]:
         except OSError:
             continue
         for child in children:
+            if _path_has_excluded_dir(child, excluded_names):
+                continue
             _add(child)
     return resolved

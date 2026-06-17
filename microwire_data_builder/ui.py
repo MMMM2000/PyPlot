@@ -19212,12 +19212,28 @@ class MiniDmaSection(MiniDatabaseSection):
     section_key = "mini_dma"
     section_title = "Mini DMA"
     supported_suffixes = (".csv",)
-    excluded_refresh_dirs = {
-        "archive",
-        "automation_history",
-        "automated_control_tests",
-        "automated",
-    }
+    excluded_refresh_dirs = set(
+        getattr(
+            mini_dma_core,
+            "MINI_DMA_EXCLUDED_DISCOVERY_DIR_NAMES",
+            {
+                ".cache",
+                ".pytest_cache",
+                "__pycache__",
+                "archive",
+                "archives",
+                "automated",
+                "automated_control_tests",
+                "automation_history",
+                "cache",
+                "scratch",
+                "temp",
+                "test",
+                "tests",
+                "tmp",
+            },
+        )
+    )
 
     def __init__(
         self,
@@ -19316,8 +19332,13 @@ class MiniDmaSection(MiniDatabaseSection):
             root = Path(source).expanduser()
             if not root.exists():
                 continue
-            if root.is_file():
-                paths: Iterable[Path] = (root,)
+            if mini_dma_core is not None:
+                paths = mini_dma_core.iter_measurement_paths(
+                    [root],
+                    exclude_dir_names=self.excluded_refresh_dirs,
+                )
+            elif root.is_file():
+                paths = (root,)
             else:
                 paths = root.rglob(mini_dma_core.MEASUREMENT_FILE if mini_dma_core else "measurement.csv")
             for path in paths:
