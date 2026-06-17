@@ -4146,6 +4146,7 @@ def test_current_sweep_modes_are_separate_recipe_choices(tmp_path: Path, qtbot) 
             "Iso-load current sweep": (mini_dma_mod.CURRENT_SWEEP_LOAD, mini_dma_mod.HSW_BASIS_LOAD_G),
             "Iso-stress current sweep": (mini_dma_mod.CURRENT_SWEEP_STRESS, mini_dma_mod.HSW_BASIS_STRESS_MPA),
             "Iso-strain current sweep": (mini_dma_mod.CURRENT_SWEEP_STRAIN, mini_dma_mod.HSW_BASIS_STRAIN_PCT),
+            "Iso-stress fatigue": (mini_dma_mod.CURRENT_SWEEP_FATIGUE, mini_dma_mod.HSW_BASIS_STRESS_MPA),
         }
 
         labels = {
@@ -4235,6 +4236,85 @@ def test_current_sweep_recipe_has_no_post_sweep_settle_step(tmp_path: Path, qtbo
         assert any(step.action == "sweep_current" for step in steps)
         assert not any(step.action == "settle" and step.note == "1" for step in steps)
         assert not hasattr(window, "spin_current_sweep_settle_s")
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+        window.spin_current_sweep_target_start.setValue(150.0)
+        window.spin_current_sweep_target_end.setValue(900.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(5.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(60.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.spin_current_sweep_fatigue_cycles.setValue(3)
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window.check_current_sweep_first_overheating.setChecked(True)
+
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        set_current_steps = [step for step in steps if step.action == "set_current"]
+        ramp_steps = [step for step in steps if step.action == "ramp_target"]
+        sweep_steps = [step for step in steps if step.action == "sweep_current"]
+
+        assert interval_ms == window._control_interval_ms()
+        assert len(set_current_steps) == 3
+        assert len(ramp_steps) == 3
+        assert len(sweep_steps) == 6
+        assert [step.note for step in sweep_steps] == ["1", "1", "2", "2", "3", "3"]
+        assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == [
+            (pytest.approx(1.0), pytest.approx(60.0)),
+            (pytest.approx(60.0), pytest.approx(1.0)),
+            (pytest.approx(1.0), pytest.approx(60.0)),
+            (pytest.approx(60.0), pytest.approx(1.0)),
+            (pytest.approx(1.0), pytest.approx(60.0)),
+            (pytest.approx(60.0), pytest.approx(1.0)),
+        ]
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in set_current_steps)
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in ramp_steps)
+        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in sweep_steps)
+        assert all(step.target_value == pytest.approx(150.0) for step in set_current_steps)
+        assert all(step.target_value == pytest.approx(150.0) for step in ramp_steps)
+        assert all(step.target_value == pytest.approx(150.0) for step in sweep_steps)
+        assert "iso-stress fatigue" in summary
+        assert "3 cycle" in summary
+        assert "First overheating" not in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_stress_fatigue_ui_hides_ladder_and_preheat_controls(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        assert mode_index >= 0
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+
+        assert window.label_current_sweep_targets_section.text() == "Stress target"
+        assert window.label_current_sweep_target_start.text() == "Stress"
+        assert window.row_current_sweep_target_end.isHidden() is True
+        assert window.label_current_sweep_target_end.isHidden() is True
+        assert window.row_current_sweep_target_step.isHidden() is True
+        assert window.label_current_sweep_target_step.isHidden() is True
+        assert window.label_current_sweep_fatigue_section.isHidden() is False
+        assert window.spin_current_sweep_fatigue_cycles.isHidden() is False
+        assert window.check_current_sweep_first_overheating.isHidden() is True
+        assert window.label_current_sweep_first_overheating_section.isHidden() is True
+
+        stress_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        window.combo_recipe_mode.setCurrentIndex(stress_index)
+        assert window.label_current_sweep_targets_section.text() == "Stress targets"
+        assert window.label_current_sweep_target_start.text() == "Start"
+        assert window.row_current_sweep_target_end.isHidden() is False
+        assert window.row_current_sweep_target_step.isHidden() is False
+        assert window.label_current_sweep_fatigue_section.isHidden() is True
     finally:
         _close_test_window(window)
 
@@ -19883,6 +19963,27 @@ def test_current_sweep_recipe_filename_is_concise_and_descriptive(tmp_path: Path
         _close_test_window(window)
 
 
+def test_iso_stress_fatigue_recipe_filename_is_concise_and_descriptive(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_setup_preload_stress_mpa.setValue(20.0)
+        window.spin_current_sweep_target_start.setValue(150.0)
+        window.spin_current_sweep_fatigue_cycles.setValue(100)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(60.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.check_current_sweep_hold_on_error.setChecked(True)
+
+        assert window._suggest_recipe_filename() == (
+            "iso-stress-fatigue_setup20MPa_stress150MPa_100cycles_current1-60mA_1mAps_hold.recipe.json"
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "iso-stress_setup20MPa_target50-500x50MPa_current1-80mA_1mAps_hold.recipe.json"
@@ -19950,6 +20051,53 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         assert window.spin_current_sweep_first_overheating_end_mA.value() == pytest.approx(90.0)
         assert window.check_current_sweep_return_target.isChecked() is True
         assert "Loaded recipe" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recipe_path = tmp_path / "iso-stress-fatigue_setup20MPa_stress150MPa_12cycles.recipe.json"
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_setup_preload_stress_mpa.setValue(20.0)
+        window.spin_current_sweep_target_start.setValue(150.0)
+        window.spin_current_sweep_target_end.setValue(999.0)
+        window.spin_current_sweep_target_step.setValue(25.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(5.0)
+        window.spin_current_sweep_fatigue_cycles.setValue(12)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(60.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+        window.check_current_sweep_hold_on_error.setChecked(True)
+        window.check_current_sweep_first_overheating.setChecked(True)
+
+        window._save_recipe_to_path(recipe_path)
+        payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+        current_sweep = payload["recipe"]["current_sweep"]
+        assert payload["recipe"]["mode"] == mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        assert current_sweep["basis"] == mini_dma_mod.HSW_BASIS_STRESS_MPA
+        assert current_sweep["target_start"] == pytest.approx(150.0)
+        assert current_sweep["fatigue_cycles"] == 12
+        assert current_sweep["first_overheating"] is False
+
+        window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_fatigue_cycles.setValue(1)
+        window.spin_current_sweep_end_mA.setValue(5.0)
+        window.check_current_sweep_hold_on_error.setChecked(False)
+
+        window._load_recipe_from_path(recipe_path)
+
+        assert window.combo_recipe_mode.currentData() == mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        assert window.spin_current_sweep_target_start.value() == pytest.approx(150.0)
+        assert window.spin_current_sweep_fatigue_cycles.value() == 12
+        assert window.spin_current_sweep_end_mA.value() == pytest.approx(60.0)
+        assert window.check_current_sweep_hold_on_error.isChecked() is True
+        assert window.check_current_sweep_first_overheating.isChecked() is False
     finally:
         _close_test_window(window)
 

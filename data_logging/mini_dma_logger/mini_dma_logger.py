@@ -455,6 +455,7 @@ HSW_BASIS_LABELS = {
 CURRENT_SWEEP_LOAD = "current_sweep_load"
 CURRENT_SWEEP_STRESS = "current_sweep_stress"
 CURRENT_SWEEP_STRAIN = "current_sweep_strain"
+CURRENT_SWEEP_FATIGUE = "current_sweep_fatigue"
 CONSTANT_CURRENT_STRAIN_SWEEP = "constant_current_strain_sweep"
 CONSTANT_CURRENT_STRESS_RAMP = "constant_current_stress_ramp"
 ELASTOCALORIC_EFFECT = "elastocaloric_effect"
@@ -620,11 +621,13 @@ CURRENT_SWEEP_BASIS_BY_MODE = {
     CURRENT_SWEEP_LOAD: HSW_BASIS_LOAD_G,
     CURRENT_SWEEP_STRESS: HSW_BASIS_STRESS_MPA,
     CURRENT_SWEEP_STRAIN: HSW_BASIS_STRAIN_PCT,
+    CURRENT_SWEEP_FATIGUE: HSW_BASIS_STRESS_MPA,
 }
 CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE = {
     CURRENT_SWEEP_LOAD: (0.0, 9.0, 3.0, 0.1),
     CURRENT_SWEEP_STRESS: (50.0, 1000.0, 50.0, 5.0),
     CURRENT_SWEEP_STRAIN: (0.0, 0.5, 0.1, 0.05),
+    CURRENT_SWEEP_FATIGUE: (150.0, 150.0, 150.0, 5.0),
 }
 CURRENT_SWEEP_MODES = frozenset(CURRENT_SWEEP_BASIS_BY_MODE) | {LEGACY_CURRENT_SWEEP}
 CURRENT_TARGET_VALUE_MODES = frozenset(CURRENT_SWEEP_TARGET_DEFAULTS_BY_MODE)
@@ -632,6 +635,7 @@ RECIPE_FILENAME_TOKENS = {
     CURRENT_SWEEP_LOAD: "iso-load",
     CURRENT_SWEEP_STRESS: "iso-stress",
     CURRENT_SWEEP_STRAIN: "iso-strain",
+    CURRENT_SWEEP_FATIGUE: "iso-stress-fatigue",
     CONSTANT_CURRENT_STRAIN_SWEEP: "iso-current",
     CONSTANT_CURRENT_STRESS_RAMP: "iso-current-stress-ramp",
     ELASTOCALORIC_EFFECT: "elastocaloric",
@@ -6987,6 +6991,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_recipe_mode.addItem("Iso-load current sweep", CURRENT_SWEEP_LOAD)
         self.combo_recipe_mode.addItem("Iso-stress current sweep", CURRENT_SWEEP_STRESS)
         self.combo_recipe_mode.addItem("Iso-strain current sweep", CURRENT_SWEEP_STRAIN)
+        self.combo_recipe_mode.addItem("Iso-stress fatigue", CURRENT_SWEEP_FATIGUE)
         self.combo_recipe_mode.addItem("Iso-current stress-strain", CONSTANT_CURRENT_STRAIN_SWEEP)
         self.combo_recipe_mode.addItem("Iso-current stress ramp", CONSTANT_CURRENT_STRESS_RAMP)
         self.combo_recipe_mode.addItem("Elastocaloric effect", ELASTOCALORIC_EFFECT)
@@ -7542,6 +7547,8 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Start", current_start_row)
+        self.row_current_sweep_target_start = current_start_row
+        self.label_current_sweep_target_start = current_sweep_form.labelForField(current_start_row)
         self.spin_current_sweep_target_end = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_end.setDecimals(3)
         self.spin_current_sweep_target_end.setRange(-100000.0, 100000.0)
@@ -7553,6 +7560,8 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("End", current_end_row)
+        self.row_current_sweep_target_end = current_end_row
+        self.label_current_sweep_target_end = current_sweep_form.labelForField(current_end_row)
         self.spin_current_sweep_target_step = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_step.setDecimals(3)
         self.spin_current_sweep_target_step.setRange(0.001, 100000.0)
@@ -7564,6 +7573,8 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Step", current_step_row)
+        self.row_current_sweep_target_step = current_step_row
+        self.label_current_sweep_target_step = current_sweep_form.labelForField(current_step_row)
         self.spin_current_sweep_target_ramp_rate = CompactDoubleSpinBox(automation_box)
         self.spin_current_sweep_target_ramp_rate.setDecimals(4)
         self.spin_current_sweep_target_ramp_rate.setRange(0.0001, 100000.0)
@@ -7579,6 +7590,24 @@ class MainWindow(QtWidgets.QMainWindow):
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
         current_sweep_form.addRow("Ramp rate", current_ramp_row)
+        self.row_current_sweep_target_ramp_rate = current_ramp_row
+        self.label_current_sweep_target_ramp_rate = current_sweep_form.labelForField(current_ramp_row)
+        self.label_current_sweep_fatigue_section = QtWidgets.QLabel("Fatigue loops", automation_box)
+        fatigue_font = self.label_current_sweep_fatigue_section.font()
+        fatigue_font.setBold(True)
+        self.label_current_sweep_fatigue_section.setFont(fatigue_font)
+        current_sweep_form.addRow("", self.label_current_sweep_fatigue_section)
+        self.spin_current_sweep_fatigue_cycles = QtWidgets.QSpinBox(automation_box)
+        self.spin_current_sweep_fatigue_cycles.setRange(1, 100000)
+        self.spin_current_sweep_fatigue_cycles.setValue(100)
+        self.spin_current_sweep_fatigue_cycles.setSuffix(" cycles")
+        self.spin_current_sweep_fatigue_cycles.setToolTip(
+            "Repeat the fixed-stress current sweep this many times, or stop earlier if wire-break diagnostics fire."
+        )
+        current_sweep_form.addRow("Cycles", self.spin_current_sweep_fatigue_cycles)
+        self.label_current_sweep_fatigue_cycles = current_sweep_form.labelForField(
+            self.spin_current_sweep_fatigue_cycles
+        )
         self.current_sweep_advanced_panel = QtWidgets.QWidget(self)
         current_sweep_advanced_form = QtWidgets.QFormLayout(self.current_sweep_advanced_panel)
         current_sweep_advanced_form.setContentsMargins(0, 0, 0, 0)
@@ -8543,6 +8572,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_target_end,
             self.spin_current_sweep_target_step,
             self.spin_current_sweep_target_ramp_rate,
+            self.spin_current_sweep_fatigue_cycles,
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_max_correction_strain_pct,
             self.spin_current_sweep_correction_rate_pct_s,
@@ -17673,8 +17703,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strain_setup_box.setVisible(True)
         self._refresh_equivalent_labels()
         self._update_setup_summary()
+        fatigue_mode = mode == CURRENT_SWEEP_FATIGUE
+        current_sweep_mode = self._is_current_sweep_mode(mode)
+        if hasattr(self, "label_current_sweep_first_overheating_section"):
+            self.label_current_sweep_first_overheating_section.setVisible(
+                current_sweep_mode and not fatigue_mode
+            )
+        if hasattr(self, "check_current_sweep_first_overheating"):
+            self.check_current_sweep_first_overheating.setVisible(
+                current_sweep_mode and not fatigue_mode
+            )
         first_overheating_enabled = (
-            self._is_current_sweep_mode(mode)
+            current_sweep_mode
+            and not fatigue_mode
             and self.check_current_sweep_first_overheating.isChecked()
         )
         first_overheating_current_editable = (
@@ -17691,6 +17732,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.row_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
         if self.label_current_sweep_first_overheating_end is not None:
             self.label_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
+        if hasattr(self, "row_current_sweep_target_end"):
+            self.row_current_sweep_target_end.setVisible(not fatigue_mode)
+        if hasattr(self, "label_current_sweep_target_end") and self.label_current_sweep_target_end is not None:
+            self.label_current_sweep_target_end.setVisible(not fatigue_mode)
+        if hasattr(self, "row_current_sweep_target_step"):
+            self.row_current_sweep_target_step.setVisible(not fatigue_mode)
+        if hasattr(self, "label_current_sweep_target_step") and self.label_current_sweep_target_step is not None:
+            self.label_current_sweep_target_step.setVisible(not fatigue_mode)
+        if hasattr(self, "label_current_sweep_target_start") and self.label_current_sweep_target_start is not None:
+            self.label_current_sweep_target_start.setText("Stress" if fatigue_mode else "Start")
+        if hasattr(self, "label_current_sweep_fatigue_section"):
+            self.label_current_sweep_fatigue_section.setVisible(fatigue_mode)
+        if hasattr(self, "spin_current_sweep_fatigue_cycles"):
+            self.spin_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
+        if hasattr(self, "label_current_sweep_fatigue_cycles") and self.label_current_sweep_fatigue_cycles is not None:
+            self.label_current_sweep_fatigue_cycles.setVisible(fatigue_mode)
         self.recipe_stack.setFixedHeight(self.recipe_stack.sizeHint().height())
         if mode == "cycle":
             summary = (
@@ -17755,44 +17812,69 @@ class MainWindow(QtWidgets.QMainWindow):
             basis = self._current_sweep_basis()
             self._update_current_sweep_basis_ui()
             suffix, _ = self._distribution_units(basis)
-            summary = (
-                f"Plan: {HSW_BASIS_LABELS.get(basis, basis)} "
-                f"{_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix} to "
-                f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix} in "
-                f"{_format_compact_number(self.spin_current_sweep_target_step.value())}{suffix} steps; current "
-                f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
-                f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)}."
-            )
-            summary += " Current returns at each plateau."
-            if self.check_current_sweep_return_target.isChecked():
-                summary += " Target returns to start."
-            summary += f" Automatic hold tolerance {self._auto_tolerance_summary_text(basis)}."
-            if basis == HSW_BASIS_LOAD_G:
-                banner = "Iso-load current sweep"
-            elif basis == HSW_BASIS_STRESS_MPA:
-                banner = "Iso-stress current sweep"
+            if fatigue_mode:
+                self.label_current_sweep_targets_section.setText("Stress target")
+                cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+                banner = "Iso-stress fatigue"
+                summary = (
+                    f"Plan: {banner}, {_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix}; "
+                    f"{cycles} cycle(s); current "
+                    f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
+                    f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)} at "
+                    f"{_format_compact_unit(self.spin_current_sweep_step_mA.value(), 'mA/s', decimals=2)}."
+                )
+                if self.check_current_sweep_hold_on_error.isChecked():
+                    summary += " Current ramp can pause while the stress target recovers."
+                if self._pre_measurement_setup_enabled(mode):
+                    setup_load_g = load_g_from_stress_mpa(
+                        float(self.spin_setup_preload_stress_mpa.value()),
+                        float(self.spin_diameter.value()),
+                    )
+                    load_text = "" if setup_load_g is None else f" ({_format_compact_unit(setup_load_g, 'g', decimals=4)})"
+                    summary += (
+                        " Setup: 0 g load, "
+                        f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
+                        f"{load_text} preload for length entry, then back to 0 g."
+                    )
             else:
-                banner = "Iso-strain current sweep"
-            summary = (
-                f"Plan: {banner}, {HSW_BASIS_LABELS.get(basis, basis)} "
-                f"{_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix} to "
-                f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix} at "
-                f"{_format_compact_number(self.spin_current_sweep_target_ramp_rate.value())}{suffix}/s; current "
-                f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
-                f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)} at "
-                f"{_format_compact_unit(self.spin_current_sweep_step_mA.value(), 'mA/s', decimals=2)}."
-            )
-            if self._pre_measurement_setup_enabled(mode):
-                setup_load_g = load_g_from_stress_mpa(
-                    float(self.spin_setup_preload_stress_mpa.value()),
-                    float(self.spin_diameter.value()),
+                summary = (
+                    f"Plan: {HSW_BASIS_LABELS.get(basis, basis)} "
+                    f"{_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix} to "
+                    f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix} in "
+                    f"{_format_compact_number(self.spin_current_sweep_target_step.value())}{suffix} steps; current "
+                    f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
+                    f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)}."
                 )
-                load_text = "" if setup_load_g is None else f" ({_format_compact_unit(setup_load_g, 'g', decimals=4)})"
-                summary += (
-                    " Setup: 0 g load, "
-                    f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
-                    f"{load_text} preload for length entry, then back to 0 g."
+                summary += " Current returns at each plateau."
+                if self.check_current_sweep_return_target.isChecked():
+                    summary += " Target returns to start."
+                summary += f" Automatic hold tolerance {self._auto_tolerance_summary_text(basis)}."
+                if basis == HSW_BASIS_LOAD_G:
+                    banner = "Iso-load current sweep"
+                elif basis == HSW_BASIS_STRESS_MPA:
+                    banner = "Iso-stress current sweep"
+                else:
+                    banner = "Iso-strain current sweep"
+                summary = (
+                    f"Plan: {banner}, {HSW_BASIS_LABELS.get(basis, basis)} "
+                    f"{_format_compact_number(self.spin_current_sweep_target_start.value())}{suffix} to "
+                    f"{_format_compact_number(self.spin_current_sweep_target_end.value())}{suffix} at "
+                    f"{_format_compact_number(self.spin_current_sweep_target_ramp_rate.value())}{suffix}/s; current "
+                    f"{_format_compact_number(self.spin_current_sweep_start_mA.value(), decimals=2)} to "
+                    f"{_format_compact_unit(self.spin_current_sweep_end_mA.value(), 'mA', decimals=2)} at "
+                    f"{_format_compact_unit(self.spin_current_sweep_step_mA.value(), 'mA/s', decimals=2)}."
                 )
+                if self._pre_measurement_setup_enabled(mode):
+                    setup_load_g = load_g_from_stress_mpa(
+                        float(self.spin_setup_preload_stress_mpa.value()),
+                        float(self.spin_diameter.value()),
+                    )
+                    load_text = "" if setup_load_g is None else f" ({_format_compact_unit(setup_load_g, 'g', decimals=4)})"
+                    summary += (
+                        " Setup: 0 g load, "
+                        f"{_format_compact_unit(self.spin_setup_preload_stress_mpa.value(), 'MPa', decimals=3)}"
+                        f"{load_text} preload for length entry, then back to 0 g."
+                    )
         elif self._is_constant_current_stress_ramp_mode(mode):
             self._update_constant_current_basis_ui()
             suffix, _ = self._distribution_units(HSW_BASIS_STRESS_MPA)
@@ -19894,6 +19976,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "target_end": float(self.spin_current_sweep_target_end.value()),
                 "target_step": float(self.spin_current_sweep_target_step.value()),
                 "target_ramp_rate_value_s": float(self.spin_current_sweep_target_ramp_rate.value()),
+                "fatigue_cycles": int(self.spin_current_sweep_fatigue_cycles.value()),
                 "target_ramp_stage_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
                 "correction_max_strain_pct": float(self.spin_current_sweep_max_correction_strain_pct.value()),
                 "correction_max_strain_rate_pct_s": float(self.spin_current_sweep_correction_rate_pct_s.value()),
@@ -19913,7 +19996,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_ramp_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_ramp_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
-                "first_overheating": self.check_current_sweep_first_overheating.isChecked(),
+                "first_overheating": (
+                    self.check_current_sweep_first_overheating.isChecked()
+                    and str(self.combo_recipe_mode.currentData() or "") != CURRENT_SWEEP_FATIGUE
+                ),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
                 ),
@@ -21214,6 +21300,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _suggest_recipe_filename(self) -> str:
         mode = str(self.combo_recipe_mode.currentData() or "recipe")
+        if mode == CURRENT_SWEEP_FATIGUE:
+            setup = self._recipe_number_token(self.spin_setup_preload_stress_mpa.value())
+            target = self._recipe_number_token(self.spin_current_sweep_target_start.value())
+            cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+            current_start = self._recipe_number_token(self.spin_current_sweep_start_mA.value())
+            current_end = self._recipe_number_token(self.spin_current_sweep_end_mA.value())
+            current_rate = self._recipe_number_token(self.spin_current_sweep_step_mA.value())
+            flags = ["hold"] if self.check_current_sweep_hold_on_error.isChecked() else []
+            flag_text = "" if not flags else "_" + "_".join(flags)
+            return (
+                f"iso-stress-fatigue_setup{setup}MPa_stress{target}MPa_"
+                f"{cycles}cycles_current{current_start}-{current_end}mA_{current_rate}mAps"
+                f"{flag_text}.recipe.json"
+            )
         if mode == CURRENT_SWEEP_STRESS:
             prefix = "iso-stress"
             target_unit = "MPa"
@@ -21321,6 +21421,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "target_end": float(self.spin_current_sweep_target_end.value()),
                 "target_step": float(self.spin_current_sweep_target_step.value()),
                 "target_ramp_rate": float(self.spin_current_sweep_target_ramp_rate.value()),
+                "fatigue_cycles": int(self.spin_current_sweep_fatigue_cycles.value()),
                 "target_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
                 "current_start_mA": float(self.spin_current_sweep_start_mA.value()),
                 "current_end_mA": float(self.spin_current_sweep_end_mA.value()),
@@ -21340,7 +21441,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "mid_correction_stress_mpa": float(self.spin_current_sweep_mid_correction_stress_mpa.value()),
                 "near_correction_stress_mpa": float(self.spin_current_sweep_near_correction_stress_mpa.value()),
                 "return_target": bool(self.check_current_sweep_return_target.isChecked()),
-                "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
+                "first_overheating": bool(
+                    self.check_current_sweep_first_overheating.isChecked()
+                    and mode != CURRENT_SWEEP_FATIGUE
+                ),
                 "first_overheating_target_mpa": float(
                     self.spin_current_sweep_first_overheating_target_mpa.value()
                 ),
@@ -21460,7 +21564,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_sweep = recipe.get("current_sweep")
         if isinstance(current_sweep, Mapping):
             basis = str(current_sweep.get("basis", self._current_sweep_basis()))
-            basis_mode = self._current_sweep_mode_for_basis(basis)
+            basis_mode = CURRENT_SWEEP_FATIGUE if mode == CURRENT_SWEEP_FATIGUE else self._current_sweep_mode_for_basis(basis)
             basis_index = self.combo_recipe_mode.findData(basis_mode)
             if basis_index >= 0:
                 self.combo_recipe_mode.setCurrentIndex(basis_index)
@@ -21468,6 +21572,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_target_end.setValue(float(current_sweep.get("target_end", self.spin_current_sweep_target_end.value())))
             self.spin_current_sweep_target_step.setValue(float(current_sweep.get("target_step", self.spin_current_sweep_target_step.value())))
             self.spin_current_sweep_target_ramp_rate.setValue(float(current_sweep.get("target_ramp_rate", self.spin_current_sweep_target_ramp_rate.value())))
+            self.spin_current_sweep_fatigue_cycles.setValue(
+                max(
+                    1,
+                    int(
+                        current_sweep.get(
+                            "fatigue_cycles",
+                            self.spin_current_sweep_fatigue_cycles.value(),
+                        )
+                    ),
+                )
+            )
             self.spin_current_sweep_target_speed_mm_s.setValue(float(current_sweep.get("target_speed_mm_s", self.spin_current_sweep_target_speed_mm_s.value())))
             self.spin_current_sweep_start_mA.setValue(float(current_sweep.get("current_start_mA", self.spin_current_sweep_start_mA.value())))
             self.spin_current_sweep_end_mA.setValue(float(current_sweep.get("current_end_mA", self.spin_current_sweep_end_mA.value())))
@@ -24816,6 +24931,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self._is_current_sweep_mode(mode):
             basis = self._current_sweep_basis()
+            is_fatigue_recipe = mode == CURRENT_SWEEP_FATIGUE
             target_start = float(self.spin_current_sweep_target_start.value())
             target_end = float(self.spin_current_sweep_target_end.value())
             target_step = abs(float(self.spin_current_sweep_target_step.value()))
@@ -24824,7 +24940,10 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
-            first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
+            first_overheating_enabled = (
+                self.check_current_sweep_first_overheating.isChecked()
+                and not is_fatigue_recipe
+            )
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
             first_overheating_current_end = (
                 current_end
@@ -24841,7 +24960,15 @@ class MainWindow(QtWidgets.QMainWindow):
             current_hold_resume_stable_s = float(self.spin_current_sweep_hold_resume_stable_s.value())
             if target_ramp_rate <= 0.0:
                 raise ValueError("Set a non-zero target ramp rate.")
-            targets = self._build_numeric_targets(target_start, target_end, target_step)
+            if is_fatigue_recipe:
+                basis = HSW_BASIS_STRESS_MPA
+                target_end = target_start
+                target_step = max(1e-9, target_step)
+                targets = [target_start]
+                fatigue_cycles = int(self.spin_current_sweep_fatigue_cycles.value())
+            else:
+                targets = self._build_numeric_targets(target_start, target_end, target_step)
+                fatigue_cycles = 0
             steps = self._build_pre_measurement_setup_steps() if self._pre_measurement_setup_enabled(mode) else []
             previous_target: float | None = 0.0
 
@@ -24871,6 +24998,48 @@ class MainWindow(QtWidgets.QMainWindow):
                             note=note,
                         )
                     )
+
+            if is_fatigue_recipe:
+                target = target_start
+                for cycle_index in range(1, fatigue_cycles + 1):
+                    cycle_note = str(cycle_index)
+                    steps.append(
+                        AutomationStep(
+                            "set_current",
+                            target_value=target,
+                            basis=basis,
+                            current_mA=current_start,
+                            note=cycle_note,
+                        )
+                    )
+                    steps.append(
+                        AutomationStep(
+                            "ramp_target",
+                            target_value=target,
+                            target_start_value=previous_target,
+                            target_end_value=target,
+                            target_ramp_rate_value_s=target_ramp_rate,
+                            basis=basis,
+                            note=cycle_note,
+                        )
+                    )
+                    previous_target = target
+                    _append_current_sweep_plateau(target=target, plateau_basis=basis, note=cycle_note)
+                summary = (
+                    f"Started iso-stress fatigue: stress {target_start:.4f} MPa, "
+                    f"{fatigue_cycles} cycle(s), current {current_start:.2f} to {current_end:.2f} mA "
+                    f"at {current_ramp_rate:.2f} mA/s; {clock_summary}."
+                )
+                if current_hold_enabled:
+                    summary += (
+                        f" Current ramp hold enabled: pause on absolute stress error above "
+                        f"{current_hold_pause_factor:.2f}x tolerance, "
+                        f"resume inside {current_hold_resume_factor:.2f}x for "
+                        f"{current_hold_resume_stable_s:.2f} s."
+                    )
+                summary += " Each cycle sweeps current up and back at the same stress target."
+                summary += self._recipe_setup_summary_sentence()
+                return steps, summary, control_interval_ms
 
             if first_overheating_enabled:
                 steps.append(
@@ -26962,6 +27131,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_target_end", self.spin_current_sweep_target_end.value())
         self.settings.setValue("current_sweep_target_step", self.spin_current_sweep_target_step.value())
         self.settings.setValue("current_sweep_target_ramp_rate", self.spin_current_sweep_target_ramp_rate.value())
+        self.settings.setValue("current_sweep_fatigue_cycles", self.spin_current_sweep_fatigue_cycles.value())
         self._store_current_sweep_target_values()
         for mode, values in self._current_sweep_target_values_by_mode.items():
             prefix = self._current_sweep_target_settings_prefix(mode)
@@ -27556,6 +27726,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._apply_current_sweep_target_values(recipe_mode, allow_legacy_settings=True)
         self._last_recipe_mode = recipe_mode
+        self.spin_current_sweep_fatigue_cycles.setValue(
+            max(1, int(self.settings.value("current_sweep_fatigue_cycles", 100)))
+        )
         current_sweep_servo_defaults_version = int(
             self.settings.value("current_sweep_servo_defaults_version", 0)
         )
