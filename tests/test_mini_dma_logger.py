@@ -37,6 +37,9 @@ os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
 mini_dma_mod = importlib.import_module(
     "data_logging.mini_dma_logger.mini_dma_logger"
 )
+stiff_guard_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.stiff_sample_guard"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -17828,6 +17831,84 @@ def test_current_sweep_hold_drift_recovery_scales_down_for_stiff_response(
         assert stiff_step_mm > window._motor_step_mm() * 1.25
     finally:
         _close_test_window(window)
+
+
+def test_offline_stiff_sample_guard_writes_reproducible_result(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    plan = {
+        "schema_version": 1,
+        "kind": "mini_dma_offline_stiff_sample_guard",
+        "drift_condition": {
+            "basis": mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            "target_mpa": 50.0,
+            "previous_error_mpa": -10.0,
+            "current_error_mpa": -17.0,
+            "tolerance_mpa": 0.171,
+            "filtered_slope_mpa_per_s": 8.0,
+            "filtered_noise_mpa": 0.1,
+            "filtered_sample_count": 7,
+        },
+        "acceptance": {
+            "stiff_10x_max_step_mm": 0.005,
+            "stiff_10x_max_fraction_of_soft_step": 0.2,
+            "stiff_50x_max_step_mm": 0.002,
+        },
+        "sensitivity_cases": [
+            {"id": "soft_reference", "sensitivity_mpa_per_mm": 300.0},
+            {"id": "stiff_10x", "sensitivity_mpa_per_mm": 3000.0},
+            {"id": "stiff_50x", "sensitivity_mpa_per_mm": 15000.0},
+        ],
+        "historical_oscillation_cases": [
+            {
+                "id": "historical_reversal",
+                "source_run": "synthetic historical reversal",
+                "sample": "oscillatory stiff sample",
+                "basis": mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                "target_mpa": 50.0,
+                "previous_error_mpa": -5.27133701,
+                "current_error_mpa": 4.39658663,
+                "tolerance_mpa": 0.182413653,
+                "filtered_slope_mpa_per_s": 0.0,
+                "filtered_noise_mpa": 0.1,
+                "filtered_sample_count": 7,
+                "sensitivity_mpa_per_mm": 1590.24028,
+                "expected": "decline_dynamic_escape",
+            }
+        ],
+    }
+    plan_path = tmp_path / "stiff-guard.json"
+    out_json = tmp_path / "stiff-result.json"
+    out_md = tmp_path / "stiff-result.md"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    def _window_factory(**_kwargs: object) -> mini_dma_mod.MainWindow:
+        window = _build_window(tmp_path, qtbot)
+        window.spin_steps_per_mm.setValue(800.0)
+        return window
+
+    result = stiff_guard_mod.run_guard(
+        plan_path,
+        out_json=out_json,
+        out_markdown=out_md,
+        repo_root=Path.cwd(),
+        window_factory=_window_factory,
+    )
+
+    assert result["passed"] is True
+    by_id = {row["id"]: row for row in result["results"]}
+    assert by_id["soft_reference"]["dynamic_step_mm"] == pytest.approx(0.032485009728586)
+    assert by_id["stiff_10x"]["dynamic_step_mm"] == pytest.approx(0.0032485009728586)
+    assert by_id["stiff_50x"]["dynamic_step_mm"] is None
+    historical_by_id = {row["id"]: row for row in result["historical_oscillation_results"]}
+    assert historical_by_id["historical_reversal"]["dynamic_step_mm"] is None
+    assert result["historical_checks"][0]["passed"] is True
+    saved = json.loads(out_json.read_text(encoding="utf-8"))
+    assert saved["passed"] is True
+    markdown = out_md.read_text(encoding="utf-8")
+    assert "stiff_10x" in markdown
+    assert "Historical Oscillation Cases" in markdown
 
 
 def test_current_sweep_hold_worsening_recovery_clamps_back_to_one_tic(
