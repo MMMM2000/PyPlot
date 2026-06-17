@@ -47,7 +47,9 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
-def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> None:
+def test_microwire_word_graph_sections_record_reference_and_origin_status() -> None:
+    from microwire_data_builder.core import OriginArtifact
+
     source_only = {
         "Manual stress/strain graphs": [
             "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
@@ -59,29 +61,64 @@ def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> Non
         "Manual stress/strain graphs (Origin)": "shape_memory.oggu",
     }
 
-    assert launcher_module._microwire_word_graph_sections_for_row(source_only) == {}
-    assert launcher_module._microwire_word_graph_sections_for_row(with_origin) == {
-        "Manual stress/strain": {
-            "sources": [],
-            "graphs": ["shape_memory.oggu"],
-            "references": ["30mA", "shape_memory.oggu"],
-        }
-    }
+    source_section = launcher_module._microwire_word_graph_sections_for_row(source_only)[
+        "Manual stress/strain"
+    ]
+    assert source_section["included"] is True
+    assert source_section["reason"] == "reference_content"
+    assert source_section["graphs"] == []
+    assert source_section["references"] == [
+        "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+        "30mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+    ]
+
+    missing_section = launcher_module._microwire_word_graph_sections_for_row(with_origin)[
+        "Manual stress/strain"
+    ]
+    assert missing_section["included"] is True
+    assert missing_section["reason"] == "reference_content"
+    assert missing_section["graphs"] == []
+    assert missing_section["references"] == ["30mA"]
+    assert missing_section["missing_origin_descriptors"] == ["shape_memory.oggu"]
+
+    artifact_section = launcher_module._microwire_word_graph_sections_for_row(
+        with_origin,
+        {
+            "shape_memory.oggu": OriginArtifact(
+                descriptor="shape_memory.oggu",
+                object_path=Path("shape_memory.oggu"),
+                display_text="shape memory",
+            )
+        },
+    )["Manual stress/strain"]
+    assert artifact_section["included"] is True
+    assert artifact_section["reason"] == "accepted_origin_object"
+    assert artifact_section["graphs"] == ["shape_memory.oggu"]
+    assert artifact_section["references"] == ["30mA"]
 
 
 def test_microwire_word_graph_sections_accept_legacy_shape_memory_columns() -> None:
+    from microwire_data_builder.core import OriginArtifact
+
     row = {
         "Shape memory stress/strain graphs": ["30mA"],
         "Shape memory stress/strain graphs (Origin)": "legacy_shape_memory.oggu",
     }
 
-    assert launcher_module._microwire_word_graph_sections_for_row(row) == {
-        "Manual stress/strain": {
-            "sources": [],
-            "graphs": ["legacy_shape_memory.oggu"],
-            "references": ["30mA", "legacy_shape_memory.oggu"],
-        }
-    }
+    section = launcher_module._microwire_word_graph_sections_for_row(
+        row,
+        {
+            "legacy_shape_memory.oggu": OriginArtifact(
+                descriptor="legacy_shape_memory.oggu",
+                object_path=Path("legacy_shape_memory.oggu"),
+                display_text="legacy shape memory",
+            )
+        },
+    )["Manual stress/strain"]
+    assert section["included"] is True
+    assert section["reason"] == "accepted_origin_object"
+    assert section["graphs"] == ["legacy_shape_memory.oggu"]
+    assert section["references"] == ["30mA"]
 
 
 def _wait_for_registry(window: launcher_module.MasterLauncher, app: QtWidgets.QApplication) -> None:
@@ -1752,11 +1789,11 @@ def _write_transition_mini_dma_run(
     cooling_current = np.linspace(100.0, 1.0, 120)
 
     def piecewise(current: np.ndarray, start: float, finish: float) -> np.ndarray:
-        before = 0.1 + current * 0.002
-        start_value = 0.1 + start * 0.002
-        transition = start_value + (current - start) * 0.04
-        finish_value = start_value + (finish - start) * 0.04
-        after = finish_value + (current - finish) * 0.003
+        before = 4.0 - current * 0.002
+        start_value = 4.0 - start * 0.002
+        transition = start_value - (current - start) * 0.04
+        finish_value = start_value - (finish - start) * 0.04
+        after = finish_value - (current - finish) * 0.003
         return np.where(current < start, before, np.where(current <= finish, transition, after))
 
     current = np.concatenate([heating_current, cooling_current])

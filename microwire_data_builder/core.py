@@ -261,11 +261,13 @@ MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
 MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
 MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Manual stress/strain graphs"
+LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
 VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
 DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
 MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
 SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Manual stress/strain graphs (Origin)"
+LEGACY_SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
 SHAPE_MEMORY_STRAIN_COLUMN = "Strain (%)"
@@ -4851,6 +4853,8 @@ _WORD_GRAPH_COLUMNS: Tuple[str, ...] = (
     MINI_DMA_ORIGIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+    LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+    LEGACY_SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     FMR_COLUMN,
     FMR_ORIGIN_COLUMN,
 )
@@ -4869,8 +4873,14 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("Mini DMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
     (
         "Manual stress/strain",
-        (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
-        (SHAPE_MEMORY_STRESS_STRAIN_COLUMN,),
+        (
+            SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+            LEGACY_SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
+        ),
+        (
+            SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+            LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
+        ),
     ),
     ("FMR", (FMR_ORIGIN_COLUMN,), (FMR_COLUMN,)),
 )
@@ -5346,11 +5356,11 @@ def _word_reference_conflicts_with_sample(row: pd.Series, *values: object) -> bo
     if row_composition and compositions:
         if all(composition != row_composition for composition in compositions):
             return True
-        pair = _word_row_microwire_pair(row)
-        if pair is not None:
-            microwire_matches = re.findall(r"(?<!\d)(\d+)\s*[/_\-]\s*(\d+)(?!\d)", lowered)
-            if microwire_matches and all(match != pair for match in microwire_matches):
-                return True
+    pair = _word_row_microwire_pair(row)
+    if pair is not None:
+        microwire_matches = re.findall(r"(?<!\d)(\d+)\s*[/_\-]\s*(\d+)(?!\d)", lowered)
+        if microwire_matches and all(match != pair for match in microwire_matches):
+            return True
     return False
 
 

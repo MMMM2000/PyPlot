@@ -5310,6 +5310,30 @@ def test_word_report_rejects_mismatched_origin_descriptor() -> None:
     assert current_section["invalid_origin_descriptors"] == [descriptor]
 
 
+def test_word_report_rejects_origin_descriptor_for_wrong_wire_without_composition() -> None:
+    descriptor = "13-3_current.oggu"
+    row = pd.Series(
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/2",
+            f"{core.FIGURE_COLUMNS[0]} (Origin)": descriptor,
+        }
+    )
+    artifact = OriginArtifact(
+        descriptor=descriptor,
+        object_path=Path(descriptor),
+        display_text="13/3 current annealing",
+    )
+
+    manifest = core.word_report_section_manifest_for_row(row, {descriptor: artifact})
+    current_section = next(item for item in manifest if item["title"] == "Current annealing")
+
+    assert current_section["included"] is False
+    assert current_section["status"] == "invalid"
+    assert current_section["reason"] == "content_failed_sample_validation"
+    assert current_section["invalid_origin_descriptors"] == [descriptor]
+
+
 def test_word_export_manifest_records_skipped_and_invalid_sections(
     tmp_path: Path,
 ) -> None:

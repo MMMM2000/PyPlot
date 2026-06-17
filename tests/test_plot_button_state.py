@@ -1456,6 +1456,12 @@ def test_shared_rescale_works_for_vsm_temperature_scan_graphs() -> None:
         window._confirm_close_with_unsaved_data = lambda: True  # noqa: SLF001 - avoid modal close prompt
         plugin = getattr(window, "_current_plugin", None)
         assert plugin is not None
+        processor = getattr(plugin, "_processor", None)
+        assert processor is not None
+        processor.show_smoothed_plot = False
+        processor.show_derivative = False
+        processor.show_smoothed_derivative = False
+        processor.show_overlay_derivative = False
         frame = pd.DataFrame(
             {
                 "temperature": [20.0, 30.0, 40.0, 50.0, 60.0],

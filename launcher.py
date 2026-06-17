@@ -2969,17 +2969,18 @@ def _microwire_word_graph_sections_for_row(
 ) -> dict[str, dict[str, Any]]:
     from microwire_data_builder.core import word_report_section_manifest_for_row
 
+    row_data = row if hasattr(row, "index") else pd.Series(row)
     sections: dict[str, dict[str, Any]] = {}
     evaluated = {
         str(item.get("title") or ""): item
-        for item in word_report_section_manifest_for_row(row, origin_artifacts or {})
+        for item in word_report_section_manifest_for_row(row_data, origin_artifacts or {})
     }
     for section_name, source_columns, graph_columns in _WORD_REPORT_GRAPH_MANIFEST_SECTIONS:
         source_values: list[str] = []
         for column in source_columns:
             source_values.extend(
                 str(item)
-                for item in _word_project_value_items(row.get(column))
+                for item in _word_project_value_items(row_data.get(column))
                 if str(item or "").strip()
             )
         source_values = list(dict.fromkeys(source_values))
