@@ -7,7 +7,7 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 ## Sections and Data Sources
 
 - Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (core/glass temperature, winding speed, glass feeding, underpressure). Imported samples are added here so fabrication lookups work even when no spreadsheet exists yet.
-- Current annealing: uses one dedicated `1000 mA` anchor slot plus an aggregated `Other annealing` bucket for every non-anchor run; extra runs surface in "Figure — other annealing" and can be hidden via the visibility dialog. The Builder also reports conservative As/Af/Ms/Mf current estimates when heating shows a local resistance drop and cooling shows the corresponding resistance increase along the cooling direction.
+- Current annealing: uses one dedicated `1000 mA` anchor slot plus an aggregated `Other annealing` bucket for every non-anchor run; extra runs surface in "Figure — other annealing" and can be hidden via the visibility dialog. The Builder accepts standard `.txt` logger files plus Košice-style `.dat` files, including cycle-tabular logs with `Ireal_mA`/`Voltage_V`/`Resistance_Ohm` columns and legacy four-column logs where current is stored as amperes despite the header text. The Builder also reports conservative As/Af/Ms/Mf current estimates when heating shows a local resistance drop and cooling shows the corresponding resistance increase along the cooling direction.
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current annealing transition review: section previews and enlarged plots mark detected As/Af/Ms/Mf currents directly on the R-vs-I graphs so automatic candidates can be inspected before they are used downstream.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice). Current annealing transition candidates auto-fill the first-pass As/Af/Ms/Mf columns when no manual marker is stored; manual edits remain authoritative.
@@ -39,6 +39,7 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 - Hidden graphs (visibility dialogs) are excluded from Assemble/Compare/exports and from HTML compare output.
 - Visibility dialogs support per-graph group toggles (for example, hide/show an entire temperature group in VSM).
 - Graph titles should include the suffix label (for example, `Ni50Fe27Ga23 10/5 (NG CA)` or `Ni50Fe27Ga23 11/1 (s3)`).
+- Source provenance is an internal Builder concern, not part of public sample identity. Multi-site imports should keep `source_id`/source label/source path/hash/modified-time metadata available for Builder filtering, grouping, audit manifests, and accidental-mixing checks, while public Assemble exports omit Praha/Košice provenance columns by default so boss-facing workbooks present one unified database.
 
 ## Current Density Requirements
 

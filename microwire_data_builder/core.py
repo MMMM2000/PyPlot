@@ -486,9 +486,13 @@ HEADER_HINTS: Dict[str, str] = {
 
 ANNEALING_COLUMNS = ["I_A", "V_V", "R_ohm"]
 
+COMPOSITION_TOKEN_PATTERN = re.compile(r"^(?P<composition>(?:[A-Z][a-z]?\d+)+)")
 DRAW_PATTERN = re.compile(r"^(?P<draw>\d+)")
 PIECE_PATTERN = re.compile(r"^(?P<piece>\d+)")
 XY_PATTERN = re.compile(r"(\d+)_+(\d+)")
+DRAW_PIECE_AFTER_COMPOSITION_PATTERN = re.compile(
+    r"(?:^|[\s_-])(?P<draw>\d{1,3})[_-](?P<piece>\d{1,3})(?=$|[\s_-])"
+)
 MICROSCOPE_PAIR_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"(\d+)_+(\d+)"),
     re.compile(r"(\d+)[/-](\d+)")
@@ -3529,8 +3533,18 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
     base = path.stem
     parts = base.split()
-    composition = parts[0] if parts else base
-    xy_match = XY_PATTERN.search(base)
+    composition_match = COMPOSITION_TOKEN_PATTERN.search(base)
+    composition = (
+        composition_match.group("composition")
+        if composition_match
+        else parts[0]
+        if parts
+        else base
+    )
+    identity_tail = base[composition_match.end():] if composition_match else base
+    xy_match = DRAW_PIECE_AFTER_COMPOSITION_PATTERN.search(identity_tail)
+    if xy_match is None:
+        xy_match = XY_PATTERN.search(base)
     draw_x: Optional[int] = int(xy_match.group(1)) if xy_match else None
     piece_y: Optional[int] = int(xy_match.group(2)) if xy_match else None
     setpoint_match = SETPOINT_PATTERN.search(base)
@@ -3550,11 +3564,108 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     )
 
 
+def _numeric_text_series(series: pd.Series) -> pd.Series:
+    cleaned = (
+        series.astype(str)
+        .str.replace("\u2212", "-", regex=False)
+        .str.replace(",", ".", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _normalise_annealing_columns(
+    *,
+    current_mA: pd.Series,
+    voltage_v: pd.Series,
+    resistance_ohm: pd.Series,
+    cycle: Optional[pd.Series] = None,
+) -> pd.DataFrame:
+    df = pd.DataFrame(
+        {
+            "I_mA": _numeric_text_series(current_mA),
+            "V_V": _numeric_text_series(voltage_v),
+            "R_ohm": _numeric_text_series(resistance_ohm),
+        }
+    )
+    if cycle is not None:
+        df["Cycle"] = _numeric_text_series(cycle)
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna(subset=["I_mA", "R_ohm"]).reset_index(drop=True)
+    if df.empty:
+        raise ValueError("no valid samples after parsing")
+    df["I_A"] = df["I_mA"] / 1_000.0
+    columns = ["I_A", "V_V", "R_ohm", "I_mA"]
+    if "Cycle" in df.columns:
+        columns.append("Cycle")
+    return df.loc[:, columns]
+
+
+def _load_annealing_dat(path: Path) -> pd.DataFrame:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    non_empty = [line for line in lines if line.strip()]
+    if not non_empty:
+        raise ValueError(f"{path}: no valid samples after parsing")
+    first_line = non_empty[0]
+    if "Cycle" in first_line and "Iset_mA" in first_line:
+        df = pd.read_csv(path, sep=r"\s+", engine="python")
+        required = {"Cycle", "Ireal_mA", "Voltage_V", "Resistance_Ohm"}
+        missing = required.difference(df.columns)
+        if missing:
+            raise ValueError(f"{path}: missing Kosice cycle .dat columns {sorted(missing)}")
+        return _normalise_annealing_columns(
+            current_mA=df["Ireal_mA"],
+            voltage_v=df["Voltage_V"],
+            resistance_ohm=df["Resistance_Ohm"],
+            cycle=df["Cycle"],
+        )
+
+    rows: List[List[float]] = []
+    for line in non_empty:
+        parts = line.split()
+        if len(parts) != 4:
+            continue
+        try:
+            rows.append([float(part.replace(",", ".")) for part in parts])
+        except ValueError:
+            continue
+    if not rows:
+        raise ValueError(f"{path}: no valid four-column Kosice .dat samples after parsing")
+    df = pd.DataFrame(rows, columns=["Iset_A", "Ireal_A", "Voltage_V", "Resistance_Ohm"])
+    return _normalise_annealing_columns(
+        current_mA=df["Ireal_A"] * 1_000.0,
+        voltage_v=df["Voltage_V"],
+        resistance_ohm=df["Resistance_Ohm"],
+    )
+
+
+def _trim_annealing_burnthrough(df: pd.DataFrame) -> pd.DataFrame:
+    try:
+        from plotting.plugins.current_annealing.burnthrough import trim_burnthrough_glitch
+    except ImportError:
+        return df
+
+    currents_mA = df["I_mA"].to_numpy(dtype=float)
+    resistances = df["R_ohm"].to_numpy(dtype=float)
+    trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents_mA, resistances)
+    trimmed_count = int(trimmed_currents.shape[0])
+    if trimmed_count < currents_mA.shape[0]:
+        df = df.iloc[:trimmed_count].copy()
+        df.loc[:, "I_mA"] = trimmed_currents
+        df.loc[:, "I_A"] = trimmed_currents / 1e3
+        df.loc[:, "R_ohm"] = trimmed_resistances
+        df = df.reset_index(drop=True)
+    return df
+
+
 def _load_annealing(
     path: Path,
     *,
     expected_setpoint_mA: Optional[float] = None,
 ) -> pd.DataFrame:
+    if path.suffix.lower() == ".dat":
+        return _trim_annealing_burnthrough(_load_annealing_dat(path))
+
     try:
         df = pd.read_csv(path, sep=None, engine="python", names=ANNEALING_COLUMNS, header=None)
     except (csv.Error, pd.errors.ParserError):
@@ -3587,26 +3698,7 @@ def _load_annealing(
     scaled_currents = currents * scale
     df.loc[:, "I_A"] = scaled_currents
     df.loc[:, "I_mA"] = scaled_currents * 1_000.0
-
-    try:
-        from plotting.plugins.current_annealing.burnthrough import trim_burnthrough_glitch
-    except ImportError:
-        return df
-
-    currents_source = "I_mA" if "I_mA" in df.columns else "I_A"
-    currents_mA = df[currents_source].to_numpy(dtype=float)
-    if currents_source == "I_A":
-        currents_mA = currents_mA * 1e3
-    resistances = df["R_ohm"].to_numpy(dtype=float)
-    trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents_mA, resistances)
-    trimmed_count = int(trimmed_currents.shape[0])
-    if trimmed_count < currents_mA.shape[0]:
-        df = df.iloc[:trimmed_count].copy()
-        df.loc[:, "I_mA"] = trimmed_currents
-        df.loc[:, "I_A"] = trimmed_currents / 1e3
-        df.loc[:, "R_ohm"] = trimmed_resistances
-        df = df.reset_index(drop=True)
-    return df
+    return _trim_annealing_burnthrough(df)
 
 
 def _annealing_transition_summary(df: pd.DataFrame, *, label: str | None = None) -> Tuple[str, ...]:

@@ -1906,7 +1906,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.root_group)
 
         # Annealing inputs
-        self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt)")
+        self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt, .dat)")
         anneal_layout = QtWidgets.QVBoxLayout(self.anneal_group)
         self.anneal_list = QtWidgets.QListWidget()
         self.anneal_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2308,7 +2308,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             self,
             "Select current-annealing files",
             self._last_anneal_dir,
-            "Text files (*.txt)",
+            "Current annealing files (*.txt *.dat);;Text files (*.txt);;Data files (*.dat)",
         )
         if not files:
             return
@@ -2326,10 +2326,15 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         if not folder:
             return
         root = Path(folder)
-        iterator = root.rglob("*.txt") if self.anneal_recursive.isChecked() else root.glob("*.txt")
-        files = [p for p in iterator if p.is_file()]
+        iterator = root.rglob("*") if self.anneal_recursive.isChecked() else root.glob("*")
+        suffixes = {".txt", ".dat"}
+        files = [p for p in iterator if p.is_file() and p.suffix.lower() in suffixes]
         if not files:
-            QtWidgets.QMessageBox.information(self, "Microwire Data Builder", "No text files were found in that folder.")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No current-annealing .txt or .dat files were found in that folder.",
+            )
             return
         self._last_anneal_dir = folder
         self._extend_paths("annealing_paths", files)
@@ -10954,7 +10959,7 @@ class FabricationSection(MiniDatabaseSection):
 class AnnealingSection(MiniDatabaseSection):
     section_key = "annealing"
     section_title = "Current annealing"
-    supported_suffixes = (".txt", ".csv", ".tsv")
+    supported_suffixes = (".txt", ".dat", ".csv", ".tsv")
 
     def __init__(
         self,
