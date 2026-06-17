@@ -6698,6 +6698,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ir_box = self._group_box("IR Thermometer")
         ir_form = QtWidgets.QFormLayout(ir_box)
+        self.check_ir_enabled = QtWidgets.QCheckBox("Enable optional IR camera/thermometer", ir_box)
+        self.check_ir_enabled.setChecked(True)
+        self.check_ir_enabled.setToolTip(
+            "When disabled, Mini DMA skips IR auto-connect and leaves temperature fields blank."
+        )
+        self.check_ir_enabled.toggled.connect(self._handle_ir_enabled_changed)
+        ir_form.addRow("", self.check_ir_enabled)
         self.combo_ir_port = QtWidgets.QComboBox(ir_box)
         refresh_ir_button = QtWidgets.QPushButton("Refresh ports", ir_box)
         refresh_ir_button.clicked.connect(self._refresh_ir_ports)
@@ -6730,15 +6737,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_ir_connect = QtWidgets.QPushButton("Connect IR", ir_box)
         self.button_ir_connect.clicked.connect(self._toggle_ir_connection)
         ir_buttons.addWidget(self.button_ir_connect)
-        zero_ir_button = QtWidgets.QPushButton("Zero delta", ir_box)
-        zero_ir_button.clicked.connect(self._zero_ir_temperature_delta)
-        ir_buttons.addWidget(zero_ir_button)
+        self.button_ir_zero_delta = QtWidgets.QPushButton("Zero delta", ir_box)
+        self.button_ir_zero_delta.clicked.connect(self._zero_ir_temperature_delta)
+        ir_buttons.addWidget(self.button_ir_zero_delta)
         ir_form.addRow("", ir_buttons)
 
         ir_aux_buttons = QtWidgets.QHBoxLayout()
-        wiring_help_button = QtWidgets.QPushButton("Wiring", ir_box)
-        wiring_help_button.clicked.connect(self._show_ir_wiring_help)
-        ir_aux_buttons.addWidget(wiring_help_button)
+        self.button_ir_wiring_help = QtWidgets.QPushButton("Wiring", ir_box)
+        self.button_ir_wiring_help.clicked.connect(self._show_ir_wiring_help)
+        ir_aux_buttons.addWidget(self.button_ir_wiring_help)
         self.button_ir_live_camera = QtWidgets.QPushButton("Live camera", ir_box)
         self.button_ir_live_camera.clicked.connect(self._open_live_thermal_camera_viewer)
         ir_aux_buttons.addWidget(self.button_ir_live_camera)
@@ -6756,6 +6763,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_ir_status.setWordWrap(True)
         self.label_ir_status.setStyleSheet("color: #a3a3a3;")
         ir_form.addRow("", self.label_ir_status)
+        self._ir_optional_controls = (
+            self.combo_ir_port,
+            refresh_ir_button,
+            self.combo_ir_sensor,
+            self.combo_ir_baud,
+            self.combo_ir_rate,
+            self.button_ir_connect,
+            self.button_ir_zero_delta,
+            self.button_ir_wiring_help,
+            self.button_ir_live_camera,
+            self.button_ir_flash_firmware,
+        )
         hardware_layout.addWidget(ir_box)
 
         hardware_layout.addStretch(1)
@@ -7461,7 +7480,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "Stress target used only for the optional first-overheating preheat sweep."
         )
         (
-            current_preheat_row,
+            self.row_current_sweep_first_overheating_target,
             self.label_current_first_overheating_target_equiv,
         ) = self._spin_with_equivalent_label(
             automation_box,
@@ -7469,7 +7488,10 @@ class MainWindow(QtWidgets.QMainWindow):
             spinbox_width=RECIPE_SPINBOX_WIDTH_PX,
             label_width=RECIPE_EQUIVALENT_LABEL_WIDTH_PX,
         )
-        current_sweep_form.addRow("Stress", current_preheat_row)
+        current_sweep_form.addRow("Stress", self.row_current_sweep_first_overheating_target)
+        self.label_current_sweep_first_overheating_target = current_sweep_form.labelForField(
+            self.row_current_sweep_first_overheating_target
+        )
         self.check_current_sweep_first_overheating_use_normal_end = QtWidgets.QCheckBox(
             "Use normal max current",
             automation_box,
@@ -11858,10 +11880,42 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
 
     def _toggle_ir_connection(self) -> None:
+        if not self._ir_enabled():
+            self.label_ir_status.setText("IR camera/thermometer is disabled for this experiment.")
+            return
         if self._ir_thread is not None:
             self._disconnect_ir_thermometer()
         else:
             self._connect_ir_thermometer()
+
+    def _ir_enabled(self) -> bool:
+        checkbox = getattr(self, "check_ir_enabled", None)
+        if checkbox is None:
+            return True
+        return bool(checkbox.isChecked())
+
+    def _handle_ir_enabled_changed(self, enabled: bool) -> None:
+        if not enabled and self._ir_thread is not None:
+            self._disconnect_ir_thermometer()
+        self._update_ir_enabled_ui()
+        self._refresh_live_labels()
+        self._persist_settings_if_enabled()
+
+    def _update_ir_enabled_ui(self) -> None:
+        enabled = self._ir_enabled()
+        for widget in getattr(self, "_ir_optional_controls", ()):
+            widget.setEnabled(enabled)
+        if not enabled:
+            self.label_ir_live.setText("IR disabled.")
+            self.label_ir_status.setText(
+                "IR camera/thermometer disabled; auto-connect will skip it and temperature columns stay blank."
+            )
+        elif self.label_ir_status.text().startswith("IR camera/thermometer disabled"):
+            self.label_ir_live.setText("IR disconnected or no samples yet.")
+            self._handle_ir_sensor_changed()
+        elif self.label_ir_status.text().startswith("IR camera/thermometer is disabled"):
+            self.label_ir_live.setText("IR disconnected or no samples yet.")
+            self._handle_ir_sensor_changed()
 
     def _populate_ir_rate_options(self, sensor_mode: str, *, selected_code: int | None = None) -> None:
         options = IR_RATE_OPTIONS_BY_SENSOR.get(sensor_mode, IR_RATE_OPTIONS_BY_SENSOR[IR_SENSOR_MLX90640])
@@ -11901,6 +11955,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
 
     def _connect_ir_thermometer(self, checked: bool = False, *, show_errors: bool = True) -> bool:
+        if not self._ir_enabled():
+            self.label_ir_status.setText("IR camera/thermometer is disabled for this experiment.")
+            if show_errors:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    "Enable the optional IR camera/thermometer before connecting it.",
+                )
+            return False
         if self._ir_thread is not None:
             self.label_ir_status.setText("IR logging is already connected.")
             return True
@@ -11966,6 +12029,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _open_live_thermal_camera_viewer(self) -> None:
+        if not self._ir_enabled():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Live camera",
+                "Enable the optional IR camera/thermometer before opening the live camera view.",
+            )
+            return
         if str(self.combo_ir_sensor.currentData() or "") != IR_SENSOR_MLX90640:
             QtWidgets.QMessageBox.information(
                 self,
@@ -12098,6 +12168,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return True, text or "Firmware flashed and Nucleo reset."
 
     def _flash_selected_ir_firmware(self) -> None:
+        if not self._ir_enabled():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Flash firmware",
+                "Enable the optional IR camera/thermometer before flashing sensor firmware.",
+            )
+            return
         sensor_mode = str(self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640)
         if self._ir_thread is not None:
             QtWidgets.QMessageBox.information(
@@ -17601,14 +17678,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.strain_setup_box.setVisible(True)
         self._refresh_equivalent_labels()
         self._update_setup_summary()
-        first_overheating_current_editable = (
+        first_overheating_enabled = (
             self._is_current_sweep_mode(mode)
             and self.check_current_sweep_first_overheating.isChecked()
+        )
+        first_overheating_current_editable = (
+            first_overheating_enabled
             and not self.check_current_sweep_first_overheating_use_normal_end.isChecked()
         )
-        self.check_current_sweep_first_overheating_use_normal_end.setEnabled(
-            self._is_current_sweep_mode(mode) and self.check_current_sweep_first_overheating.isChecked()
-        )
+        self.row_current_sweep_first_overheating_target.setVisible(first_overheating_enabled)
+        if self.label_current_sweep_first_overheating_target is not None:
+            self.label_current_sweep_first_overheating_target.setVisible(first_overheating_enabled)
+        self.check_current_sweep_first_overheating_use_normal_end.setVisible(first_overheating_enabled)
+        self.check_current_sweep_first_overheating_use_normal_end.setEnabled(first_overheating_enabled)
         self.spin_current_sweep_first_overheating_end_mA.setEnabled(first_overheating_current_editable)
         first_overheating_current_visible = first_overheating_current_editable
         self.row_current_sweep_first_overheating_end.setVisible(first_overheating_current_visible)
@@ -18623,6 +18705,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.button_manual_auto_connect.setText("Auto-connect hardware")
 
     def _manual_auto_connect_should_connect_ir(self) -> bool:
+        if not self._ir_enabled():
+            return False
         if self._ir_thread is not None:
             return True
         if not hasattr(self, "combo_ir_sensor") or not hasattr(self, "combo_ir_port"):
@@ -19394,19 +19478,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._session_ir_temperature_count / elapsed_s
 
     def _latest_ir_config1(self) -> str:
+        if not self._ir_enabled():
+            return ""
         sample = self._latest_ir_sample
         return "" if sample is None else sample.config1
 
     def _latest_ir_snapshot(self, *, now_s: float | None = None) -> dict[str, object]:
-        with self._ir_state_lock:
-            sample = self._latest_ir_sample
-            baseline_c = self._ir_baseline_object_c
-            sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=now_s or time.time())
-            dashboard_temperature_c = self._ir_temperature_buffer.recent_object_mean_c(
-                now_s=now_s,
-                window_s=IR_DASHBOARD_TEMPERATURE_WINDOW_S,
-            )
-        if sample is None:
+        def _empty_snapshot(sample_rate_hz: float | None = None) -> dict[str, object]:
             return {
                 "sensor_type": None,
                 "object_c_apparent": None,
@@ -19429,6 +19507,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "frame_width": None,
                 "frame_height": None,
             }
+
+        if not self._ir_enabled():
+            return _empty_snapshot()
+        with self._ir_state_lock:
+            sample = self._latest_ir_sample
+            baseline_c = self._ir_baseline_object_c
+            sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=now_s or time.time())
+            dashboard_temperature_c = self._ir_temperature_buffer.recent_object_mean_c(
+                now_s=now_s,
+                window_s=IR_DASHBOARD_TEMPERATURE_WINDOW_S,
+            )
+        if sample is None:
+            return _empty_snapshot(sample_rate_hz=sample_rate_hz)
         current_time_s = time.time() if now_s is None else float(now_s)
         delta_c = None if baseline_c is None else sample.object_c_apparent - baseline_c
         return {
@@ -19698,7 +19789,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "recent_sample_rate_hz": self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
             },
             "ir_thermometer": {
-                "enabled": self._ir_thread is not None,
+                "enabled": self._ir_enabled(),
+                "connected": self._ir_thread is not None,
                 "port": str(self.combo_ir_port.currentData() or ""),
                 "sensor_mode": str(self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640),
                 "baud": int(self.combo_ir_baud.currentText()),
@@ -26378,7 +26470,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_scale_raw.setText(f"Raw line: {self._latest_scale_text or '-'}")
         ir_snapshot = self._latest_ir_snapshot()
         ir_object = ir_snapshot["object_c_apparent"]
-        if ir_object is None:
+        if not self._ir_enabled():
+            self.label_ir_live.setText("IR disabled.")
+        elif ir_object is None:
             self.label_ir_live.setText("IR disconnected or no samples yet.")
         else:
             ir_sensor_type = ir_snapshot["sensor_type"]
@@ -26727,6 +26821,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("scale_request", self.edit_scale_request.text())
         self.settings.setValue("scale_terminator", self.edit_scale_terminator.text())
         self.settings.setValue("ir_port", self.combo_ir_port.currentData() or "")
+        self.settings.setValue("ir_enabled", self._ir_enabled())
         self.settings.setValue("ir_sensor_mode", self.combo_ir_sensor.currentData() or IR_SENSOR_MLX90640)
         self.settings.setValue("ir_baud", self.combo_ir_baud.currentText())
         self.settings.setValue("ir_interval_code", self.combo_ir_rate.currentData() or 7)
@@ -27021,6 +27116,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_scale_interval.setValue(saved_scale_interval_ms)
         self.edit_scale_request.setText(scale_request)
         self.edit_scale_terminator.setText(scale_terminator)
+        self.check_ir_enabled.setChecked(bool(self.settings.value("ir_enabled", True, type=bool)))
+        self._update_ir_enabled_ui()
         ir_baud = self.settings.value("ir_baud", "2000000", type=str)
         if self.combo_ir_baud.findText(ir_baud) >= 0:
             self.combo_ir_baud.setCurrentText(ir_baud)

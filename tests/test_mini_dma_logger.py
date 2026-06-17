@@ -3420,6 +3420,28 @@ def test_manual_auto_connect_connects_selected_ir_without_hardware_steal(tmp_pat
         _close_test_window(window)
 
 
+def test_manual_auto_connect_skips_disabled_optional_ir(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+
+    try:
+        window.combo_ir_port.addItem("Synthetic IR", "COM_IR")
+        window.combo_ir_port.setCurrentIndex(window.combo_ir_port.findData("COM_IR"))
+        window.check_ir_enabled.setChecked(False)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "tic"]
+        assert "IR disabled" in window.label_ir_live.text()
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_leaves_active_ir_connection_alone(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     called: list[str] = []
@@ -7422,6 +7444,8 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
         assert help_menu.isEnabled()
         assert any(action.text() == "View Help" for action in help_menu.actions())
 
+        assert window.check_ir_enabled.text() == "Enable optional IR camera/thermometer"
+        assert window.check_ir_enabled.isChecked() is True
         sensor_labels = [
             window.combo_ir_sensor.itemText(index)
             for index in range(window.combo_ir_sensor.count())
@@ -7434,6 +7458,37 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
         assert window.label_ir_rate.text() == "Camera refresh"
         assert window.button_ir_flash_firmware.text() == "Flash firmware"
         assert "Cube raw camera firmware" in window.label_ir_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_mini_dma_ir_can_be_disabled_without_temperature_snapshots(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        sample = mini_dma_mod.IrTemperatureSample(
+            timestamp_s=10.0,
+            raw_text="MLX90614,7,900,2370,23.10,41.50,14813,15733,2",
+            sequence=7,
+            device_elapsed_ms=900,
+            read_us=2370,
+            ambient_c=23.10,
+            object_c_apparent=41.50,
+            raw_ambient=14813,
+            raw_object=15733,
+            flags=2,
+            config1="0x9795",
+        )
+        window._handle_ir_sample(sample)
+
+        window.check_ir_enabled.setChecked(False)
+
+        assert window.combo_ir_port.isEnabled() is False
+        assert window.button_ir_connect.isEnabled() is False
+        assert window._manual_auto_connect_should_connect_ir() is False
+        assert window._latest_ir_snapshot(now_s=11.0)["object_c_apparent"] is None
+        assert window._latest_ir_config1() == ""
+        assert "auto-connect will skip" in window.label_ir_status.text()
     finally:
         _close_test_window(window)
 
@@ -8892,6 +8947,10 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is True
+        assert window.row_current_sweep_first_overheating_target.isHidden() is True
+        assert window.label_current_sweep_first_overheating_target is not None
+        assert window.label_current_sweep_first_overheating_target.isHidden() is True
+        assert window.check_current_sweep_first_overheating_use_normal_end.isHidden() is True
         window.action_current_sweep_advanced_settings.trigger()
         qtbot.waitUntil(lambda: window._current_sweep_advanced_dialog is not None)
         assert window._current_sweep_advanced_dialog is not None
@@ -8904,14 +8963,19 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.check_current_sweep_first_overheating.isHidden() is False
         assert window.label_current_sweep_first_overheating_section.text() == "First overheating"
         assert window.check_current_sweep_first_overheating.text() == "Enable first-overheating sweep"
-        assert window.spin_current_sweep_first_overheating_target_mpa.isHidden() is False
+        assert window.row_current_sweep_first_overheating_target.isHidden() is True
+        assert window.label_current_sweep_first_overheating_target.isHidden() is True
         assert window.check_current_sweep_first_overheating_use_normal_end.text() == "Use normal max current"
         assert window.check_current_sweep_first_overheating_use_normal_end.isChecked() is True
+        assert window.check_current_sweep_first_overheating_use_normal_end.isHidden() is True
         assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is False
         assert window.row_current_sweep_first_overheating_end.isHidden() is True
         assert window.label_current_sweep_first_overheating_end is not None
         assert window.label_current_sweep_first_overheating_end.isHidden() is True
         window.check_current_sweep_first_overheating.setChecked(True)
+        assert window.row_current_sweep_first_overheating_target.isHidden() is False
+        assert window.label_current_sweep_first_overheating_target.isHidden() is False
+        assert window.check_current_sweep_first_overheating_use_normal_end.isHidden() is False
         window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
         assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is True
         assert window.row_current_sweep_first_overheating_end.isHidden() is False
