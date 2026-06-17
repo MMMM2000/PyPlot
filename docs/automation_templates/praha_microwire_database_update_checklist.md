@@ -7,7 +7,7 @@ Use this checklist whenever refreshing the shared `.pydpj` database before DOCX 
 3. Run the supported automation recipe for measurement sections, for example:
 
    ```powershell
-   uv run python launcher.py --builder-automation docs/automation_templates/praha_microwire_database_update.json
+   uv run python launcher.py --automation-recipe docs/automation_templates/praha_microwire_database_update.json
    ```
 
 4. Confirm the recipe manifest includes the intended updated sections and `rebuild_assemble`.

@@ -1921,10 +1921,11 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     command = manifest["commands"][0]
     assert command["section"] == "mini_dma"
+    assert command["candidate_count"] == 1
     assert command["record_count"] == 1
     assert command["updated_count"] == 1
-    assert command["skipped_count"] == 1
-    assert str(bad_run / "measurement.csv") in command["skipped_sources"]
+    assert command["skipped_count"] == 0
+    assert command["skipped_sources"] == []
     rebuild_command = manifest["commands"][1]
     assert rebuild_command["action"] == "rebuild_assemble"
     assert rebuild_command["status"] == "ok"
