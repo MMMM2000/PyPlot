@@ -47,6 +47,26 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def test_builder_update_filters_existing_records_under_refresh_root(tmp_path: Path) -> None:
+    refresh_root = tmp_path / "mini DMA"
+    stale_path = refresh_root / "Ni46Fe27Ga23Co2Cu2 2_8 iso-stress" / "measurement.csv"
+    fresh_path = refresh_root / "Ni46Fe27Ga23Cu2Co2 2_8 iso-stress" / "measurement.csv"
+    unrelated_path = tmp_path / "other" / "measurement.csv"
+
+    records = [
+        SimpleNamespace(path=str(stale_path), label="stale"),
+        SimpleNamespace(path=str(fresh_path), label="fresh"),
+        SimpleNamespace(path=str(unrelated_path), label="unrelated"),
+    ]
+
+    filtered = launcher_module._filter_builder_records_outside_refresh_roots(
+        records,
+        [refresh_root],
+    )
+
+    assert [record.label for record in filtered] == ["unrelated"]
+
+
 def test_microwire_word_graph_sections_record_reference_and_origin_status() -> None:
     from microwire_data_builder.core import OriginArtifact
 

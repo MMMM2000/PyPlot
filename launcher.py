@@ -551,6 +551,53 @@ def _record_path_key(record: object) -> str:
         return str(raw_path)
 
 
+def _path_matches_refresh_root(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve()
+    except Exception:
+        resolved_path = path
+    try:
+        resolved_root = root.resolve()
+    except Exception:
+        resolved_root = root
+    try:
+        if resolved_root.is_file():
+            return resolved_path == resolved_root
+    except OSError:
+        pass
+    if resolved_path == resolved_root:
+        return True
+    try:
+        return resolved_path.is_relative_to(resolved_root)
+    except AttributeError:
+        try:
+            resolved_path.relative_to(resolved_root)
+            return True
+        except ValueError:
+            return False
+    except ValueError:
+        return False
+
+
+def _filter_builder_records_outside_refresh_roots(
+    records: Sequence[object],
+    roots: Sequence[Path],
+) -> list[object]:
+    if not roots:
+        return list(records)
+    filtered: list[object] = []
+    for record in records:
+        key = _record_path_key(record)
+        if not key:
+            filtered.append(record)
+            continue
+        record_path = Path(key)
+        if any(_path_matches_refresh_root(record_path, root) for root in roots):
+            continue
+        filtered.append(record)
+    return filtered
+
+
 def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
     return {
         "microscope": {
@@ -685,6 +732,10 @@ def _run_builder_update_section_command(
         section.import_project_payload(sections.get(section_name, {}))
         existing_payload = section.store.load_payload(payload_name)
         existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
+        existing_records = _filter_builder_records_outside_refresh_roots(
+            existing_records,
+            input_paths,
+        )
         source_strings = [str(path) for path in input_paths]
         section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
         result = section.process(candidates)
