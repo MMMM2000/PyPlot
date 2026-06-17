@@ -1301,14 +1301,15 @@ def _fit_current_transition_with_suffix_after(
         else 0.0
     )
     best: tuple[float, TangentTransitionFit] | None = None
+    fit_cache = _MiniDmaLineFitCache(x, y)
     first_after_start = max(min_points * 2, n - (min_points * 5))
     for right_start in range(first_after_start, n - min_points + 1):
-        after = _mini_dma_line_fit(x[right_start:], y[right_start:])
+        after = fit_cache.fit(right_start, n)
         if after is None:
             continue
         for left_end in range(min_points, right_start - min_points + 1):
-            before = _mini_dma_line_fit(x[:left_end], y[:left_end])
-            transition = _mini_dma_line_fit(x[left_end:right_start], y[left_end:right_start])
+            before = fit_cache.fit(0, left_end)
+            transition = fit_cache.fit(left_end, right_start)
             if before is None or transition is None:
                 continue
             if transition.slope >= 0.0:
@@ -1400,6 +1401,64 @@ def _mini_dma_line_fit(x_values: np.ndarray, y_values: np.ndarray) -> LinearSegm
         end_x=float(x[-1]),
         rmse=rmse,
     )
+
+
+class _MiniDmaLineFitCache:
+    def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
+        self._x = x
+        self._sum_x = _mini_dma_prefix_sum(x)
+        self._sum_y = _mini_dma_prefix_sum(y)
+        self._sum_xx = _mini_dma_prefix_sum(x * x)
+        self._sum_xy = _mini_dma_prefix_sum(x * y)
+        self._sum_yy = _mini_dma_prefix_sum(y * y)
+        self._cache: dict[tuple[int, int], LinearSegmentFit | None] = {}
+
+    def fit(self, start: int, end: int) -> LinearSegmentFit | None:
+        key = (int(start), int(end))
+        if key not in self._cache:
+            self._cache[key] = self._fit_uncached(key[0], key[1])
+        return self._cache[key]
+
+    def _fit_uncached(self, start: int, end: int) -> LinearSegmentFit | None:
+        count = end - start
+        if count < 2:
+            return None
+        sum_x = _mini_dma_window_sum(self._sum_x, start, end)
+        sum_y = _mini_dma_window_sum(self._sum_y, start, end)
+        sum_xx = _mini_dma_window_sum(self._sum_xx, start, end)
+        sum_xy = _mini_dma_window_sum(self._sum_xy, start, end)
+        sum_yy = _mini_dma_window_sum(self._sum_yy, start, end)
+        denominator = (count * sum_xx) - (sum_x * sum_x)
+        if math.isclose(denominator, 0.0, abs_tol=1e-18):
+            return None
+        slope = ((count * sum_xy) - (sum_x * sum_y)) / denominator
+        intercept = (sum_y - (slope * sum_x)) / count
+        sse = (
+            sum_yy
+            + (slope * slope * sum_xx)
+            + (count * intercept * intercept)
+            + (2.0 * slope * intercept * sum_x)
+            - (2.0 * slope * sum_xy)
+            - (2.0 * intercept * sum_y)
+        )
+        rmse = float(np.sqrt(max(float(sse), 0.0) / count))
+        if not all(math.isfinite(float(value)) for value in (slope, intercept, rmse)):
+            return None
+        return LinearSegmentFit(
+            slope=float(slope),
+            intercept=float(intercept),
+            start_x=float(self._x[start]),
+            end_x=float(self._x[end - 1]),
+            rmse=rmse,
+        )
+
+
+def _mini_dma_prefix_sum(values: np.ndarray) -> np.ndarray:
+    return np.concatenate(([0.0], np.cumsum(values, dtype=float)))
+
+
+def _mini_dma_window_sum(prefix: np.ndarray, start: int, end: int) -> float:
+    return float(prefix[end] - prefix[start])
 
 
 def _mini_dma_line_intersection_x(left: LinearSegmentFit, right: LinearSegmentFit) -> float | None:

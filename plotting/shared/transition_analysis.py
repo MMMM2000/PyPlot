@@ -54,21 +54,26 @@ def fit_tangent_transition(
         x = x[indices]
         y = y[indices]
 
-    min_points = max(2, int(min_segment_points))
-    best: tuple[float, int, int, LinearSegmentFit, LinearSegmentFit, LinearSegmentFit] | None = None
     n = len(x)
+    min_points = max(2, int(min_segment_points))
+    cache = _SegmentFitCache(x, y)
+    before_cache: dict[int, LinearSegmentFit | None] = {}
+    after_cache: dict[int, LinearSegmentFit | None] = {}
+    best: tuple[float, int, int, LinearSegmentFit, LinearSegmentFit, LinearSegmentFit] | None = None
     for left_end in range(min_points, n - (min_points * 2) + 1):
+        before = before_cache.setdefault(left_end, cache.fit(0, left_end))
+        if before is None:
+            continue
         for right_start in range(left_end + min_points, n - min_points + 1):
-            transition = _fit_segment(x[left_end:right_start], y[left_end:right_start])
+            transition = cache.fit(left_end, right_start)
             if transition is None:
                 continue
             if transition_slope_sign is not None:
                 expected_sign = 1 if transition_slope_sign > 0 else -1
                 if math.copysign(1.0, transition.slope) != expected_sign:
                     continue
-            before = _fit_segment(x[:left_end], y[:left_end])
-            after = _fit_segment(x[right_start:], y[right_start:])
-            if before is None or after is None:
+            after = after_cache.setdefault(right_start, cache.fit(right_start, n))
+            if after is None:
                 continue
             baseline_slope = max(abs(before.slope), abs(after.slope))
             slope_gain = abs(transition.slope) - baseline_slope
@@ -234,6 +239,65 @@ def _fit_segment(x: np.ndarray, y: np.ndarray) -> LinearSegmentFit | None:
         end_x=float(x[-1]),
         rmse=rmse,
     )
+
+
+class _SegmentFitCache:
+    def __init__(self, x: np.ndarray, y: np.ndarray) -> None:
+        self._x = x
+        self._y = y
+        self._sum_x = _prefix_sum(x)
+        self._sum_y = _prefix_sum(y)
+        self._sum_xx = _prefix_sum(x * x)
+        self._sum_xy = _prefix_sum(x * y)
+        self._sum_yy = _prefix_sum(y * y)
+        self._cache: dict[tuple[int, int], LinearSegmentFit | None] = {}
+
+    def fit(self, start: int, end: int) -> LinearSegmentFit | None:
+        key = (int(start), int(end))
+        if key not in self._cache:
+            self._cache[key] = self._fit_uncached(key[0], key[1])
+        return self._cache[key]
+
+    def _fit_uncached(self, start: int, end: int) -> LinearSegmentFit | None:
+        count = end - start
+        if count < 2:
+            return None
+        sum_x = _window_sum(self._sum_x, start, end)
+        sum_y = _window_sum(self._sum_y, start, end)
+        sum_xx = _window_sum(self._sum_xx, start, end)
+        sum_xy = _window_sum(self._sum_xy, start, end)
+        sum_yy = _window_sum(self._sum_yy, start, end)
+        denominator = (count * sum_xx) - (sum_x * sum_x)
+        if math.isclose(denominator, 0.0, abs_tol=1e-18):
+            return None
+        slope = ((count * sum_xy) - (sum_x * sum_y)) / denominator
+        intercept = (sum_y - (slope * sum_x)) / count
+        sse = (
+            sum_yy
+            + (slope * slope * sum_xx)
+            + (count * intercept * intercept)
+            + (2.0 * slope * intercept * sum_x)
+            - (2.0 * slope * sum_xy)
+            - (2.0 * intercept * sum_y)
+        )
+        rmse = float(np.sqrt(max(float(sse), 0.0) / count))
+        if not all(math.isfinite(float(value)) for value in (slope, intercept, rmse)):
+            return None
+        return LinearSegmentFit(
+            slope=float(slope),
+            intercept=float(intercept),
+            start_x=float(self._x[start]),
+            end_x=float(self._x[end - 1]),
+            rmse=rmse,
+        )
+
+
+def _prefix_sum(values: np.ndarray) -> np.ndarray:
+    return np.concatenate(([0.0], np.cumsum(values, dtype=float)))
+
+
+def _window_sum(prefix: np.ndarray, start: int, end: int) -> float:
+    return float(prefix[end] - prefix[start])
 
 
 def _line_intersection_x(left: LinearSegmentFit, right: LinearSegmentFit) -> float | None:
