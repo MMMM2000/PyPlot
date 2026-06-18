@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-17.6"
+CONTROL_LOGIC_VERSION = "2026-06-17.7"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -125,6 +125,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_large_error_not_masked_by_noise",
     "current_hold_volatile_response_waits_for_delayed_feedback",
     "current_hold_volatile_response_requires_settling",
+    "current_hold_volatile_response_contains_adaptive_recovery",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -14254,6 +14255,41 @@ class MainWindow(QtWidgets.QMainWindow):
         min_slope = self._current_sweep_hold_min_slope_for_basis(basis)
         return abs(slope) >= min_slope
 
+    def _current_sweep_hold_volatile_containment_active(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        filtered_signal: ScaleControlSignal | None,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> bool:
+        if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if seek_key is None:
+            return False
+        if self._current_sweep_hold_volatile_response_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
+            return True
+        if not self._current_sweep_hold_unstable_response_active(seek_key):
+            return False
+        stress_band = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            SERVO_CURRENT_SWEEP_HOLD_VOLATILE_WORSENING_MPA,
+        )
+        if stress_band is None:
+            stress_band = abs(float(tolerance)) * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR
+        volatile_band = max(
+            abs(float(tolerance)) * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR,
+            abs(float(stress_band)),
+        )
+        return abs(float(error_value)) >= volatile_band
+
     def _current_sweep_hold_large_overshoot(
         self,
         basis: str,
@@ -15893,6 +15929,14 @@ class MainWindow(QtWidgets.QMainWindow):
             or filtered_signal is None
         ):
             return None
+        if self._current_sweep_hold_volatile_containment_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
+            return None
         if float(previous_error) * float(error_value) <= 0.0:
             return None
         previous_abs = abs(float(previous_error))
@@ -15969,6 +16013,14 @@ class MainWindow(QtWidgets.QMainWindow):
             or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             or previous_error is None
             or filtered_signal is None
+        ):
+            return None
+        if self._current_sweep_hold_volatile_containment_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
         ):
             return None
         if float(previous_error) * float(error_value) <= 0.0:
@@ -17664,7 +17716,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 nudge_mm = improving_step_mm
                 current_hold_correction_reason = "current_hold_improving_recovery"
         if self._current_sweep_hold_unstable_response_active(seek_key):
-            if current_hold_correction_reason == "current_hold_improving_recovery":
+            volatile_containment_active = self._current_sweep_hold_volatile_containment_active(
+                basis,
+                delta_value,
+                acceptance_tolerance,
+                filtered_signal,
+                seek_key=seek_key,
+            )
+            if volatile_containment_active:
+                nudge_mm = min(nudge_mm, self._motor_step_mm())
+                current_hold_correction_reason = "current_hold_volatile_single_step"
+                self._log(
+                    "Current-hold response is volatile/unstable; containing recovery to one motor step "
+                    "until the load/stress response settles."
+                )
+            elif current_hold_correction_reason == "current_hold_improving_recovery":
                 current_hold_correction_reason = "current_hold_unstable_improving_recovery"
                 self._log(
                     "Current-hold response is still flagged unstable, but the last correction "
