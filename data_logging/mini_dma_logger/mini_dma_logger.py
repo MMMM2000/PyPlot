@@ -124,6 +124,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_same_sign_drift_recovery_uses_dynamic_steps",
     "current_hold_large_error_not_masked_by_noise",
     "current_hold_volatile_response_waits_for_delayed_feedback",
+    "current_hold_volatile_response_requires_settling",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -14225,6 +14226,34 @@ class MainWindow(QtWidgets.QMainWindow):
         moving_away = float(error_value) * float(filtered_signal.slope_per_s) < 0.0
         return moving_away and abs(float(filtered_signal.slope_per_s)) >= slope_threshold
 
+    def _current_sweep_hold_volatile_response_unsettled(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        filtered_signal: ScaleControlSignal | None,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> bool:
+        if not self._current_sweep_hold_volatile_response_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
+            return False
+        if filtered_signal is None:
+            return False
+        slope = float(filtered_signal.slope_per_s)
+        if not math.isfinite(slope):
+            return False
+        moving_away = float(error_value) * slope < 0.0
+        if not moving_away:
+            return False
+        min_slope = self._current_sweep_hold_min_slope_for_basis(basis)
+        return abs(slope) >= min_slope
+
     def _current_sweep_hold_large_overshoot(
         self,
         basis: str,
@@ -17293,18 +17322,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 effective_tolerance,
                 seek_key=seek_key,
             )
-            if self._seek_wait_for_required_post_move_samples(seek_key, required_samples):
-                volatile_post_move_response = self._current_sweep_hold_volatile_response_active(
-                    basis,
-                    delta_value,
-                    effective_tolerance,
-                    filtered_signal,
-                    seek_key=seek_key,
-                )
+            volatile_post_move_response = self._current_sweep_hold_volatile_response_active(
+                basis,
+                delta_value,
+                effective_tolerance,
+                filtered_signal,
+                seek_key=seek_key,
+            )
+            volatile_unsettled_response = self._current_sweep_hold_volatile_response_unsettled(
+                basis,
+                delta_value,
+                effective_tolerance,
+                filtered_signal,
+                seek_key=seek_key,
+            )
+            waiting_for_required_samples = self._seek_wait_for_required_post_move_samples(
+                seek_key,
+                required_samples,
+            )
+            if waiting_for_required_samples or volatile_unsettled_response:
                 self._log_waiting_for_feedback(
                     (
                         "Current-hold response is fluctuating after the last move; waiting for delayed "
-                        "scale feedback before compounding another correction."
+                        "scale feedback to settle before compounding another correction."
                     )
                     if volatile_post_move_response
                     else f"Waiting for {required_samples} fresh scale samples before the next fine correction."
@@ -17321,7 +17361,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     post_move_sample_count=self._seek_post_move_sample_count_by_key.get(seek_key, 0),
                     result="waiting",
                     reason=(
-                        "volatile_post_move_response"
+                        "volatile_response_unsettled"
+                        if volatile_unsettled_response
+                        else "volatile_post_move_response"
                         if volatile_post_move_response
                         else f"{required_samples}_fresh_scale_samples"
                     ),
