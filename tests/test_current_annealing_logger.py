@@ -793,6 +793,101 @@ def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> No
     ) in fake.calls
 
 
+def test_current_annealing_preflight_blocks_stale_broker_current_limit(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    fake.snapshot = lambda: {  # type: ignore[method-assign]
+        "profile": {"profile_id": "hmp4040", "channel_count": 4},
+        "bench_profile": {
+            "channels": {
+                "1": {
+                    "role": "current_annealing",
+                    "confirmed": True,
+                    "voltage_limit_v": 32.05,
+                    "current_limit_a": 0.03,
+                }
+            }
+        },
+    }
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.is_connected = True
+    window.channel_select = 1
+    window.ui.spinBox_max_current.setValue(35)
+
+    errors = window._start_preflight_errors()
+
+    assert any("35" in error and "30" in error and "shared broker" in error for error in errors)
+
+
+def test_current_annealing_shared_broker_zero_current_stops_after_startup_grace(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    fake.readbacks = [{"voltage_V": 0.0, "current_mA": 0.0} for _ in range(6)]
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((str(title), str(message))),
+    )
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.process_running = True
+    window.current_current_set = 0.010
+    window._process_start_time = 0.0
+    monkeypatch.setattr(logger_mod.time, "monotonic", lambda: 10.0)
+
+    for _ in range(6):
+        assert window._read_shared_broker_sample() is True
+
+    assert window.process_running is False
+    assert warnings
+    assert warnings[-1][0] == "Contact lost"
+    assert "Measured current is zero" in warnings[-1][1]
+
+
+def test_current_annealing_broker_limit_clamp_reverses_instead_of_stalling(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    monkeypatch.setattr(logger_mod.QtWidgets.QMessageBox, "warning", lambda *_args: None)
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.max_current_mA = 35
+    window._shared_broker_current_limit_mA = 30.0
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.current_increment = 0.001
+    window.current_current_set = 0.031
+    window.reverse_enabled = True
+    window.process_running = True
+    window.direction_ascending = True
+
+    window._send_current_setpoint()
+
+    assert window.current_current_set == pytest.approx(0.030)
+    assert window.current_increment == pytest.approx(-0.001)
+    assert window.direction_ascending is False
+    ramp_calls = [payload for name, payload in fake.calls if name == "schedule_current_ramp"]
+    assert ramp_calls
+    assert ramp_calls[-1]["channel"] == 1
+    assert ramp_calls[-1]["lease_id"] == "lease-1"
+    assert ramp_calls[-1]["target_mA"] == pytest.approx(30.0)
+    assert ramp_calls[-1]["rate_mA_s"] == pytest.approx(1.0)
+
+
 def test_current_annealing_channel_dropdown_tracks_detected_hmp_model(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
@@ -1384,6 +1479,7 @@ def test_live_dashboard_draws_pyqtgraph_segments(qtbot) -> None:
     window._append_measurement_sample(5.0, 100.0)
     window._append_measurement_sample(6.0, 105.0)
     window._append_measurement_sample(5.0, 103.0)
+    window._append_measurement_sample(4.0, 101.0)
 
     assert window._plot_backend == "pyqtgraph"
     assert len(window._segment_lines_ax1) == 2
@@ -1501,6 +1597,7 @@ def test_live_dashboard_pyqtgraph_uses_cycle_palette(qtbot) -> None:
         (6.0, 103.0),
         (5.0, 104.0),
         (6.0, 105.0),
+        (7.0, 106.0),
     ]:
         window._append_measurement_sample(current, resistance)
 
@@ -1847,20 +1944,52 @@ def test_logger_segments_use_current_annealing_cycle_palette(qtbot) -> None:
     qtbot.addWidget(window)
     window.current_step_mA = 1
 
-    colors = window._segment_colors([1.0, 2.0, 3.0, 2.0, 1.0, 2.0])
+    colors = window._segment_colors([1.0, 2.0, 3.0, 2.0, 1.0, 2.0, 3.0])
 
     assert colors[0] in logger_mod.INCREASING_CYCLE_COLORS
     assert colors[1] in logger_mod.INCREASING_CYCLE_COLORS
     assert colors[2] in logger_mod.DECREASING_CYCLE_COLORS
     assert colors[3] in logger_mod.DECREASING_CYCLE_COLORS
     assert colors[4] in logger_mod.INCREASING_CYCLE_COLORS
+    assert colors[5] in logger_mod.INCREASING_CYCLE_COLORS
     assert colors == [
         "#dc2626",
         "#dc2626",
         "#2563eb",
         "#2563eb",
         "#f97316",
+        "#f97316",
     ]
+
+
+def test_logger_segments_ignore_single_point_cooling_jitter(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.current_step_mA = 1
+
+    colors = window._segment_colors([6.0, 5.0, 4.0, 4.8, 3.8, 2.8])
+
+    assert colors == ["#2563eb"] * 5
+    assert window._segment_runs([6.0, 5.0, 4.0, 4.8, 3.8, 2.8]) == [("#2563eb", 0, 5)]
+
+
+def test_measurement_history_dialog_uses_scroll_area_instead_of_tabs(qtbot) -> None:
+    entries = [
+        {
+            "title": f"Run {idx}",
+            "currents": [1.0, 2.0, 3.0, 2.0, 1.0],
+            "resistances": [40.0 + idx, 41.0 + idx, 42.0 + idx, 41.5 + idx, 41.0 + idx],
+            "timestamp": "2026-06-18 14:00:00",
+            "source": f"run-{idx}.txt",
+        }
+        for idx in range(5)
+    ]
+    dialog = logger_mod.MeasurementHistoryDialog(None, entries)
+    qtbot.addWidget(dialog)
+
+    assert dialog.findChild(logger_mod.QtWidgets.QScrollArea) is not None
+    assert dialog.findChild(logger_mod.QtWidgets.QTabWidget) is None
+    assert len(dialog.findChildren(logger_mod.QtWidgets.QFrame)) >= 5
 
 
 def test_prepare_output_file_writes_current_ui_metadata(tmp_path, qtbot) -> None:

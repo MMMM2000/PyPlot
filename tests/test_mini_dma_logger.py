@@ -298,6 +298,36 @@ def test_automation_controller_dispatches_steps_outside_main_window(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_automation_controller_does_not_advance_progress_during_current_hold(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._automation_active = True
+        window._automation_paused = False
+        window._automation_steps = [
+            mini_dma_mod.AutomationStep("sweep_current", note="controller-boundary"),
+        ]
+        window._automation_index = 0
+        window._automation_total_steps = 100
+        window._automation_completed_ticks = 42
+
+        def _hold_step(_step: object, _index: int) -> bool:
+            window._automation_phase = "current_hold"
+            return False
+
+        window._handle_current_sweep_step = _hold_step  # type: ignore[method-assign]
+        window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
+        window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+        window._automation_controller.tick()
+
+        assert window._automation_index == 0
+        assert window._automation_completed_ticks == 42
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -3831,15 +3861,21 @@ def test_recipe_start_keeps_timed_progress_estimate(tmp_path: Path, qtbot) -> No
         _set_copper_current_sweep_defaults(window)
         steps, _, interval_ms = window._build_automation_recipe()
         _, expected_ticks = window._estimate_recipe_points_and_ticks(steps, interval_ms)
+        _, expected_progress_ticks = window._estimate_recipe_points_and_ticks(
+            steps,
+            interval_ms,
+            include_current_hold_estimate=False,
+        )
         assert expected_ticks > len(steps)
+        assert expected_ticks >= expected_progress_ticks
 
         window._preflight_recipe_hardware = lambda _steps, **_kwargs: True  # type: ignore[method-assign]
         window._start_session = lambda **_kwargs: setattr(window, "_session_active", True)  # type: ignore[method-assign]
 
         window._start_auto_ramp()
 
-        assert window._automation_total_steps == expected_ticks
-        assert window.recipe_progress.maximum() == expected_ticks
+        assert window._automation_total_steps == expected_progress_ticks
+        assert window.recipe_progress.maximum() == expected_progress_ticks
         assert window._automation_completed_ticks == 0
     finally:
         _close_test_window(window)
@@ -3919,7 +3955,7 @@ def test_recipe_progress_shows_throttled_time_remaining(tmp_path: Path, qtbot) -
         window._update_recipe_progress()
 
         first_format = window.recipe_progress.format()
-        assert "remaining" in first_format
+        assert "ETA" in first_format
         assert "1.5 min" in first_format
 
         window._automation_completed_ticks = 20
@@ -3931,7 +3967,7 @@ def test_recipe_progress_shows_throttled_time_remaining(tmp_path: Path, qtbot) -
         _close_test_window(window)
 
 
-def test_recipe_progress_uses_current_sweep_fraction_during_hold(tmp_path: Path, qtbot) -> None:
+def test_recipe_progress_shows_compact_current_sweep_context_during_hold(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -3965,11 +4001,14 @@ def test_recipe_progress_uses_current_sweep_fraction_during_hold(tmp_path: Path,
 
         window._update_recipe_progress()
 
-        assert window.recipe_progress.maximum() == 1000
-        assert 550 <= window.recipe_progress.value() <= 650
-        assert "current 59%" in window.recipe_progress.format()
-        assert "holding for target recovery" in window.recipe_progress.format()
-        assert "100%" not in window.recipe_progress.format()
+        assert window.recipe_progress.maximum() == 11991
+        assert window.recipe_progress.value() == 11990
+        text = window.recipe_progress.format()
+        assert "Overall  99%" in text
+        assert "150 MPa, recovering at 36.2 mA" in text
+        assert "sweep 1/1" in text
+        assert "ETA" in text
+        assert "current 59%" not in text
     finally:
         _close_test_window(window)
 
@@ -4052,7 +4091,7 @@ def test_recipe_progress_uses_schedule_eta_at_start_instead_of_early_spike(tmp_p
 
         window._update_recipe_progress()
 
-        assert "remaining" in window.recipe_progress.format()
+        assert "ETA" in window.recipe_progress.format()
         assert "25.0 min" in window.recipe_progress.format()
         assert "h" not in window.recipe_progress.format()
     finally:
@@ -21418,6 +21457,23 @@ def test_session_metadata_records_recipe_completed_stop_reason(tmp_path: Path, q
         assert payload["stop"]["reason"] == "recipe_completed"
         assert payload["stop"]["category"] == "normal"
         assert payload["stop"]["detail"] == "Recipe completed."
+    finally:
+        _close_test_window(window)
+
+
+def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_summary_generation")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    requested: list[Path] = []
+    window._start_run_summary_generation = lambda run_dir: requested.append(run_dir)  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        assert window._session_base_path is not None
+        assert requested == [window._session_base_path.parent]
     finally:
         _close_test_window(window)
 

@@ -3364,7 +3364,7 @@ class MiniDmaAutomationController:
             finished = host._handle_timed_record_step(step, step_index)
             if not finished and host._automation_active:
                 host._automation_index -= 1
-        if host._automation_active:
+        if host._automation_active and host._automation_phase != "current_hold":
             host._automation_completed_ticks = min(
                 max(1, host._automation_total_steps or len(host._automation_steps)),
                 host._automation_completed_ticks + 1,
@@ -8167,6 +8167,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recipe_progress.setValue(0)
         self.recipe_progress.setTextVisible(True)
         self.recipe_progress.setFormat("Recipe progress: idle")
+        progress_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        progress_font.setPointSize(self.recipe_progress.font().pointSize())
+        self.recipe_progress.setFont(progress_font)
+        self.recipe_progress.setStyleSheet("QProgressBar { text-align: left; padding-left: 8px; }")
         self.label_current_task = QtWidgets.QLabel("Current task: idle", self.recipe_action_footer)
         self.label_current_task.setWordWrap(True)
         task_font = self.label_current_task.font()
@@ -18140,8 +18144,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_banner.setText(banner)
         try:
             steps, _, interval_ms = self._build_automation_recipe()
-            record_points, tick_count = self._estimate_recipe_points_and_ticks(steps, interval_ms)
-            duration_s = (tick_count * interval_ms) / 1000.0
+            record_points, estimate_tick_count = self._estimate_recipe_points_and_ticks(
+                steps,
+                interval_ms,
+                include_current_hold_estimate=True,
+            )
+            _, progress_tick_count = self._estimate_recipe_points_and_ticks(
+                steps,
+                interval_ms,
+                include_current_hold_estimate=False,
+            )
+            duration_s = (estimate_tick_count * interval_ms) / 1000.0
             self._recipe_estimated_points = record_points
             self.label_recipe_estimate.setText(
                 f"Estimated points: {record_points} | Estimated duration: {_format_duration(duration_s)}"
@@ -18150,8 +18163,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Estimated: {record_points} pts | {_format_duration(duration_s)}"
             )
             if not self._automation_active:
-                self._automation_total_steps = tick_count
-                self.recipe_progress.setRange(0, max(1, tick_count))
+                self._automation_total_steps = progress_tick_count
+                self.recipe_progress.setRange(0, max(1, progress_tick_count))
                 self.recipe_progress.setValue(0)
                 self.recipe_progress.setFormat(self._recipe_idle_progress_text)
         except Exception:
@@ -18264,7 +18277,13 @@ class MainWindow(QtWidgets.QMainWindow):
             require_fresh_after_move=step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA},
         )
 
-    def _estimate_recipe_points_and_ticks(self, steps: Sequence[AutomationStep], interval_ms: int) -> tuple[int, int]:
+    def _estimate_recipe_points_and_ticks(
+        self,
+        steps: Sequence[AutomationStep],
+        interval_ms: int,
+        *,
+        include_current_hold_estimate: bool = True,
+    ) -> tuple[int, int]:
         points = 0
         ticks = 0
         interval_s = max(0.001, float(interval_ms) / 1000.0)
@@ -18306,7 +18325,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
             if step.action == "sweep_current" and step.current_start_mA is not None and step.current_end_mA is not None:
                 duration_s = self._current_sweep_nominal_duration_s(step)
-                estimated_duration_s = duration_s + self._current_sweep_hold_estimate_s(step)
+                estimated_duration_s = duration_s
+                if include_current_hold_estimate:
+                    estimated_duration_s += self._current_sweep_hold_estimate_s(step)
                 sweep_ticks = max(1, int(math.ceil(estimated_duration_s / interval_s)))
                 ticks += sweep_ticks
                 if logging_enabled:
@@ -18441,10 +18462,11 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_s = max(0.001, float(self._automation_interval_ms) / 1000.0)
         scheduled_remaining_s = max(0.0, (total - value) * interval_s)
         if self._automation_estimated_total_s > 0.0:
-            scheduled_remaining_s = min(
-                scheduled_remaining_s,
-                max(0.0, self._automation_estimated_total_s - elapsed_s),
-            )
+            if self._automation_phase == "current_hold":
+                progress_fraction = max(0.0, min(1.0, value / max(1, total)))
+                scheduled_remaining_s = max(0.0, self._automation_estimated_total_s * (1.0 - progress_fraction))
+            else:
+                scheduled_remaining_s = max(0.0, self._automation_estimated_total_s - elapsed_s)
         scheduled_remaining_s += self._learned_current_sweep_extra_remaining_s()
         if value <= 0 or elapsed_s <= 0.0:
             return scheduled_remaining_s
@@ -20496,11 +20518,32 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_refresh_timer.stop()
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
+        if self._session_base_path is not None:
+            self._start_run_summary_generation(self._session_base_path.parent)
         self._clear_run_zero_load_scale_reference()
         self._release_experiment_sleep_guard()
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
         self._refresh_live_labels()
+
+    def _start_run_summary_generation(self, run_dir: Path) -> None:
+        def _worker() -> None:
+            try:
+                from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot
+
+                summary = generate_core_run_plot(run_dir)
+                self._run_on_ui_thread(
+                    lambda: self._log(
+                        "Generated run summary images: "
+                        f"{summary['image_path']} and {summary['detail_image_path']}"
+                    )
+                )
+            except Exception as exc:
+                self._run_on_ui_thread(
+                    lambda exc=exc: self._log(f"Mini DMA run summary generation failed for {run_dir}: {exc}")
+                )
+
+        Thread(target=_worker, name="MiniDmaRunSummary", daemon=True).start()
 
     def _acquire_experiment_sleep_guard(self) -> None:
         try:
@@ -22169,7 +22212,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_recipe_banner.setVisible(self._automation_active)
         self._set_dashboard_value("task", task_text)
 
-    def _active_current_sweep_progress(self) -> tuple[int, str] | None:
+    def _active_current_sweep_progress_text(self) -> str | None:
         if (
             not self._automation_active
             or not self._is_current_sweep_mode(self._automation_name)
@@ -22191,21 +22234,35 @@ class MainWindow(QtWidgets.QMainWindow):
             setpoint_mA = self._supply_last_setpoint_mA
         if setpoint_mA is None:
             setpoint_mA = start_mA
-        fraction = abs(float(setpoint_mA) - start_mA) / span_mA
-        fraction = max(0.0, min(1.0, fraction))
-        bar_value = max(0, min(999, int(math.floor(fraction * 1000.0))))
-        percent = max(0, min(99, int(math.floor(fraction * 100.0))))
+        sweep_indices = [
+            index
+            for index, candidate in enumerate(self._automation_steps)
+            if (
+                candidate.action == "sweep_current"
+                and candidate.current_start_mA is not None
+                and candidate.current_end_mA is not None
+            )
+        ]
+        sweep_text = ""
+        if sweep_indices:
+            try:
+                sweep_number = sweep_indices.index(self._active_current_sweep_step_index) + 1
+            except ValueError:
+                sweep_number = None
+            if sweep_number is not None:
+                sweep_text = f" | sweep {sweep_number}/{len(sweep_indices)}"
         current_text = self._automation_current_target_text(float(setpoint_mA))
         end_text = self._automation_current_target_text(end_mA)
-        progress_text = f"Recipe progress: current {percent}% ({current_text}/{end_text})"
+        target_text = self._automation_target_text(step.basis, step.target_value)
         if self._automation_phase == "current_hold":
-            progress_text += ", holding for target recovery"
-            return bar_value, progress_text
-        ramp_rate = max(1e-9, abs(float(step.current_ramp_rate_mA_s or self.spin_current_sweep_step_mA.value())))
-        remaining_s = max(0.0, abs(end_mA - float(setpoint_mA)) / ramp_rate)
-        if remaining_s > 0.0:
-            progress_text += f", {_format_duration(remaining_s)} current ramp remaining"
-        return bar_value, progress_text
+            return f"{target_text}, recovering at {current_text}{sweep_text}"
+        direction_value = self._active_current_sweep_display_direction
+        if abs(direction_value) <= 1e-12 and self._active_current_sweep_display_target_mA is not None:
+            direction_value = float(self._active_current_sweep_display_target_mA) - float(setpoint_mA)
+        if abs(direction_value) <= 1e-12:
+            direction_value = end_mA - start_mA
+        direction = "up" if direction_value >= 0.0 else "down"
+        return f"{target_text}, current {direction} {current_text}/{end_text}{sweep_text}"
 
     def _update_recipe_progress(self, *, complete: bool = False) -> None:
         if not self._is_ui_thread():
@@ -22239,20 +22296,7 @@ class MainWindow(QtWidgets.QMainWindow):
             now_s = time.monotonic()
             if self._automation_progress_started_s <= 0.0:
                 self._automation_progress_started_s = now_s
-            current_sweep_progress = self._active_current_sweep_progress()
-            if current_sweep_progress is not None:
-                progress_value, progress_text = current_sweep_progress
-                self.recipe_progress.setRange(0, 1000)
-                self.recipe_progress.setValue(progress_value)
-                self.recipe_progress.setFormat(progress_text)
-                self._update_current_task_display()
-                self._update_length_setup_progress(
-                    value=progress_value,
-                    total=1000,
-                    complete=False,
-                    percent=int(math.floor((progress_value / 1000.0) * 100.0)),
-                )
-                return
+            current_sweep_text = self._active_current_sweep_progress_text()
             self.recipe_progress.setRange(0, total)
             self.recipe_progress.setValue(value)
             percent = min(99, int(math.floor((value / total) * 100.0)))
@@ -22262,7 +22306,9 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if should_update_format:
                 self._automation_progress_last_format_update_s = now_s
-                progress_text = f"Recipe progress: {percent}% ({value}/{total})"
+                progress_text = f"Overall {percent:3d}%"
+                if current_sweep_text:
+                    progress_text += f" | {current_sweep_text}"
                 elapsed_s = max(0.0, now_s - self._automation_progress_started_s)
                 if value < total:
                     remaining_s = self._estimated_recipe_remaining_s(
@@ -22273,7 +22319,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     remaining_s = None
                 if remaining_s is not None and remaining_s > 0.0:
-                    progress_text += f", {_format_duration(remaining_s)} remaining"
+                    progress_text += f" | ETA {_format_duration(remaining_s)}"
                 self.recipe_progress.setFormat(progress_text)
         else:
             self.recipe_progress.setRange(0, total)
@@ -22820,9 +22866,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_steps = updated_steps
         if active_step_updated and old_active_step is not None and new_active_step is not None:
             self._apply_active_current_sweep_step_update_state(old_active_step, new_active_step, active_index)
-        self._recipe_estimated_points, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
+        self._recipe_estimated_points, estimate_ticks = self._estimate_recipe_points_and_ticks(
             self._automation_steps,
             self._automation_interval_ms,
+            include_current_hold_estimate=True,
+        )
+        _, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
+            self._automation_steps,
+            self._automation_interval_ms,
+            include_current_hold_estimate=False,
+        )
+        self._automation_estimated_total_s = max(
+            0.0,
+            float(estimate_ticks) * max(0.001, float(self._automation_interval_ms) / 1000.0),
         )
         self._automation_completed_ticks = min(
             self._automation_completed_ticks,
@@ -23456,14 +23512,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         self._automation_steps = steps
         self._automation_index = 0
-        self._recipe_estimated_points, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
+        self._recipe_estimated_points, estimate_ticks = self._estimate_recipe_points_and_ticks(
             steps,
             interval_ms,
+            include_current_hold_estimate=True,
+        )
+        _, self._automation_total_steps = self._estimate_recipe_points_and_ticks(
+            steps,
+            interval_ms,
+            include_current_hold_estimate=False,
         )
         self._automation_completed_ticks = 0
         self._automation_estimated_total_s = max(
             0.0,
-            float(self._automation_total_steps) * max(0.001, float(interval_ms) / 1000.0),
+            float(estimate_ticks) * max(0.001, float(interval_ms) / 1000.0),
         )
         self._current_sweep_duration_overheads_s = []
         self._current_sweep_recipe_overrides = []

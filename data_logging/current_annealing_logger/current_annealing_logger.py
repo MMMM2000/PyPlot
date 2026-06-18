@@ -199,6 +199,7 @@ SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
 
 INCREASING_CYCLE_COLORS = ["#dc2626", "#f97316", "#ea580c", "#ef4444"]
 DECREASING_CYCLE_COLORS = ["#2563eb", "#0ea5e9", "#1d4ed8", "#06b6d4"]
+MEASUREMENT_HISTORY_LIMIT = 12
 PROJECT_EXTENSION = ".pydpj"
 PROJECT_ROW_MICROWIRE_KEYS = ("Microwire", "microwire", "wire", "sample", "Sample")
 PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (μm)", "d (um)", "d_um", "d", "Diameter", "diameter_um", "diameter")
@@ -248,6 +249,94 @@ def _display_microwire(value: object) -> str:
     if len(digits) >= 2:
         return f"{digits[0]}/{digits[1]}"
     return text
+
+
+def _cycle_color(direction: float, cycle_index: int) -> str:
+    palette = INCREASING_CYCLE_COLORS if direction >= 0 else DECREASING_CYCLE_COLORS
+    return palette[(max(1, cycle_index) - 1) % len(palette)]
+
+
+def _segment_colors_for_currents(currents: List[float], *, step_mA: float = 1.0) -> List[str]:
+    if len(currents) < 2:
+        return []
+    step_value = abs(float(step_mA or 1.0))
+    tolerance = max(0.5, step_value * 0.6)
+    reversal_threshold = max(tolerance * 2.0, step_value * 1.5)
+    inc_count = 0
+    dec_count = 0
+    current_direction: float | None = None
+    pending_direction: float | None = None
+    pending_start: int | None = None
+    pending_delta = 0.0
+    directions: List[float] = []
+    for idx in range(1, len(currents)):
+        diff = float(currents[idx]) - float(currents[idx - 1])
+        if abs(diff) <= tolerance * 0.2 and current_direction is not None:
+            direction = current_direction
+        else:
+            direction = 1.0 if diff >= 0 else -1.0
+        directions.append(direction)
+        if current_direction is None:
+            current_direction = direction
+            pending_direction = None
+            pending_start = None
+            pending_delta = 0.0
+            continue
+        if direction == current_direction:
+            pending_direction = None
+            pending_start = None
+            pending_delta = 0.0
+            continue
+        directions[-1] = current_direction
+        if pending_direction != direction:
+            pending_direction = direction
+            pending_start = idx - 1
+            pending_delta = abs(diff)
+        else:
+            pending_delta += abs(diff)
+        if pending_start is not None and pending_delta >= reversal_threshold:
+            for replace_idx in range(pending_start, len(directions)):
+                directions[replace_idx] = direction
+            current_direction = direction
+            pending_direction = None
+            pending_start = None
+            pending_delta = 0.0
+
+    colors: List[str] = []
+    last_direction: float | None = None
+    cycle_index = 0
+    for direction in directions:
+        if last_direction is None or direction != last_direction:
+            if direction >= 0:
+                inc_count += 1
+                cycle_index = inc_count
+            else:
+                dec_count += 1
+                cycle_index = dec_count
+            last_direction = direction
+        colors.append(_cycle_color(direction, cycle_index))
+    return colors
+
+
+def _segment_runs_for_currents(currents: List[float], *, step_mA: float = 1.0) -> List[tuple[str, int, int]]:
+    if not currents:
+        return []
+    if len(currents) == 1:
+        return [(_cycle_color(1.0, 1), 0, 0)]
+    colors = _segment_colors_for_currents(currents, step_mA=step_mA)
+    if not colors:
+        return [(_cycle_color(1.0, 1), 0, len(currents) - 1)]
+    runs: List[tuple[str, int, int]] = []
+    start_idx = 0
+    current_color = colors[0]
+    for segment_idx, color in enumerate(colors[1:], start=1):
+        if color == current_color:
+            continue
+        runs.append((current_color, start_idx, segment_idx))
+        start_idx = segment_idx
+        current_color = color
+    runs.append((current_color, start_idx, len(currents) - 1))
+    return runs
 
 
 @dataclass
@@ -355,17 +444,29 @@ class MeasurementHistoryDialog(QtWidgets.QDialog):
             label.setWordWrap(True)
             layout.addWidget(label)
         else:
-            tabs = QtWidgets.QTabWidget(self)
+            scroll = QtWidgets.QScrollArea(self)
+            scroll.setWidgetResizable(True)
+            container = QtWidgets.QWidget(scroll)
+            container_layout = QtWidgets.QVBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(12)
             for idx, entry in enumerate(entries, start=1):
-                tab = QtWidgets.QWidget()
-                tab_layout = QtWidgets.QVBoxLayout(tab)
-                tab_layout.setContentsMargins(0, 0, 0, 0)
-                tab_layout.setSpacing(6)
+                card = QtWidgets.QFrame(container)
+                card.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+                card_layout = QtWidgets.QVBoxLayout(card)
+                card_layout.setContentsMargins(10, 10, 10, 10)
+                card_layout.setSpacing(6)
                 title = entry.get("title") or f"Measurement {idx}"
                 currents = entry.get("currents", [])
                 resistances = entry.get("resistances", [])
                 timestamp = entry.get("timestamp", "")
                 source = entry.get("source", "")
+                title_label = QtWidgets.QLabel(str(title))
+                title_label.setWordWrap(True)
+                font = title_label.font()
+                font.setBold(True)
+                title_label.setFont(font)
+                card_layout.addWidget(title_label)
                 if FigureCanvas is not None:
                     figure = Figure(figsize=(5.5, 3.2))
                     canvas = FigureCanvas(figure)
@@ -376,31 +477,22 @@ class MeasurementHistoryDialog(QtWidgets.QDialog):
                     ax.grid(True)
                     if isinstance(currents, list) and isinstance(resistances, list) and len(currents) == len(resistances):
                         if len(currents) == 1:
-                            ax.plot(currents, resistances, color='#d32f2f', marker='o', linestyle='None')
+                            ax.plot(currents, resistances, color=_cycle_color(1.0, 1), marker='o', linestyle='None')
                         else:
-                            for point in range(1, len(currents)):
-                                prev_c, curr_c = currents[point - 1], currents[point]
-                                prev_r, curr_r = resistances[point - 1], resistances[point]
-                                diff = curr_c - prev_c
-                                if abs(diff) <= 0.2:
-                                    color = '#27ae60'
-                                elif diff >= 0:
-                                    color = '#d32f2f'
-                                else:
-                                    color = '#1976d2'
+                            for color, start_idx, end_idx in _segment_runs_for_currents(currents):
                                 ax.plot(
-                                    [prev_c, curr_c],
-                                    [prev_r, curr_r],
+                                    currents[start_idx : end_idx + 1],
+                                    resistances[start_idx : end_idx + 1],
                                     color=color,
                                     marker='o',
                                     linestyle='-',
                                 )
-                    tab_layout.addWidget(canvas)
+                    card_layout.addWidget(canvas)
                 else:
                     placeholder = QtWidgets.QLabel("Matplotlib backend not available.")
                     placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                     placeholder.setMinimumHeight(160)
-                    tab_layout.addWidget(placeholder)
+                    card_layout.addWidget(placeholder)
                 details: list[str] = []
                 if timestamp:
                     details.append(timestamp)
@@ -409,10 +501,11 @@ class MeasurementHistoryDialog(QtWidgets.QDialog):
                 if details:
                     info = QtWidgets.QLabel("\n".join(details))
                     info.setWordWrap(True)
-                    tab_layout.addWidget(info)
-                tab_layout.addStretch(1)
-                tabs.addTab(tab, title)
-            layout.addWidget(tabs)
+                    card_layout.addWidget(info)
+                container_layout.addWidget(card)
+            container_layout.addStretch(1)
+            scroll.setWidget(container)
+            layout.addWidget(scroll)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
         buttons.accepted.connect(self.accept)
@@ -497,6 +590,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_lease_id: str | None = None
         self._shared_broker_owner = "current_annealing_logger"
         self._shared_broker_current_limit_mA: float | None = None
+        self._shared_broker_limit_warning_shown = False
         self._owned_shared_broker_server: Any = None
         self._owned_shared_broker_thread: Any = None
         self._owned_shared_broker_driver: Any = None
@@ -1067,6 +1161,48 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._nonzero_current_seen:
             return
         self._clear_zero_placeholders()
+
+    def _handle_zero_current_readback(self) -> None:
+        """Handle a near-zero measured current while a nonzero setpoint is active."""
+
+        self._skip_current_sample = True
+        self.sample_ready = True
+        try:
+            now = time.monotonic()
+        except Exception:
+            now = None
+        self._zero_current_count += 1
+        if not self._nonzero_current_seen:
+            self._record_zero_placeholder()
+            self._last_nonzero_current_time = None
+        zero_limit = 6
+        zero_delay = 2.0
+        if (
+            now is not None
+            and self._process_start_time is not None
+            and (now - self._process_start_time) < self._contact_grace_period
+        ):
+            return
+        if (
+            self._nonzero_current_seen
+            and now is not None
+            and self._last_nonzero_current_time is not None
+            and (now - self._last_nonzero_current_time) < zero_delay
+        ):
+            return
+        if self._zero_current_count < zero_limit:
+            return
+        if not self._contact_lost:
+            self._contact_lost = True
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Contact lost",
+                "Measured current is zero while current is being applied. "
+                "Check the wire/contact connection; the wire may be disconnected or burned through. "
+                "Stopping the process.",
+            )
+            if self.process_running:
+                self.stop_annealing("Contact lost; stopping measurement.", show_dialog=False)
 
     def _clear_zero_placeholders(self) -> None:
         """Remove any temporary zero-current markers from the plots."""
@@ -1716,7 +1852,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "source": str(item.get("source", "")),
                 }
             )
-            if len(entries) >= 3:
+            if len(entries) >= MEASUREMENT_HISTORY_LIMIT:
                 break
         return entries
 
@@ -1727,7 +1863,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _save_measurement_history(self) -> None:
         payload: List[Dict[str, Any]] = []
-        for entry in self._measurement_history[:3]:
+        for entry in self._measurement_history[:MEASUREMENT_HISTORY_LIMIT]:
             payload.append(
                 {
                     "currents": [round(float(value), 6) for value in entry.get("currents", [])],
@@ -1795,53 +1931,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _cycle_color(direction: float, cycle_index: int) -> str:
-        palette = INCREASING_CYCLE_COLORS if direction >= 0 else DECREASING_CYCLE_COLORS
-        return palette[(max(1, cycle_index) - 1) % len(palette)]
+        return _cycle_color(direction, cycle_index)
 
     def _segment_colors(self, currents: List[float]) -> List[str]:
-        if len(currents) < 2:
-            return []
-        step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
-        tolerance = max(0.5, step_value * 0.6)
-        inc_count = 0
-        dec_count = 0
-        current_direction: float | None = None
-        colors: List[str] = []
-        for idx in range(1, len(currents)):
-            diff = currents[idx] - currents[idx - 1]
-            if abs(diff) <= tolerance * 0.2 and current_direction is not None:
-                direction = current_direction
-            else:
-                direction = 1.0 if diff >= 0 else -1.0
-            if current_direction is None or direction != current_direction:
-                if direction >= 0:
-                    inc_count += 1
-                else:
-                    dec_count += 1
-                current_direction = direction
-            cycle_index = inc_count if direction >= 0 else dec_count
-            colors.append(self._cycle_color(direction, cycle_index))
-        return colors
+        return _segment_colors_for_currents(
+            currents,
+            step_mA=float(getattr(self, 'current_step_mA', 1) or 1),
+        )
 
     def _segment_runs(self, currents: List[float]) -> List[tuple[str, int, int]]:
-        if not currents:
-            return []
-        if len(currents) == 1:
-            return [(self._cycle_color(1.0, 1), 0, 0)]
-        colors = self._segment_colors(currents)
-        if not colors:
-            return [(self._cycle_color(1.0, 1), 0, len(currents) - 1)]
-        runs: List[tuple[str, int, int]] = []
-        start_idx = 0
-        current_color = colors[0]
-        for segment_idx, color in enumerate(colors[1:], start=1):
-            if color == current_color:
-                continue
-            runs.append((current_color, start_idx, segment_idx))
-            start_idx = segment_idx
-            current_color = color
-        runs.append((current_color, start_idx, len(currents) - 1))
-        return runs
+        return _segment_runs_for_currents(
+            currents,
+            step_mA=float(getattr(self, 'current_step_mA', 1) or 1),
+        )
 
     def _redraw_segments(self) -> None:
         if getattr(self, '_plot_backend', '') == 'pyqtgraph':
@@ -1918,7 +2020,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "source": str(title_source),
         }
         self._measurement_history.insert(0, entry)
-        self._measurement_history = self._measurement_history[:3]
+        self._measurement_history = self._measurement_history[:MEASUREMENT_HISTORY_LIMIT]
         self._save_measurement_history()
 
     def _reset_loop_tracking(self) -> None:
@@ -2127,11 +2229,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_preflight_errors(self, *, check_connection: bool = True) -> list[str]:
         errors: list[str] = []
+        self._sync_runtime_settings()
         profile = SUPPLY_PROFILES.get(str(getattr(self, "supply_profile_id", "")), {})
         if bool(profile.get("requires_channel", False)) and int(getattr(self, "channel_select", 0) or 0) <= 0:
             errors.append("Select the physically connected PSU channel before starting.")
         if check_connection and self._using_shared_broker() and not bool(getattr(self, "is_connected", False)):
             errors.append("Connect or auto-connect the shared HMP broker before starting.")
+        if check_connection and self._using_shared_broker() and bool(getattr(self, "is_connected", False)):
+            try:
+                snapshot = self._get_shared_broker_client().snapshot()
+                self._remember_shared_broker_channel_limit(snapshot)
+            except Exception as exc:
+                errors.append(
+                    "Could not refresh the shared HMP broker channel limits before starting: "
+                    + broker_failure_diagnostic(exc, context="Current Annealing shared HMP broker")
+                )
+            else:
+                limit_mA = getattr(self, "_shared_broker_current_limit_mA", None)
+                try:
+                    requested_mA = max(
+                        float(getattr(self, "max_current_mA", 0.0) or 0.0),
+                        float(getattr(self, "start_current_mA", 0.0) or 0.0),
+                    )
+                except Exception:
+                    requested_mA = 0.0
+                try:
+                    limit_value = None if limit_mA is None else float(limit_mA)
+                except Exception:
+                    limit_value = None
+                tolerance_mA = max(1e-6, self._current_resolution_mA() * 1e-3)
+                if limit_value is not None and limit_value > 0.0 and requested_mA > limit_value + tolerance_mA:
+                    errors.append(
+                        f"Requested max current is {requested_mA:g} mA, but the shared broker "
+                        f"has CH{self._shared_broker_channel()} confirmed for only {limit_value:g} mA. "
+                        "Update the shared broker/profile limit before starting."
+                    )
         return errors
 
     def _show_start_preflight_errors(self, errors: list[str]) -> None:
@@ -2676,8 +2808,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_voltage = float(voltage)
         self.current_current_read = float(current_mA) / 1000.0
         if float(current_mA) < self._minimum_plottable_current_mA():
-            self._skip_current_sample = True
-            self.sample_ready = True
+            self._handle_zero_current_readback()
             return True
         self._skip_current_sample = False
         self._zero_current_count = 0
@@ -3067,54 +3198,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.lock.unlock()
                         return
                     if self.current_current_read * 1000.0 < self._minimum_plottable_current_mA():
-                        self._skip_current_sample = True
-                        try:
-                            now = time.monotonic()
-                        except Exception:
-                            now = None
-                        self._zero_current_count += 1
-                        # Treat a zero reading as a valid response so callers
-                        # waiting on ``sample_ready`` do not interpret the
-                        # timeout as a communication failure.
-                        self.sample_ready = True
-                        if not self._nonzero_current_seen:
-                            self._record_zero_placeholder()
-                            # Ignore sustained zero readings until we have
-                            # confirmed the setup is capable of sourcing
-                            # current at least once. This prevents false
-                            # alarms immediately after a process starts when
-                            # the supply has not ramped yet.
-                            self._last_nonzero_current_time = None
-                            self.lock.unlock()
-                            return
-                        zero_limit = 6
-                        zero_delay = 2.0
-                        if (
-                            now is not None
-                            and self._process_start_time is not None
-                            and (now - self._process_start_time) < self._contact_grace_period
-                        ):
-                            self.lock.unlock()
-                            return
-                        if (
-                            now is not None
-                            and self._last_nonzero_current_time is not None
-                            and (now - self._last_nonzero_current_time) < zero_delay
-                        ):
-                            self.lock.unlock()
-                            return
-                        if self._zero_current_count < zero_limit:
-                            self.lock.unlock()
-                            return
-                        if not self._contact_lost:
-                            self._contact_lost = True
-                            QtWidgets.QMessageBox.warning(
-                                self,
-                                "Contact lost",
-                                "Measured current is zero. The wire likely burned through. Stopping the process.",
-                            )
-                            if self.process_running:
-                                self.stop_annealing("Contact lost; stopping measurement.", show_dialog=False)
+                        self._handle_zero_current_readback()
                         self.lock.unlock()
                         return
                     self._skip_current_sample = False
@@ -3986,6 +4070,37 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance_mA = max(1e-9, self._current_resolution_mA() * 1e-6)
             if requested_mA > max_current_mA + tolerance_mA:
                 self.current_current_set = max_current_mA / 1000.0
+                shared_limit_mA = getattr(self, "_shared_broker_current_limit_mA", None)
+                try:
+                    shared_limit_value = None if shared_limit_mA is None else float(shared_limit_mA)
+                except Exception:
+                    shared_limit_value = None
+                if self._using_shared_broker() and shared_limit_value is not None and shared_limit_value > 0.0:
+                    message = (
+                        f"Shared broker CH{self._shared_broker_channel()} limit is {shared_limit_value:g} mA, "
+                        f"but the run requested {requested_mA:g} mA. "
+                        "The current was clamped to the confirmed broker limit."
+                    )
+                    if self.process_running:
+                        self._show_status_message(message, timeout_ms=15000)
+                        if not self._shared_broker_limit_warning_shown:
+                            self._shared_broker_limit_warning_shown = True
+                            try:
+                                QtWidgets.QMessageBox.warning(self, "Shared broker current limit", message)
+                            except Exception:
+                                pass
+                    if self.process_running and self.current_increment > 0:
+                        if getattr(self, "reverse_enabled", False):
+                            self.current_increment = -abs(self.current_step_A)
+                            self.line_color = "b"
+                            self.direction_ascending = False
+                            self._reset_voltage_projection()
+                        else:
+                            self.stop_annealing(
+                                "Shared broker current limit reached; stopping measurement.",
+                                show_dialog=False,
+                            )
+                            return
         if self._using_shared_broker():
             self._set_shared_broker_current()
             self.ui.label_last_command.setText(
@@ -4186,6 +4301,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sync_runtime_settings()
             self._refresh_command_profiles()
             self._max_voltage_dialog = False
+            self._shared_broker_limit_warning_shown = False
             self._contact_lost = False
             self._zero_current_count = 0
             try:
@@ -4418,6 +4534,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not self._read_shared_broker_sample():
                     self.warn_no_response_and_abort()
                     return
+                if not self.process_running:
+                    return
             else:
                 self.serial_command = "MEAS:VOLT?\n"
                 # Use this command for the simulator; use the first for real hardware
@@ -4473,6 +4591,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._using_shared_broker():
                 if not self._read_shared_broker_sample():
                     self.warn_no_response_and_abort()
+                    return
+                if not self.process_running:
                     return
             else:
                 self.serial_command = "MEAS:VOLT?\n"

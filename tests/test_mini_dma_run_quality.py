@@ -175,6 +175,21 @@ def test_run_quality_writes_cache(tmp_path: Path) -> None:
     assert payload["include_in_optimization_summary"] is True
 
 
+def test_run_quality_does_not_read_large_ir_sidecar(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run-large-ir"
+    _write_run(run_dir)
+    ir_path = run_dir / "ir_temperature.csv"
+    with ir_path.open("wb") as handle:
+        handle.write(b"elapsed_s,object_c_apparent\n")
+        handle.seek(129 * 1024 * 1024)
+        handle.write(b"\n")
+
+    quality = analyze_run_quality(run_dir)
+
+    assert quality.ir_temperature_rows == -1
+    assert "large:ir_temperature.csv:not_counted" in quality.metadata_warnings
+
+
 def test_run_quality_cli_writes_cache(tmp_path: Path) -> None:
     run_dir = tmp_path / "run01"
     _write_run(run_dir)
@@ -191,12 +206,15 @@ def test_run_quality_cli_can_generate_core_plot_batch_artifacts(tmp_path: Path) 
 
     assert run_quality_main([str(run_dir), "--write", "--core-plots", "--core-plot-dir", str(output_dir)]) == 0
 
-    image = output_dir / "run01_stress_time_strain_current.png"
-    summary = output_dir / "run01_stress_time_strain_current.json"
+    image = output_dir / "run01_run_summary.png"
+    detail = output_dir / "run01_run_summary_detail.png"
+    summary = output_dir / "run01_run_summary.json"
     assert (run_dir / "run_quality.json").exists()
     assert image.exists()
+    assert detail.exists()
     payload = json.loads(summary.read_text(encoding="utf-8"))
     assert payload["image_path"] == str(image)
+    assert payload["detail_image_path"] == str(detail)
     assert payload["summary_path"] == str(summary)
     assert payload["run_quality_path"] == str(run_dir / "run_quality.json")
 
@@ -228,7 +246,8 @@ def test_run_quality_cli_keeps_batch_going_when_one_core_plot_fails(
     assert "plot=" in captured.out
     assert "run-setup-only:" in captured.out
     assert "plot_error=" in captured.out
-    assert (output_dir / "run-good_stress_time_strain_current.png").exists()
+    assert (output_dir / "run-good_run_summary.png").exists()
+    assert (output_dir / "run-good_run_summary_detail.png").exists()
     assert (good_run / "run_quality.json").exists()
     setup_payload = json.loads((setup_only / "run_quality.json").read_text(encoding="utf-8"))
     assert "missing:measurement.csv" in setup_payload["metadata_warnings"]

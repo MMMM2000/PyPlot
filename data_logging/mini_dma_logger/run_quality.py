@@ -21,6 +21,7 @@ FAILED_STOP_REASONS = {"not_started", "failed_setup"}
 CURRENT_LIMIT_PHASES = {"current_limit_unwind", "current_limit_return_skipped"}
 VOLTAGE_LIMIT_FRACTION = 0.98
 CURRENT_COMPLIANCE_RATIO = 0.8
+MAX_IR_TEMPERATURE_ANALYSIS_BYTES = 128 * 1024 * 1024
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -46,6 +47,19 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
         return []
     with path.open("r", newline="", encoding="utf-8-sig") as handle:
         return list(csv.DictReader(handle))
+
+
+def _read_ir_temperature_rows_for_quality(path: Path) -> tuple[list[dict[str, str]], int, str | None]:
+    if not path.exists():
+        return [], 0, None
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return [], 0, f"unreadable:ir_temperature.csv:{exc.__class__.__name__}"
+    if size > MAX_IR_TEMPERATURE_ANALYSIS_BYTES:
+        return [], -1, "large:ir_temperature.csv:not_counted"
+    rows = _read_csv_rows(path)
+    return rows, len(rows), None
 
 
 def _json_warning(path: Path) -> str | None:
@@ -470,7 +484,9 @@ def analyze_run_quality(
     metadata = _read_json(run_path / "metadata.json")
     rows = _read_csv_rows(run_path / "measurement.csv")
     trace_rows = _read_csv_rows(run_path / "control_trace.csv")
-    ir_rows = _read_csv_rows(run_path / "ir_temperature.csv")
+    ir_rows, ir_temperature_row_count, ir_warning = _read_ir_temperature_rows_for_quality(
+        run_path / "ir_temperature.csv"
+    )
     name_fields = _metadata_mapping(metadata, "name_fields")
     stop = _metadata_mapping(metadata, "stop")
     control_logic = _metadata_mapping(metadata, "control_logic")
@@ -514,6 +530,8 @@ def analyze_run_quality(
     stop_category = str(stop.get("category") or "")
     stop_classification = _classify_stop(stop_reason, stop_category)
     metadata_warnings = _metadata_warnings(run_path, metadata, rows, trace_rows, ir_rows)
+    if ir_warning is not None:
+        metadata_warnings.append(ir_warning)
     exclusion_reasons: list[str] = []
     if stop_reason in FAILED_STOP_REASONS:
         exclusion_reasons.append(f"stop_reason:{stop_reason}")
@@ -582,7 +600,7 @@ def analyze_run_quality(
         stop_detail=str(stop.get("detail") or ""),
         measurement_rows=len(rows),
         control_trace_rows=len(trace_rows),
-        ir_temperature_rows=len(ir_rows),
+        ir_temperature_rows=ir_temperature_row_count,
         current_loop_count_estimate=current_loop_count,
         total_elapsed_s=total_elapsed,
         current_phase_elapsed_s=current_phase_elapsed,
@@ -688,15 +706,18 @@ def main(argv: list[str] | None = None) -> int:
             run_path = Path(quality.run_dir)
             image_path = None
             summary_path = None
+            detail_image_path = None
             if args.core_plot_dir:
                 output_dir = Path(args.core_plot_dir)
-                image_path = output_dir / f"{run_path.name}_stress_time_strain_current.png"
+                image_path = output_dir / f"{run_path.name}_run_summary.png"
+                detail_image_path = output_dir / f"{run_path.name}_run_summary_detail.png"
                 summary_path = image_path.with_suffix(".json")
             try:
                 plot_summaries.append(
                     generate_core_run_plot(
                         run_path,
                         image_path=image_path,
+                        detail_image_path=detail_image_path,
                         summary_path=summary_path,
                         write_quality=True,
                     )
@@ -706,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
                     {
                         "run_dir": str(run_path),
                         "image_path": None,
+                        "detail_image_path": None,
                         "summary_path": None,
                         "run_quality_path": str(run_path / "run_quality.json"),
                         "plot_error": str(exc),
@@ -718,6 +740,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     **quality.to_dict(),
                     "core_plot_path": plot_summary["image_path"],
+                    "core_plot_detail_path": plot_summary.get("detail_image_path"),
                     "core_plot_summary_path": plot_summary["summary_path"],
                     "core_plot_error": plot_summary.get("plot_error"),
                 }
