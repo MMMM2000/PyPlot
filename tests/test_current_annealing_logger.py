@@ -465,6 +465,20 @@ def test_current_annealing_process_settings_layout_has_room_for_density(qtbot) -
         assert density.width() >= density.sizeHint().width()
 
 
+def test_current_annealing_uses_recipe_and_hardware_tabs(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    assert window.ui.left_tabs.tabText(0) == "Recipe"
+    assert window.ui.left_tabs.tabText(1) == "Hardware"
+    assert window.ui.frame_process_settings.parent() is window.ui.tab_recipe
+    assert window.ui.frame_serial_settings.parent() is window.ui.tab_hardware
+    assert window.ui.frame_voltage_limit_settings.parent() is window.ui.tab_hardware
+    assert window.ui.checkBox_reverse.isHidden()
+    assert window.ui.frame_process_settings.isEnabled()
+    assert not window._overlay.isVisible()
+
+
 def test_current_annealing_progress_is_pinned_above_run_buttons(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
@@ -640,7 +654,64 @@ def test_current_annealing_top_axis_shows_density_when_diameter_known(qtbot) -> 
     top_axis = window.pg_plot_resistance_vs_current.getPlotItem().getAxis("top")
     assert top_axis.style["showValues"] is True
     assert top_axis.labelText == "Current density"
-    assert "A/mm" in top_axis.labelUnits
+    assert top_axis.labelUnits == "A/mm²"
+
+
+def test_current_annealing_plot_config_can_show_power_top_axis_and_voltage_right_axis(qtbot) -> None:
+    pytest.importorskip("pyqtgraph")
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window.start_current_mA = 1
+    window._plot_axis_modes["upper"]["top"] = logger_mod.PLOT_AXIS_POWER_MW
+    window._plot_axis_modes["upper"]["right"] = logger_mod.PLOT_AXIS_VOLTAGE
+    window._plot_axis_modes["lower"]["bottom"] = logger_mod.PLOT_AXIS_CURRENT_MA
+    window._plot_axis_modes["lower"]["left"] = logger_mod.PLOT_AXIS_VOLTAGE
+    window._plot_axis_modes["lower"]["top"] = logger_mod.PLOT_AXIS_CURRENT_DENSITY
+    window._plot_axis_modes["lower"]["right"] = logger_mod.PLOT_AXIS_RESISTANCE
+    window.init_graph_window()
+    window._append_measurement_sample(10.0, 100.0, voltage=1.0)
+    window._append_measurement_sample(20.0, 110.0, voltage=2.2)
+
+    upper_item = window.pg_plot_resistance_vs_current.getPlotItem()
+    lower_item = window.pg_plot_resistance_vs_sample.getPlotItem()
+    assert upper_item.getAxis("top").labelText == "Power"
+    assert upper_item.getAxis("top").labelUnits == "mW"
+    assert upper_item.getAxis("right").labelText == "Voltage"
+    assert upper_item.getAxis("right").labelUnits == "V"
+    assert lower_item.getAxis("bottom").labelText == "Current"
+    assert lower_item.getAxis("left").labelText == "Voltage"
+    assert lower_item.getAxis("top").labelText == "Current density"
+    assert lower_item.getAxis("right").labelText == "Resistance"
+    assert set(window._right_axis_curves) == {"upper", "lower"}
+
+
+def test_current_annealing_plot_config_dialog_has_superscript_density_unit(qtbot) -> None:
+    dialog = logger_mod.CurrentAnnealingPlotConfigDialog(
+        None,
+        axis_modes={
+            "upper": {
+                "bottom": logger_mod.PLOT_AXIS_CURRENT_MA,
+                "left": logger_mod.PLOT_AXIS_RESISTANCE,
+                "top": logger_mod.PLOT_AXIS_CURRENT_DENSITY,
+                "right": logger_mod.PLOT_AXIS_NONE,
+            },
+            "lower": {
+                "bottom": logger_mod.PLOT_AXIS_SAMPLE_N,
+                "left": logger_mod.PLOT_AXIS_RESISTANCE,
+                "top": logger_mod.PLOT_AXIS_NONE,
+                "right": logger_mod.PLOT_AXIS_NONE,
+            },
+        },
+    )
+    qtbot.addWidget(dialog)
+
+    combo_texts = [
+        combo.itemText(index)
+        for combo in dialog.findChildren(logger_mod.QtWidgets.QComboBox)
+        for index in range(combo.count())
+    ]
+    assert "Current density (A/mm²)" in combo_texts
 
 
 def test_current_annealing_density_top_axis_uses_bottom_tick_positions(qtbot) -> None:
@@ -694,6 +765,53 @@ def test_current_annealing_planned_time_has_no_hidden_hold_duration(qtbot) -> No
     window.ui.spinBox_loops.setValue(1)
 
     assert window.compute_planned_seconds() == 4
+
+
+def test_current_annealing_runtime_recipe_fields_stay_editable(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._set_process_controls_enabled(False)
+
+    assert window.ui.spinBox_max_current.isEnabled()
+    assert window.ui.spinBox_step_mA.isEnabled()
+    assert window.ui.spinBox_start_current.isEnabled()
+    assert window.ui.spinBox_loops.isEnabled()
+    assert window.ui.checkBox_infinite_loops.isEnabled()
+    assert window.ui.label_max_current.isEnabled()
+    assert not window.ui.lineEdit_log_dir.isEnabled()
+
+
+def test_current_annealing_update_running_recipe_refreshes_live_plan(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.operation_mode = 2
+    window.process_running = True
+    window.direction_ascending = True
+    window.current_current_set = 0.007
+    window.current_increment = 0.001
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.loop_idx = 0
+    window.ui.spinBox_start_current.setValue(1)
+    window.ui.spinBox_max_current.setValue(10)
+    window.ui.spinBox_step_mA.setValue(1.0)
+    window.ui.spinBox_loops.setValue(2)
+    window._init_loop_tracking(window._planned_automatic_loop_steps(), 2, False)
+
+    window.ui.spinBox_max_current.setValue(6)
+    window.ui.spinBox_step_mA.setValue(0.2)
+    window.ui.spinBox_loops.setValue(3)
+    window.handle_update_running_recipe_clicked()
+
+    assert window.max_current_mA == 6
+    assert window.current_step_mA == pytest.approx(0.2)
+    assert window.current_step_A == pytest.approx(0.0002)
+    assert window.current_increment == pytest.approx(-0.0002)
+    assert window.direction_ascending is False
+    assert window.loop_target == 3
+    assert window._planned_loop_steps == 50
+    assert window.total_steps >= window.step_idx
 
 
 def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
@@ -989,6 +1107,36 @@ def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch:
     assert progress_seen == ["Connecting shared HMP broker..."]
     assert window._hardware_auto_connect_progress is None
     assert window.process_running is True
+
+
+def test_current_annealing_start_reports_auto_connect_failure_detail(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window.operation_mode = 0
+    warnings: list[tuple[str, str]] = []
+    preflight: list[list[str]] = []
+
+    def _connect() -> None:
+        raise RuntimeError("broker is busy")
+
+    monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((str(title), str(message))),
+    )
+    monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: preflight.append(payload))
+
+    window.handle_toggle_process_clicked()
+
+    assert warnings == [("Hardware auto-connect failed", "Hardware auto-connect failed: broker is busy")]
+    assert preflight == [["Hardware auto-connect failed: broker is busy"]]
+    assert window.process_running is False
 
 
 def test_shared_broker_connect_verifies_broker_before_marking_connected(qtbot) -> None:
@@ -1305,6 +1453,80 @@ def test_current_annealing_prepare_output_file_creates_metadata_sidecar(tmp_path
     assert payload["supply"]["profile_id"] == "shared_hmp_broker"
     assert payload["supply"]["channel"] == 1
     assert "hold_duration_s" not in payload
+
+
+def test_current_annealing_replace_moves_previous_output_and_metadata_to_trash(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("replace_me")
+    data_path = logger_mod.Path(window.build_log_path())
+    data_path.write_text("old data\n", encoding="utf-8")
+    metadata_dir = data_path.parent / "metadata" / data_path.stem
+    metadata_dir.mkdir(parents=True)
+    (metadata_dir / "metadata.json").write_text('{"old": true}\n', encoding="utf-8")
+    moved: list[logger_mod.Path] = []
+
+    class _FakeMessageBox:
+        Icon = logger_mod.QtWidgets.QMessageBox.Icon
+        ButtonRole = logger_mod.QtWidgets.QMessageBox.ButtonRole
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self._clicked: object | None = None
+
+        def setWindowTitle(self, _title: str) -> None:
+            pass
+
+        def setIcon(self, _icon: object) -> None:
+            pass
+
+        def setText(self, _text: str) -> None:
+            pass
+
+        def setInformativeText(self, _text: str) -> None:
+            pass
+
+        def addButton(self, text: str, _role: object) -> object:
+            button = object()
+            if text == "Replace":
+                self._clicked = button
+            return button
+
+        def exec(self) -> int:
+            return 0
+
+        def clickedButton(self) -> object | None:
+            return self._clicked
+
+        @staticmethod
+        def critical(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("critical message was not expected")
+
+    def _fake_trash(path: logger_mod.Path) -> logger_mod.Path:
+        moved.append(path)
+        if path.is_dir():
+            destination = tmp_path / "trash" / path.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            logger_mod.shutil.move(str(path), str(destination))
+            return destination
+        destination = tmp_path / "trash" / path.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        path.replace(destination)
+        return destination
+
+    monkeypatch.setattr(logger_mod.QtWidgets, "QMessageBox", _FakeMessageBox)
+    monkeypatch.setattr(logger_mod, "_move_path_to_trash", _fake_trash)
+
+    assert window.prepare_output_file() is True
+
+    assert moved == [data_path, metadata_dir]
+    assert data_path.read_text(encoding="utf-8").startswith("# Current (mA)")
+    assert (metadata_dir / "metadata.json").exists()
+    assert (tmp_path / "trash" / data_path.name).read_text(encoding="utf-8") == "old data\n"
 
 
 def test_current_annealing_metadata_records_hardware_backend(tmp_path, qtbot) -> None:

@@ -155,6 +155,19 @@ class Ui_MainWindow(object):
         main_layout = QtWidgets.QVBoxLayout(left_panel)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
+        self.left_tabs = QtWidgets.QTabWidget(left_panel)
+        self.left_tabs.setObjectName("left_tabs")
+        self.tab_recipe = QtWidgets.QWidget(self.left_tabs)
+        self.tab_hardware = QtWidgets.QWidget(self.left_tabs)
+        self.recipe_tab_layout = QtWidgets.QVBoxLayout(self.tab_recipe)
+        self.recipe_tab_layout.setContentsMargins(0, 0, 0, 0)
+        self.recipe_tab_layout.setSpacing(12)
+        self.hardware_tab_layout = QtWidgets.QVBoxLayout(self.tab_hardware)
+        self.hardware_tab_layout.setContentsMargins(0, 0, 0, 0)
+        self.hardware_tab_layout.setSpacing(12)
+        self.left_tabs.addTab(self.tab_recipe, "Recipe")
+        self.left_tabs.addTab(self.tab_hardware, "Hardware")
+        main_layout.addWidget(self.left_tabs)
         left_scroll = QtWidgets.QScrollArea(left_container)
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -206,7 +219,11 @@ class Ui_MainWindow(object):
         self.frame_serial_settings = QtWidgets.QFrame(self.centralWidget)
         self.frame_serial_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.frame_serial_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-        main_layout.addWidget(self.frame_serial_settings)
+        self.frame_serial_settings.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.hardware_tab_layout.addWidget(self.frame_serial_settings)
 
         gb_serial = QtWidgets.QGroupBox("Hardware connection", self.frame_serial_settings)
         gb_layout = QtWidgets.QVBoxLayout(gb_serial)
@@ -335,7 +352,7 @@ class Ui_MainWindow(object):
         self.frame_process_settings = QtWidgets.QFrame(self.centralWidget)
         self.frame_process_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.frame_process_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-        main_layout.addWidget(self.frame_process_settings)
+        self.recipe_tab_layout.addWidget(self.frame_process_settings)
 
         gb_proc = QtWidgets.QGroupBox("Process settings", self.frame_process_settings)
         self.groupBox_process_settings = gb_proc
@@ -447,14 +464,13 @@ class Ui_MainWindow(object):
         rev = QtWidgets.QHBoxLayout()
         self.checkBox_reverse = QtWidgets.QCheckBox("Reverse to zero after max")
         self.checkBox_reverse.setChecked(True)
+        self.checkBox_reverse.hide()
         self.spinBox_loops = QtWidgets.QSpinBox()
         self.spinBox_loops.setRange(0, 100000)
         self.spinBox_loops.setSpecialValueText("∞")
         self.spinBox_loops.setValue(1)
         self.checkBox_infinite_loops = QtWidgets.QCheckBox("∞")
         self.checkBox_infinite_loops.setToolTip("Repeat indefinitely")
-        rev.addWidget(self.checkBox_reverse)
-        rev.addSpacing(12)
         rev.addWidget(QtWidgets.QLabel("Loops:"))
         rev.addWidget(self.spinBox_loops)
         rev.addWidget(self.checkBox_infinite_loops)
@@ -462,7 +478,18 @@ class Ui_MainWindow(object):
         grid.addLayout(rev, 4, 0, 1, 2)
 
         # Voltage limit behaviour
+        self.frame_voltage_limit_settings = QtWidgets.QFrame(self.centralWidget)
+        self.frame_voltage_limit_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.frame_voltage_limit_settings.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.groupBox_voltage_limit_settings = QtWidgets.QGroupBox("Run limits", self.frame_voltage_limit_settings)
+        frame_layout_limits = QtWidgets.QVBoxLayout(self.frame_voltage_limit_settings)
+        frame_layout_limits.setContentsMargins(0, 0, 0, 0)
+        frame_layout_limits.addWidget(self.groupBox_voltage_limit_settings)
         limit_grid = QtWidgets.QGridLayout()
+        self.groupBox_voltage_limit_settings.setLayout(limit_grid)
         limit_grid.setContentsMargins(0, 0, 0, 0)
         limit_grid.setHorizontalSpacing(10)
         limit_grid.setVerticalSpacing(6)
@@ -497,7 +524,7 @@ class Ui_MainWindow(object):
             "Choose how the logger reacts when the power supply reaches its voltage compliance limit"
         )
         limit_grid.addWidget(self.comboBox_max_voltage_action, 1, 2, 1, 5)
-        grid.addLayout(limit_grid, 5, 0, 1, 2)
+        self.hardware_tab_layout.addWidget(self.frame_voltage_limit_settings)
 
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")
@@ -653,6 +680,14 @@ class Ui_MainWindow(object):
         sticky_status_layout.addWidget(self.label_time_remaining)
         self.label_time_to_limit = QtWidgets.QLabel("To limit: N/A")
         sticky_status_layout.addWidget(self.label_time_to_limit)
+        self.pushButton_update_running_recipe = QtWidgets.QPushButton("Update running recipe")
+        self.pushButton_update_running_recipe.setEnabled(False)
+        self.pushButton_update_running_recipe.setVisible(False)
+        self.pushButton_update_running_recipe.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        sticky_status_layout.addWidget(self.pushButton_update_running_recipe)
 
         # Live values group
         self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
@@ -718,7 +753,7 @@ class Ui_MainWindow(object):
         # ------------------------------------------------------------------
         self.frame_command_and_response = QtWidgets.QFrame(self.centralWidget)
         self.frame_command_and_response.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        main_layout.addWidget(self.frame_command_and_response)
+        self.hardware_tab_layout.addWidget(self.frame_command_and_response)
 
         frame_layout_cmd = QtWidgets.QVBoxLayout(self.frame_command_and_response)
         frame_layout_cmd.setContentsMargins(0, 0, 0, 0)
@@ -760,6 +795,7 @@ class Ui_MainWindow(object):
 
         header.toggled.connect(_toggle_cmds)
         self.frame_command_and_response.setVisible(False)
+        self.hardware_tab_layout.addStretch(1)
 
         # Status bar
         self.statusBar = QtWidgets.QStatusBar(MainWindow)
