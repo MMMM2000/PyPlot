@@ -14,6 +14,9 @@ import math
 import re
 import json
 import subprocess
+import shutil
+import ctypes
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -125,6 +128,71 @@ def _default_download_dir() -> str:
 
 DEFAULT_LOG_DIR = _default_download_dir()
 
+
+def _unique_replaced_output_path(path: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = path.with_name(f"{path.stem}.replaced-{timestamp}{path.suffix}")
+    candidate = base
+    counter = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}.replaced-{timestamp}-{counter}{path.suffix}")
+        counter += 1
+    return candidate
+
+
+def _move_path_to_trash(path: Path) -> Path | None:
+    """Move an existing output path to the OS trash, with a local fallback."""
+
+    if not path.exists():
+        return None
+    if os.name == "nt":
+        try:
+            fo_delete = 0x0003
+            fof_allowundo = 0x0040
+            fof_noconfirmation = 0x0010
+            fof_silent = 0x0004
+
+            class _SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", wintypes.HWND),
+                    ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", wintypes.USHORT),
+                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", wintypes.LPVOID),
+                    ("lpszProgressTitle", wintypes.LPCWSTR),
+                ]
+
+            payload = str(path) + "\0\0"
+            operation = _SHFILEOPSTRUCTW(
+                None,
+                fo_delete,
+                payload,
+                None,
+                fof_allowundo | fof_noconfirmation | fof_silent,
+                False,
+                None,
+                None,
+            )
+            result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+            if result == 0 and not operation.fAnyOperationsAborted and not path.exists():
+                return path
+        except Exception:
+            pass
+    try:
+        moved, trash_path = QtCore.QFile.moveToTrash(str(path))
+        if moved:
+            return Path(trash_path) if trash_path else path
+    except Exception:
+        pass
+    fallback = _unique_replaced_output_path(path)
+    if path.is_dir():
+        shutil.move(str(path), str(fallback))
+    else:
+        path.replace(fallback)
+    return fallback
+
 DEFAULT_PRESET = {
     "preset": 0,
     "composition": "Ni51Fe26Ga21",
@@ -141,6 +209,12 @@ MAX_VOLTAGE_ACTION_LABELS = {
     "reverse": "Reverse to zero",
     "stop": "Stop measurement",
 }
+CURRENT_DENSITY_UNIT = "A/mm²"
+PLOT_TOP_AXIS_CURRENT_DENSITY = "current_density"
+PLOT_TOP_AXIS_POWER_MW = "power_mw"
+PLOT_TOP_AXIS_NONE = "none"
+PLOT_RIGHT_AXIS_NONE = "none"
+PLOT_RIGHT_AXIS_VOLTAGE = "voltage"
 
 SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
     "hmp4030": {
@@ -513,6 +587,58 @@ class MeasurementHistoryDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
 
+class CurrentAnnealingPlotConfigDialog(QtWidgets.QDialog):
+    """Small dashboard axis selector for the Current Annealing live plots."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        *,
+        top_axis_mode: str,
+        right_axis_mode: str,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Configure plots")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.combo_top_axis = QtWidgets.QComboBox(self)
+        self.combo_top_axis.addItem(f"Current density ({CURRENT_DENSITY_UNIT})", PLOT_TOP_AXIS_CURRENT_DENSITY)
+        self.combo_top_axis.addItem("Power (mW)", PLOT_TOP_AXIS_POWER_MW)
+        self.combo_top_axis.addItem("None", PLOT_TOP_AXIS_NONE)
+        index = self.combo_top_axis.findData(top_axis_mode)
+        self.combo_top_axis.setCurrentIndex(index if index >= 0 else 0)
+        form.addRow("Top X axis", self.combo_top_axis)
+
+        self.combo_right_axis = QtWidgets.QComboBox(self)
+        self.combo_right_axis.addItem("None", PLOT_RIGHT_AXIS_NONE)
+        self.combo_right_axis.addItem("Voltage (V)", PLOT_RIGHT_AXIS_VOLTAGE)
+        index = self.combo_right_axis.findData(right_axis_mode)
+        self.combo_right_axis.setCurrentIndex(index if index >= 0 else 0)
+        form.addRow("Right Y axis", self.combo_right_axis)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def top_axis_mode(self) -> str:
+        return str(self.combo_top_axis.currentData() or PLOT_TOP_AXIS_CURRENT_DENSITY)
+
+    @property
+    def right_axis_mode(self) -> str:
+        return str(self.combo_right_axis.currentData() or PLOT_RIGHT_AXIS_NONE)
+
+
 class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
@@ -679,14 +805,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._applied_limit_current_mA: float | None = None
         self._samples_current: List[float] = []
         self._samples_resistance: List[float] = []
+        self._samples_voltage: List[float] = []
         self._segment_lines_ax1: list[Any] = []
         self._segment_lines_ax2: list[Any] = []
+        self._right_axis_view: Any = None
+        self._right_axis_curve: Any = None
         self._placeholder_text_ax1: Any = None
         self._placeholder_text_ax2: Any = None
         self._plot_backend = "none"
         self.pg_plot_resistance_vs_current: Any = None
         self.pg_plot_resistance_vs_sample: Any = None
+        self._plot_top_axis_mode = str(
+            self.settings.value("plot_top_axis", PLOT_TOP_AXIS_CURRENT_DENSITY) or PLOT_TOP_AXIS_CURRENT_DENSITY
+        )
+        self._plot_right_axis_mode = str(
+            self.settings.value("plot_right_axis", PLOT_RIGHT_AXIS_NONE) or PLOT_RIGHT_AXIS_NONE
+        )
         self._pg_placeholder_labels: list[QtWidgets.QLabel] = []
+        self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
+        self._last_auto_connect_error = ""
         self._history_settings = QtCore.QSettings("microwire", "current_annealing_history")
         self._measurement_history: List[Dict[str, Any]] = self._load_measurement_history()
 
@@ -845,14 +982,13 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         
-        # Disable process controls by default until a port is connected
-        self.ui.frame_process_settings.setEnabled(False)
+        # Keep recipe/process settings editable before hardware connection.
+        self.ui.frame_process_settings.setEnabled(True)
         self.ui.frame_command_and_response.setEnabled(False)
 
-        # Connection overlay over the left panel until port is connected
+        # Legacy overlay is kept as a no-op compatibility hook; settings stay editable.
         self._setup_connect_overlay()
-        if hasattr(self, 'is_connected') and not self.is_connected:
-            self._show_connect_overlay(True)
+        self._show_connect_overlay(False)
         
         self.max_resistance = 0
         
@@ -1079,6 +1215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot.setYRange(y_low, y_high, padding=0.0)
         if plot is self.pg_plot_resistance_vs_current:
             self._refresh_current_density_axis(x_low=x_low, x_high=x_high)
+            self._refresh_right_axis_overlay()
 
     def _refresh_current_density_axis(self, *, x_low: float | None = None, x_high: float | None = None) -> None:
         plot = getattr(self, "pg_plot_resistance_vs_current", None)
@@ -1086,8 +1223,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         plot_item = plot.getPlotItem()
         top_axis = plot_item.getAxis("top")
-        diameter_um = self._diameter_um()
-        if diameter_um is None:
+        mode = str(getattr(self, "_plot_top_axis_mode", PLOT_TOP_AXIS_CURRENT_DENSITY) or PLOT_TOP_AXIS_CURRENT_DENSITY)
+        if mode == PLOT_TOP_AXIS_NONE:
+            top_axis.setLabel("")
+            top_axis.setTicks([])
+            top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
+            return
+        if mode == PLOT_TOP_AXIS_CURRENT_DENSITY and self._diameter_um() is None:
             top_axis.setLabel("")
             top_axis.setTicks([])
             top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
@@ -1099,11 +1241,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
         if not (math.isfinite(float(x_low)) and math.isfinite(float(x_high))) or math.isclose(float(x_low), float(x_high)):
             return
-        ticks = [
-            (position, self._format_current_density(position))
-            for position in self._current_axis_tick_positions(plot_item, float(x_low), float(x_high))
-        ]
-        top_axis.setLabel("Current density", units="A/mm^2")
+        positions = self._current_axis_tick_positions(plot_item, float(x_low), float(x_high))
+        if mode == PLOT_TOP_AXIS_POWER_MW:
+            ticks = [(position, self._format_power_mw_at_current(position)) for position in positions]
+            top_axis.setLabel("Power", units="mW")
+        else:
+            ticks = [(position, self._format_current_density(position)) for position in positions]
+            top_axis.setLabel("Current density", units=CURRENT_DENSITY_UNIT)
         top_axis.setTicks([ticks])
         top_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
 
@@ -1284,6 +1428,37 @@ class MainWindow(QtWidgets.QMainWindow):
         decimals = 2 if abs_density < 10.0 else (1 if abs_density < 100.0 else 0)
         return f"{density:.{decimals}f}"
 
+    def _resistance_at_current_for_power_axis(self, current_mA: float) -> float | None:
+        currents = list(getattr(self, "_samples_current", []))
+        resistances = list(getattr(self, "_samples_resistance", []))
+        pairs = [
+            (float(c), float(r))
+            for c, r in zip(currents, resistances)
+            if math.isfinite(float(c)) and math.isfinite(float(r)) and float(r) > 0.0
+        ]
+        if not pairs:
+            return None
+        pairs.sort(key=lambda pair: pair[0])
+        if len(pairs) == 1:
+            return pairs[0][1]
+        for (x0, y0), (x1, y1) in zip(pairs, pairs[1:]):
+            if x0 <= current_mA <= x1 or x1 <= current_mA <= x0:
+                if math.isclose(x0, x1):
+                    return y1
+                frac = (current_mA - x0) / (x1 - x0)
+                return y0 + frac * (y1 - y0)
+        nearest = min(pairs, key=lambda pair: abs(pair[0] - current_mA))
+        return nearest[1]
+
+    def _format_power_mw_at_current(self, current_mA: float) -> str:
+        resistance = self._resistance_at_current_for_power_axis(float(current_mA))
+        if resistance is None:
+            return ""
+        power_mw = (float(current_mA) ** 2) * float(resistance) / 1000.0
+        abs_power = abs(power_mw)
+        decimals = 2 if abs_power < 10.0 else (1 if abs_power < 100.0 else 0)
+        return f"{power_mw:.{decimals}f}"
+
     def _refresh_current_density_visibility(self) -> None:
         visible = self._diameter_um() is not None
         for label in (
@@ -1336,7 +1511,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not isinstance(label, QtWidgets.QLabel):
                 return
             label.setVisible(visible)
-            label.setText("" if not visible else f"{self._format_current_density(value_mA)} A/mm^2{suffix}")
+            label.setText("" if not visible else f"{self._format_current_density(value_mA)} {CURRENT_DENSITY_UNIT}{suffix}")
 
         try:
             _set("label_max_current_density", float(self.ui.spinBox_max_current.value()))
@@ -1883,7 +2058,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _reset_sample_buffers(self) -> None:
         self._samples_current = []
         self._samples_resistance = []
+        self._samples_voltage = []
         self._clear_segment_lines()
+        self._clear_right_axis_overlay()
 
     def _clear_segment_lines(self) -> None:
         for container in (self._segment_lines_ax1, self._segment_lines_ax2):
@@ -1896,6 +2073,95 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
             container.clear()
+
+    def _clear_right_axis_overlay(self) -> None:
+        if pg is None:
+            return
+        curve = getattr(self, "_right_axis_curve", None)
+        view = getattr(self, "_right_axis_view", None)
+        if curve is not None and view is not None:
+            try:
+                view.removeItem(curve)
+            except Exception:
+                pass
+        self._right_axis_curve = None
+
+    def _ensure_right_axis_view(self) -> Any:
+        plot = getattr(self, "pg_plot_resistance_vs_current", None)
+        if pg is None or plot is None:
+            return None
+        if self._right_axis_view is not None:
+            return self._right_axis_view
+        plot_item = plot.getPlotItem()
+        view = pg.ViewBox()
+        plot_item.scene().addItem(view)
+        plot_item.getAxis("right").linkToView(view)
+        view.setXLink(plot_item)
+
+        def _sync_geometry() -> None:
+            try:
+                view.setGeometry(plot_item.vb.sceneBoundingRect())
+                view.linkedViewChanged(plot_item.vb, view.XAxis)
+            except Exception:
+                pass
+
+        try:
+            plot_item.vb.sigResized.connect(_sync_geometry)
+        except Exception:
+            pass
+        self._right_axis_view = view
+        _sync_geometry()
+        return view
+
+    def _refresh_right_axis_overlay(self) -> None:
+        plot = getattr(self, "pg_plot_resistance_vs_current", None)
+        if pg is None or plot is None:
+            return
+        plot_item = plot.getPlotItem()
+        right_axis = plot_item.getAxis("right")
+        mode = str(getattr(self, "_plot_right_axis_mode", PLOT_RIGHT_AXIS_NONE) or PLOT_RIGHT_AXIS_NONE)
+        if mode != PLOT_RIGHT_AXIS_VOLTAGE:
+            self._clear_right_axis_overlay()
+            right_axis.setLabel("")
+            right_axis.setTicks([])
+            right_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
+            return
+        currents = list(getattr(self, "_samples_current", []))
+        voltages = list(getattr(self, "_samples_voltage", []))
+        points = [
+            (float(c), float(v))
+            for c, v in zip(currents, voltages)
+            if math.isfinite(float(c)) and math.isfinite(float(v))
+        ]
+        if not points:
+            right_axis.setLabel("Voltage", units="V")
+            right_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
+            return
+        view = self._ensure_right_axis_view()
+        if view is None:
+            return
+        self._clear_right_axis_overlay()
+        x_values = [point[0] for point in points]
+        y_values = [point[1] for point in points]
+        self._right_axis_curve = pg.PlotDataItem(
+            x_values,
+            y_values,
+            pen=pg.mkPen("#a855f7", width=2),
+            symbol="o",
+            symbolSize=5,
+            symbolBrush=pg.mkBrush("#a855f7"),
+            symbolPen=pg.mkPen("#a855f7"),
+        )
+        view.addItem(self._right_axis_curve)
+        y_low = min(y_values)
+        y_high = max(y_values)
+        padding = max((y_high - y_low) * 0.08, 0.05) if not math.isclose(y_low, y_high) else max(abs(y_low) * 0.05, 0.05)
+        try:
+            view.setYRange(y_low - padding, y_high + padding, padding=0.0)
+        except Exception:
+            pass
+        right_axis.setLabel("Voltage", units="V")
+        right_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
 
     def _remove_placeholder_text(self) -> None:
         for label in self._pg_placeholder_labels:
@@ -1920,12 +2186,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return resistance > 0.0
 
-    def _append_measurement_sample(self, current_mA: float, resistance: float) -> None:
+    def _append_measurement_sample(self, current_mA: float, resistance: float, voltage: float | None = None) -> None:
         if not self._measurement_sample_is_plottable(current_mA, resistance):
             return
         self._remove_placeholder_text()
         self._samples_current.append(float(current_mA))
         self._samples_resistance.append(float(resistance))
+        if voltage is None:
+            try:
+                voltage = float(getattr(self, "current_voltage", math.nan))
+            except Exception:
+                voltage = math.nan
+        self._samples_voltage.append(float(voltage))
         self.sample_index = len(self._samples_current)
         self._redraw_segments()
 
@@ -2003,6 +2275,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if item2 is not None:
                 self._segment_lines_ax2.append(item2)
         self._refresh_pyqtgraph_ranges()
+        try:
+            self._refresh_current_density_axis(x_low=min(currents), x_high=max(currents))
+        except Exception:
+            pass
+        self._refresh_right_axis_overlay()
 
     def _finalize_measurement_history(self) -> None:
         if len(self._samples_current) < 2 or len(self._samples_current) != len(self._samples_resistance):
@@ -2279,6 +2556,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _auto_connect_for_start(self) -> bool:
         if bool(getattr(self, "is_connected", False)):
             return True
+        self._last_auto_connect_error = ""
         dialog: QtWidgets.QProgressDialog | None = None
         try:
             text = "Connecting shared HMP broker..." if self._using_shared_broker() else "Connecting hardware..."
@@ -2301,7 +2579,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return bool(getattr(self, "is_connected", False))
         except Exception as exc:
             message = f"Hardware auto-connect failed: {exc}"
+            self._last_auto_connect_error = message
             self._show_status_message(message, timeout_ms=15000)
+            try:
+                QtWidgets.QMessageBox.warning(self, "Hardware auto-connect failed", message)
+            except Exception:
+                pass
             return False
         finally:
             if dialog is not None:
@@ -2742,8 +3025,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_connect_port.setText("Connect to broker")
         self._set_port_controls_enabled(True)
         self.ui.frame_command_and_response.setEnabled(False)
-        self.ui.frame_process_settings.setEnabled(False)
-        self._show_connect_overlay(True)
+        self.ui.frame_process_settings.setEnabled(True)
+        self._show_connect_overlay(False)
         self._update_mode_action_state()
         self._sync_hardware_connection_controls()
 
@@ -3038,7 +3321,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._write_sample_to_file(initial_sample=initial_sample)
         if self.first_sample:
             self.first_sample = False
-        self._append_measurement_sample(current_mA, resistance)
+        self._append_measurement_sample(current_mA, resistance, float(getattr(self, "current_voltage", math.nan)))
         if not initial_sample:
             self._record_sample_progress()
         if record_voltage_progress:
@@ -3141,9 +3424,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ser_mcu.close()
             self.is_connected = False
             self.ui.pushButton_connect_port.setText('Connect to port')
-            self._show_connect_overlay(True)
+            self._show_connect_overlay(False)
             self.ui.frame_command_and_response.setEnabled(False)
-            self.ui.frame_process_settings.setEnabled(False)
+            self.ui.frame_process_settings.setEnabled(True)
             self._set_port_controls_enabled(True)
             self._update_mode_action_state()
 
@@ -4283,6 +4566,24 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = MeasurementHistoryDialog(self, list(self._measurement_history))
         dialog.exec()
 
+    def handle_configure_plots_clicked(self) -> None:
+        dialog = CurrentAnnealingPlotConfigDialog(
+            self,
+            top_axis_mode=str(getattr(self, "_plot_top_axis_mode", PLOT_TOP_AXIS_CURRENT_DENSITY)),
+            right_axis_mode=str(getattr(self, "_plot_right_axis_mode", PLOT_RIGHT_AXIS_NONE)),
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self._plot_top_axis_mode = dialog.top_axis_mode
+        self._plot_right_axis_mode = dialog.right_axis_mode
+        try:
+            self.settings.setValue("plot_top_axis", self._plot_top_axis_mode)
+            self.settings.setValue("plot_right_axis", self._plot_right_axis_mode)
+        except Exception:
+            pass
+        self._refresh_current_density_axis()
+        self._refresh_right_axis_overlay()
+
     def handle_toggle_process_clicked(self):
         if not self.process_running:
             preflight_errors = self._start_preflight_errors(check_connection=False)
@@ -4290,7 +4591,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._show_start_preflight_errors(preflight_errors)
                 return
             if not bool(getattr(self, "is_connected", False)) and not self._auto_connect_for_start():
-                self._show_start_preflight_errors(["Hardware auto-connect did not complete."])
+                detail = str(getattr(self, "_last_auto_connect_error", "") or "").strip()
+                self._show_start_preflight_errors([detail or "Hardware auto-connect did not complete."])
                 return
             preflight_errors = self._start_preflight_errors()
             if preflight_errors:
@@ -4816,9 +5118,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         layout.addRow("Set current (mA)", self.label_live_set)
-        layout.addRow("Set current density (A/mm^2)", self.label_live_set_density)
+        layout.addRow(f"Set current density ({CURRENT_DENSITY_UNIT})", self.label_live_set_density)
         layout.addRow("Current (mA)", self.label_live_current)
-        layout.addRow("Current density (A/mm^2)", self.label_live_current_density)
+        layout.addRow(f"Current density ({CURRENT_DENSITY_UNIT})", self.label_live_current_density)
         layout.addRow("Voltage (V)", self.label_live_voltage)
         # Alias old names for compatibility
         self.ui.lcd_current_mA = self.label_live_current
@@ -5005,10 +5307,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     title = format_annealing_title(Path(title_source).stem if title_source else "")
                 except Exception:
                     title = format_annealing_title(title_source)
+                header_row = QtWidgets.QHBoxLayout()
+                header_row.setContentsMargins(0, 0, 0, 0)
+                header_row.setSpacing(8)
                 title_label = QtWidgets.QLabel(title, container)
                 title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 title_label.setStyleSheet("font-weight: 700; padding: 4px;")
-                layout.addWidget(title_label)
+                self.ui.pushButton_configure_plots = QtWidgets.QPushButton("Configure plots", container)
+                self.ui.pushButton_configure_plots.setObjectName("pushButton_configure_plots")
+                self.ui.pushButton_configure_plots.clicked.connect(self.handle_configure_plots_clicked)
+                header_row.addStretch(1)
+                header_row.addWidget(title_label, 3)
+                header_row.addWidget(self.ui.pushButton_configure_plots, 0)
+                layout.addLayout(header_row)
                 self.pg_plot_resistance_vs_current = pg.PlotWidget(container)
                 self.pg_plot_resistance_vs_sample = pg.PlotWidget(container)
                 self._configure_pyqtgraph_plot(
@@ -5027,6 +5338,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 layout.addWidget(self.pg_plot_resistance_vs_current, 1)
                 layout.addWidget(self.pg_plot_resistance_vs_sample, 1)
+                self._refresh_right_axis_overlay()
                 self._zero_placeholder_line1 = None
                 self._zero_placeholder_line2 = None
                 self._zero_placeholder_count = 0
@@ -5443,6 +5755,21 @@ class MainWindow(QtWidgets.QMainWindow):
         except OSError:
             pass
 
+    def _evacuate_existing_output_for_replacement(self, output_path: str) -> None:
+        output = Path(output_path)
+        moved: list[str] = []
+        metadata_dir = output.parent / "metadata" / output.stem
+        for path in (output, metadata_dir):
+            if not path.exists():
+                continue
+            destination = _move_path_to_trash(path)
+            moved.append(str(destination or path))
+        if moved:
+            self._show_status_message(
+                "Moved previous output to Trash before replacing: " + "; ".join(moved),
+                timeout_ms=12000,
+            )
+
     def prepare_output_file(self) -> bool:
         """Create or prepare the output file, prompting if it exists.
 
@@ -5475,6 +5802,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 mode = "a"
             else:
                 mode = "w"
+                try:
+                    self._evacuate_existing_output_for_replacement(path)
+                except OSError as exc:
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"Failed to move previous output to Trash before replacing {path}: {exc}",
+                    )
+                    return False
         try:
             if mode == "a":
                 self._ensure_log_header(path)
@@ -5583,7 +5919,7 @@ class MainWindow(QtWidgets.QMainWindow):
             label = getattr(self, "_overlay_label", None)
             if isinstance(label, QtWidgets.QLabel):
                 label.setText(self._connect_overlay_message())
-            overlay.setVisible(bool(show))
+            overlay.setVisible(False)
         except Exception:
             pass
 

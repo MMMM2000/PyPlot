@@ -155,6 +155,19 @@ class Ui_MainWindow(object):
         main_layout = QtWidgets.QVBoxLayout(left_panel)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
+        self.left_tabs = QtWidgets.QTabWidget(left_panel)
+        self.left_tabs.setObjectName("left_tabs")
+        self.tab_recipe = QtWidgets.QWidget(self.left_tabs)
+        self.tab_hardware = QtWidgets.QWidget(self.left_tabs)
+        self.recipe_tab_layout = QtWidgets.QVBoxLayout(self.tab_recipe)
+        self.recipe_tab_layout.setContentsMargins(0, 0, 0, 0)
+        self.recipe_tab_layout.setSpacing(12)
+        self.hardware_tab_layout = QtWidgets.QVBoxLayout(self.tab_hardware)
+        self.hardware_tab_layout.setContentsMargins(0, 0, 0, 0)
+        self.hardware_tab_layout.setSpacing(12)
+        self.left_tabs.addTab(self.tab_recipe, "Recipe")
+        self.left_tabs.addTab(self.tab_hardware, "Hardware")
+        main_layout.addWidget(self.left_tabs)
         left_scroll = QtWidgets.QScrollArea(left_container)
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -206,7 +219,7 @@ class Ui_MainWindow(object):
         self.frame_serial_settings = QtWidgets.QFrame(self.centralWidget)
         self.frame_serial_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.frame_serial_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-        main_layout.addWidget(self.frame_serial_settings)
+        self.hardware_tab_layout.addWidget(self.frame_serial_settings)
 
         gb_serial = QtWidgets.QGroupBox("Hardware connection", self.frame_serial_settings)
         gb_layout = QtWidgets.QVBoxLayout(gb_serial)
@@ -335,7 +348,7 @@ class Ui_MainWindow(object):
         self.frame_process_settings = QtWidgets.QFrame(self.centralWidget)
         self.frame_process_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.frame_process_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-        main_layout.addWidget(self.frame_process_settings)
+        self.recipe_tab_layout.addWidget(self.frame_process_settings)
 
         gb_proc = QtWidgets.QGroupBox("Process settings", self.frame_process_settings)
         self.groupBox_process_settings = gb_proc
@@ -718,7 +731,7 @@ class Ui_MainWindow(object):
         # ------------------------------------------------------------------
         self.frame_command_and_response = QtWidgets.QFrame(self.centralWidget)
         self.frame_command_and_response.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        main_layout.addWidget(self.frame_command_and_response)
+        self.hardware_tab_layout.addWidget(self.frame_command_and_response)
 
         frame_layout_cmd = QtWidgets.QVBoxLayout(self.frame_command_and_response)
         frame_layout_cmd.setContentsMargins(0, 0, 0, 0)
