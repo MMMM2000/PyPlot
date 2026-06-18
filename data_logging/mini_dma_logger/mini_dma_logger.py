@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-17.8"
+CONTROL_LOGIC_VERSION = "2026-06-17.7"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -126,7 +126,6 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_volatile_response_waits_for_delayed_feedback",
     "current_hold_volatile_response_requires_settling",
     "current_hold_volatile_response_contains_adaptive_recovery",
-    "current_hold_volatile_response_throttles_ramp_resume",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -606,8 +605,6 @@ SERVO_CURRENT_SWEEP_HOLD_VOLATILE_WORSENING_MPA = 25.0
 SERVO_CURRENT_SWEEP_HOLD_VOLATILE_SLOPE_FACTOR = 25.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
-SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_S = 25.0
-SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_FACTOR = 0.2
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
@@ -5464,7 +5461,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_current_sweep_wall_started_s = 0.0
         self._active_current_sweep_last_schedule_update_s = 0.0
         self._current_sweep_post_hold_throttle_until_s = 0.0
-        self._current_sweep_post_hold_throttle_factor = SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR
         self._active_current_sweep_last_setpoint_mA: float | None = None
         self._active_current_sweep_display_target_mA: float | None = None
         self._active_current_sweep_display_direction = 0.0
@@ -25411,37 +25407,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_voltage_limit_started_s += held_s
         self._active_current_sweep_last_schedule_update_s = float(now_s)
         if self._active_current_sweep_display_direction > 0.0:
-            seek_key = None
-            if self._automation_basis is not None and self._automation_target_value is not None:
-                seek_key = self._seek_error_key(
-                    self._automation_basis,
-                    float(self._automation_target_value),
-                )
-            instability_level = self._current_sweep_hold_instability_level(seek_key)
-            throttle_s = SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S
-            throttle_factor = SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR
-            if instability_level >= SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL:
-                throttle_s = SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_S
-                throttle_factor = SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_FACTOR
-                self._log(
-                    "Current-hold response was volatile/unstable; resuming current ramp with "
-                    f"{throttle_factor:.0%} speed for {throttle_s:.1f} s."
-                )
-            self._current_sweep_post_hold_throttle_factor = throttle_factor
             self._current_sweep_post_hold_throttle_until_s = float(now_s) + max(
                 0.0,
-                throttle_s,
+                SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S,
             )
         else:
             self._current_sweep_post_hold_throttle_until_s = 0.0
-            self._current_sweep_post_hold_throttle_factor = SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR
         self._clear_current_sweep_ramp_hold()
         self._log(f"Resumed current ramp after holding for {held_s:.2f} s; {reason}.")
 
     def _apply_current_sweep_post_hold_ramp_throttle(self, *, now_s: float) -> None:
         if self._current_sweep_post_hold_throttle_until_s <= 0.0:
             self._active_current_sweep_last_schedule_update_s = float(now_s)
-            self._current_sweep_post_hold_throttle_factor = SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR
             return
         last_s = self._active_current_sweep_last_schedule_update_s
         if last_s <= 0.0:
@@ -25449,11 +25426,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         active_until_s = min(float(now_s), self._current_sweep_post_hold_throttle_until_s)
         active_dt_s = max(0.0, active_until_s - float(last_s))
-        factor = min(1.0, max(0.0, float(self._current_sweep_post_hold_throttle_factor)))
+        factor = min(1.0, max(0.0, SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR))
         self._active_current_sweep_started_s += active_dt_s * (1.0 - factor)
         if float(now_s) >= self._current_sweep_post_hold_throttle_until_s:
             self._current_sweep_post_hold_throttle_until_s = 0.0
-            self._current_sweep_post_hold_throttle_factor = SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR
         self._active_current_sweep_last_schedule_update_s = float(now_s)
 
     def _current_sweep_hold_setting(
