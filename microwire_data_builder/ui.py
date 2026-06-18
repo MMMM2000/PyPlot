@@ -212,6 +212,8 @@ ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
 ANNEALING_HIGH_GRAPH_COLUMN = "Graph — 1000 mA"
+ANNEALING_HIGH_GRAPH_DISPLAY_TITLE = "Exact 1000 mA graph"
+ANNEALING_IMPORTED_ITEM_LABEL = "Imported workbook sources"
 ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other annealing"
 ANNEALING_LEGACY_LOW_GRAPH_COLUMN = "Graph — low mA"
 ANNEALING_LEGACY_OTHER_GRAPH_COLUMN = "Graph — other mA"
@@ -4412,6 +4414,56 @@ def _combine_pixmaps_vertical(
     return target
 
 
+def _render_missing_high_measurement_pixmap(
+    records: Sequence[MeasurementRecord],
+    *,
+    width_px: int = ANNEALING_GRAPH_WIDTH,
+    height_px: int = ANNEALING_GRAPH_HEIGHT,
+) -> QtGui.QPixmap:
+    target = QtGui.QPixmap(max(int(width_px), 1), max(int(height_px), 1))
+    target.fill(QtGui.QColor("#181818"))
+    painter = QtGui.QPainter(target)
+    try:
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        border_rect = target.rect().adjusted(0, 0, -1, -1)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#5f6368"), 1))
+        painter.drawRect(border_rect)
+
+        title_font = QtGui.QFont()
+        title_font.setBold(True)
+        title_font.setPointSize(11)
+        painter.setFont(title_font)
+        painter.setPen(QtGui.QColor("#f1f3f4"))
+        painter.drawText(
+            QtCore.QRect(16, 18, target.width() - 32, 32),
+            int(QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignVCenter),
+            "No exact 1000 mA graph",
+        )
+
+        body_font = QtGui.QFont()
+        body_font.setPointSize(9)
+        painter.setFont(body_font)
+        painter.setPen(QtGui.QColor("#bdc1c6"))
+        available = _format_annealing_setpoint_list(records)
+        body_text = (
+            f"Available setpoints:\n{available} mA"
+            if available
+            else "No annealing setpoints were detected."
+        )
+        painter.drawText(
+            QtCore.QRect(20, 58, target.width() - 40, target.height() - 76),
+            int(
+                QtCore.Qt.AlignmentFlag.AlignHCenter
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+                | QtCore.Qt.TextFlag.TextWordWrap
+            ),
+            body_text,
+        )
+    finally:
+        painter.end()
+    return target
+
+
 @dataclass
 class _VsmHysteresisPlotGroup:
     label: str
@@ -5016,6 +5068,35 @@ def _format_setpoint(value: Optional[float]) -> str:
     if abs(value - rounded) < 1e-6:
         return f"{rounded}"
     return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _available_annealing_setpoints(records: Sequence[MeasurementRecord]) -> List[float]:
+    values: List[float] = []
+    for record in records:
+        setpoint = _extract_setpoint(record)
+        if setpoint is None:
+            continue
+        if any(abs(existing - setpoint) < 1e-6 for existing in values):
+            continue
+        values.append(setpoint)
+    return sorted(values)
+
+
+def _format_annealing_setpoint_list(records: Sequence[MeasurementRecord]) -> str:
+    values = _available_annealing_setpoints(records)
+    formatted = [_format_setpoint(value) for value in values]
+    formatted = [value for value in formatted if value]
+    return ", ".join(formatted)
+
+
+def _missing_high_measurement_message(records: Sequence[MeasurementRecord]) -> str:
+    available = _format_annealing_setpoint_list(records)
+    if available:
+        return (
+            "No exact 1000 mA measurement available for this microwire.\n"
+            f"Available setpoints: {available} mA."
+        )
+    return "No exact 1000 mA measurement available for this microwire."
 
 
 def _select_anchor_and_other_records(
@@ -7125,7 +7206,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
         layout.addWidget(self.header_label)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
-        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_COLUMN, logger, splitter)
+        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, logger, splitter)
         self._other_display = _AnnealingPlotGallery(ANNEALING_OTHER_GRAPH_COLUMN, logger, splitter)
         splitter.addWidget(self._high_display)
         splitter.addWidget(self._other_display)
@@ -7142,7 +7223,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
     ) -> None:
         if key is None:
             self.header_label.setText("Select a row to preview annealing plots.")
-            self._high_display.clear("Select a row to view the 1000 mA measurement.")
+            self._high_display.clear("Select a row to view the exact 1000 mA measurement.")
             self._other_display.clear("Select a row to view the other annealing measurements.")
             return
 
@@ -7156,7 +7237,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
         self._high_display.set_record(
             high,
             setpoint=_extract_setpoint(high),
-            description="No 1000 mA measurement available for this microwire.",
+            description=_missing_high_measurement_message(other_records),
         )
         self._other_display.set_records(
             other_records,
@@ -11181,6 +11262,7 @@ class AnnealingSection(MiniDatabaseSection):
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
+            self.model.set_tooltip_provider(self._tooltip_for_cell)
         self._sanitize_graph_columns()
         self._record_groups: Dict[str, List[MeasurementRecord]] = {}
         self.export_button = QtWidgets.QPushButton("Export worksheet…")
@@ -11892,11 +11974,14 @@ class AnnealingSection(MiniDatabaseSection):
             high_record, other_records = _select_anchor_and_other_records(records)
             if column == ANNEALING_HIGH_GRAPH_COLUMN:
                 target = high_record
-                pixmap = _render_measurement_pixmap(
-                    target,
-                    self.logger,
-                    wire_diameter_um=diameter_um,
-                )
+                if target is None and other_records:
+                    pixmap = _render_missing_high_measurement_pixmap(other_records)
+                else:
+                    pixmap = _render_measurement_pixmap(
+                        target,
+                        self.logger,
+                        wire_diameter_um=diameter_um,
+                    )
             else:
                 if other_records:
                     preview_count = max(
@@ -11941,6 +12026,20 @@ class AnnealingSection(MiniDatabaseSection):
                         pixmap = loaded
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
+
+    def _tooltip_for_cell(self, row: pd.Series, column: str) -> Optional[str]:
+        if column != ANNEALING_HIGH_GRAPH_COLUMN:
+            return None
+        key = row.get("_group_key")
+        if not isinstance(key, str) or not key:
+            return None
+        records = self._record_groups.get(key, [])
+        if not records:
+            return None
+        high_record, _other_records = _select_anchor_and_other_records(records)
+        if high_record is not None:
+            return None
+        return _missing_high_measurement_message(records)
 
     def _preview_background(
         self,
@@ -14507,7 +14606,7 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         )
         layout.addWidget(self.header_label)
 
-        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_COLUMN, logger, self)
+        self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, logger, self)
         self._other_display = _AnnealingPlotGallery(ANNEALING_OTHER_GRAPH_COLUMN, logger, self)
         layout.addWidget(self._high_display, 1)
         layout.addWidget(self._other_display, 1)
@@ -14524,7 +14623,7 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
     ) -> None:
         if key is None:
             self.header_label.setText("Select a row to preview annealing plots.")
-            self._high_display.clear("Select a row to view the 1000 mA measurement.")
+            self._high_display.clear("Select a row to view the exact 1000 mA measurement.")
             self._other_display.clear("Select a row to view the other annealing measurements.")
             return
         composition, draw, piece, suffix = key
@@ -14537,7 +14636,7 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         self._high_display.set_record(
             high,
             setpoint=_extract_setpoint(high),
-            description="No 1000 mA measurement available for this microwire.",
+            description=_missing_high_measurement_message(other_records),
         )
         self._other_display.set_records(
             other_records,
@@ -23952,7 +24051,7 @@ class CompareSection(MiniDatabaseSection):
         self.graph_panel_checkbox.setChecked(False)
         self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
         graph_row.addWidget(self.graph_panel_checkbox)
-        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
+        self.open_high_plot_button = QtWidgets.QPushButton("Open exact 1000 mA graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
         graph_row.addWidget(self.open_high_plot_button)
@@ -24032,7 +24131,7 @@ class CompareSection(MiniDatabaseSection):
         annealing_layout.setContentsMargins(0, 0, 0, 0)
         annealing_layout.setSpacing(6)
         self.high_preview_display = _AnnealingPlotDisplay(
-            ANNEALING_HIGH_GRAPH_COLUMN, self.logger, annealing_tab
+            ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, self.logger, annealing_tab
         )
         annealing_layout.addWidget(self.high_preview_display, 1)
         self.other_preview_display = _AnnealingPlotGallery(
@@ -24888,8 +24987,10 @@ class CompareSection(MiniDatabaseSection):
     def _update_preview_graph_buttons(self, *_: Any) -> None:
         key = self._active_compare_key()
         enabled = key is not None
-        self.open_high_plot_button.setEnabled(enabled)
-        self.open_other_plot_button.setEnabled(enabled)
+        annealing_records = self._ensure_annealing_groups().get(key or "", []) if enabled else []
+        high_record, other_records = _select_anchor_and_other_records(annealing_records) if annealing_records else (None, [])
+        self.open_high_plot_button.setEnabled(bool(enabled and high_record is not None))
+        self.open_other_plot_button.setEnabled(bool(enabled and other_records))
         self.open_vsm_hysteresis_button.setEnabled(
             bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
         )
@@ -24981,7 +25082,7 @@ class CompareSection(MiniDatabaseSection):
                 self.high_preview_display.set_record(
                     high_record,
                     setpoint=_extract_setpoint(high_record),
-                    description="No 1000 mA measurement available for this microwire.",
+                    description=_missing_high_measurement_message(records),
                 )
                 self.other_preview_display.set_records(
                     other_records,
@@ -25082,7 +25183,7 @@ class CompareSection(MiniDatabaseSection):
                     QtWidgets.QMessageBox.information(
                         self,
                         "Microwire Data Builder",
-                        "No 1000 mA measurement available for this microwire.",
+                        _missing_high_measurement_message(records),
                     )
                     return
                 self._show_annealing_records([high_record], "1000 mA")
@@ -25460,7 +25561,7 @@ class AssemblySection(QtWidgets.QWidget):
         self.oe_samples_checkbox.setChecked(self._show_oe_samples)
         self.oe_samples_checkbox.toggled.connect(self.set_show_oe_samples)
         graph_row.addWidget(self.oe_samples_checkbox)
-        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
+        self.open_high_plot_button = QtWidgets.QPushButton("Open exact 1000 mA graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
         graph_row.addWidget(self.open_high_plot_button)
@@ -25596,7 +25697,7 @@ class AssemblySection(QtWidgets.QWidget):
         annealing_layout.setContentsMargins(0, 0, 0, 0)
         annealing_layout.setSpacing(6)
         self.high_preview_display = _AnnealingPlotDisplay(
-            ANNEALING_HIGH_GRAPH_COLUMN, self.logger, annealing_tab
+            ANNEALING_HIGH_GRAPH_DISPLAY_TITLE, self.logger, annealing_tab
         )
         annealing_layout.addWidget(self.high_preview_display, 1)
         self.other_preview_display = _AnnealingPlotGallery(
@@ -26013,7 +26114,7 @@ class AssemblySection(QtWidgets.QWidget):
         start_dir = _dialog_start_directory("sample_data")
         path_text, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Import data workbook",
+            "Import workbook as source",
             str(start_dir),
             "Excel files (*.xlsx *.xlsm *.xltx *.xltm);;All files (*.*)",
         )
@@ -26051,6 +26152,7 @@ class AssemblySection(QtWidgets.QWidget):
             f"Imported workbook: {path.name}",
             f"New samples added: {stats['new_samples']}",
             f"Existing samples updated: {stats['updated_samples']}",
+            "Imported rows are tagged as Source = Imported for the Source filter.",
         ]
         if stats["added_fields"]:
             summary_lines.append(f"Fields filled: {stats['added_fields']}")
@@ -28267,10 +28369,12 @@ class AssemblySection(QtWidgets.QWidget):
             row = self._selected_preview_row(raw=True)
             key = _row_to_microwire_key(row) if row is not None else None
             enabled = row_index is not None and key is not None
+            annealing_records = self._ensure_annealing_groups().get(key or "", []) if enabled else []
+            high_record, other_records = _select_anchor_and_other_records(annealing_records) if annealing_records else (None, [])
             if hasattr(self, "open_high_plot_button"):
-                self.open_high_plot_button.setEnabled(enabled)
+                self.open_high_plot_button.setEnabled(bool(enabled and high_record is not None))
             if hasattr(self, "open_other_plot_button"):
-                self.open_other_plot_button.setEnabled(enabled)
+                self.open_other_plot_button.setEnabled(bool(enabled and other_records))
             if hasattr(self, "open_vsm_hysteresis_button"):
                 self.open_vsm_hysteresis_button.setEnabled(
                     bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
@@ -28365,7 +28469,7 @@ class AssemblySection(QtWidgets.QWidget):
                 self.high_preview_display.set_record(
                     high_record,
                     setpoint=_extract_setpoint(high_record),
-                    description="No 1000 mA measurement available for this microwire.",
+                    description=_missing_high_measurement_message(records),
                 )
                 self.other_preview_display.set_records(
                     other_records,
@@ -28768,7 +28872,7 @@ class AssemblySection(QtWidgets.QWidget):
                     QtWidgets.QMessageBox.information(
                         self,
                         "Microwire Data Builder",
-                        "No 1000 mA measurement available for this microwire.",
+                        _missing_high_measurement_message(records),
                     )
                     return
                 self._show_annealing_records([high_record], "1000 mA")
@@ -29349,9 +29453,9 @@ class AssemblySection(QtWidgets.QWidget):
               <div class="preview-title">Annealing graphs</div>
               <div class="preview-grid">
                 <div class="preview-card">
-                  <div class="preview-label">1000 mA</div>
-                  <img id="preview-high" class="preview-image" alt="1000 mA graph" />
-                  <div id="preview-high-empty" class="preview-empty">No 1000 mA graph</div>
+                  <div class="preview-label">Exact 1000 mA</div>
+                  <img id="preview-high" class="preview-image" alt="Exact 1000 mA graph" />
+                  <div id="preview-high-empty" class="preview-empty">No exact 1000 mA graph</div>
                 </div>
                 <div class="preview-card">
                   <div class="preview-label">Other annealing</div>
@@ -30693,7 +30797,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 initial_sources = section.data.sources
             self._handle_section_sources_changed(key, initial_sources)
 
-        self._imported_item = QtWidgets.QTreeWidgetItem(["Imported data", ""])
+        self._imported_item = QtWidgets.QTreeWidgetItem([ANNEALING_IMPORTED_ITEM_LABEL, ""])
         self.project_tree.addTopLevelItem(self._imported_item)
         self._update_imported_data_item()
 
@@ -31489,17 +31593,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _setup_data_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         data_menu = menu_bar.addMenu("Data")
-        import_action = QtGui.QAction("Import workbook…", self)
+        import_action = QtGui.QAction("Import workbook as source…", self)
         import_action.triggered.connect(self._handle_import_data)
         data_menu.addAction(import_action)
 
-        show_imported_action = QtGui.QAction("Show imported data", self)
+        show_imported_action = QtGui.QAction("Show imported workbook rows", self)
         show_imported_action.setCheckable(True)
         show_imported_action.setChecked(True)
         show_imported_action.toggled.connect(self._toggle_show_imported)
         data_menu.addAction(show_imported_action)
 
-        separate_action = QtGui.QAction("Separate imported data", self)
+        separate_action = QtGui.QAction("Separate imported source rows", self)
         separate_action.setCheckable(True)
         initial_separate = bool(
             self.settings.value(self._project_settings_key("separate_imported"), False)
@@ -31508,7 +31612,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         separate_action.toggled.connect(self._toggle_separate_imported)
         data_menu.addAction(separate_action)
 
-        remove_action = QtGui.QAction("Remove imported data", self)
+        remove_action = QtGui.QAction("Remove imported workbook data", self)
         remove_action.triggered.connect(self._remove_imported_data)
         data_menu.addAction(remove_action)
 
