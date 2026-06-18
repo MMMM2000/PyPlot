@@ -215,6 +215,23 @@ PLOT_TOP_AXIS_POWER_MW = "power_mw"
 PLOT_TOP_AXIS_NONE = "none"
 PLOT_RIGHT_AXIS_NONE = "none"
 PLOT_RIGHT_AXIS_VOLTAGE = "voltage"
+PLOT_AXIS_CURRENT_MA = "current_mA"
+PLOT_AXIS_SAMPLE_N = "sample_n"
+PLOT_AXIS_RESISTANCE = "resistance"
+PLOT_AXIS_VOLTAGE = "voltage"
+PLOT_AXIS_CURRENT_DENSITY = "current_density"
+PLOT_AXIS_POWER_MW = "power_mw"
+PLOT_AXIS_NONE = "none"
+PLOT_X_AXIS_CHOICES = (
+    (PLOT_AXIS_CURRENT_MA, "Current", "mA"),
+    (PLOT_AXIS_SAMPLE_N, "N", ""),
+    (PLOT_AXIS_CURRENT_DENSITY, "Current density", CURRENT_DENSITY_UNIT),
+    (PLOT_AXIS_POWER_MW, "Power", "mW"),
+)
+PLOT_Y_AXIS_CHOICES = (
+    (PLOT_AXIS_RESISTANCE, "Resistance", "Ohm"),
+    (PLOT_AXIS_VOLTAGE, "Voltage", "V"),
+)
 
 SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
     "hmp4030": {
@@ -588,14 +605,13 @@ class MeasurementHistoryDialog(QtWidgets.QDialog):
 
 
 class CurrentAnnealingPlotConfigDialog(QtWidgets.QDialog):
-    """Small dashboard axis selector for the Current Annealing live plots."""
+    """Dashboard axis selector for both Current Annealing live plots."""
 
     def __init__(
         self,
         parent: QtWidgets.QWidget | None,
         *,
-        top_axis_mode: str,
-        right_axis_mode: str,
+        axis_modes: Mapping[str, Mapping[str, str]],
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Configure plots")
@@ -603,23 +619,46 @@ class CurrentAnnealingPlotConfigDialog(QtWidgets.QDialog):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        form = QtWidgets.QFormLayout()
-        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self.combo_top_axis = QtWidgets.QComboBox(self)
-        self.combo_top_axis.addItem(f"Current density ({CURRENT_DENSITY_UNIT})", PLOT_TOP_AXIS_CURRENT_DENSITY)
-        self.combo_top_axis.addItem("Power (mW)", PLOT_TOP_AXIS_POWER_MW)
-        self.combo_top_axis.addItem("None", PLOT_TOP_AXIS_NONE)
-        index = self.combo_top_axis.findData(top_axis_mode)
-        self.combo_top_axis.setCurrentIndex(index if index >= 0 else 0)
-        form.addRow("Top X axis", self.combo_top_axis)
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        layout.addLayout(grid)
+        for column, label in enumerate(("Bottom X", "Left Y", "Top X", "Right Y"), start=1):
+            header = QtWidgets.QLabel(label, self)
+            header.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            grid.addWidget(header, 0, column)
 
-        self.combo_right_axis = QtWidgets.QComboBox(self)
-        self.combo_right_axis.addItem("None", PLOT_RIGHT_AXIS_NONE)
-        self.combo_right_axis.addItem("Voltage (V)", PLOT_RIGHT_AXIS_VOLTAGE)
-        index = self.combo_right_axis.findData(right_axis_mode)
-        self.combo_right_axis.setCurrentIndex(index if index >= 0 else 0)
-        form.addRow("Right Y axis", self.combo_right_axis)
-        layout.addLayout(form)
+        self._combos: dict[tuple[str, str], QtWidgets.QComboBox] = {}
+        defaults = {
+            "upper": {
+                "bottom": PLOT_AXIS_CURRENT_MA,
+                "left": PLOT_AXIS_RESISTANCE,
+                "top": PLOT_AXIS_CURRENT_DENSITY,
+                "right": PLOT_AXIS_NONE,
+            },
+            "lower": {
+                "bottom": PLOT_AXIS_SAMPLE_N,
+                "left": PLOT_AXIS_RESISTANCE,
+                "top": PLOT_AXIS_NONE,
+                "right": PLOT_AXIS_NONE,
+            },
+        }
+        for row, (plot_key, label) in enumerate((("upper", "Upper plot"), ("lower", "Lower plot")), start=1):
+            grid.addWidget(QtWidgets.QLabel(label, self), row, 0)
+            plot_modes = {**defaults[plot_key], **dict(axis_modes.get(plot_key, {}))}
+            for column, axis_key in enumerate(("bottom", "left", "top", "right"), start=1):
+                combo = QtWidgets.QComboBox(self)
+                choices = PLOT_X_AXIS_CHOICES if axis_key in {"bottom", "top"} else PLOT_Y_AXIS_CHOICES
+                if axis_key in {"top", "right"}:
+                    combo.addItem("None", PLOT_AXIS_NONE)
+                for mode, name, units in choices:
+                    label_text = name if not units else f"{name} ({units})"
+                    combo.addItem(label_text, mode)
+                selected = str(plot_modes.get(axis_key, defaults[plot_key][axis_key]))
+                index = combo.findData(selected)
+                combo.setCurrentIndex(index if index >= 0 else 0)
+                grid.addWidget(combo, row, column)
+                self._combos[(plot_key, axis_key)] = combo
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -631,12 +670,11 @@ class CurrentAnnealingPlotConfigDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
     @property
-    def top_axis_mode(self) -> str:
-        return str(self.combo_top_axis.currentData() or PLOT_TOP_AXIS_CURRENT_DENSITY)
-
-    @property
-    def right_axis_mode(self) -> str:
-        return str(self.combo_right_axis.currentData() or PLOT_RIGHT_AXIS_NONE)
+    def axis_modes(self) -> dict[str, dict[str, str]]:
+        payload: dict[str, dict[str, str]] = {"upper": {}, "lower": {}}
+        for (plot_key, axis_key), combo in self._combos.items():
+            payload[plot_key][axis_key] = str(combo.currentData() or PLOT_AXIS_NONE)
+        return payload
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -808,19 +846,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._samples_voltage: List[float] = []
         self._segment_lines_ax1: list[Any] = []
         self._segment_lines_ax2: list[Any] = []
-        self._right_axis_view: Any = None
-        self._right_axis_curve: Any = None
+        self._right_axis_views: dict[str, Any] = {}
+        self._right_axis_curves: dict[str, Any] = {}
         self._placeholder_text_ax1: Any = None
         self._placeholder_text_ax2: Any = None
         self._plot_backend = "none"
         self.pg_plot_resistance_vs_current: Any = None
         self.pg_plot_resistance_vs_sample: Any = None
-        self._plot_top_axis_mode = str(
-            self.settings.value("plot_top_axis", PLOT_TOP_AXIS_CURRENT_DENSITY) or PLOT_TOP_AXIS_CURRENT_DENSITY
-        )
-        self._plot_right_axis_mode = str(
-            self.settings.value("plot_right_axis", PLOT_RIGHT_AXIS_NONE) or PLOT_RIGHT_AXIS_NONE
-        )
+        self._plot_axis_modes = self._load_plot_axis_modes()
         self._pg_placeholder_labels: list[QtWidgets.QLabel] = []
         self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_auto_connect_error = ""
@@ -1175,22 +1208,26 @@ class MainWindow(QtWidgets.QMainWindow):
             canvas.draw()
 
     def _refresh_pyqtgraph_ranges(self) -> None:
-        currents = list(self._samples_current)
-        resistances = list(self._samples_resistance)
-        if not currents or not resistances:
+        if not self._samples_current or not self._samples_resistance:
             for plot in (self.pg_plot_resistance_vs_current, self.pg_plot_resistance_vs_sample):
                 if plot is not None:
                     plot.enableAutoRange(axis='xy', enable=True)
             return
-        self._set_pyqtgraph_range_from_values(self.pg_plot_resistance_vs_current, currents, resistances)
-        sample_numbers = [float(index) for index in range(1, len(resistances) + 1)]
-        self._set_pyqtgraph_range_from_values(self.pg_plot_resistance_vs_sample, sample_numbers, resistances)
+        for plot_key, plot in (
+            ("upper", self.pg_plot_resistance_vs_current),
+            ("lower", self.pg_plot_resistance_vs_sample),
+        ):
+            x_values = self._plot_series_values(self._axis_mode(plot_key, "bottom"))
+            y_values = self._plot_series_values(self._axis_mode(plot_key, "left"))
+            self._set_pyqtgraph_range_from_values(plot, x_values, y_values, plot_key=plot_key)
 
     def _set_pyqtgraph_range_from_values(
         self,
         plot: Any,
         x_values: list[float],
         y_values: list[float],
+        *,
+        plot_key: str,
     ) -> None:
         if plot is None:
             return
@@ -1213,23 +1250,90 @@ class MainWindow(QtWidgets.QMainWindow):
         y_low, y_high = _padded_bounds(finite_y, minimum_padding=1.0)
         plot.setXRange(x_low, x_high, padding=0.0)
         plot.setYRange(y_low, y_high, padding=0.0)
-        if plot is self.pg_plot_resistance_vs_current:
-            self._refresh_current_density_axis(x_low=x_low, x_high=x_high)
-            self._refresh_right_axis_overlay()
+        self._refresh_top_axis(plot_key, x_low=x_low, x_high=x_high)
+        self._refresh_right_axis_overlay(plot_key)
+
+    def _axis_mode(self, plot_key: str, axis_key: str) -> str:
+        return str(
+            getattr(self, "_plot_axis_modes", self._default_plot_axis_modes()).get(plot_key, {}).get(
+                axis_key,
+                self._default_plot_axis_modes().get(plot_key, {}).get(axis_key, PLOT_AXIS_NONE),
+            )
+        )
+
+    def _plot_axis_label_units(self, mode: str) -> tuple[str, str]:
+        for candidate, label, units in (*PLOT_X_AXIS_CHOICES, *PLOT_Y_AXIS_CHOICES):
+            if mode == candidate:
+                return label, units
+        return "", ""
+
+    def _plot_series_values(self, mode: str) -> list[float]:
+        currents = list(self._samples_current)
+        resistances = list(self._samples_resistance)
+        voltages = list(self._samples_voltage)
+        n = len(currents)
+        if mode == PLOT_AXIS_CURRENT_MA:
+            return [float(value) for value in currents]
+        if mode == PLOT_AXIS_SAMPLE_N:
+            return [float(index) for index in range(1, n + 1)]
+        if mode == PLOT_AXIS_RESISTANCE:
+            return [float(value) for value in resistances]
+        if mode == PLOT_AXIS_VOLTAGE:
+            if len(voltages) < n:
+                voltages = voltages + [math.nan] * (n - len(voltages))
+            return [float(value) for value in voltages[:n]]
+        if mode == PLOT_AXIS_CURRENT_DENSITY:
+            return [
+                float(value) if value is not None else math.nan
+                for value in (self._current_density_a_mm2(current) for current in currents)
+            ]
+        if mode == PLOT_AXIS_POWER_MW:
+            return [
+                (float(current) ** 2) * float(resistance) / 1000.0
+                for current, resistance in zip(currents, resistances)
+            ]
+        return []
+
+    def _format_axis_value(self, mode: str, value: float) -> str:
+        if not math.isfinite(float(value)):
+            return ""
+        abs_value = abs(float(value))
+        decimals = 2 if abs_value < 10.0 else (1 if abs_value < 100.0 else 0)
+        return f"{float(value):.{decimals}f}"
+
+    def _nearest_axis_label_for_bottom_position(self, plot_key: str, axis_mode: str, position: float) -> str:
+        bottom_values = self._plot_series_values(self._axis_mode(plot_key, "bottom"))
+        axis_values = self._plot_series_values(axis_mode)
+        pairs = [
+            (float(x_value), float(axis_value))
+            for x_value, axis_value in zip(bottom_values, axis_values)
+            if math.isfinite(float(x_value)) and math.isfinite(float(axis_value))
+        ]
+        if not pairs:
+            return ""
+        _, value = min(pairs, key=lambda pair: abs(pair[0] - float(position)))
+        return self._format_axis_value(axis_mode, value)
 
     def _refresh_current_density_axis(self, *, x_low: float | None = None, x_high: float | None = None) -> None:
-        plot = getattr(self, "pg_plot_resistance_vs_current", None)
+        self._refresh_top_axis("upper", x_low=x_low, x_high=x_high)
+
+    def _refresh_top_axis(self, plot_key: str, *, x_low: float | None = None, x_high: float | None = None) -> None:
+        plot = (
+            getattr(self, "pg_plot_resistance_vs_current", None)
+            if plot_key == "upper"
+            else getattr(self, "pg_plot_resistance_vs_sample", None)
+        )
         if pg is None or plot is None:
             return
         plot_item = plot.getPlotItem()
         top_axis = plot_item.getAxis("top")
-        mode = str(getattr(self, "_plot_top_axis_mode", PLOT_TOP_AXIS_CURRENT_DENSITY) or PLOT_TOP_AXIS_CURRENT_DENSITY)
-        if mode == PLOT_TOP_AXIS_NONE:
+        mode = self._axis_mode(plot_key, "top")
+        if mode == PLOT_AXIS_NONE:
             top_axis.setLabel("")
             top_axis.setTicks([])
             top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
             return
-        if mode == PLOT_TOP_AXIS_CURRENT_DENSITY and self._diameter_um() is None:
+        if mode == PLOT_AXIS_CURRENT_DENSITY and self._diameter_um() is None:
             top_axis.setLabel("")
             top_axis.setTicks([])
             top_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
@@ -1242,12 +1346,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not (math.isfinite(float(x_low)) and math.isfinite(float(x_high))) or math.isclose(float(x_low), float(x_high)):
             return
         positions = self._current_axis_tick_positions(plot_item, float(x_low), float(x_high))
-        if mode == PLOT_TOP_AXIS_POWER_MW:
-            ticks = [(position, self._format_power_mw_at_current(position)) for position in positions]
-            top_axis.setLabel("Power", units="mW")
-        else:
-            ticks = [(position, self._format_current_density(position)) for position in positions]
-            top_axis.setLabel("Current density", units=CURRENT_DENSITY_UNIT)
+        label, units = self._plot_axis_label_units(mode)
+        ticks = [
+            (position, self._nearest_axis_label_for_bottom_position(plot_key, mode, position))
+            for position in positions
+        ]
+        top_axis.setLabel(label, units=units)
         top_axis.setTicks([ticks])
         top_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
 
@@ -2077,21 +2181,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def _clear_right_axis_overlay(self) -> None:
         if pg is None:
             return
-        curve = getattr(self, "_right_axis_curve", None)
-        view = getattr(self, "_right_axis_view", None)
+        for plot_key, curve in list(getattr(self, "_right_axis_curves", {}).items()):
+            view = self._right_axis_views.get(plot_key)
+            if curve is None or view is None:
+                continue
+            try:
+                view.removeItem(curve)
+            except Exception:
+                pass
+        self._right_axis_curves.clear()
+
+    def _clear_right_axis_overlay_for_plot(self, plot_key: str) -> None:
+        curve = self._right_axis_curves.pop(plot_key, None)
+        view = self._right_axis_views.get(plot_key)
         if curve is not None and view is not None:
             try:
                 view.removeItem(curve)
             except Exception:
                 pass
-        self._right_axis_curve = None
 
-    def _ensure_right_axis_view(self) -> Any:
-        plot = getattr(self, "pg_plot_resistance_vs_current", None)
+    def _ensure_right_axis_view(self, plot_key: str) -> Any:
+        plot = self.pg_plot_resistance_vs_current if plot_key == "upper" else self.pg_plot_resistance_vs_sample
         if pg is None or plot is None:
             return None
-        if self._right_axis_view is not None:
-            return self._right_axis_view
+        if plot_key in self._right_axis_views:
+            return self._right_axis_views[plot_key]
         plot_item = plot.getPlotItem()
         view = pg.ViewBox()
         plot_item.scene().addItem(view)
@@ -2109,41 +2223,42 @@ class MainWindow(QtWidgets.QMainWindow):
             plot_item.vb.sigResized.connect(_sync_geometry)
         except Exception:
             pass
-        self._right_axis_view = view
+        self._right_axis_views[plot_key] = view
         _sync_geometry()
         return view
 
-    def _refresh_right_axis_overlay(self) -> None:
-        plot = getattr(self, "pg_plot_resistance_vs_current", None)
+    def _refresh_right_axis_overlay(self, plot_key: str = "upper") -> None:
+        plot = self.pg_plot_resistance_vs_current if plot_key == "upper" else self.pg_plot_resistance_vs_sample
         if pg is None or plot is None:
             return
         plot_item = plot.getPlotItem()
         right_axis = plot_item.getAxis("right")
-        mode = str(getattr(self, "_plot_right_axis_mode", PLOT_RIGHT_AXIS_NONE) or PLOT_RIGHT_AXIS_NONE)
-        if mode != PLOT_RIGHT_AXIS_VOLTAGE:
-            self._clear_right_axis_overlay()
+        mode = self._axis_mode(plot_key, "right")
+        if mode == PLOT_AXIS_NONE:
+            self._clear_right_axis_overlay_for_plot(plot_key)
             right_axis.setLabel("")
             right_axis.setTicks([])
             right_axis.setStyle(showValues=False, tickLength=0, maxTickLevel=0, maxTextLevel=0)
             return
-        currents = list(getattr(self, "_samples_current", []))
-        voltages = list(getattr(self, "_samples_voltage", []))
+        bottom_values = self._plot_series_values(self._axis_mode(plot_key, "bottom"))
+        right_values = self._plot_series_values(mode)
         points = [
-            (float(c), float(v))
-            for c, v in zip(currents, voltages)
-            if math.isfinite(float(c)) and math.isfinite(float(v))
+            (float(x_value), float(y_value))
+            for x_value, y_value in zip(bottom_values, right_values)
+            if math.isfinite(float(x_value)) and math.isfinite(float(y_value))
         ]
+        label, units = self._plot_axis_label_units(mode)
         if not points:
-            right_axis.setLabel("Voltage", units="V")
+            right_axis.setLabel(label, units=units)
             right_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
             return
-        view = self._ensure_right_axis_view()
+        view = self._ensure_right_axis_view(plot_key)
         if view is None:
             return
-        self._clear_right_axis_overlay()
+        self._clear_right_axis_overlay_for_plot(plot_key)
         x_values = [point[0] for point in points]
         y_values = [point[1] for point in points]
-        self._right_axis_curve = pg.PlotDataItem(
+        curve = pg.PlotDataItem(
             x_values,
             y_values,
             pen=pg.mkPen("#a855f7", width=2),
@@ -2152,7 +2267,8 @@ class MainWindow(QtWidgets.QMainWindow):
             symbolBrush=pg.mkBrush("#a855f7"),
             symbolPen=pg.mkPen("#a855f7"),
         )
-        view.addItem(self._right_axis_curve)
+        view.addItem(curve)
+        self._right_axis_curves[plot_key] = curve
         y_low = min(y_values)
         y_high = max(y_values)
         padding = max((y_high - y_low) * 0.08, 0.05) if not math.isclose(y_low, y_high) else max(abs(y_low) * 0.05, 0.05)
@@ -2160,12 +2276,14 @@ class MainWindow(QtWidgets.QMainWindow):
             view.setYRange(y_low - padding, y_high + padding, padding=0.0)
         except Exception:
             pass
-        right_axis.setLabel("Voltage", units="V")
+        right_axis.setLabel(label, units=units)
         right_axis.setStyle(showValues=True, tickLength=4, maxTickLevel=0, maxTextLevel=0)
 
     def _remove_placeholder_text(self) -> None:
         for label in self._pg_placeholder_labels:
             label.hide()
+            label.deleteLater()
+        self._pg_placeholder_labels = []
         for attr in ('_placeholder_text_ax1', '_placeholder_text_ax2'):
             text_item = getattr(self, attr, None)
             if text_item is None:
@@ -2250,24 +2368,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def _redraw_pyqtgraph_segments(self) -> None:
         self._clear_segment_lines()
         currents = list(self._samples_current)
-        resistances = list(self._samples_resistance)
         if not currents:
             self._refresh_pyqtgraph_ranges()
             return
+        upper_x = self._plot_series_values(self._axis_mode("upper", "bottom"))
+        upper_y = self._plot_series_values(self._axis_mode("upper", "left"))
+        lower_x = self._plot_series_values(self._axis_mode("lower", "bottom"))
+        lower_y = self._plot_series_values(self._axis_mode("lower", "left"))
         for color, start_idx, end_idx in self._segment_runs(currents):
-            x_current = currents[start_idx : end_idx + 1]
-            y_values = resistances[start_idx : end_idx + 1]
-            x_sample = [float(index + 1) for index in range(start_idx, end_idx + 1)]
             item1 = self._add_live_plot_item(
                 self.pg_plot_resistance_vs_current,
-                x_current,
-                y_values,
+                upper_x[start_idx : end_idx + 1],
+                upper_y[start_idx : end_idx + 1],
                 color,
             )
             item2 = self._add_live_plot_item(
                 self.pg_plot_resistance_vs_sample,
-                x_sample,
-                y_values,
+                lower_x[start_idx : end_idx + 1],
+                lower_y[start_idx : end_idx + 1],
                 color,
             )
             if item1 is not None:
@@ -2275,11 +2393,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if item2 is not None:
                 self._segment_lines_ax2.append(item2)
         self._refresh_pyqtgraph_ranges()
-        try:
-            self._refresh_current_density_axis(x_low=min(currents), x_high=max(currents))
-        except Exception:
-            pass
-        self._refresh_right_axis_overlay()
 
     def _finalize_measurement_history(self) -> None:
         if len(self._samples_current) < 2 or len(self._samples_current) != len(self._samples_resistance):
@@ -2433,6 +2546,64 @@ class MainWindow(QtWidgets.QMainWindow):
             widget = getattr(self.ui, attr, None)
             if isinstance(widget, QtWidgets.QLineEdit):
                 self.name_history.remember(key, widget.text())
+
+    def _reverse_to_zero_after_max_enabled(self) -> bool:
+        return True
+
+    def _default_plot_axis_modes(self) -> dict[str, dict[str, str]]:
+        return {
+            "upper": {
+                "bottom": PLOT_AXIS_CURRENT_MA,
+                "left": PLOT_AXIS_RESISTANCE,
+                "top": PLOT_AXIS_CURRENT_DENSITY,
+                "right": PLOT_AXIS_NONE,
+            },
+            "lower": {
+                "bottom": PLOT_AXIS_SAMPLE_N,
+                "left": PLOT_AXIS_RESISTANCE,
+                "top": PLOT_AXIS_NONE,
+                "right": PLOT_AXIS_NONE,
+            },
+        }
+
+    def _load_plot_axis_modes(self) -> dict[str, dict[str, str]]:
+        modes = self._default_plot_axis_modes()
+        raw = self.settings.value("plot_axis_modes", "", type=str)
+        if raw:
+            try:
+                payload = json.loads(str(raw))
+                if isinstance(payload, dict):
+                    for plot_key in ("upper", "lower"):
+                        plot_payload = payload.get(plot_key)
+                        if isinstance(plot_payload, dict):
+                            for axis_key in ("bottom", "left", "top", "right"):
+                                value = plot_payload.get(axis_key)
+                                if isinstance(value, str):
+                                    modes[plot_key][axis_key] = value
+                    return modes
+            except Exception:
+                pass
+        # Compatibility with the first configurable-axis implementation.
+        legacy_top = str(self.settings.value("plot_top_axis", modes["upper"]["top"]) or modes["upper"]["top"])
+        legacy_right = str(self.settings.value("plot_right_axis", modes["upper"]["right"]) or modes["upper"]["right"])
+        legacy_map = {
+            PLOT_TOP_AXIS_CURRENT_DENSITY: PLOT_AXIS_CURRENT_DENSITY,
+            PLOT_TOP_AXIS_POWER_MW: PLOT_AXIS_POWER_MW,
+            PLOT_TOP_AXIS_NONE: PLOT_AXIS_NONE,
+            PLOT_RIGHT_AXIS_NONE: PLOT_AXIS_NONE,
+            PLOT_RIGHT_AXIS_VOLTAGE: PLOT_AXIS_VOLTAGE,
+        }
+        modes["upper"]["top"] = legacy_map.get(legacy_top, legacy_top)
+        modes["upper"]["right"] = legacy_map.get(legacy_right, legacy_right)
+        return modes
+
+    def _store_plot_axis_modes(self) -> None:
+        try:
+            self.settings.setValue("plot_axis_modes", json.dumps(self._plot_axis_modes, sort_keys=True))
+            self.settings.setValue("plot_top_axis", self._plot_axis_modes["upper"].get("top", PLOT_AXIS_CURRENT_DENSITY))
+            self.settings.setValue("plot_right_axis", self._plot_axis_modes["upper"].get("right", PLOT_AXIS_NONE))
+        except Exception:
+            pass
 
     def _set_port_controls_enabled(self, enabled: bool) -> None:
         for name in (
@@ -3623,7 +3794,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         ascend_steps = max(1, int(math.ceil(max(0.0, limit_value - 1.0) / step_mA)))
         hold_steps = 0
-        reverse_steps = ascend_steps if getattr(self, 'reverse_enabled', False) else 0
+        reverse_steps = ascend_steps if self._reverse_to_zero_after_max_enabled() else 0
         projected_loop = max(1, ascend_steps + hold_steps + reverse_steps)
         self._projected_loop_samples = projected_loop
         self._applied_limit_current_mA = limit_value
@@ -4125,7 +4296,7 @@ class MainWindow(QtWidgets.QMainWindow):
             start_mA = int(self.ui.spinBox_start_current.value()) if hasattr(self.ui, 'spinBox_start_current') else 1
             hold_s = 0
             loops = int(self.ui.spinBox_loops.value()) if hasattr(self.ui, 'spinBox_loops') else 1
-            reverse = bool(self.ui.checkBox_reverse.isChecked()) if hasattr(self.ui, 'checkBox_reverse') else False
+            reverse = self._reverse_to_zero_after_max_enabled()
             infinite = bool(self.ui.checkBox_infinite_loops.isChecked()) if hasattr(self.ui, 'checkBox_infinite_loops') else False
             step_mA = float(self.ui.spinBox_step_mA.value()) if hasattr(self.ui, 'spinBox_step_mA') else 1.0
         except Exception:
@@ -4373,17 +4544,10 @@ class MainWindow(QtWidgets.QMainWindow):
                             except Exception:
                                 pass
                     if self.process_running and self.current_increment > 0:
-                        if getattr(self, "reverse_enabled", False):
-                            self.current_increment = -abs(self.current_step_A)
-                            self.line_color = "b"
-                            self.direction_ascending = False
-                            self._reset_voltage_projection()
-                        else:
-                            self.stop_annealing(
-                                "Shared broker current limit reached; stopping measurement.",
-                                show_dialog=False,
-                            )
-                            return
+                        self.current_increment = -abs(self.current_step_A)
+                        self.line_color = "b"
+                        self.direction_ascending = False
+                        self._reset_voltage_projection()
         if self._using_shared_broker():
             self._set_shared_broker_current()
             self.ui.label_last_command.setText(
@@ -4569,20 +4733,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_configure_plots_clicked(self) -> None:
         dialog = CurrentAnnealingPlotConfigDialog(
             self,
-            top_axis_mode=str(getattr(self, "_plot_top_axis_mode", PLOT_TOP_AXIS_CURRENT_DENSITY)),
-            right_axis_mode=str(getattr(self, "_plot_right_axis_mode", PLOT_RIGHT_AXIS_NONE)),
+            axis_modes=self._plot_axis_modes,
         )
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        self._plot_top_axis_mode = dialog.top_axis_mode
-        self._plot_right_axis_mode = dialog.right_axis_mode
-        try:
-            self.settings.setValue("plot_top_axis", self._plot_top_axis_mode)
-            self.settings.setValue("plot_right_axis", self._plot_right_axis_mode)
-        except Exception:
-            pass
-        self._refresh_current_density_axis()
-        self._refresh_right_axis_overlay()
+        self._plot_axis_modes = dialog.axis_modes
+        self._store_plot_axis_modes()
+        self.init_graph_window()
+        if self._samples_current:
+            self._redraw_segments()
 
     def handle_toggle_process_clicked(self):
         if not self.process_running:
@@ -4683,7 +4842,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._display_ui_value('label_live_voltage', "0")
                 self._warn_start_at_max()
                 # reverse + loop configuration
-                self.reverse_enabled = getattr(self.ui, 'checkBox_reverse', None) is not None and self.ui.checkBox_reverse.isChecked()
+                self.reverse_enabled = self._reverse_to_zero_after_max_enabled()
                 self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
                 self.infinite_loops = bool(self.ui.checkBox_infinite_loops.isChecked()) if hasattr(self.ui, 'checkBox_infinite_loops') else False
                 self.loop_idx = 0
@@ -4703,7 +4862,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 step_mA = max(self._current_resolution_mA(), float(step_mA))
                 up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - start_mA) / step_mA))
                 hold_steps = 0
-                down_steps = up_steps if self.reverse_enabled else 0
+                down_steps = up_steps if self._reverse_to_zero_after_max_enabled() else 0
                 per_loop = max(1, up_steps + hold_steps + down_steps)
                 self._init_loop_tracking(per_loop, int(self.loop_target or 1), self.infinite_loops)
                 if hasattr(self.ui, 'progressBar_process'):
@@ -4929,13 +5088,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Reverse or stop immediately at the configured maximum current.
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
-                if getattr(self, 'reverse_enabled', False):
-                    self.current_increment = -self.current_step_A
-                    self.line_color = "b"
-                    self.direction_ascending = False
-                    self._reset_voltage_projection()
-                else:
-                    self.stop_annealing("Max current reached; stopping measurement.", show_dialog=True)
+                self.current_increment = -self.current_step_A
+                self.line_color = "b"
+                self.direction_ascending = False
+                self._reset_voltage_projection()
 
             # Iterate the current set point
             if not self.process_running:
@@ -5236,7 +5392,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._has_remaining_loops(next_loop):
                 self.force_stop_at_zero = False
             else:
-                self.force_stop_at_zero = not bool(getattr(self, "reverse_enabled", False))
+                self.force_stop_at_zero = False
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self._adjust_progress_for_reverse()
@@ -5285,6 +5441,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Zero margins to eliminate bright edge lines and maximize canvas area
                 layout.setContentsMargins(0, 0, 0, 0)
                 layout.setSpacing(0)
+            self._remove_placeholder_text()
             while layout.count():
                 item = layout.takeAt(0)
                 if item is None:
@@ -5295,6 +5452,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pg_placeholder_labels = []
             self.pg_plot_resistance_vs_current = None
             self.pg_plot_resistance_vs_sample = None
+            self._right_axis_views.clear()
+            self._right_axis_curves.clear()
 
             if pg is not None:
                 self._plot_backend = "pyqtgraph"
@@ -5322,23 +5481,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 layout.addLayout(header_row)
                 self.pg_plot_resistance_vs_current = pg.PlotWidget(container)
                 self.pg_plot_resistance_vs_sample = pg.PlotWidget(container)
+                upper_bottom_label, upper_bottom_units = self._plot_axis_label_units(self._axis_mode("upper", "bottom"))
+                upper_left_label, upper_left_units = self._plot_axis_label_units(self._axis_mode("upper", "left"))
+                lower_bottom_label, lower_bottom_units = self._plot_axis_label_units(self._axis_mode("lower", "bottom"))
+                lower_left_label, lower_left_units = self._plot_axis_label_units(self._axis_mode("lower", "left"))
                 self._configure_pyqtgraph_plot(
                     self.pg_plot_resistance_vs_current,
-                    bottom_label="Current",
-                    bottom_units="mA",
-                    left_label="Resistance",
-                    left_units="Ohm",
+                    bottom_label=upper_bottom_label,
+                    bottom_units=upper_bottom_units,
+                    left_label=upper_left_label,
+                    left_units=upper_left_units,
                 )
                 self._configure_pyqtgraph_plot(
                     self.pg_plot_resistance_vs_sample,
-                    bottom_label="N",
-                    bottom_units="",
-                    left_label="Resistance",
-                    left_units="Ohm",
+                    bottom_label=lower_bottom_label,
+                    bottom_units=lower_bottom_units,
+                    left_label=lower_left_label,
+                    left_units=lower_left_units,
                 )
                 layout.addWidget(self.pg_plot_resistance_vs_current, 1)
                 layout.addWidget(self.pg_plot_resistance_vs_sample, 1)
-                self._refresh_right_axis_overlay()
+                self._refresh_right_axis_overlay("upper")
+                self._refresh_right_axis_overlay("lower")
                 self._zero_placeholder_line1 = None
                 self._zero_placeholder_line2 = None
                 self._zero_placeholder_count = 0
@@ -5668,12 +5832,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _metadata_payload(self, output_path: str) -> Dict[str, Any]:
         output = Path(output_path)
         loops, infinite = self._current_loop_settings()
-        reverse_widget = getattr(self.ui, "checkBox_reverse", None)
-        reverse = (
-            bool(reverse_widget.isChecked())
-            if isinstance(reverse_widget, QtWidgets.QCheckBox)
-            else bool(getattr(self, "reverse_enabled", False))
-        )
+        reverse = self._reverse_to_zero_after_max_enabled()
         supply_widget = getattr(self.ui, "comboBox_supply", None)
         supply = ""
         if supply_widget is not None:

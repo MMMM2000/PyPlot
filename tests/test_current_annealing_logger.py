@@ -473,6 +473,8 @@ def test_current_annealing_uses_recipe_and_hardware_tabs(qtbot) -> None:
     assert window.ui.left_tabs.tabText(1) == "Hardware"
     assert window.ui.frame_process_settings.parent() is window.ui.tab_recipe
     assert window.ui.frame_serial_settings.parent() is window.ui.tab_hardware
+    assert window.ui.frame_voltage_limit_settings.parent() is window.ui.tab_hardware
+    assert window.ui.checkBox_reverse.isHidden()
     assert window.ui.frame_process_settings.isEnabled()
     assert not window._overlay.isVisible()
 
@@ -661,30 +663,55 @@ def test_current_annealing_plot_config_can_show_power_top_axis_and_voltage_right
     qtbot.addWidget(window)
 
     window.start_current_mA = 1
-    window._plot_top_axis_mode = logger_mod.PLOT_TOP_AXIS_POWER_MW
-    window._plot_right_axis_mode = logger_mod.PLOT_RIGHT_AXIS_VOLTAGE
+    window._plot_axis_modes["upper"]["top"] = logger_mod.PLOT_AXIS_POWER_MW
+    window._plot_axis_modes["upper"]["right"] = logger_mod.PLOT_AXIS_VOLTAGE
+    window._plot_axis_modes["lower"]["bottom"] = logger_mod.PLOT_AXIS_CURRENT_MA
+    window._plot_axis_modes["lower"]["left"] = logger_mod.PLOT_AXIS_VOLTAGE
+    window._plot_axis_modes["lower"]["top"] = logger_mod.PLOT_AXIS_CURRENT_DENSITY
+    window._plot_axis_modes["lower"]["right"] = logger_mod.PLOT_AXIS_RESISTANCE
+    window.init_graph_window()
     window._append_measurement_sample(10.0, 100.0, voltage=1.0)
     window._append_measurement_sample(20.0, 110.0, voltage=2.2)
 
-    plot_item = window.pg_plot_resistance_vs_current.getPlotItem()
-    top_axis = plot_item.getAxis("top")
-    right_axis = plot_item.getAxis("right")
-    assert top_axis.labelText == "Power"
-    assert top_axis.labelUnits == "mW"
-    assert right_axis.labelText == "Voltage"
-    assert right_axis.labelUnits == "V"
-    assert window._right_axis_curve is not None
+    upper_item = window.pg_plot_resistance_vs_current.getPlotItem()
+    lower_item = window.pg_plot_resistance_vs_sample.getPlotItem()
+    assert upper_item.getAxis("top").labelText == "Power"
+    assert upper_item.getAxis("top").labelUnits == "mW"
+    assert upper_item.getAxis("right").labelText == "Voltage"
+    assert upper_item.getAxis("right").labelUnits == "V"
+    assert lower_item.getAxis("bottom").labelText == "Current"
+    assert lower_item.getAxis("left").labelText == "Voltage"
+    assert lower_item.getAxis("top").labelText == "Current density"
+    assert lower_item.getAxis("right").labelText == "Resistance"
+    assert set(window._right_axis_curves) == {"upper", "lower"}
 
 
 def test_current_annealing_plot_config_dialog_has_superscript_density_unit(qtbot) -> None:
     dialog = logger_mod.CurrentAnnealingPlotConfigDialog(
         None,
-        top_axis_mode=logger_mod.PLOT_TOP_AXIS_CURRENT_DENSITY,
-        right_axis_mode=logger_mod.PLOT_RIGHT_AXIS_NONE,
+        axis_modes={
+            "upper": {
+                "bottom": logger_mod.PLOT_AXIS_CURRENT_MA,
+                "left": logger_mod.PLOT_AXIS_RESISTANCE,
+                "top": logger_mod.PLOT_AXIS_CURRENT_DENSITY,
+                "right": logger_mod.PLOT_AXIS_NONE,
+            },
+            "lower": {
+                "bottom": logger_mod.PLOT_AXIS_SAMPLE_N,
+                "left": logger_mod.PLOT_AXIS_RESISTANCE,
+                "top": logger_mod.PLOT_AXIS_NONE,
+                "right": logger_mod.PLOT_AXIS_NONE,
+            },
+        },
     )
     qtbot.addWidget(dialog)
 
-    assert "A/mm²" in dialog.combo_top_axis.itemText(0)
+    combo_texts = [
+        combo.itemText(index)
+        for combo in dialog.findChildren(logger_mod.QtWidgets.QComboBox)
+        for index in range(combo.count())
+    ]
+    assert "Current density (A/mm²)" in combo_texts
 
 
 def test_current_annealing_density_top_axis_uses_bottom_tick_positions(qtbot) -> None:

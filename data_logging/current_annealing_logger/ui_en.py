@@ -219,6 +219,10 @@ class Ui_MainWindow(object):
         self.frame_serial_settings = QtWidgets.QFrame(self.centralWidget)
         self.frame_serial_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.frame_serial_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
+        self.frame_serial_settings.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.hardware_tab_layout.addWidget(self.frame_serial_settings)
 
         gb_serial = QtWidgets.QGroupBox("Hardware connection", self.frame_serial_settings)
@@ -460,14 +464,13 @@ class Ui_MainWindow(object):
         rev = QtWidgets.QHBoxLayout()
         self.checkBox_reverse = QtWidgets.QCheckBox("Reverse to zero after max")
         self.checkBox_reverse.setChecked(True)
+        self.checkBox_reverse.hide()
         self.spinBox_loops = QtWidgets.QSpinBox()
         self.spinBox_loops.setRange(0, 100000)
         self.spinBox_loops.setSpecialValueText("∞")
         self.spinBox_loops.setValue(1)
         self.checkBox_infinite_loops = QtWidgets.QCheckBox("∞")
         self.checkBox_infinite_loops.setToolTip("Repeat indefinitely")
-        rev.addWidget(self.checkBox_reverse)
-        rev.addSpacing(12)
         rev.addWidget(QtWidgets.QLabel("Loops:"))
         rev.addWidget(self.spinBox_loops)
         rev.addWidget(self.checkBox_infinite_loops)
@@ -475,7 +478,18 @@ class Ui_MainWindow(object):
         grid.addLayout(rev, 4, 0, 1, 2)
 
         # Voltage limit behaviour
+        self.frame_voltage_limit_settings = QtWidgets.QFrame(self.centralWidget)
+        self.frame_voltage_limit_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.frame_voltage_limit_settings.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.groupBox_voltage_limit_settings = QtWidgets.QGroupBox("Run limits", self.frame_voltage_limit_settings)
+        frame_layout_limits = QtWidgets.QVBoxLayout(self.frame_voltage_limit_settings)
+        frame_layout_limits.setContentsMargins(0, 0, 0, 0)
+        frame_layout_limits.addWidget(self.groupBox_voltage_limit_settings)
         limit_grid = QtWidgets.QGridLayout()
+        self.groupBox_voltage_limit_settings.setLayout(limit_grid)
         limit_grid.setContentsMargins(0, 0, 0, 0)
         limit_grid.setHorizontalSpacing(10)
         limit_grid.setVerticalSpacing(6)
@@ -510,7 +524,7 @@ class Ui_MainWindow(object):
             "Choose how the logger reacts when the power supply reaches its voltage compliance limit"
         )
         limit_grid.addWidget(self.comboBox_max_voltage_action, 1, 2, 1, 5)
-        grid.addLayout(limit_grid, 5, 0, 1, 2)
+        self.hardware_tab_layout.addWidget(self.frame_voltage_limit_settings)
 
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")
@@ -773,6 +787,7 @@ class Ui_MainWindow(object):
 
         header.toggled.connect(_toggle_cmds)
         self.frame_command_and_response.setVisible(False)
+        self.hardware_tab_layout.addStretch(1)
 
         # Status bar
         self.statusBar = QtWidgets.QStatusBar(MainWindow)
