@@ -4469,6 +4469,21 @@ class SharedBrokerSupplyController:
             for channel in channels:
                 lease_id = self._leases[channel]
                 try:
+                    client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+                except Exception:
+                    pass
+                if self.current_channel is not None and int(channel) == int(self.current_channel):
+                    try:
+                        client.configure_channel(
+                            channel=channel,
+                            lease_id=lease_id,
+                            voltage_v=1.0,
+                            current_a=0.001,
+                            output_on=False,
+                        )
+                    except Exception:
+                        pass
+                try:
                     client.release(channel=channel, lease_id=lease_id)
                 except Exception:
                     pass
@@ -20331,7 +20346,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_current_end_mA": float(
                     self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
-                "reverse_current": bool(self.check_current_sweep_reverse_current.isChecked()),
+                "reverse_current": (
+                    True
+                    if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE
+                    else bool(self.check_current_sweep_reverse_current.isChecked())
+                ),
                 "tolerance": self._auto_requested_tolerance_for_basis(self._current_sweep_basis()),
                 "tolerance_mode": "automatic",
                 "dynamic_balance_max_speed_mm_s": float(self.spin_current_sweep_target_speed_mm_s.value()),
@@ -21812,7 +21831,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "first_overheating_current_end_mA": float(
                     self.spin_current_sweep_first_overheating_end_mA.value()
                 ),
-                "reverse_current": bool(self.check_current_sweep_reverse_current.isChecked()),
+                "reverse_current": (
+                    True
+                    if mode == CURRENT_SWEEP_FATIGUE
+                    else bool(self.check_current_sweep_reverse_current.isChecked())
+                ),
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
                 "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "balance_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
@@ -21994,7 +22017,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                 )
             )
-            self.check_current_sweep_reverse_current.setChecked(bool(current_sweep.get("reverse_current", self.check_current_sweep_reverse_current.isChecked())))
+            reverse_current = bool(
+                current_sweep.get(
+                    "reverse_current",
+                    self.check_current_sweep_reverse_current.isChecked(),
+                )
+            )
+            if self.combo_recipe_mode.currentData() == CURRENT_SWEEP_FATIGUE:
+                reverse_current = True
+            self.check_current_sweep_reverse_current.setChecked(reverse_current)
             self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
             self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
@@ -25375,7 +25406,7 @@ class MainWindow(QtWidgets.QMainWindow):
             current_end = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
             current_ramp_rate = abs(float(self.spin_current_sweep_step_mA.value()))
             current_hold_enabled = self.check_current_sweep_hold_on_error.isChecked()
-            reverse_current = self.check_current_sweep_reverse_current.isChecked()
+            reverse_current = True if is_fatigue_recipe else self.check_current_sweep_reverse_current.isChecked()
             first_overheating_enabled = self.check_current_sweep_first_overheating.isChecked()
             first_overheating_target_mpa = float(self.spin_current_sweep_first_overheating_target_mpa.value())
             first_overheating_current_end = (

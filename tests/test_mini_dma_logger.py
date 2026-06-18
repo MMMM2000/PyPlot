@@ -4383,8 +4383,10 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         window.spin_current_sweep_fatigue_cycles.setValue(3)
         window.check_current_sweep_hold_on_error.setChecked(True)
         window.check_current_sweep_first_overheating.setChecked(False)
+        window.check_current_sweep_reverse_current.setChecked(False)
 
         steps, summary, interval_ms = window._build_automation_recipe()
+        payload = window._current_recipe_payload()
 
         set_current_steps = [step for step in steps if step.action == "set_current"]
         ramp_steps = [step for step in steps if step.action == "ramp_target"]
@@ -4412,6 +4414,7 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         assert "iso-stress fatigue" in summary
         assert "3 cycle" in summary
         assert "First overheating" not in summary
+        assert payload["recipe"]["current_sweep"]["reverse_current"] is True
     finally:
         _close_test_window(window)
 
@@ -12387,7 +12390,19 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
                 "output_on": False,
             },
         ),
+        ("set_output", {"channel": 4, "lease_id": "lease-4", "output_on": False}),
+        (
+            "configure_channel",
+            {
+                "channel": 4,
+                "lease_id": "lease-4",
+                "voltage_v": 1.0,
+                "current_a": 0.001,
+                "output_on": False,
+            },
+        ),
         ("release", {"channel": 4, "lease_id": "lease-4"}),
+        ("set_output", {"channel": 3, "lease_id": "lease-3", "output_on": False}),
         ("release", {"channel": 3, "lease_id": "lease-3"}),
     ]
 
@@ -21035,6 +21050,10 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         assert current_sweep["target_start"] == pytest.approx(150.0)
         assert current_sweep["fatigue_cycles"] == 12
         assert current_sweep["first_overheating"] is True
+        assert current_sweep["reverse_current"] is True
+
+        payload["recipe"]["current_sweep"]["reverse_current"] = False
+        recipe_path.write_text(json.dumps(payload), encoding="utf-8")
 
         window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
         window.spin_current_sweep_target_start.setValue(50.0)
@@ -21042,6 +21061,7 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         window.spin_current_sweep_end_mA.setValue(5.0)
         window.check_current_sweep_hold_on_error.setChecked(False)
         window.check_current_sweep_first_overheating.setChecked(False)
+        window.check_current_sweep_reverse_current.setChecked(False)
 
         window._load_recipe_from_path(recipe_path)
 
@@ -21051,6 +21071,7 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         assert window.spin_current_sweep_end_mA.value() == pytest.approx(60.0)
         assert window.check_current_sweep_hold_on_error.isChecked() is True
         assert window.check_current_sweep_first_overheating.isChecked() is True
+        assert window.check_current_sweep_reverse_current.isChecked() is True
     finally:
         _close_test_window(window)
 

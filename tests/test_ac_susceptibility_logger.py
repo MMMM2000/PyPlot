@@ -293,7 +293,8 @@ def test_power_supply_serial_resource_is_normalized_for_windows_paths() -> None:
 def test_owon_voltage_limit_is_clamped_to_bench_scpi_maximum() -> None:
     assert sweep.effective_power_supply_voltage_limit("owon_spe6102", 62.0) == pytest.approx(61.0)
     assert sweep.effective_power_supply_voltage_limit("owon_spe6102", 48.0) == pytest.approx(48.0)
-    assert sweep.effective_power_supply_voltage_limit("hmp4030", 62.0) == pytest.approx(62.0)
+    assert sweep.effective_power_supply_voltage_limit("hmp4030", 62.0) == pytest.approx(32.05)
+    assert sweep.effective_power_supply_voltage_limit("shared_hmp_broker", 62.0) == pytest.approx(32.05)
 
 
 def test_serial_scpi_current_source_requires_supported_id_before_commands(monkeypatch: pytest.MonkeyPatch) -> None:

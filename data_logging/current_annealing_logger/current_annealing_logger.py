@@ -898,8 +898,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.spinBox_start_current.valueChanged.connect(self._refresh_config_current_density_labels)
         self.ui.pushButton_start_process.clicked.connect(self.handle_toggle_process_clicked)
         self.ui.lineEdit_log_file_full.textChanged.connect(self.handle_legacy_log_path_changed)
-        self.ui.pushButton_select_filename.clicked.connect(self.handle_select_filename_en)
-        # Also hook legacy browse button to new unified handler
         if hasattr(self.ui, 'pushButton_select_filename'):
             self.ui.pushButton_select_filename.clicked.connect(self.handle_browse_full_file)
         if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -1003,9 +1001,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.spinBox_max_current.valueChanged.connect(self._refresh_config_current_density_labels)
         if hasattr(self.ui, 'checkBox_infinite_loops'):
             self.ui.checkBox_infinite_loops.toggled.connect(self.update_planned_time_label)
-        if hasattr(self.ui, 'spinBox_step_mA'):
-            self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
-
         self._store_loop_preferences()
         # Initialize planned estimate and file name once
         try:
@@ -4168,7 +4163,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         if hasattr(self.ui, "spinBox_broker_port"):
             self.ui.spinBox_broker_port.blockSignals(True)
-            self.ui.spinBox_broker_port.setValue(8765 if shared else int(self.settings.value("shared_broker_port", 8765, type=int)))
+            self.ui.spinBox_broker_port.setValue(int(self.settings.value("shared_broker_port", 8765, type=int)))
             self.ui.spinBox_broker_port.blockSignals(False)
         if not shared:
             self._shared_broker_lease_id = None

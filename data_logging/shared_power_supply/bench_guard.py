@@ -199,8 +199,12 @@ def probe_hmp_bench(
     try:
         driver.connect()
         idn = identify_hmp_with_blank_retry(driver)
+        profile = getattr(driver, "profile", None)
+        channel_count = None if profile is None else int(profile.channel_count)
         readbacks: dict[int, dict[str, Any]] = {}
         for channel in channels:
+            if channel_count is not None and int(channel) > channel_count:
+                continue
             readbacks[int(channel)] = {
                 "output_on": driver.output_state(channel=int(channel)),
                 "readback": driver.measure(channel=int(channel)),

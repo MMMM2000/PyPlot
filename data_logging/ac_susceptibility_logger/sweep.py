@@ -60,6 +60,7 @@ POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": True,
         "voltage_first": False,
         "current_resolution_a": 0.001,
+        "max_voltage_v": 32.05,
     },
     "owon_spe6102": {
         "label": "OWON SPE6102",
@@ -75,6 +76,7 @@ POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": False,
         "voltage_first": False,
         "current_resolution_a": 0.001,
+        "max_voltage_v": 32.05,
         "shared_broker": True,
     },
 }

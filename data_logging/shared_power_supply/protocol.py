@@ -39,8 +39,8 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             profile = BenchProfile.from_dict(dict(request.get("profile") or {}))
             return {"ok": True, "profile": broker.load_profile(profile).to_dict()}
         if action == "save_profile":
-            broker.confirm_profile(name=str(request.get("name") or broker.bench_profile.name))
-            return {"ok": True, "profile": broker.bench_profile.to_dict()}
+            profile = broker.confirm_profile(name=str(request.get("name") or broker.bench_profile.name))
+            return {"ok": True, "profile": profile.to_dict()}
         if action == "assign_role":
             config = broker.assign_role(
                 channel=int(request["channel"]),

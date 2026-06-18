@@ -11,6 +11,7 @@ from data_logging.shared_power_supply.bench_guard import (
     probe_hmp_bench,
     read_lock_info,
 )
+from data_logging.shared_power_supply.profiles import HMP4030_PROFILE
 
 
 def test_bench_lock_is_atomic_and_records_owner(tmp_path: Path) -> None:
@@ -114,3 +115,34 @@ def test_bench_probe_reads_requested_channels() -> None:
         1: {"output_on": False, "readback": {"voltage_V": 1.0, "current_mA": 10.0}},
         3: {"output_on": True, "readback": {"voltage_V": 3.0, "current_mA": 30.0}},
     }
+
+
+def test_bench_probe_skips_channels_not_present_on_detected_model() -> None:
+    class FakeDriver:
+        def __init__(self, **_kwargs: object) -> None:
+            self.closed = False
+            self.profile = HMP4030_PROFILE
+
+        def connect(self) -> None:
+            pass
+
+        def identify(self) -> str:
+            return "HAMEG,HMP4030,022982747,HW50020001/SW2.50"
+
+        def output_state(self, *, channel: int) -> bool:
+            if channel > self.profile.channel_count:
+                raise AssertionError("probe should not touch unavailable channels")
+            return False
+
+        def measure(self, *, channel: int) -> dict[str, float]:
+            if channel > self.profile.channel_count:
+                raise AssertionError("probe should not touch unavailable channels")
+            return {"voltage_V": float(channel), "current_mA": float(channel * 10)}
+
+        def close(self) -> None:
+            self.closed = True
+
+    result = probe_hmp_bench(channels=(1, 3, 4), driver_factory=FakeDriver)
+
+    assert result.available is True
+    assert sorted(result.channel_readbacks or {}) == [1, 3]

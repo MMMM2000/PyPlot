@@ -1,5 +1,5 @@
 ledger:
-  updated_utc: "2026-06-18 05:30"
+  updated_utc: "2026-06-18 16:35"
   integration_branch: "codex/integration-mini-dma-ready-review"
   notes: >
     Master coordination ledger for active and recently handed-off PyPlot worker
@@ -276,7 +276,7 @@ tasks:
       base_branch: "codex/integration-mini-dma-ready-review"
       branch: "codex/mini-dma-current-hold-live-optimization"
       upstream: "origin/codex/mini-dma-current-hold-live-optimization"
-      commit: "ab78c3276d4fd363a07a7e639c74c773f34fb140"
+      commit: "b2a1cb377b9f35ee36c17302691e0e5209e62288"
       worktree: "83c1"
       clean_status_reported: true
     scope:
@@ -315,6 +315,7 @@ tasks:
       tests:
         - "Worker reported full tests/test_mini_dma_logger.py: 582 passed."
         - "Worker reported focused stiff guard tests: 2 passed."
+        - "Worker final head reported 62 focused current-hold/volatile/control tests passed."
         - "Worker reported py_compile for Mini DMA modules/scripts passed."
         - "Worker reported campaign checker OK on the final live campaign manifest."
       screenshots_or_artifacts:
@@ -322,21 +323,24 @@ tasks:
         - "G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-17_Ni50Fe25Ga25_2-3_150MPa_60mA_control_opt/analysis/completion_audit.md"
       changelog_status: "Fragments added."
       risks:
-        - "Live proof is on Ni50Fe25Ga25 2/3; a separate later campaign should physically validate a different/stiffer wire."
+        - "Live proof is strongest on Ni50Fe25Ga25 2/3; Ni47Fe24Ga23Co6 2/1 stiff-wire validation showed safety/stability improvement but not precision."
+        - "Current-induced transformation bursts are still a measurement/control limitation, not fully solved by stiffness containment."
         - "No live hardware was run from the master integration thread."
     integration:
       decision: "merge"
-      merged_commit: "ea58624, b731b76"
+      merged_commit: "81ee3e47"
       combined_checks:
         - "2026-06-18 integration: py_compile Mini DMA modules/scripts passed."
         - "2026-06-18 integration: tests/test_mini_dma_logger.py tests/test_mini_dma_bench_automation.py tests/test_mini_dma_run_quality.py tests/test_mini_dma_fatigue_learning.py: 615 passed."
         - "2026-06-18 integration: tests/test_ac_susceptibility_logger.py tests/test_shared_power_supply_broker.py tests/test_shared_power_supply_setup_ui.py: 150 passed."
         - "2026-06-18 integration: git diff --check passed."
+        - "2026-06-18 release-hardening: tests/test_mini_dma_logger.py full file: 594 passed."
+        - "2026-06-18 release-hardening: Mini DMA helper/reporting tests: 32 passed."
       regression_guarantees_to_recheck:
         - "First-overheating and fatigue cycle numbering remain stable in UI and saved recipes."
         - "Current-hold recovery does not reintroduce oscillation on historically stiff wires."
         - "One-way current sweeps do not change default up/down sweep recipes."
-      final_status: "integrated into temporary integration merge branch; combined checks passed"
+      final_status: "integrated into current integration branch; combined checks passed"
     links:
       handoff: "pasted in master thread"
       pr: ""
@@ -569,5 +573,144 @@ tasks:
       final_status: "integrated into current branch; focused combined checks passed"
     links:
       handoff: ""
+      pr: ""
+      artifacts: []
+
+  - id: "current-annealing-ux-polish"
+    title: "Current Annealing UX and runtime update polish"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "019edae7-90a4-73a3-98ee-5c390872c971"
+      thread_title: "Current Annealing UX polish"
+      role: "worker"
+    git:
+      base_branch: "codex/integration-mini-dma-ready-review"
+      branch: "codex/current-annealing-ux-polish"
+      upstream: "origin/codex/current-annealing-ux-polish"
+      commit: "5cbffe4c"
+      worktree: ""
+      clean_status_reported: true
+    scope:
+      summary: >
+        Polishes Current Annealing around Recipe/Hardware tabs, shared-broker
+        auto-connect, non-destructive Replace, configurable live axes, stable
+        current-density labels, and safe live recipe updates during active runs.
+      touched_files:
+        - "data_logging/current_annealing_logger/current_annealing_logger.py"
+        - "data_logging/current_annealing_logger/ui_en.py"
+        - "tests/test_current_annealing_logger.py"
+      conflict_areas:
+        - "Current Annealing shared broker startup"
+        - "Current Annealing run state and live settings"
+        - "Current Annealing plot configuration"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Start auto-connects hardware and shows immediate failure details in a popup."
+        - "Output Replace moves previous output/metadata to Trash or safe backup before writing."
+        - "Reverse-to-zero behavior remains enabled while the old checkbox is hidden."
+        - "Configure plots supports bottom X, top X, left Y, and right Y for both live graphs."
+        - "Update running recipe can safely lower max current by switching an upward ramp down immediately."
+        - "Current-density labels use A/mm^2."
+      tests:
+        - "Worker reported tests/test_current_annealing_logger.py: 83 passed."
+        - "Worker reported py_compile current_annealing_logger.py passed."
+        - "2026-06-18 release-hardening master run: tests/test_current_annealing_logger.py: 84 passed."
+      screenshots_or_artifacts:
+        - "artifacts/current_annealing_ux_polish/current_annealing_recipe_tab_axes_followup.png"
+        - "artifacts/current_annealing_ux_polish/current_annealing_hardware_tab_limits_followup.png"
+        - "artifacts/current_annealing_ux_polish/current_annealing_dashboard_all_axes_followup.png"
+        - "artifacts/current_annealing_ux_polish/current_annealing_plot_config_all_axes_followup.png"
+      changelog_status: "Fragment added in worker branch."
+      risks:
+        - "No live hardware was touched in the worker or master verification."
+        - "Runtime-safe recipe update intentionally does not rename active output files or change sample identity metadata mid-run."
+    integration:
+      decision: "merge"
+      merged_commit: "7ae5bb8d"
+      combined_checks:
+        - "2026-06-18 integration: tests/test_current_annealing_logger.py: 83 passed before release hardening."
+        - "2026-06-18 release-hardening: tests/test_current_annealing_logger.py: 84 passed."
+      regression_guarantees_to_recheck:
+        - "User saved folder paths and broker port settings are preserved by tests."
+        - "Shared broker autostart still shows failure popup instead of silent no-op."
+      final_status: "integrated into current integration branch; focused checks passed"
+    links:
+      handoff: "pasted in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "release-hardening-shared-psu-ca-mini"
+    title: "Release hardening for shared PSU, Current Annealing, and Mini DMA"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "master"
+      thread_title: "PyPlot master coordination"
+      role: "master"
+    git:
+      base_branch: "codex/integration-mini-dma-ready-review"
+      branch: "codex/integration-mini-dma-ready-review-merge-0618"
+      upstream: "origin/codex/integration-mini-dma-ready-review"
+      commit: "pending-release-hardening-commit"
+      worktree: "9b54"
+      clean_status_reported: false
+    scope:
+      summary: >
+        Master-thread release audit/hardening pass after integrating recent
+        workers. Tightens broker lease/profile invariants, preserves Current
+        Annealing shared-broker settings, caps AC HMP voltage requests, makes
+        Mini DMA shared-broker release safer, and prevents stale hidden one-way
+        current-sweep state from changing fatigue recipes.
+      touched_files:
+        - "data_logging/shared_power_supply/"
+        - "data_logging/ac_susceptibility_logger/sweep.py"
+        - "data_logging/current_annealing_logger/current_annealing_logger.py"
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "tests/"
+      conflict_areas:
+        - "Shared HMP broker lease/profile state"
+        - "AC/Current Annealing/Mini DMA shared-broker assumptions"
+        - "Mini DMA current-sweep/fatigue recipe generation"
+    readiness:
+      handoff_received: true
+      branch_and_commit: false
+      clean_git_status: false
+      behavioral_guarantees:
+        - "Active broker leases cannot have their channel role or bench profile changed underneath them."
+        - "Same-owner broker reconnects reuse the existing lease id."
+        - "AC HMP and shared-broker voltage limits clamp to the physical HMP range."
+        - "Current Annealing shared-broker port setting is restored instead of reset to 8765."
+        - "Mini DMA releases leased broker channels only after asking them to turn output off."
+        - "Iso-stress fatigue always saves/loads/builds up-and-back current sweeps."
+      tests:
+        - "py_compile touched modules passed."
+        - "Shared PSU broker/setup/bench guard tests: 30 passed."
+        - "AC susceptibility logger tests: 128 passed."
+        - "Current Annealing logger tests: 84 passed."
+        - "Mini DMA focused fatigue/shared-broker slice: 10 passed."
+        - "Mini DMA logger full file: 594 passed."
+        - "Mini DMA helper/reporting tests: 32 passed."
+        - "git diff --check passed with expected CRLF warnings only."
+      screenshots_or_artifacts: []
+      changelog_status: "changelog.d/2026-06-18-1825-release-hardening.md added."
+      risks:
+        - "No live hardware validation was run in this master thread."
+        - "Old remote bundle origin/codex/integration-mw-builder-docx-visualization still needs separate review; not merged here."
+        - "Mini DMA phone summary layout and one-way sweep run-quality classification remain review items, not patched in this pass."
+    integration:
+      decision: "commit-before-main-merge"
+      merged_commit: ""
+      combined_checks:
+        - "Release-hardening checks listed in readiness/tests."
+      regression_guarantees_to_recheck:
+        - "Real shared broker simultaneous use across Current Annealing, AC, and Mini DMA after operator bench review."
+        - "Mini DMA fatigue first-overheating and current cycles on a saved recipe before colleague release."
+      final_status: "master hardening patch verified locally; commit and push pending"
+    links:
+      handoff: "master audit"
       pr: ""
       artifacts: []

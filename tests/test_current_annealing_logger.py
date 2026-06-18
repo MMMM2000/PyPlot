@@ -262,6 +262,18 @@ def test_current_annealing_defaults_to_shared_broker_without_channel(
     assert window.ui.spinBox_broker_port.value() == 8765
 
 
+def test_current_annealing_shared_broker_restores_saved_port(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: dict[str, object] = {"shared_broker_port": 49217}
+
+    monkeypatch.setattr(logger_mod.QtCore, "QSettings", lambda *_args: _MemorySettings(saved))
+
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window._apply_supply_profile("shared_hmp_broker")
+
+    assert window.ui.spinBox_broker_port.value() == 49217
+
+
 def test_current_annealing_shared_broker_restores_saved_channel(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     saved: dict[str, object] = {}
 

@@ -116,6 +116,31 @@ def test_broker_prevents_two_owners_from_leasing_same_channel() -> None:
         broker.lease(channel=1, owner="annealing-b", role=ROLE_CURRENT_ANNEALING)
 
 
+def test_broker_reuses_same_owner_lease_without_replacing_id() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
+    broker.confirm_profile()
+
+    first = broker.lease(channel=1, owner="annealing", role=ROLE_CURRENT_ANNEALING)
+    second = broker.lease(channel=1, owner="annealing", role=ROLE_CURRENT_ANNEALING)
+
+    assert second.lease_id == first.lease_id
+
+
+def test_broker_blocks_profile_changes_while_channel_is_leased() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
+    saved = broker.confirm_profile()
+    broker.lease(channel=1, owner="annealing", role=ROLE_CURRENT_ANNEALING)
+
+    with pytest.raises(PermissionError, match="leased"):
+        broker.assign_role(channel=1, role=ROLE_MINI_DMA_CURRENT, confirmed=True)
+    with pytest.raises(PermissionError, match="leased"):
+        broker.confirm_profile(name="new name")
+    with pytest.raises(PermissionError, match="leased"):
+        broker.load_profile(saved)
+
+
 def test_broker_requires_confirmed_role_before_control() -> None:
     broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
     broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=False)
