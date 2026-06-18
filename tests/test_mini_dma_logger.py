@@ -16979,6 +16979,129 @@ def test_current_sweep_hold_unstable_response_disables_fast_recovery_speed(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_quiet_response_keeps_normal_post_move_sample_gate(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -38.0
+    window._seek_filtered_control_signal = (  # type: ignore[method-assign]
+        lambda _basis: mini_dma_mod.ScaleControlSignal(
+            value=90.0,
+            latest_value=90.0,
+            noise=0.2,
+            slope_per_s=0.5,
+            sample_count=7,
+            timestamp_s=time.time(),
+        )
+    )
+
+    try:
+        required_samples = window._seek_required_post_move_samples(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            -40.0,
+            0.4,
+            seek_key=seek_key,
+        )
+
+        assert required_samples == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_volatile_response_waits_before_compounding_move(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        300.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -8.0
+    window._seek_last_value_by_key[seek_key] = 58.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.3
+    window._seek_last_filtered_value_by_key[seek_key] = 58.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = now_s - 0.5
+    window._seek_post_move_sample_count_by_key[seek_key] = 0
+    window._seek_out_of_band_sign_by_key[seek_key] = -1.0
+    window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
+    window._current_position_mm = 0.01
+    window._effective_position_mm = 0.01
+    window._last_move_target_mm = 0.01
+    window._last_effective_move_target_mm = 0.01
+    window._last_motion_command_time_s = now_s - 0.8
+    window._last_motion_expected_complete_time_s = now_s - 0.7
+    load_g = mini_dma_mod.load_g_from_stress_mpa(110.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(5):
+        timestamp_s = now_s - 0.4 + index * 0.1
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert not moves
+        assert trace_rows[-1]["reason"] == "volatile_post_move_response"
+        assert trace_rows[-1]["required_fresh_samples"] == (
+            mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_unstable_response_clamps_large_error_to_single_step(
     tmp_path: Path,
     qtbot,

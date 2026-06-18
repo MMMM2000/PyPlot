@@ -96,7 +96,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-17.4"
+CONTROL_LOGIC_VERSION = "2026-06-17.5"
 CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -123,6 +123,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_unstable_improving_recovery_can_escape_single_step",
     "current_hold_same_sign_drift_recovery_uses_dynamic_steps",
     "current_hold_large_error_not_masked_by_noise",
+    "current_hold_volatile_response_waits_for_delayed_feedback",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -597,6 +598,9 @@ SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR = 10.0
 SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR = 2.0
 SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
+SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES = 4
+SERVO_CURRENT_SWEEP_HOLD_VOLATILE_WORSENING_MPA = 25.0
+SERVO_CURRENT_SWEEP_HOLD_VOLATILE_SLOPE_FACTOR = 25.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S = 6.0
 SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
@@ -14178,6 +14182,49 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         return self._current_sweep_hold_instability_level(seek_key) >= SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL
 
+    def _current_sweep_hold_volatile_response_active(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        filtered_signal: ScaleControlSignal | None,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> bool:
+        if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if seek_key is None:
+            return False
+        previous_error = self._seek_last_error_by_key.get(seek_key)
+        if previous_error is None:
+            return False
+        stress_band = self._current_sweep_basis_value_from_stress_cap(
+            basis,
+            SERVO_CURRENT_SWEEP_HOLD_VOLATILE_WORSENING_MPA,
+        )
+        if stress_band is None:
+            stress_band = abs(float(tolerance)) * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR
+        volatile_band = max(
+            abs(float(tolerance)) * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR,
+            abs(float(stress_band)),
+        )
+        current_abs = abs(float(error_value))
+        previous_abs = abs(float(previous_error))
+        if current_abs < volatile_band:
+            return False
+        if previous_abs > 0.0 and float(previous_error) * float(error_value) < 0.0:
+            return True
+        if current_abs - previous_abs >= volatile_band:
+            return True
+        if filtered_signal is None:
+            return False
+        slope_threshold = (
+            self._current_sweep_hold_min_slope_for_basis(basis)
+            * SERVO_CURRENT_SWEEP_HOLD_VOLATILE_SLOPE_FACTOR
+        )
+        moving_away = float(error_value) * float(filtered_signal.slope_per_s) < 0.0
+        return moving_away and abs(float(filtered_signal.slope_per_s)) >= slope_threshold
+
     def _current_sweep_hold_large_overshoot(
         self,
         basis: str,
@@ -16572,7 +16619,19 @@ class MainWindow(QtWidgets.QMainWindow):
             very_near_value = max(very_near_value, abs(float(near_cap)))
         if abs(float(error_value)) <= very_near_value:
             return 2
-        return 1
+        required_samples = 1
+        if self._current_sweep_hold_volatile_response_active(
+            basis,
+            error_value,
+            tolerance,
+            self._seek_filtered_control_signal(basis),
+            seek_key=seek_key,
+        ):
+            required_samples = max(
+                required_samples,
+                SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES,
+            )
+        return required_samples
 
     def _seek_wait_for_required_post_move_samples(
         self,
@@ -17235,8 +17294,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 seek_key=seek_key,
             )
             if self._seek_wait_for_required_post_move_samples(seek_key, required_samples):
+                volatile_post_move_response = self._current_sweep_hold_volatile_response_active(
+                    basis,
+                    delta_value,
+                    effective_tolerance,
+                    filtered_signal,
+                    seek_key=seek_key,
+                )
                 self._log_waiting_for_feedback(
-                    f"Waiting for {required_samples} fresh scale samples before the next fine correction."
+                    (
+                        "Current-hold response is fluctuating after the last move; waiting for delayed "
+                        "scale feedback before compounding another correction."
+                    )
+                    if volatile_post_move_response
+                    else f"Waiting for {required_samples} fresh scale samples before the next fine correction."
                 )
                 self._write_control_trace(
                     decision="wait",
@@ -17249,7 +17320,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     required_fresh_samples=required_samples,
                     post_move_sample_count=self._seek_post_move_sample_count_by_key.get(seek_key, 0),
                     result="waiting",
-                    reason=f"{required_samples}_fresh_scale_samples",
+                    reason=(
+                        "volatile_post_move_response"
+                        if volatile_post_move_response
+                        else f"{required_samples}_fresh_scale_samples"
+                    ),
                 )
                 return False
         setup_preload_takeup = self._setup_preload_takeup_active(
@@ -19742,6 +19817,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_entry_confirm_s": SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S,
                 "current_hold_min_away_slope_mpa_s": (
                     SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
+                ),
+                "current_hold_volatile_extra_samples": (
+                    SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
+                ),
+                "current_hold_volatile_worsening_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_VOLATILE_WORSENING_MPA
+                ),
+                "current_hold_volatile_slope_factor": (
+                    SERVO_CURRENT_SWEEP_HOLD_VOLATILE_SLOPE_FACTOR
                 ),
             },
             "settings": {
