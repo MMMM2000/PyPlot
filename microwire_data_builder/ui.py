@@ -8361,6 +8361,28 @@ def _reportable_mini_dma_measurements(
     excluded_dirs: Collection[str] | None = None,
 ) -> Tuple[List[Path], List[Dict[str, Any]]]:
     ignored = {str(name).casefold() for name in (excluded_dirs or MiniDmaSection.excluded_refresh_dirs)}
+    source_roots: List[Path] = []
+    for source in sources:
+        try:
+            candidate = Path(source).expanduser()
+            root = candidate.resolve() if candidate.is_dir() else candidate.parent.resolve()
+        except Exception:
+            root = Path(source).expanduser()
+        source_roots.append(root)
+
+    def _ignored_part_for(measurement_path: Path) -> Optional[str]:
+        try:
+            resolved_path = measurement_path.resolve()
+        except OSError:
+            resolved_path = measurement_path
+        for root in source_roots:
+            try:
+                relative_parts = resolved_path.relative_to(root).parts[:-1]
+            except ValueError:
+                continue
+            return next((part for part in relative_parts if part.casefold() in ignored), None)
+        return next((part for part in measurement_path.parts[:-1] if part.casefold() in ignored), None)
+
     candidates: Dict[str, Dict[str, Any]] = {}
     for raw_path in paths:
         measurement_path = _mini_dma_resolve_measurement_path(Path(raw_path))
@@ -8372,10 +8394,7 @@ def _reportable_mini_dma_measurements(
             resolved = str(measurement_path)
         if resolved in candidates:
             continue
-        ignored_part = next(
-            (part for part in measurement_path.parts if part.casefold() in ignored),
-            None,
-        )
+        ignored_part = _ignored_part_for(measurement_path)
         metadata = _read_mini_dma_metadata(measurement_path)
         sample_key = _mini_dma_reportability_sample_key(measurement_path, metadata, sources)
         timestamp = _mini_dma_metadata_sort_timestamp(metadata, measurement_path)
@@ -19525,7 +19544,11 @@ class MiniDmaSection(MiniDatabaseSection):
                     continue
                 if path.name.casefold() != "measurement.csv":
                     continue
-                if any(part.casefold() in self.excluded_refresh_dirs for part in path.parts):
+                try:
+                    relative_parts = path.resolve().relative_to(root.resolve()).parts[:-1]
+                except Exception:
+                    relative_parts = path.parts[:-1]
+                if any(part.casefold() in self.excluded_refresh_dirs for part in relative_parts):
                     continue
                 try:
                     resolved = str(path.resolve())

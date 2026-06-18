@@ -1596,6 +1596,20 @@ def _path_has_excluded_dir(path: Path, excluded_names: Collection[str]) -> bool:
     return any(part.casefold() in excluded_names for part in path.parts[:-1])
 
 
+def _path_has_excluded_dir_below_root(
+    path: Path,
+    root: Path,
+    excluded_names: Collection[str],
+) -> bool:
+    if not excluded_names:
+        return False
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return _path_has_excluded_dir(path, excluded_names)
+    return any(part.casefold() in excluded_names for part in relative.parts[:-1])
+
+
 def iter_measurement_paths(
     paths: Iterable[Path],
     *,
@@ -1606,12 +1620,12 @@ def iter_measurement_paths(
     seen: set[Path] = set()
     excluded_names = _normalised_excluded_dir_names(exclude_dir_names)
 
-    def _add(candidate: Path) -> None:
+    def _add(candidate: Path, root: Path) -> None:
         try:
             measurement = resolve_measurement_path(candidate).resolve()
         except ValueError:
             return
-        if _path_has_excluded_dir(measurement, excluded_names):
+        if _path_has_excluded_dir_below_root(measurement, root, excluded_names):
             return
         if require_measurement_data and not looks_like_measurement_file(measurement):
             return
@@ -1622,7 +1636,11 @@ def iter_measurement_paths(
 
     for path in paths:
         candidate = Path(path)
-        _add(candidate)
+        try:
+            root = candidate.resolve() if candidate.is_dir() else candidate.parent.resolve()
+        except OSError:
+            root = candidate if candidate.is_dir() else candidate.parent
+        _add(candidate, root)
         if not candidate.is_dir():
             continue
         try:
@@ -1630,7 +1648,11 @@ def iter_measurement_paths(
         except OSError:
             continue
         for child in children:
-            if _path_has_excluded_dir(child, excluded_names):
+            try:
+                resolved_child = child.resolve()
+            except OSError:
+                resolved_child = child
+            if _path_has_excluded_dir_below_root(resolved_child, root, excluded_names):
                 continue
-            _add(child)
+            _add(child, root)
     return resolved
