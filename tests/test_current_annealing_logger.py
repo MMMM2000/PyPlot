@@ -42,8 +42,27 @@ class _MemorySettings:
     def contains(self, key: str) -> bool:
         return key in self._store
 
+    def clear(self) -> None:
+        self._store.clear()
+
+    def allKeys(self) -> list[str]:
+        return list(self._store)
+
     def sync(self) -> None:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_current_annealing_qsettings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Current Annealing tests from writing the operator's real settings."""
+
+    stores: dict[tuple[str, str], dict[str, object]] = {}
+
+    def _settings_factory(organization: str = "", application: str = "") -> _MemorySettings:
+        key = (str(organization), str(application))
+        return _MemorySettings(stores.setdefault(key, {}))
+
+    monkeypatch.setattr(logger_mod.QtCore, "QSettings", _settings_factory)
 
 
 class _FakeBrokerClient:
@@ -663,6 +682,7 @@ def test_current_annealing_plot_config_can_show_power_top_axis_and_voltage_right
     qtbot.addWidget(window)
 
     window.start_current_mA = 1
+    window.ui.doubleSpinBox_wire_diameter_um.setValue(20.0)
     window._plot_axis_modes["upper"]["top"] = logger_mod.PLOT_AXIS_POWER_MW
     window._plot_axis_modes["upper"]["right"] = logger_mod.PLOT_AXIS_VOLTAGE
     window._plot_axis_modes["lower"]["bottom"] = logger_mod.PLOT_AXIS_CURRENT_MA
@@ -1077,6 +1097,7 @@ def test_current_annealing_start_auto_connects_selected_shared_broker(qtbot, mon
         window.is_connected = True
 
     monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
+    monkeypatch.setattr(window, "_start_preflight_errors", lambda **_kwargs: [])
     monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: errors.append(payload))
 
     window.handle_toggle_process_clicked()
@@ -1101,6 +1122,7 @@ def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch:
         window.is_connected = True
 
     monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
+    monkeypatch.setattr(window, "_start_preflight_errors", lambda **_kwargs: [])
 
     window.handle_toggle_process_clicked()
 
@@ -2032,6 +2054,7 @@ def test_shared_broker_setpoint_and_stop_only_affect_leased_channel(qtbot) -> No
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 2
     window._shared_broker_lease_id = "lease-1"
+    window.ui.spinBox_max_current.setValue(30)
     window.current_current_set = 0.025
 
     window._send_current_setpoint()
@@ -2079,6 +2102,7 @@ def test_shared_broker_setpoint_uses_rate_limited_ramp_when_available(qtbot) -> 
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 2
     window._shared_broker_lease_id = "lease-1"
+    window.ui.spinBox_max_current.setValue(30)
     window.current_current_set = 0.025
     window.current_step_mA = 1.0
 
