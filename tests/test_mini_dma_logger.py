@@ -10999,6 +10999,40 @@ def test_current_sweep_resume_from_hold_starts_post_hold_throttle(
         _close_test_window(window)
 
 
+def test_current_sweep_volatile_hold_resume_uses_stronger_throttle(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._active_current_sweep_started_s = 90.0
+    window._current_sweep_ramp_hold_started_s = 100.0
+    window._active_current_sweep_display_direction = 1.0
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL):
+        window._note_current_sweep_hold_instability(seek_key)
+
+    try:
+        window._resume_current_sweep_ramp_from_hold(now_s=106.0, reason="test")
+
+        assert window._active_current_sweep_started_s == pytest.approx(96.0)
+        assert window._active_current_sweep_last_schedule_update_s == pytest.approx(106.0)
+        assert window._current_sweep_post_hold_throttle_until_s == pytest.approx(
+            106.0 + mini_dma_mod.SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_S
+        )
+        assert window._current_sweep_post_hold_throttle_factor == pytest.approx(
+            mini_dma_mod.SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_FACTOR
+        )
+        assert "resuming current ramp with 20% speed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_resume_from_hold_skips_post_hold_throttle_on_down_sweep(
     tmp_path: Path,
     qtbot,
@@ -11026,6 +11060,7 @@ def test_current_sweep_post_hold_throttle_slows_effective_ramp_schedule(
     window._active_current_sweep_started_s = 90.0
     window._active_current_sweep_last_schedule_update_s = 100.0
     window._current_sweep_post_hold_throttle_until_s = 108.0
+    window._current_sweep_post_hold_throttle_factor = mini_dma_mod.SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR
 
     try:
         window._apply_current_sweep_post_hold_ramp_throttle(now_s=104.0)
@@ -11041,6 +11076,43 @@ def test_current_sweep_post_hold_throttle_slows_effective_ramp_schedule(
         assert window._active_current_sweep_started_s == pytest.approx(90.0 + expected_delay)
         assert window._active_current_sweep_last_schedule_update_s == pytest.approx(110.0)
         assert window._current_sweep_post_hold_throttle_until_s == pytest.approx(0.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_post_hold_throttle_uses_active_factor(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._active_current_sweep_started_s = 90.0
+    window._active_current_sweep_last_schedule_update_s = 100.0
+    window._current_sweep_post_hold_throttle_until_s = 110.0
+    window._current_sweep_post_hold_throttle_factor = (
+        mini_dma_mod.SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_FACTOR
+    )
+
+    try:
+        window._apply_current_sweep_post_hold_ramp_throttle(now_s=105.0)
+
+        expected_delay = 5.0 * (
+            1.0 - mini_dma_mod.SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_FACTOR
+        )
+        assert window._active_current_sweep_started_s == pytest.approx(90.0 + expected_delay)
+        assert window._current_sweep_post_hold_throttle_factor == pytest.approx(
+            mini_dma_mod.SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_FACTOR
+        )
+
+        window._apply_current_sweep_post_hold_ramp_throttle(now_s=112.0)
+
+        expected_delay += 5.0 * (
+            1.0 - mini_dma_mod.SERVO_CURRENT_SWEEP_VOLATILE_POST_HOLD_THROTTLE_FACTOR
+        )
+        assert window._active_current_sweep_started_s == pytest.approx(90.0 + expected_delay)
+        assert window._current_sweep_post_hold_throttle_until_s == pytest.approx(0.0)
+        assert window._current_sweep_post_hold_throttle_factor == pytest.approx(
+            mini_dma_mod.SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR
+        )
     finally:
         _close_test_window(window)
 
