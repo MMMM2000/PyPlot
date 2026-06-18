@@ -1052,6 +1052,36 @@ def test_shared_broker_current_source_leases_turns_off_and_releases_only_channel
     ]
 
 
+def test_shared_broker_current_source_reports_operator_diagnostics() -> None:
+    class FailingBrokerClient:
+        def __init__(self, *, host: str, port: int, timeout_s: float) -> None:
+            self.host = host
+            self.port = port
+            self.timeout_s = timeout_s
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            return {"snapshot": {}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            return {"lease_id": "lease-stale"}
+
+        def configure_channel(self, **_payload: object) -> None:
+            raise RuntimeError("valid lease required for CH1")
+
+    source = sweep.SharedBrokerCurrentSource(
+        host="127.0.0.1",
+        port=8765,
+        channel=1,
+        voltage_limit_v=32.0,
+        client_factory=FailingBrokerClient,
+    )
+
+    source.connect()
+
+    with pytest.raises(RuntimeError, match="AC shared HMP broker: stale channel lease detected"):
+        source.initialize(voltage_limit_v=32.0)
+
+
 def test_run_ac_sweep_writes_bounded_lcr_debug_sidecar(tmp_path: Path) -> None:
     class FakeLcr:
         def __init__(self) -> None:
@@ -3338,7 +3368,7 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert settings_action is not None
         assert settings_action.isVisible() is False
         assert window.pushButton_auto_setup.text() == "Auto-connect hardware"
-        assert window.groupBox_ac_hardware.title() == "Hardware"
+        assert window.groupBox_ac_hardware.title() == "2. Setup and hardware status"
         assert window.ui.groupBox_serial_settings.isHidden()
         assert window.frame_ac_hardware_details.isHidden()
         assert window.pushButton_ac_hardware_details.text() == "Show hardware details"
@@ -3357,8 +3387,8 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert not hasattr(window, "comboBox_ac_psu_backend")
         assert not hasattr(window, "comboBox_ac_psu_port")
         assert not hasattr(window, "comboBox_ac_psu_baud")
-        assert "Instrument setup" in window.groupBox_lcr_settings.title()
-        assert "Experiment plan" in window.groupBox_ac_plan.title()
+        assert "AC susceptibility workflow" in window.groupBox_lcr_settings.title()
+        assert "Measurement plan and live run" in window.groupBox_ac_plan.title()
         assert not hasattr(window, "label_ac_read_interval")
         assert not hasattr(window, "spinBox_ac_read_interval")
     finally:
@@ -4009,6 +4039,35 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         app.processEvents()
 
 
+def test_ac_logger_output_status_shows_run_status_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "output_status_paths")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+
+    window = ac_logger.MainWindow()
+    try:
+        output_dir = tmp_path / "ac"
+        window.ui.lineEdit_log_dir.setText(str(output_dir))
+        window.ui.lineEdit_log_file.setText("sweep01")
+        window.sync_full_log_path()
+
+        output_path = output_dir / "sweep01.tsv"
+        status_text = window.label_ac_output_status.text()
+        assert f"Output path ready: {output_path}" in status_text
+        assert f"Run status sidecar: {sweep.ac_run_status_path_for_output(output_path)}" in status_text
+        assert f"local fallback: {sweep.ac_run_status_fallback_path_for_output(output_path)}" in status_text
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_run_attempts_auto_connect_before_missing_hardware_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4065,6 +4124,187 @@ def test_ac_logger_run_attempts_auto_connect_before_missing_hardware_warning(
         assert not info_messages
         assert warning_messages
         assert warning_messages[-1][0] == "Shared HMP broker unavailable"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_serial_psu_prepare_failure_stays_idle_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "serial_psu_prepare_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+            voltage_limit_v=61.0,
+        )
+        monkeypatch.setattr(
+            window,
+            "_release_inherited_psu_port_for_ac",
+            lambda _resource: (_ for _ in ()).throw(RuntimeError("inherited process active")),
+        )
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert window._ac_sweep_running is False
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert "Power supply preparation failed: inherited process active" in window.label_lcr_status.text()
+        assert warnings == [
+            (
+                "AC power supply unavailable",
+                "Could not prepare the selected power supply for the AC sweep:\ninherited process active",
+            )
+        ]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_worker_launch_failure_resets_running_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "worker_launch_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    class _FailingSweepWorker:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("worker setup exploded")
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="shared_hmp_broker",
+            psu_resource="127.0.0.1:8765/CH1",
+            voltage_limit_v=32.0,
+            shared_broker_channel=1,
+        )
+        monkeypatch.setattr(window, "_ensure_ac_shared_broker_running", lambda _config=None: None)
+        monkeypatch.setattr(ac_logger, "AcSweepWorker", _FailingSweepWorker)
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window._ac_active_output_path is None
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert window._ac_worker is None
+        assert window._ac_worker_thread is None
+        assert window.label_lcr_status.text() == "AC sweep failed: worker setup exploded"
+        assert warnings == [("AC sweep failed", "worker setup exploded")]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_baseline_worker_launch_failure_resets_running_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "baseline_worker_launch_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    class _FailingBaselineWorker:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("baseline worker setup exploded")
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        monkeypatch.setattr(
+            window,
+            "_prepare_lcr_plan",
+            lambda: [
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+        )
+        monkeypatch.setattr(window, "_baseline_output_path", lambda: tmp_path / "baseline.tsv")
+        monkeypatch.setattr(ac_logger, "AcBaselineWorker", _FailingBaselineWorker)
+
+        window.handle_measure_lcr_baseline_clicked()
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window._ac_active_output_path is None
+        assert window.pushButton_measure_lcr_baseline.isEnabled()
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert window._ac_worker is None
+        assert window._ac_worker_thread is None
+        assert window.label_lcr_status.text() == "Baseline failed: baseline worker setup exploded"
+        assert warnings == [("Baseline failed", "baseline worker setup exploded")]
     finally:
         window.close()
         app.processEvents()
@@ -4280,6 +4520,123 @@ def test_ac_logger_worker_failure_clears_running_progress(
         assert "write/flush failed" in window.label_lcr_status.text()
         assert window.label_ac_current_task.text() == "Current task: failed"
         assert warnings and warnings[-1][0] == "AC run failed"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_worker_failure_surfaces_local_status_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_failure_status_fallback")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    fallback_dir = tmp_path / "fallback_status"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    output_path = Path("G:/missing/ac_sweep.tsv")
+    fallback_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "failed",
+                "phase": "closed",
+                "rows_written": 42,
+                "updated_utc": "2026-06-16T20:00:00Z",
+                "output_path": str(output_path),
+                "stop_reason": "AC sweep output write/flush failed for G:\\missing\\ac_sweep.tsv: [WinError 3]",
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._ac_active_output_path = output_path
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_ac_worker_failed(
+            "AC sweep output write/flush failed for G:\\missing\\ac_sweep.tsv: [WinError 3]"
+        )
+
+        status_text = window.label_lcr_status.text()
+        assert "Run status: failed (closed)" in status_text
+        assert "Rows written: 42" in status_text
+        assert f"Local fallback status: {fallback_path}" in status_text
+        assert warnings and warnings[-1][0] == "AC run failed"
+        assert "Rows written: 42" in warnings[-1][1]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_finished_sweep_surfaces_run_status_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_finished_status_summary")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    infos: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, title, message: infos.append((title, message)),
+    )
+    output_path = tmp_path / "ac_sweep.tsv"
+    status_path = sweep.ac_run_status_path_for_output(output_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "completed",
+                "phase": "closed",
+                "rows_written": 1234,
+                "updated_utc": "2026-06-16T20:00:00Z",
+                "output_path": str(output_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_sweep_worker_finished(str(output_path), stopped=False)
+
+        status_text = window.label_lcr_status.text()
+        assert "AC sweep saved:" in status_text
+        assert "Run status: completed (closed)" in status_text
+        assert "Rows written: 1234" in status_text
+        assert f"Run status file: {status_path}" in status_text
+        assert infos and infos[-1][0] == "AC sweep saved"
+        assert "Rows written: 1234" in infos[-1][1]
     finally:
         window.close()
         app.processEvents()

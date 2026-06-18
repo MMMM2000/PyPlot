@@ -37,6 +37,9 @@ os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
 mini_dma_mod = importlib.import_module(
     "data_logging.mini_dma_logger.mini_dma_logger"
 )
+stiff_guard_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.stiff_sample_guard"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -641,6 +644,7 @@ def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) 
     try:
         window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
         qtbot.addWidget(window)
+        recipe_key = str(window.combo_recipe_mode.currentData())
 
         for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
             _set_plot_tile(window, index, x_key, y_left_key, y_right_key)
@@ -648,7 +652,7 @@ def test_main_window_persists_dashboard_plots_by_default(tmp_path: Path, qtbot) 
         _ensure_app().processEvents()
 
         for index, (x_key, y_left_key, y_right_key) in enumerate(USER_DASHBOARD_PLOTS):
-            assert _saved_recipe_plot_tile_values("ramp", index) == {
+            assert _saved_recipe_plot_tile_values(recipe_key, index) == {
                 "visible": True,
                 "x": x_key,
                 "y_left": y_left_key,
@@ -674,11 +678,12 @@ def test_dashboard_plot_choices_persist_immediately(tmp_path: Path, qtbot) -> No
     try:
         window = mini_dma_mod.MainWindow(log_dir=str(tmp_path))
         qtbot.addWidget(window)
+        recipe_key = str(window.combo_recipe_mode.currentData())
 
         _set_plot_tile(window, 0, "elapsed_s", "position_mm", "strain_pct")
         _ensure_app().processEvents()
 
-        assert _saved_recipe_plot_tile_values("ramp", 0) == {
+        assert _saved_recipe_plot_tile_values(recipe_key, 0) == {
             "visible": True,
             "x": "elapsed_s",
             "y_left": "position_mm",
@@ -2931,12 +2936,9 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
     window._current_position_mm = 1.25
     window._current_position_steps = 125
     window.spin_steps_per_mm.setValue(100.0)
-    ramp_index = window.combo_recipe_mode.findData("ramp")
-    assert ramp_index >= 0
-    window.combo_recipe_mode.setCurrentIndex(ramp_index)
 
     try:
-        moved = window._move_to_position_mm(2.0)
+        moved = window._move_to_position_mm(2.0, speed_mm_s=1.0)
         _wait_for_tic_commands(window)
 
         assert moved is True
@@ -3417,6 +3419,28 @@ def test_manual_auto_connect_connects_selected_ir_without_hardware_steal(tmp_pat
         window._run_manual_auto_connect_hardware()
 
         assert called == ["scale", "supply", "current", "tic", "ir"]
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_skips_disabled_optional_ir(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+
+    try:
+        window.combo_ir_port.addItem("Synthetic IR", "COM_IR")
+        window.combo_ir_port.setCurrentIndex(window.combo_ir_port.findData("COM_IR"))
+        window.check_ir_enabled.setChecked(False)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "tic"]
+        assert "IR disabled" in window.label_ir_live.text()
     finally:
         _close_test_window(window)
 
@@ -3905,6 +3929,90 @@ def test_recipe_progress_shows_throttled_time_remaining(tmp_path: Path, qtbot) -
         assert window.recipe_progress.format() == first_format
     finally:
         _close_test_window(window)
+
+
+def test_recipe_progress_uses_current_sweep_fraction_during_hold(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=150.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=60.0,
+            current_ramp_rate_mA_s=0.4,
+            current_hold_enabled=True,
+        )
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [step]
+        window._automation_total_steps = 11991
+        window._automation_completed_ticks = 11990
+        window._automation_interval_ms = 100
+        window._automation_progress_started_s = time.monotonic() - 1200.0
+        window._automation_progress_last_format_update_s = 0.0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 36.2
+        window._active_current_sweep_display_target_mA = 60.0
+        window._active_current_sweep_display_direction = 1.0
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=150.0,
+            plateau_index=1,
+        )
+
+        window._update_recipe_progress()
+
+        assert window.recipe_progress.maximum() == 1000
+        assert 550 <= window.recipe_progress.value() <= 650
+        assert "current 59%" in window.recipe_progress.format()
+        assert "holding for target recovery" in window.recipe_progress.format()
+        assert "100%" not in window.recipe_progress.format()
+    finally:
+        _close_test_window(window)
+
+
+def test_bench_guard_stops_bad_current_hold_quality() -> None:
+    from data_logging.mini_dma_logger.bench_automation import (
+        MiniDmaBenchGuardrails,
+        _check_guardrails,
+    )
+
+    class _FakeWindow:
+        def __init__(self) -> None:
+            self._automation_phase = "current_hold"
+            self._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+            self._automation_target_value = 150.0
+            self._current_sweep_ramp_hold_started_s = time.monotonic() - 300.0
+            self._session_points = [SimpleNamespace(stress_mpa=162.5)]
+            self.auto_stop_kwargs: dict[str, object] | None = None
+            self.session_stop_kwargs: dict[str, object] | None = None
+
+        def _stop_auto_ramp(self, **kwargs: object) -> None:
+            self.auto_stop_kwargs = dict(kwargs)
+
+        def _stop_session(self, **kwargs: object) -> None:
+            self.session_stop_kwargs = dict(kwargs)
+
+    window = _FakeWindow()
+    guardrails = MiniDmaBenchGuardrails(
+        max_stress_mpa=300.0,
+        recovery_stress_mpa=150.0,
+        current_hold_quality_timeout_s=240.0,
+        current_hold_quality_error_mpa=8.0,
+    )
+
+    event = _check_guardrails(window, guardrails)
+
+    assert event is not None
+    assert event["type"] == "current_hold_quality_timeout"
+    assert event["error_mpa"] == pytest.approx(12.5)
+    assert window.auto_stop_kwargs is not None
+    assert window.auto_stop_kwargs["stop_reason"] == "current_hold_quality_timeout"
+    assert window.session_stop_kwargs is not None
+    assert window.session_stop_kwargs["reason"] == "current_hold_quality_timeout"
 
 
 def test_current_sweep_estimate_includes_hold_allowance(tmp_path: Path, qtbot) -> None:
@@ -5368,6 +5476,53 @@ def test_project_diameter_is_preferred_over_fabrication_suggestion(tmp_path: Pat
         _close_test_window(window)
 
 
+def test_project_auto_import_skips_condition_only_name_changes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        state_key = window._builder_project_last_auto_import_state_key
+        assert state_key is not None
+        assert "#16a34a" in window.spin_diameter.styleSheet()
+
+        window.edit_name_condition.setText("temperature test")
+
+        assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/3 temperature test"
+        assert window.spin_diameter.value() == pytest.approx(0.0191)
+        assert "#16a34a" in window.spin_diameter.styleSheet()
+        assert window._builder_project_last_auto_import_state_key == state_key
+        assert window._builder_project_import_thread is None
+        assert not window._builder_project_import_timer.isActive()
+    finally:
+        _close_test_window(window)
+
+
 def test_project_diameter_invalidates_immediately_then_updates_for_changed_microwire(
     tmp_path: Path,
     qtbot,
@@ -5465,6 +5620,59 @@ def test_project_auto_import_retries_after_sample_change_during_background_impor
         window._builder_project_import_timer.stop()
     finally:
         window._builder_import_in_progress = False
+        _close_test_window(window)
+
+
+def test_cached_builder_project_suggestions_are_visible_before_background_import_finishes(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            },
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "d (um)": 18.4,
+                            },
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+        mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+    mini_dma_mod._read_builder_project_cache_entry(project_path)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        assert window._builder_project_sample_suggestions == {}
+
+        started = window._start_saved_builder_project_auto_import(project_path, quiet=True)
+
+        assert started is True
+        assert window._builder_project_sample_suggestions == {"Ni50Fe27Ga23": ("12/2", "12/3")}
+        assert "cached sample suggestions are ready" in window.label_project_status.text()
+        completer_model = window.edit_name_wire.completer().model()
+        suggestions = [
+            completer_model.data(completer_model.index(row, 0))
+            for row in range(completer_model.rowCount())
+        ]
+        assert suggestions == ["12/2", "12/3"]
+    finally:
+        window._stop_builder_project_import_thread()
         _close_test_window(window)
 
 
@@ -5898,6 +6106,123 @@ def test_builder_project_rows_feed_sample_completers(tmp_path: Path, qtbot) -> N
             for row in range(microwire_model.rowCount())
         ]
         assert microwires == ["1/2", "1/5", "1/6", "1/7"]
+    finally:
+        _close_test_window(window)
+
+
+def test_builder_project_cache_reuses_payload_for_sample_suggestions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {"Composition": "Ni44Fe27Ga23Cu3Co3", "Microwire": "1/5"},
+                            {"Composition": "Ni44Fe27Ga23Cu3Co3", "Microwire": "1/2"},
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+        mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+
+    original_read_text = Path.read_text
+    read_paths: list[Path] = []
+
+    def _read_text_spy(self: Path, *args: object, **kwargs: object) -> str:
+        if self == project_path:
+            read_paths.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text_spy)
+
+    try:
+        first = mini_dma_mod._read_builder_project_cache_entry(project_path)
+        second = mini_dma_mod._read_builder_project_cache_entry(project_path)
+
+        assert first is second
+        assert read_paths == [project_path]
+        assert first.suggestions == {"Ni44Fe27Ga23Cu3Co3": ("1/2", "1/5")}
+    finally:
+        with mini_dma_mod._BUILDER_PROJECT_CACHE_LOCK:
+            mini_dma_mod._BUILDER_PROJECT_CACHE.clear()
+
+
+def test_builder_project_stale_async_suggestions_are_ignored(tmp_path: Path, qtbot) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(json.dumps({"sections": {"microscope": {"rows": []}}}), encoding="utf-8")
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_project_path.setText(str(project_path))
+        window.edit_name_composition.setText("Ni44Fe27Ga23Cu3Co3")
+        window.edit_name_wire.setText("1/5")
+        current_key = window._project_import_request_key(project_path)
+        stale_key = (str(project_path), "Ni50Fe27Ga23", "12/2", "")
+        window._builder_project_path = project_path
+        window._builder_project_import_request_key = current_key
+        window._builder_project_sample_suggestions = {"Existing": ("9/9",)}
+
+        window._handle_builder_project_suggestions(
+            project_path,
+            stale_key,
+            {"Ni50Fe27Ga23": ("12/2",)},
+        )
+
+        assert window._builder_project_sample_suggestions == {"Existing": ("9/9",)}
+
+        window._handle_builder_project_suggestions(
+            project_path,
+            current_key,
+            {"Ni44Fe27Ga23Cu3Co3": ("1/5", "1/2")},
+        )
+
+        assert window._builder_project_sample_suggestions == {
+            "Ni44Fe27Ga23Cu3Co3": ("1/5", "1/2")
+        }
+    finally:
+        _close_test_window(window)
+
+
+def test_stopping_builder_project_import_clears_retry_state(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeThread:
+        def __init__(self) -> None:
+            self.quit_called = False
+            self.wait_timeout: int | None = None
+
+        def quit(self) -> None:
+            self.quit_called = True
+
+        def wait(self, timeout_ms: int) -> None:
+            self.wait_timeout = timeout_ms
+
+    thread = _FakeThread()
+
+    try:
+        window._builder_project_import_thread = thread  # type: ignore[assignment]
+        window._builder_project_import_worker = object()  # type: ignore[assignment]
+        window._builder_project_import_request_key = ("project.pydpj", "Ni50Fe27Ga23", "12/2", "")
+        window._builder_import_in_progress = True
+        window._builder_project_import_retry_pending = True
+
+        window._stop_builder_project_import_thread()
+
+        assert window._builder_project_import_thread is None
+        assert window._builder_project_import_worker is None
+        assert window._builder_project_import_request_key is None
+        assert window._builder_import_in_progress is False
+        assert window._builder_project_import_retry_pending is False
+        assert thread.quit_called is True
+        assert thread.wait_timeout == 1500
     finally:
         _close_test_window(window)
 
@@ -7151,6 +7476,7 @@ def test_displacement_ramp_uses_global_control_and_log_clocks(tmp_path: Path, qt
     window = _build_window(tmp_path, qtbot)
 
     try:
+        assert window.combo_recipe_mode.findData("ramp") < 0
         window.spin_control_interval.setValue(50)
         window.spin_log_interval.setValue(200)
         window.spin_ramp_distance.setValue(1.0)
@@ -7163,7 +7489,8 @@ def test_displacement_ramp_uses_global_control_and_log_clocks(tmp_path: Path, qt
 
         assert interval_ms == 50
         assert all(step.action != "record" for step in recipe_steps)
-        assert any(step.action == "move" for step in recipe_steps)
+        assert not any(step.action == "move" for step in recipe_steps)
+        assert "Started calibration" in summary
         assert "control every 50 ms" in summary
         assert "log every 200 ms" in summary
     finally:
@@ -7204,6 +7531,8 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
         assert help_menu.isEnabled()
         assert any(action.text() == "View Help" for action in help_menu.actions())
 
+        assert window.check_ir_enabled.text() == "Enable optional IR camera/thermometer"
+        assert window.check_ir_enabled.isChecked() is True
         sensor_labels = [
             window.combo_ir_sensor.itemText(index)
             for index in range(window.combo_ir_sensor.count())
@@ -7216,6 +7545,37 @@ def test_mini_dma_ir_panel_exposes_sensor_choice_and_help(tmp_path: Path, qtbot)
         assert window.label_ir_rate.text() == "Camera refresh"
         assert window.button_ir_flash_firmware.text() == "Flash firmware"
         assert "Cube raw camera firmware" in window.label_ir_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_mini_dma_ir_can_be_disabled_without_temperature_snapshots(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        sample = mini_dma_mod.IrTemperatureSample(
+            timestamp_s=10.0,
+            raw_text="MLX90614,7,900,2370,23.10,41.50,14813,15733,2",
+            sequence=7,
+            device_elapsed_ms=900,
+            read_us=2370,
+            ambient_c=23.10,
+            object_c_apparent=41.50,
+            raw_ambient=14813,
+            raw_object=15733,
+            flags=2,
+            config1="0x9795",
+        )
+        window._handle_ir_sample(sample)
+
+        window.check_ir_enabled.setChecked(False)
+
+        assert window.combo_ir_port.isEnabled() is False
+        assert window.button_ir_connect.isEnabled() is False
+        assert window._manual_auto_connect_should_connect_ir() is False
+        assert window._latest_ir_snapshot(now_s=11.0)["object_c_apparent"] is None
+        assert window._latest_ir_config1() == ""
+        assert "auto-connect will skip" in window.label_ir_status.text()
     finally:
         _close_test_window(window)
 
@@ -8674,6 +9034,10 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.spin_current_sweep_max_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_correction_stress_mpa.isHidden() is True
         assert window.spin_current_sweep_hold_filter_window_s.isHidden() is True
+        assert window.row_current_sweep_first_overheating_target.isHidden() is True
+        assert window.label_current_sweep_first_overheating_target is not None
+        assert window.label_current_sweep_first_overheating_target.isHidden() is True
+        assert window.check_current_sweep_first_overheating_use_normal_end.isHidden() is True
         window.action_current_sweep_advanced_settings.trigger()
         qtbot.waitUntil(lambda: window._current_sweep_advanced_dialog is not None)
         assert window._current_sweep_advanced_dialog is not None
@@ -8686,14 +9050,19 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.check_current_sweep_first_overheating.isHidden() is False
         assert window.label_current_sweep_first_overheating_section.text() == "First overheating"
         assert window.check_current_sweep_first_overheating.text() == "Enable first-overheating sweep"
-        assert window.spin_current_sweep_first_overheating_target_mpa.isHidden() is False
+        assert window.row_current_sweep_first_overheating_target.isHidden() is True
+        assert window.label_current_sweep_first_overheating_target.isHidden() is True
         assert window.check_current_sweep_first_overheating_use_normal_end.text() == "Use normal max current"
         assert window.check_current_sweep_first_overheating_use_normal_end.isChecked() is True
+        assert window.check_current_sweep_first_overheating_use_normal_end.isHidden() is True
         assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is False
         assert window.row_current_sweep_first_overheating_end.isHidden() is True
         assert window.label_current_sweep_first_overheating_end is not None
         assert window.label_current_sweep_first_overheating_end.isHidden() is True
         window.check_current_sweep_first_overheating.setChecked(True)
+        assert window.row_current_sweep_first_overheating_target.isHidden() is False
+        assert window.label_current_sweep_first_overheating_target.isHidden() is False
+        assert window.check_current_sweep_first_overheating_use_normal_end.isHidden() is False
         window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
         assert window.spin_current_sweep_first_overheating_end_mA.isEnabled() is True
         assert window.row_current_sweep_first_overheating_end.isHidden() is False
@@ -9237,7 +9606,7 @@ def test_current_sweep_first_overheating_can_use_independent_max_current(tmp_pat
         _close_test_window(window)
 
 
-def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_returns_current_to_start_by_default(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -9245,7 +9614,6 @@ def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) ->
         assert index >= 0
         window.combo_recipe_mode.setCurrentIndex(index)
         _set_copper_current_sweep_defaults(window)
-        window.check_current_sweep_reverse_current.setChecked(False)
 
         steps, _summary, _interval_ms = window._build_automation_recipe()
 
@@ -9257,6 +9625,50 @@ def test_current_sweep_always_returns_current_to_start(tmp_path: Path, qtbot) ->
             (3.0, 1.0),
         ]
         assert all(step.current_end_mA == pytest.approx(1.0) for step in current_sweep_steps[1::2])
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_can_skip_nominal_reverse_current_steps(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_LOAD)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.check_current_sweep_reverse_current.setChecked(False)
+
+        steps, summary, _interval_ms = window._build_automation_recipe()
+
+        current_sweep_steps = [step for step in steps if step.action == "sweep_current"]
+
+        assert len(current_sweep_steps) == 4
+        assert all(step.current_start_mA == pytest.approx(1.0) for step in current_sweep_steps)
+        assert all(step.current_end_mA == pytest.approx(3.0) for step in current_sweep_steps)
+        assert "Nominal current reverse sweeps are disabled." in summary
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_recipe_payload_preserves_reverse_current_false(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        _set_copper_current_sweep_defaults(window)
+        window.check_current_sweep_reverse_current.setChecked(False)
+
+        payload = window._current_recipe_payload()
+
+        assert payload["recipe"]["current_sweep"]["reverse_current"] is False
+
+        window.check_current_sweep_reverse_current.setChecked(True)
+        window._apply_recipe_payload(payload)
+
+        assert window.check_current_sweep_reverse_current.isChecked() is False
     finally:
         _close_test_window(window)
 
@@ -11291,6 +11703,89 @@ def test_voltage_limit_unwind_waits_for_target_recovery_before_completing(
         _close_test_window(window)
 
 
+def test_voltage_limit_unwind_open_circuit_stops_before_mechanical_seek(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.2}
+
+        def __init__(self) -> None:
+            self.output_off_calls = 0
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.2
+
+        def output_off(self) -> None:
+            self.output_off_calls += 1
+
+        def disconnect(self) -> None:
+            return None
+
+    supply = _FakeSupply()
+    recovery_prompts: list[str] = []
+    trace_rows: list[dict[str, object]] = []
+    seek_calls: list[tuple[object, ...]] = []
+    window._ask_wire_break_recovery_after_stop = recovery_prompts.append  # type: ignore[method-assign]
+    window._maybe_offer_run_cleanup_after_wire_break = lambda: None  # type: ignore[method-assign]
+    window._supply_controller = supply  # type: ignore[assignment]
+    window._supply_output_enabled = True
+    window._supply_last_setpoint_mA = 25.4
+    window._supply_snapshot = {
+        "current_mA": 0.1,
+        "voltage_V": 32.054,
+        "resistance_ohm": None,
+        "power_W": 0.0,
+    }
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._active_current_sweep_step_index = 4
+    window._active_current_sweep_last_setpoint_mA = 25.4
+    window._current_sweep_voltage_limit_step_index = 4
+    window._current_sweep_voltage_limit_started_s = 100.0
+    window._current_sweep_voltage_limit_start_mA = 25.4
+    window.spin_supply_voltage_limit.setValue(32.05)
+    window._write_control_trace = lambda **kwargs: trace_rows.append(dict(kwargs))  # type: ignore[method-assign]
+    window._seek_distribution_target = lambda *args, **_kwargs: seek_calls.append(args) or False  # type: ignore[method-assign]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 101.0)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=950.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=50.0,
+        current_ramp_rate_mA_s=1.0,
+        note="4",
+    )
+
+    try:
+        assert window._handle_current_sweep_voltage_unwind(
+            step,
+            step_index=4,
+            ramp_rate_mA_s=1.0,
+            target_mA=1.0,
+        ) is True
+
+        assert window._automation_active is False
+        assert window._current_sweep_voltage_limit_step_index is None
+        assert supply.output_off_calls >= 1
+        assert seek_calls == []
+        assert len(recovery_prompts) == 1
+        assert "Wire break detected" in recovery_prompts[0]
+        assert trace_rows[-1]["decision"] == "stop"
+        assert trace_rows[-1]["reason"] == "wire_break_or_contact_loss"
+        assert trace_rows[-1]["result"] == "stopped"
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_open_circuit_zero_current_stops_recipe_and_offers_recovery(
     tmp_path: Path,
     qtbot,
@@ -11794,6 +12289,99 @@ def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
                 "current_limit_a": 0.06,
             },
         )
+    ]
+
+
+def test_shared_broker_supply_controller_retries_after_stale_current_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.lease_count = 0
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "snapshot":
+                return {
+                    "ok": True,
+                    "snapshot": {
+                        "model": "hmp4040",
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.08,
+                                }
+                            }
+                        },
+                    },
+                }
+            return {"ok": True}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.lease_count += 1
+            lease_id = "lease-stale" if self.lease_count == 1 else "lease-fresh"
+            self.calls.append(
+                ("lease", {"channel": channel, "owner": owner, "role": role, "lease_id": lease_id})
+            )
+            return {"lease_id": lease_id}
+
+        def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            self.calls.append(
+                ("set_current", {"channel": channel, "lease_id": lease_id, "current_mA": current_mA})
+            )
+            if lease_id == "lease-stale":
+                raise RuntimeError("valid lease required for CH4")
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=0.08,
+    )
+
+    controller.connect()
+    controller.set_current_mA(10.0)
+
+    set_current_calls = [call for call in clients[0].calls if call[0] == "set_current"]
+    lease_calls = [call for call in clients[0].calls if call[0] == "lease"]
+    assert lease_calls == [
+        (
+            "lease",
+            {
+                "channel": 4,
+                "owner": "mini_dma_logger",
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                "lease_id": "lease-stale",
+            },
+        ),
+        (
+            "lease",
+            {
+                "channel": 4,
+                "owner": "mini_dma_logger",
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                "lease_id": "lease-fresh",
+            },
+        ),
+    ]
+    assert set_current_calls == [
+        ("set_current", {"channel": 4, "lease_id": "lease-stale", "current_mA": 10.0}),
+        ("set_current", {"channel": 4, "lease_id": "lease-fresh", "current_mA": 10.0}),
     ]
 
 
@@ -13719,6 +14307,16 @@ def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> 
         )
         window._active_current_sweep_display_target_mA = 70.0
         window._active_current_sweep_display_direction = 1.0
+        window._supply_output_enabled = True
+        window._supply_last_setpoint_mA = 42.0
+        window._supply_snapshot = {
+            "current_mA": 41.8,
+            "voltage_V": 31.95,
+            "resistance_ohm": 764.0,
+            "power_W": 1.336,
+        }
+        window._supply_snapshot_monotonic = time.monotonic() - 2.0
+        window.spin_supply_voltage_limit.setValue(32.05)
         window._write_control_trace(
             decision="accept",
             basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
@@ -13736,6 +14334,14 @@ def test_session_control_trace_logs_current_task_text(tmp_path: Path, qtbot) -> 
 
         assert len(rows) == 1
         assert rows[0]["task_text"] == "At 30 MPa: increasing current to 70 mA"
+        assert rows[0]["supply_output_enabled"] == "1"
+        assert rows[0]["supply_setpoint_mA"] == "42"
+        assert rows[0]["supply_measured_current_mA"] == "41.8"
+        assert rows[0]["supply_voltage_V"] == "31.95"
+        assert rows[0]["supply_voltage_limit_V"] == "32.05"
+        assert rows[0]["supply_resistance_ohm"] == "764"
+        assert rows[0]["supply_power_W"] == "1.336"
+        assert float(rows[0]["supply_snapshot_age_s"]) == pytest.approx(2.0, abs=0.5)
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -16035,16 +16641,22 @@ def test_current_sweep_large_overshoot_falls_back_to_single_motor_step(
         _close_test_window(window)
 
 
-def test_current_sweep_stops_when_correction_travel_exceeds_limit(
+def test_current_sweep_ignores_accumulated_correction_travel_limit(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
 
-    def _fail_move(*_args: object, **_kwargs: object) -> bool:
-        pytest.fail("travel-limit stop should happen before sending a move")
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_target_mm")))
+        window._current_position_mm = target_mm
+        effective = kwargs.get("effective_target_mm")
+        if effective is not None:
+            window._effective_position_mm = float(effective)
+        return True
 
-    window._move_to_position_mm = _fail_move  # type: ignore[method-assign]
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_zero_load_scale_g.setValue(0.0)
@@ -16088,15 +16700,9 @@ def test_current_sweep_stops_when_correction_travel_exceeds_limit(
         )
 
         assert reached is False
-        assert window._automation_active is False
-        assert "exceeded the correction travel limit" in window.log_output.toPlainText()
-        stop = window._session_stop_metadata()
-        assert stop["reason"] == "correction_travel_limit"
-        assert stop["category"] == "fault"
-        assert stop["label"] == "Correction travel limit"
-        assert "stress_mpa target 50 plateau 1" in str(stop["detail"])
-        assert "previous" in str(stop["detail"])
-        assert "next" in str(stop["detail"])
+        assert window._automation_active is True
+        assert moves
+        assert "exceeded the correction travel limit" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -16488,7 +17094,7 @@ def test_current_sweep_hold_unstable_response_decays_after_stable_samples(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_moving_away_clamps_to_one_tic_when_worsening(
+def test_current_sweep_hold_moving_away_uses_dynamic_recovery_when_worsening(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -16564,7 +17170,9 @@ def test_current_sweep_hold_moving_away_clamps_to_one_tic_when_worsening(
         assert moves, window.log_output.toPlainText()
         target_mm, effective_mm = moves[-1]
         commanded_mm = abs(target_mm if effective_mm is None else effective_mm)
-        assert commanded_mm == pytest.approx(window._motor_step_mm())
+        assert commanded_mm > window._motor_step_mm() * 5.0
+        assert commanded_mm < 0.05
+        assert "drifting away from target" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -16964,6 +17572,343 @@ def test_current_sweep_hold_improving_recovery_can_grow_above_one_tic(
         assert trace_rows[-1]["reason"] == "gated;current_hold_improving_recovery"
     finally:
         _close_test_window(window)
+
+
+def test_current_sweep_hold_unstable_but_improving_recovery_can_escape_one_tic(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        20000.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL):
+        window._note_current_sweep_hold_instability(seek_key)
+    assert window._current_sweep_hold_unstable_response_active(seek_key) is True
+
+    previous_position_mm = 6.70000
+    current_position_mm = previous_position_mm + window._motor_step_mm()
+    window._current_position_mm = current_position_mm
+    window._effective_position_mm = current_position_mm
+    window._last_move_target_mm = current_position_mm
+    window._last_effective_move_target_mm = current_position_mm
+    window._last_motion_command_time_s = now_s - 2.0
+    window._last_motion_expected_complete_time_s = now_s - 2.0
+    window._seek_last_error_by_key[seek_key] = 20.0
+    window._seek_last_value_by_key[seek_key] = 30.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 1.0
+    window._seek_last_filtered_value_by_key[seek_key] = 30.0
+    window._seek_last_effective_position_by_key[seek_key] = previous_position_mm
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = now_s - 1.0
+    window._seek_post_move_sample_count_by_key[seek_key] = 2
+    load_g = mini_dma_mod.load_g_from_stress_mpa(32.0, window.spin_diameter.value())
+    assert load_g is not None
+    for index in range(7):
+        timestamp_s = now_s - 1.2 + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves
+        _target_mm, effective_mm = moves[-1]
+        assert effective_mm is not None
+        correction_mm = abs(float(effective_mm) - current_position_mm)
+        assert correction_mm > window._motor_step_mm() * 1.25
+        assert correction_mm == pytest.approx(window._motor_step_mm() * 1.6)
+        assert trace_rows[-1]["reason"] == "gated;current_hold_unstable_improving_recovery"
+        assert "cautiously widening" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_same_sign_drift_uses_dynamic_recovery(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        window._last_move_target_mm = target_mm
+        window._last_motion_command_time_s = time.time()
+        window._last_motion_expected_complete_time_s = time.time() - 0.1
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        300.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL):
+        window._note_current_sweep_hold_instability(seek_key)
+    previous_position_mm = 6.70000
+    current_position_mm = previous_position_mm + window._motor_step_mm()
+    window._current_position_mm = current_position_mm
+    window._effective_position_mm = current_position_mm
+    window._last_move_target_mm = current_position_mm
+    window._last_effective_move_target_mm = current_position_mm
+    window._last_motion_command_time_s = now_s - 2.0
+    window._last_motion_expected_complete_time_s = now_s - 2.0
+    window._seek_last_error_by_key[seek_key] = -10.0
+    window._seek_last_value_by_key[seek_key] = 60.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 1.0
+    window._seek_last_filtered_value_by_key[seek_key] = 60.0
+    window._seek_last_effective_position_by_key[seek_key] = previous_position_mm
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = now_s - 1.0
+    window._seek_post_move_sample_count_by_key[seek_key] = 2
+    for index, stress_mpa in enumerate([61.0, 63.0, 65.0, 67.0, 69.0, 71.0, 73.0]):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s - 1.5 + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    drift_signal = mini_dma_mod.ScaleControlSignal(
+        value=67.0,
+        latest_value=73.0,
+        noise=0.1,
+        slope_per_s=8.0,
+        sample_count=7,
+        timestamp_s=now_s,
+    )
+    drift_step_mm = window._current_sweep_hold_drift_recovery_step_mm(
+        mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        -10.0,
+        -17.0,
+        0.171,
+        window._motor_step_mm(),
+        drift_signal,
+        seek_key=seek_key,
+    )
+    assert drift_step_mm is not None
+    assert drift_step_mm > window._motor_step_mm() * 10.0
+    window._current_sweep_hold_drift_recovery_step_mm = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: drift_step_mm
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert moves
+        _target_mm, effective_mm = moves[-1]
+        assert effective_mm is not None
+        correction_mm = abs(float(effective_mm) - current_position_mm)
+        assert correction_mm > window._motor_step_mm() * 10.0
+        assert trace_rows[-1]["reason"] == "gated;current_hold_unstable_drift_recovery"
+        assert "drifting away from target" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_drift_recovery_scales_down_for_stiff_response(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = time.time()
+
+    window.spin_steps_per_mm.setValue(800.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    drift_signal = mini_dma_mod.ScaleControlSignal(
+        value=67.0,
+        latest_value=73.0,
+        noise=0.1,
+        slope_per_s=8.0,
+        sample_count=7,
+        timestamp_s=now_s,
+    )
+
+    def drift_step_for_sensitivity(sensitivity_per_mm: float) -> float | None:
+        window._basis_sensitivity_per_mm = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: sensitivity_per_mm
+        )
+        return window._current_sweep_hold_drift_recovery_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            -10.0,
+            -17.0,
+            0.171,
+            window._motor_step_mm(),
+            drift_signal,
+            seek_key=seek_key,
+        )
+
+    try:
+        soft_step_mm = drift_step_for_sensitivity(300.0)
+        stiff_step_mm = drift_step_for_sensitivity(3000.0)
+
+        assert soft_step_mm is not None
+        assert stiff_step_mm is not None
+        assert soft_step_mm > window._motor_step_mm() * 10.0
+        assert stiff_step_mm < soft_step_mm * 0.2
+        assert stiff_step_mm < 0.005
+        assert stiff_step_mm > window._motor_step_mm() * 1.25
+    finally:
+        _close_test_window(window)
+
+
+def test_offline_stiff_sample_guard_writes_reproducible_result(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    plan = {
+        "schema_version": 1,
+        "kind": "mini_dma_offline_stiff_sample_guard",
+        "drift_condition": {
+            "basis": mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            "target_mpa": 50.0,
+            "previous_error_mpa": -10.0,
+            "current_error_mpa": -17.0,
+            "tolerance_mpa": 0.171,
+            "filtered_slope_mpa_per_s": 8.0,
+            "filtered_noise_mpa": 0.1,
+            "filtered_sample_count": 7,
+        },
+        "acceptance": {
+            "stiff_10x_max_step_mm": 0.005,
+            "stiff_10x_max_fraction_of_soft_step": 0.2,
+            "stiff_50x_max_step_mm": 0.002,
+        },
+        "sensitivity_cases": [
+            {"id": "soft_reference", "sensitivity_mpa_per_mm": 300.0},
+            {"id": "stiff_10x", "sensitivity_mpa_per_mm": 3000.0},
+            {"id": "stiff_50x", "sensitivity_mpa_per_mm": 15000.0},
+        ],
+        "historical_oscillation_cases": [
+            {
+                "id": "historical_reversal",
+                "source_run": "synthetic historical reversal",
+                "sample": "oscillatory stiff sample",
+                "basis": mini_dma_mod.HSW_BASIS_STRESS_MPA,
+                "target_mpa": 50.0,
+                "previous_error_mpa": -5.27133701,
+                "current_error_mpa": 4.39658663,
+                "tolerance_mpa": 0.182413653,
+                "filtered_slope_mpa_per_s": 0.0,
+                "filtered_noise_mpa": 0.1,
+                "filtered_sample_count": 7,
+                "sensitivity_mpa_per_mm": 1590.24028,
+                "expected": "decline_dynamic_escape",
+            }
+        ],
+    }
+    plan_path = tmp_path / "stiff-guard.json"
+    out_json = tmp_path / "stiff-result.json"
+    out_md = tmp_path / "stiff-result.md"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    def _window_factory(**_kwargs: object) -> mini_dma_mod.MainWindow:
+        window = _build_window(tmp_path, qtbot)
+        window.spin_steps_per_mm.setValue(800.0)
+        return window
+
+    result = stiff_guard_mod.run_guard(
+        plan_path,
+        out_json=out_json,
+        out_markdown=out_md,
+        repo_root=Path.cwd(),
+        window_factory=_window_factory,
+    )
+
+    assert result["passed"] is True
+    by_id = {row["id"]: row for row in result["results"]}
+    assert by_id["soft_reference"]["dynamic_step_mm"] == pytest.approx(0.032485009728586)
+    assert by_id["stiff_10x"]["dynamic_step_mm"] == pytest.approx(0.0032485009728586)
+    assert by_id["stiff_50x"]["dynamic_step_mm"] is None
+    historical_by_id = {row["id"]: row for row in result["historical_oscillation_results"]}
+    assert historical_by_id["historical_reversal"]["dynamic_step_mm"] is None
+    assert result["historical_checks"][0]["passed"] is True
+    saved = json.loads(out_json.read_text(encoding="utf-8"))
+    assert saved["passed"] is True
+    markdown = out_md.read_text(encoding="utf-8")
+    assert "stiff_10x" in markdown
+    assert "Historical Oscillation Cases" in markdown
 
 
 def test_current_sweep_hold_worsening_recovery_clamps_back_to_one_tic(
@@ -18299,6 +19244,8 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
     window._manual_jog_uses_last_target = False
     window._automation_active = True
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._automation_phase = "current"
+    window._automation_basis = mini_dma_mod.HSW_BASIS_LOAD_G
     window.spin_steps_per_mm.setValue(10000.0)
     window.spin_current_sweep_nudge_mm.setValue(0.002)
     window.spin_current_sweep_balance_speed_mm_s.setValue(0.05)
@@ -19476,6 +20423,76 @@ def test_current_sweep_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> No
         _close_test_window(window)
 
 
+def test_elastocaloric_recipe_round_trips_from_json(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recipe_path = tmp_path / "elastocaloric_setup10MPa_strain0-4pct_current50mA.recipe.json"
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.ELASTOCALORIC_EFFECT)
+        assert index >= 0
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_constant_current_start_target.setValue(0.5)
+        window.spin_constant_current_end_target.setValue(4.25)
+        window.spin_constant_current_move_speed_mm_s.setValue(6.0)
+        window.spin_elastocaloric_stabilize_s.setValue(45.0)
+        window.spin_constant_current_hold_s.setValue(7.0)
+        window.spin_elastocaloric_release_record_s.setValue(9.0)
+        window.spin_constant_current_start_mA.setValue(50.0)
+        window.spin_constant_current_transition_stress_mpa.setValue(10.0)
+        window.spin_constant_current_transition_rate_mA_s.setValue(1.5)
+        window.spin_constant_current_transition_settle_s.setValue(2.0)
+        window.check_constant_current_transition_hold_on_error.setChecked(True)
+
+        window._save_recipe_to_path(recipe_path)
+        payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+        elastocaloric = payload["recipe"]["elastocaloric_effect"]
+        assert payload["recipe"]["mode"] == mini_dma_mod.ELASTOCALORIC_EFFECT
+        assert elastocaloric["start_strain_pct"] == pytest.approx(0.5)
+        assert elastocaloric["jump_strain_pct"] == pytest.approx(4.25)
+        assert elastocaloric["jump_speed_mm_s"] == pytest.approx(6.0)
+        assert elastocaloric["temperature_stabilize_s"] == pytest.approx(45.0)
+        assert elastocaloric["record_after_jump_s"] == pytest.approx(7.0)
+        assert elastocaloric["record_after_release_s"] == pytest.approx(9.0)
+        assert elastocaloric["current_mA"] == pytest.approx(50.0)
+        assert elastocaloric["transition_enabled"] is True
+        assert elastocaloric["transition_stress_mpa"] == pytest.approx(10.0)
+        assert elastocaloric["transition_rate_mA_s"] == pytest.approx(1.5)
+        assert elastocaloric["transition_settle_s"] == pytest.approx(2.0)
+        assert elastocaloric["transition_hold_on_error"] is True
+
+        window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
+        window.spin_constant_current_start_target.setValue(0.0)
+        window.spin_constant_current_end_target.setValue(1.0)
+        window.spin_constant_current_move_speed_mm_s.setValue(0.5)
+        window.spin_elastocaloric_stabilize_s.setValue(1.0)
+        window.spin_constant_current_hold_s.setValue(1.0)
+        window.spin_elastocaloric_release_record_s.setValue(1.0)
+        window.spin_constant_current_start_mA.setValue(5.0)
+        window.spin_constant_current_transition_stress_mpa.setValue(2.0)
+        window.spin_constant_current_transition_rate_mA_s.setValue(0.1)
+        window.spin_constant_current_transition_settle_s.setValue(0.0)
+        window.check_constant_current_transition_hold_on_error.setChecked(False)
+
+        window._load_recipe_from_path(recipe_path)
+
+        assert window.combo_recipe_mode.currentData() == mini_dma_mod.ELASTOCALORIC_EFFECT
+        assert window.spin_constant_current_start_target.value() == pytest.approx(0.5)
+        assert window.spin_constant_current_end_target.value() == pytest.approx(4.25)
+        assert window.spin_constant_current_move_speed_mm_s.value() == pytest.approx(6.0)
+        assert window.spin_elastocaloric_stabilize_s.value() == pytest.approx(45.0)
+        assert window.spin_constant_current_hold_s.value() == pytest.approx(7.0)
+        assert window.spin_elastocaloric_release_record_s.value() == pytest.approx(9.0)
+        assert window.spin_constant_current_start_mA.value() == pytest.approx(50.0)
+        assert window.spin_constant_current_transition_stress_mpa.value() == pytest.approx(10.0)
+        assert window.spin_constant_current_transition_rate_mA_s.value() == pytest.approx(1.5)
+        assert window.spin_constant_current_transition_settle_s.value() == pytest.approx(2.0)
+        assert window.check_constant_current_transition_hold_on_error.isChecked() is True
+        assert window.spin_elastocaloric_stabilize_s.isVisibleTo(window.recipe_stack)
+        assert "Loaded recipe" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_recipe_round_trips_disabled_return_target(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     recipe_path = tmp_path / "current_sweep_no_return.recipe.json"
@@ -20143,6 +21160,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "conservative_current_hold_response_stiffness" in first_logic["features"]
         assert "current_hold_unstable_response_damps_to_single_motor_steps" in first_logic["features"]
         assert "current_hold_improving_recovery_scales_cautiously" in first_logic["features"]
+        assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]

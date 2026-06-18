@@ -249,6 +249,101 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert ("start", None) in events
 
 
+def test_mini_dma_bench_plan_replaces_stale_execute_summary_while_running(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "kind": bench_automation.PLAN_KIND,
+                "mode": "execute",
+                "state": "completed",
+                "runs": [{"name": "old-run", "status": "completed"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan_path = tmp_path / "bench-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "mini_dma_bench_sequence",
+                "execute": True,
+                "armed": True,
+                "operator_confirmation": bench_automation.MINI_DMA_BENCH_CONFIRMATION,
+                "summary_path": str(summary_path),
+                "default_max_run_duration_s": 10,
+                "bench_lock": {"enabled": False},
+                "length_setup": {
+                    "starting_length_mm": 20.0,
+                    "preload_length_mm": 20.4,
+                },
+                "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    windows: list[object] = []
+    observed_running_summaries: list[dict[str, object]] = []
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            pass
+
+    class _FakeWindow:
+        def __init__(self, log_dir: str | None = None, *, persist_settings: bool = True) -> None:
+            self._automation_active = False
+            self._session_active = False
+            self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
+            windows.append(self)
+
+        def set_length_setup_automation_values(
+            self,
+            *,
+            starting_length_mm: float | None,
+            preload_length_mm: float | None,
+        ) -> None:
+            pass
+
+        def _load_recipe_from_path(self, path: Path) -> None:
+            pass
+
+        def _start_auto_ramp(self) -> None:
+            self._automation_active = True
+            self._session_active = True
+
+        def _stop_session(self, *, reason: str, detail: str) -> None:
+            self._session_active = False
+
+        def close(self) -> None:
+            self._automation_active = False
+            self._session_active = False
+
+    def _sleep(_seconds: float) -> None:
+        observed_running_summaries.append(json.loads(summary_path.read_text(encoding="utf-8")))
+        assert windows
+        windows[-1]._automation_active = False  # type: ignore[attr-defined]
+
+    summary = bench_automation.run_mini_dma_bench_plan(
+        plan_path,
+        app_factory=lambda _qt_args: _FakeApp(),
+        window_factory=_FakeWindow,
+        sleep_fn=_sleep,
+    )
+
+    assert observed_running_summaries
+    running = observed_running_summaries[0]
+    assert running["state"] == "running"
+    assert running["run_count"] == 0
+    assert running["planned_run_count"] == 1
+    assert running["runs"] == []
+    assert "old-run" not in json.dumps(running)
+    assert summary["state"] == "completed"
+    assert summary["run_count"] == 1
+
+
 def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)

@@ -820,6 +820,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._lcr_correction_last_result: LcrCorrectionResult | None = None
         self._ac_progress_units = "count"
         self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
+        self._ac_active_output_path: Path | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
         self._ac_worker: QtCore.QObject | None = None
         self._ac_psu_watchdog: AcPsuWatchdogGuard | None = None
@@ -1901,6 +1902,7 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(hidden, QtWidgets.QLineEdit):
             hidden.setText(full)
         self.f_name = full
+        self._refresh_ac_output_status()
         try:
             ready = bool(getattr(self, "_ac_output_settings_ready", False))
         except RuntimeError:
@@ -1918,6 +1920,7 @@ class MainWindow(CurrentAnnealingWindow):
             pass
 
     def build_log_path(self) -> str:  # type: ignore[override]
+        self._ac_output_path_fallback_reason = ""
         try:
             directory = self.ui.lineEdit_log_dir.text().strip() or str(AC_DEFAULT_LOG_DIR)
             base = self.ui.lineEdit_log_file.text().strip() or AC_DEFAULT_SWEEP_BASE
@@ -1927,8 +1930,43 @@ class MainWindow(CurrentAnnealingWindow):
                 base = base[:-4]
             os.makedirs(directory, exist_ok=True)
             return os.path.join(directory, f"{base}.tsv")
-        except Exception:
-            return str(AC_DEFAULT_LOG_DIR / f"{AC_DEFAULT_SWEEP_BASE}.tsv")
+        except Exception as exc:
+            self._ac_output_path_fallback_reason = str(exc)
+            fallback = AC_DEFAULT_LOG_DIR / f"{AC_DEFAULT_SWEEP_BASE}.tsv"
+            try:
+                fallback.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            return str(fallback)
+
+    def _refresh_ac_output_status(self) -> None:
+        try:
+            label = getattr(self, "label_ac_output_status", None)
+        except RuntimeError:
+            return
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        try:
+            path_text = str(getattr(self, "f_name", "") or "")
+            if not path_text:
+                path_text = self.build_log_path()
+        except RuntimeError:
+            return
+        fallback_reason = str(getattr(self, "_ac_output_path_fallback_reason", "") or "")
+        status_detail = self._format_ac_output_status_paths(path_text)
+        if fallback_reason:
+            label.setText(
+                "Output fallback: selected path is unavailable; "
+                f"using {path_text}. Reason: {fallback_reason}\n{status_detail}"
+            )
+            return
+        label.setText(f"Output path ready: {path_text}\n{status_detail}")
+
+    def _format_ac_output_status_paths(self, output_path: str | Path) -> str:
+        path = Path(output_path)
+        status_path = sweep.ac_run_status_path_for_output(path)
+        fallback_path = sweep.ac_run_status_fallback_path_for_output(path)
+        return f"Run status sidecar: {status_path}; local fallback: {fallback_path}"
 
     def handle_browse_log_dir(self) -> None:  # type: ignore[override]
         start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, "lineEdit_log_dir") else str(AC_DEFAULT_LOG_DIR)
@@ -1976,12 +2014,12 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(serial_group, QtWidgets.QGroupBox):
             serial_group.hide()
 
-        group = QtWidgets.QGroupBox("Instrument setup", frame)
+        group = QtWidgets.QGroupBox("AC susceptibility workflow", frame)
         outer = QtWidgets.QVBoxLayout(group)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(8)
 
-        output_group = QtWidgets.QGroupBox("Output", group)
+        output_group = QtWidgets.QGroupBox("1. Output and resume", group)
         output_grid = QtWidgets.QGridLayout(output_group)
         output_grid.setColumnStretch(1, 1)
         output_grid.addWidget(getattr(self.ui, "label_log_dir"), 0, 0)
@@ -2009,9 +2047,20 @@ class MainWindow(CurrentAnnealingWindow):
         )
         self.label_ac_baseline_file.setWordWrap(True)
         output_grid.addWidget(self.label_ac_baseline_file, 2, 1, 1, 2)
+        self.label_ac_output_status = QtWidgets.QLabel("", output_group)
+        self.label_ac_output_status.setWordWrap(True)
+        self.label_ac_output_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        output_grid.addWidget(self.label_ac_output_status, 3, 1, 1, 2)
+        self.label_ac_resume_status = QtWidgets.QLabel(
+            "Resume point: use Continue from previous sweep; complete AC settings are skipped and partial settings repeat.",
+            output_group,
+        )
+        self.label_ac_resume_status.setWordWrap(True)
+        output_grid.addWidget(self.label_ac_resume_status, 4, 1, 1, 2)
         outer.addWidget(output_group)
+        self._refresh_ac_output_status()
 
-        hardware_group = QtWidgets.QGroupBox("Hardware", group)
+        hardware_group = QtWidgets.QGroupBox("2. Setup and hardware status", group)
         hardware_layout = QtWidgets.QVBoxLayout(hardware_group)
         hardware_layout.setContentsMargins(8, 8, 8, 8)
         hardware_layout.setSpacing(8)
@@ -2100,7 +2149,9 @@ class MainWindow(CurrentAnnealingWindow):
         outer.addWidget(hardware_group)
         self.groupBox_ac_hardware = hardware_group
 
-        grid = QtWidgets.QGridLayout()
+        lcr_group = QtWidgets.QGroupBox("3. LCR measurement settings", group)
+        grid = QtWidgets.QGridLayout(lcr_group)
+        grid.setContentsMargins(8, 8, 8, 8)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         self.lineEdit_lcr_frequencies = QtWidgets.QLineEdit(group)
@@ -2276,9 +2327,10 @@ class MainWindow(CurrentAnnealingWindow):
         grid.addWidget(self.label_lcr_correction_status, 7, 2, 1, 2)
         grid.addWidget(self.checkBox_ac_plan_loops, 8, 0)
         grid.addWidget(self.pushButton_apply_lcr_setting, 8, 3)
-        outer.addLayout(grid)
+        outer.addWidget(lcr_group)
+        self.groupBox_ac_lcr_plan = lcr_group
 
-        plan_group = QtWidgets.QGroupBox("Experiment plan", group)
+        plan_group = QtWidgets.QGroupBox("4. Measurement plan and live run", group)
         plan_grid = QtWidgets.QGridLayout(plan_group)
         plan_grid.setColumnStretch(1, 1)
         plan_grid.setColumnStretch(3, 1)
@@ -2325,12 +2377,24 @@ class MainWindow(CurrentAnnealingWindow):
         outer.addWidget(plan_group)
         self.groupBox_ac_plan = plan_group
 
-        self.label_lcr_status = QtWidgets.QLabel("LCR not connected", group)
+        status_group = QtWidgets.QGroupBox("Run status and recovery", group)
+        status_layout = QtWidgets.QVBoxLayout(status_group)
+        status_layout.setContentsMargins(8, 8, 8, 8)
+        status_layout.setSpacing(6)
+        self.label_ac_broker_status = QtWidgets.QLabel("", status_group)
+        self.label_ac_broker_status.setWordWrap(True)
+        self.label_ac_broker_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        status_layout.addWidget(self.label_ac_broker_status)
+        self.label_lcr_status = QtWidgets.QLabel("Run state: idle; LCR not connected.", status_group)
         self.label_lcr_status.setWordWrap(True)
-        outer.addWidget(self.label_lcr_status)
+        self.label_lcr_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        status_layout.addWidget(self.label_lcr_status)
+        outer.addWidget(status_group)
+        self.groupBox_ac_status = status_group
 
         cast(QtWidgets.QVBoxLayout, layout).addWidget(group)
         self.groupBox_lcr_settings = group
+        self._refresh_ac_broker_status()
         self._make_ac_settings_panel_width_friendly()
 
         self.pushButton_refresh_lcr_ports.clicked.connect(self.populate_lcr_ports)
@@ -2878,7 +2942,7 @@ class MainWindow(CurrentAnnealingWindow):
                     self.lcr_meter = Lcr6000Serial(port, baudrate=DEFAULT_BAUDRATE)
                     idn = self.lcr_meter.identify()
                     self.pushButton_connect_lcr.setText("Disconnect LCR")
-                    self.label_lcr_status.setText(f"Connected: {idn or port}")
+                    self.label_lcr_status.setText(f"Connected: {idn or port}; idle, not sweeping.")
                     self._configure_lcr_for_current_index()
                     self._refresh_lcr_correction_status()
                     lcr_connected = True
@@ -2926,7 +2990,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.lcr_meter.close()
             self.lcr_meter = None
             self.pushButton_connect_lcr.setText("Connect LCR")
-            self.label_lcr_status.setText("LCR disconnected")
+            self.label_lcr_status.setText("Run state: idle; LCR disconnected.")
             self._refresh_lcr_correction_status()
             self._refresh_ac_hardware_status()
             return
@@ -2943,7 +3007,7 @@ class MainWindow(CurrentAnnealingWindow):
             self.label_lcr_status.setText(f"LCR connection failed: {exc}")
             return
         self.pushButton_connect_lcr.setText("Disconnect LCR")
-        self.label_lcr_status.setText(f"Connected: {idn or port}")
+        self.label_lcr_status.setText(f"Connected: {idn or port}; idle, not sweeping.")
         self._configure_lcr_for_current_index()
         self._refresh_lcr_correction_status()
         self._refresh_ac_hardware_status()
@@ -2958,7 +3022,7 @@ class MainWindow(CurrentAnnealingWindow):
         except Exception as exc:
             self.label_lcr_status.setText(f"Identify failed: {exc}")
             return
-        self.label_lcr_status.setText(f"Connected: {idn}")
+        self.label_lcr_status.setText(f"Connected: {idn}; idle, not sweeping.")
         self._refresh_lcr_correction_status()
 
     def handle_apply_lcr_setting_clicked(self) -> None:
@@ -3254,17 +3318,29 @@ class MainWindow(CurrentAnnealingWindow):
                 voltage_limit_v=config.voltage_limit_v,
             )
         else:
-            self._release_inherited_psu_port_for_ac(config.psu_resource)
-            psu = sweep.SerialScpiCurrentSource(
-                backend_id=config.psu_backend,
-                resource=config.psu_resource,
-                baudrate=self._selected_ac_psu_baudrate(),
-                voltage_limit_v=config.voltage_limit_v,
-            )
+            try:
+                self._release_inherited_psu_port_for_ac(config.psu_resource)
+                psu = sweep.SerialScpiCurrentSource(
+                    backend_id=config.psu_backend,
+                    resource=config.psu_resource,
+                    baudrate=self._selected_ac_psu_baudrate(),
+                    voltage_limit_v=config.voltage_limit_v,
+                )
+            except Exception as exc:
+                self._lcr_last_error = str(exc)
+                self.label_lcr_status.setText(f"Power supply preparation failed: {exc}")
+                self._refresh_ac_hardware_status()
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "AC power supply unavailable",
+                    f"Could not prepare the selected power supply for the AC sweep:\n{exc}",
+                )
+                return
         self._reset_ac_live_plots(reset_reason)
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = config
+        self._ac_active_output_path = output_path
         watchdog = None
         if not config.uses_shared_broker:
             watchdog = AcPsuWatchdogGuard(
@@ -3277,6 +3353,7 @@ class MainWindow(CurrentAnnealingWindow):
             except Exception as exc:
                 self._ac_sweep_running = False
                 self._ac_active_sweep_config = None
+                self._ac_active_output_path = None
                 QtWidgets.QMessageBox.warning(
                     self,
                     "AC sweep watchdog failed",
@@ -3320,6 +3397,8 @@ class MainWindow(CurrentAnnealingWindow):
             if watchdog is not None:
                 watchdog.stop()
             self._ac_psu_watchdog = None
+            self._finish_ac_worker_state()
+            self._clear_ac_worker_refs()
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"AC sweep failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "AC sweep failed", str(exc))
@@ -3410,6 +3489,9 @@ class MainWindow(CurrentAnnealingWindow):
             thread.start()
             return
         except Exception as exc:
+            if bool(getattr(self, "_ac_sweep_running", False)):
+                self._finish_ac_worker_state()
+                self._clear_ac_worker_refs()
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"Baseline failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "Baseline failed", str(exc))
@@ -3432,6 +3514,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = None
+        self._ac_active_output_path = None
         self.pushButton_measure_lcr_baseline.setEnabled(True)
         self.pushButton_run_ac_sweep.setEnabled(True)
         self.pushButton_continue_ac_sweep.setEnabled(True)
@@ -3468,28 +3551,70 @@ class MainWindow(CurrentAnnealingWindow):
     def _handle_sweep_worker_finished(self, path_text: str, stopped: bool = False) -> None:
         self._finish_ac_worker_state()
         path = Path(path_text)
+        detail = self._format_ac_run_status_detail(path)
         if stopped:
-            self.label_lcr_status.setText(f"AC sweep stopped; partial file saved: {path}")
+            display_message = f"Saved partial AC sweep to:\n{path}"
+            if detail:
+                display_message = f"{display_message}\n\n{detail}"
+            self.label_lcr_status.setText(f"AC sweep stopped; partial file saved: {path}" + (f"\n{detail}" if detail else ""))
             self._set_ac_current_task("Current task: stopped")
-            QtWidgets.QMessageBox.information(self, "AC sweep stopped", f"Saved partial AC sweep to:\n{path}")
+            QtWidgets.QMessageBox.information(self, "AC sweep stopped", display_message)
             return
-        self.label_lcr_status.setText(f"AC sweep saved: {path}")
+        display_message = f"Saved AC sweep to:\n{path}"
+        if detail:
+            display_message = f"{display_message}\n\n{detail}"
+        self.label_lcr_status.setText(f"AC sweep saved: {path}" + (f"\n{detail}" if detail else ""))
         self._complete_ac_progress("Microwire sweep")
         self._set_ac_current_task("Current task: microwire sweep complete")
-        QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{path}")
+        QtWidgets.QMessageBox.information(self, "AC sweep saved", display_message)
 
     @QtCore.pyqtSlot(str)
     def _handle_ac_worker_failed(self, message: str) -> None:
         stopped = "stopped by user" in message.lower()
+        output_path = getattr(self, "_ac_active_output_path", None)
         self._finish_ac_worker_state()
         if stopped:
             self.label_lcr_status.setText("AC run stopped by user.")
             self._set_ac_current_task("Current task: stopped")
             return
         self._lcr_last_error = message
-        self.label_lcr_status.setText(f"AC run failed: {message}")
+        detail = self._format_ac_failure_status_detail(output_path, message)
+        display_message = f"{message}\n\n{detail}" if detail else message
+        self.label_lcr_status.setText(f"AC run failed: {display_message}")
         self._set_ac_current_task("Current task: failed")
-        QtWidgets.QMessageBox.warning(self, "AC run failed", message)
+        QtWidgets.QMessageBox.warning(self, "AC run failed", display_message)
+
+    def _format_ac_failure_status_detail(self, output_path: Path | None, message: str) -> str:
+        return self._format_ac_run_status_detail(output_path, message=message)
+
+    def _format_ac_run_status_detail(self, output_path: Path | None, *, message: str = "") -> str:
+        if output_path is None:
+            return ""
+        try:
+            summary = sweep.classify_ac_run_status(output_path)
+        except Exception:
+            return ""
+        primary_status_path = sweep.ac_run_status_path_for_output(output_path)
+        fallback_status_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+        status_path = Path(summary.status_path)
+        try:
+            status_exists = status_path.exists()
+        except OSError:
+            status_exists = False
+        if not status_exists and summary.status in {"unknown", "unknown_no_run_status"} and not summary.stop_reason:
+            return ""
+        parts: list[str] = [f"Run status: {summary.status}"]
+        if summary.phase:
+            parts[-1] += f" ({summary.phase})"
+        if summary.rows_written:
+            parts.append(f"Rows written: {summary.rows_written}")
+        if summary.stop_reason and summary.stop_reason not in message:
+            parts.append(f"Stop reason: {summary.stop_reason}")
+        if status_path == fallback_status_path and status_path != primary_status_path:
+            parts.append(f"Local fallback status: {status_path}")
+        else:
+            parts.append(f"Run status file: {status_path}")
+        return "\n".join(parts)
 
     def _reset_ac_progress(self, label: str, total: int, *, units: str = "count") -> None:
         self._ac_progress_total = max(1, int(total))
@@ -4487,13 +4612,42 @@ class MainWindow(CurrentAnnealingWindow):
         backend_label = str(profile.get("label", backend))
         if backend == "shared_hmp_broker":
             resource = self._ac_broker_resource_display()
-            label.setText(f"AC current supply: {backend_label}, {resource}")
+            label.setText(f"AC current supply: {backend_label}, {resource}; broker lease requested at sweep start")
+            self._refresh_ac_broker_status()
             self._refresh_ac_hardware_status()
             return
         resource = str(getattr(self, "_ac_psu_resource", "") or "") or "no port selected"
         baudrate = int(getattr(self, "_ac_psu_baudrate", 115200) or 115200)
         label.setText(f"AC current supply: {backend_label}, {resource}, {baudrate} baud")
+        self._refresh_ac_broker_status()
         self._refresh_ac_hardware_status()
+
+    def _refresh_ac_broker_status(self) -> None:
+        try:
+            label = getattr(self, "label_ac_broker_status", None)
+        except RuntimeError:
+            return
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        backend = str(getattr(self, "_ac_psu_backend", "") or "owon_spe6102")
+        if backend != "shared_hmp_broker":
+            label.setText("Broker lease: not used by the selected current-supply profile.")
+            return
+        channel = int(getattr(self, "_ac_shared_broker_channel", 0) or 0)
+        confirmed = bool(getattr(self, "_ac_shared_broker_channel_confirmed", False))
+        resource = self._ac_broker_resource_display()
+        if channel <= 0 or not confirmed:
+            label.setText(
+                "Broker lease: no HMP channel selected; sweep start is blocked until the wired AC channel is confirmed."
+            )
+            return
+        if getattr(self, "_owned_shared_broker_server", None) is not None:
+            label.setText(f"Broker lease: local broker running for AC susceptibility on {resource}.")
+            return
+        if bool(getattr(self, "_ac_sweep_running", False)):
+            label.setText(f"Broker lease: AC susceptibility owns {resource} until the sweep stops or fails.")
+            return
+        label.setText(f"Broker lease: ready to request AC susceptibility ownership of {resource} at sweep start.")
 
     def _set_ac_hardware_details_visible(self, checked: bool) -> None:
         details = getattr(self, "frame_ac_hardware_details", None)
@@ -4525,6 +4679,7 @@ class MainWindow(CurrentAnnealingWindow):
         psu_text = f"{backend_label} on {resource}" if resource else f"{backend_label}, no port selected"
         lcr_text = "LCR connected" if lcr_connected else "LCR not connected"
         label.setText(f"{lcr_text}; PSU {psu_text}")
+        self._refresh_ac_broker_status()
 
     def _install_ac_wheel_guard(self, control_root: QtWidgets.QWidget) -> None:
         self._ac_lcr_scroll_area = self._find_parent_scroll_area(control_root)
@@ -4597,7 +4752,7 @@ class MainWindow(CurrentAnnealingWindow):
         plan_count = len(self._lcr_plan)
         level_unit = "A" if setting.level_mode == "current" else "V"
         self.label_lcr_status.setText(
-            f"AC setting {index + 1}/{plan_count}: {setting.function}, "
+            f"LCR ready, not sweeping. AC setting {index + 1}/{plan_count}: {setting.function}, "
             f"{setting.frequency_hz:g} Hz, {setting.level_value:g} {level_unit}"
         )
         return True

@@ -12,10 +12,10 @@ import re
 import sys
 import time
 import traceback
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, NoReturn, Protocol, Sequence
 
 from data_logging.shared_power_supply.broker import ROLE_AC_SUSCEPTIBILITY
-from data_logging.shared_power_supply.protocol import BrokerJsonClient
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, broker_failure_diagnostic
 
 from .lcr6000 import (
     Lcr6000Reading,
@@ -2365,7 +2365,10 @@ class SharedBrokerCurrentSource:
             raise RuntimeError("select a shared HMP broker channel")
         if self._client is None:
             self._client = self._client_factory(host=self.host, port=self.port, timeout_s=self.timeout_s)
-        self._client.request("snapshot")
+        try:
+            self._client.request("snapshot")
+        except Exception as exc:
+            self._raise_broker_failure(exc)
 
     def _require_client(self) -> Any:
         if self._client is None:
@@ -2375,11 +2378,14 @@ class SharedBrokerCurrentSource:
     def _ensure_lease(self) -> str:
         if self._lease_id:
             return self._lease_id
-        lease = self._require_client().lease(
-            channel=self.channel,
-            owner=self.owner,
-            role=ROLE_AC_SUSCEPTIBILITY,
-        )
+        try:
+            lease = self._require_client().lease(
+                channel=self.channel,
+                owner=self.owner,
+                role=ROLE_AC_SUSCEPTIBILITY,
+            )
+        except Exception as exc:
+            self._raise_broker_failure(exc)
         lease_id = str(lease.get("lease_id") or "")
         if not lease_id:
             raise RuntimeError("Shared HMP broker did not return a lease id.")
@@ -2388,39 +2394,36 @@ class SharedBrokerCurrentSource:
 
     def initialize(self, *, voltage_limit_v: float) -> None:
         self.voltage_limit_v = effective_power_supply_voltage_limit(self.backend_id, voltage_limit_v)
-        self._require_client().configure_channel(
-            channel=self.channel,
-            lease_id=self._ensure_lease(),
-            voltage_v=self.voltage_limit_v,
-            current_a=0.0,
-            output_on=True,
-        )
+        self._configure_channel(voltage_v=self.voltage_limit_v, current_a=0.0, output_on=True)
 
     def set_current(self, current_a: float) -> None:
         resolution = max(1e-6, float(self.profile.get("current_resolution_a", 0.001)))
         current = max(0.0, round(float(current_a) / resolution) * resolution)
-        self._require_client().configure_channel(
-            channel=self.channel,
-            lease_id=self._ensure_lease(),
-            voltage_v=self.voltage_limit_v,
-            current_a=current,
-            output_on=True,
-        )
+        self._configure_channel(voltage_v=self.voltage_limit_v, current_a=current, output_on=True)
 
     def set_voltage_limit(self, voltage_v: float) -> None:
         self.voltage_limit_v = effective_power_supply_voltage_limit(self.backend_id, voltage_v)
         measurement = self.measure()
         current_a = 0.0 if measurement.current_actual_a is None else max(0.0, float(measurement.current_actual_a))
-        self._require_client().configure_channel(
-            channel=self.channel,
-            lease_id=self._ensure_lease(),
-            voltage_v=self.voltage_limit_v,
-            current_a=current_a,
-            output_on=True,
-        )
+        self._configure_channel(voltage_v=self.voltage_limit_v, current_a=current_a, output_on=True)
+
+    def _configure_channel(self, *, voltage_v: float, current_a: float, output_on: bool) -> None:
+        try:
+            self._require_client().configure_channel(
+                channel=self.channel,
+                lease_id=self._ensure_lease(),
+                voltage_v=float(voltage_v),
+                current_a=current_a,
+                output_on=bool(output_on),
+            )
+        except Exception as exc:
+            self._raise_broker_failure(exc)
 
     def measure(self) -> PowerSupplyMeasurement:
-        readback = self._require_client().measure_channel(channel=self.channel)
+        try:
+            readback = self._require_client().measure_channel(channel=self.channel)
+        except Exception as exc:
+            self._raise_broker_failure(exc)
         current_mA = readback.get("current_mA")
         voltage_v = readback.get("voltage_V")
         return PowerSupplyMeasurement(
@@ -2432,11 +2435,17 @@ class SharedBrokerCurrentSource:
     def output_off(self) -> None:
         if not self._lease_id:
             return
-        self._require_client().set_output(
-            channel=self.channel,
-            lease_id=self._lease_id,
-            output_on=False,
-        )
+        try:
+            self._require_client().set_output(
+                channel=self.channel,
+                lease_id=self._lease_id,
+                output_on=False,
+            )
+        except Exception as exc:
+            self._raise_broker_failure(exc)
+
+    def _raise_broker_failure(self, exc: Exception) -> NoReturn:
+        raise RuntimeError(broker_failure_diagnostic(exc, context="AC shared HMP broker")) from exc
 
     def close(self) -> None:
         client = self._client

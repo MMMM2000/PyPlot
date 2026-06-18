@@ -350,6 +350,10 @@ through the broker, reads back only that channel, and turns off/releases only
 that leased channel when the sweep stops or fails. The detached serial watchdog
 is not armed in broker mode because it cannot safely address a broker lease;
 the worker shutdown path performs the broker channel shutdown/release instead.
+Broker connection, stale lease, wrong-channel, and channel-limit failures use
+the shared broker diagnostic wording used by the other HMP-backed apps, so the
+run log and failure dialog should point to the operator action instead of only
+showing the raw TCP or lease exception.
 The broker channel starts as **Select channel...** on first use, and a sweep will
 not start until the operator explicitly chooses the wired HMP channel. On the
 current shared bench, choose `CH1` for AC susceptibility; Mini DMA uses `CH3`
@@ -375,11 +379,14 @@ Every microwire current sweep also writes a durable
 `<sweep>_run_status.json` sidecar. This file is flushed throughout the run with
 the process ID, heartbeat timestamp, active setting/current point, rows written,
 output paths, shared-HMP channel/lease context when available, and the final
-status on completion, user stop, or handled error. If a previous TSV is selected
-with **Continue from previous sweep...** and its heartbeat looks stale or its
-debug stream has no close marker, the continuation prompt reports the unclean
-status. Resume remains setting-granular: complete settings can be skipped, but a
-partial setting is measured again from its first current point.
+status on completion, user stop, or handled error. The output section shows the
+primary status sidecar path and the local fallback path before the sweep starts,
+and completion/stop/failure dialogs repeat the run-status summary with rows
+written and the status-file location. If a previous TSV is selected with
+**Continue from previous sweep...** and its heartbeat looks stale or its debug
+stream has no close marker, the continuation prompt reports the unclean status.
+Resume remains setting-granular: complete settings can be skipped, but a partial
+setting is measured again from its first current point.
 
 The same status payload is also mirrored to a local fallback file under
 `Downloads/ac_susceptibility/run_status_fallback`. This fallback does not depend
