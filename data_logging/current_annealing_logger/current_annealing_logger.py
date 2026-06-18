@@ -905,6 +905,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.clicked.connect(self.handle_pushButton_reverse_now_clicked)
             self.ui.pushButton_reverse_now.setEnabled(False)
+        if hasattr(self.ui, 'pushButton_update_running_recipe'):
+            self.ui.pushButton_update_running_recipe.clicked.connect(self.handle_update_running_recipe_clicked)
+            self.ui.pushButton_update_running_recipe.setEnabled(False)
+            self.ui.pushButton_update_running_recipe.setVisible(False)
         if hasattr(self.ui, 'pushButton_show_history'):
             self.ui.pushButton_show_history.clicked.connect(self.handle_show_history_clicked)
             self._update_history_button_state()
@@ -2433,6 +2437,58 @@ class MainWindow(QtWidgets.QMainWindow):
             self.total_steps = max(1, projected * max(1, int(loops)))
         self.step_idx = 0
         self._finish_time = None
+
+    def _planned_automatic_loop_steps(self) -> int:
+        """Return the nominal samples in one automatic up/down current loop."""
+
+        try:
+            start_mA = int(self.ui.spinBox_start_current.value()) if hasattr(self.ui, 'spinBox_start_current') else 1
+        except Exception:
+            start_mA = 1
+        try:
+            max_mA = int(self.ui.spinBox_max_current.value())
+        except Exception:
+            max_mA = int(getattr(self, "max_current_mA", start_mA))
+        min_start = max(1, int(getattr(self, "min_start_current_mA", 1)))
+        if max_mA < min_start:
+            start_mA = max_mA
+        else:
+            start_mA = max(min_start, min(start_mA, max_mA))
+        step_mA = max(
+            self._current_resolution_mA(),
+            abs(float(getattr(self, "current_step_mA", self._current_resolution_mA()) or self._current_resolution_mA())),
+        )
+        up_steps = max(0, math.ceil(max(0.0, float(max_mA - start_mA)) / step_mA))
+        down_steps = up_steps if self._reverse_to_zero_after_max_enabled() else 0
+        return max(1, int(up_steps + down_steps))
+
+    def _refresh_running_recipe_plan(self) -> None:
+        """Apply editable recipe settings to the active run and progress model."""
+
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
+        self.infinite_loops = (
+            bool(self.ui.checkBox_infinite_loops.isChecked())
+            if hasattr(self.ui, 'checkBox_infinite_loops')
+            else False
+        )
+        per_loop = self._planned_automatic_loop_steps()
+        self._planned_loop_steps = per_loop
+        if not self._loop_sample_history:
+            self._projected_loop_samples = per_loop
+        elif not self._projected_loop_samples:
+            self._projected_loop_samples = per_loop
+        if self.infinite_loops:
+            self.total_steps = 0
+            if hasattr(self.ui, 'progressBar_process'):
+                self.ui.progressBar_process.setMaximum(0)
+            self._finish_time = None
+        else:
+            self._recalculate_total_steps(projected_loop_steps=self._projected_loop_samples or per_loop)
+        if hasattr(self.ui, 'label_time_to_limit'):
+            self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
+        self.update_time_estimate()
 
     def _note_loop_sample(self) -> None:
         if getattr(self, 'operation_mode', 2) != 2:
@@ -4777,6 +4833,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
                 self.ui.pushButton_reverse_now.setEnabled(True)
+            if hasattr(self.ui, 'pushButton_update_running_recipe'):
+                self.ui.pushButton_update_running_recipe.setVisible(True)
+                self.ui.pushButton_update_running_recipe.setEnabled(True)
             self.force_stop_at_zero = False
             self.command_number = 0
             self.sample_index = 0
@@ -4847,23 +4906,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.infinite_loops = bool(self.ui.checkBox_infinite_loops.isChecked()) if hasattr(self.ui, 'checkBox_infinite_loops') else False
                 self.loop_idx = 0
                 # progress plan
-                step_mA = self.current_step_mA if hasattr(self, 'current_step_mA') else 1
-                try:
-                    start_mA = int(self.ui.spinBox_start_current.value()) if hasattr(self.ui, 'spinBox_start_current') else 1
-                except Exception:
-                    start_mA = 1
-                min_start = int(getattr(self, "min_start_current_mA", 1))
-                min_start = max(1, min_start)
-                max_mA = int(self.ui.spinBox_max_current.value())
-                if max_mA < min_start:
-                    start_mA = max_mA
-                else:
-                    start_mA = max(min_start, min(start_mA, max_mA))
-                step_mA = max(self._current_resolution_mA(), float(step_mA))
-                up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - start_mA) / step_mA))
-                hold_steps = 0
-                down_steps = up_steps if self._reverse_to_zero_after_max_enabled() else 0
-                per_loop = max(1, up_steps + hold_steps + down_steps)
+                per_loop = self._planned_automatic_loop_steps()
                 self._init_loop_tracking(per_loop, int(self.loop_target or 1), self.infinite_loops)
                 if hasattr(self.ui, 'progressBar_process'):
                     if self.total_steps:
@@ -4895,6 +4938,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.direction_ascending = False
         self._reset_voltage_projection()
 
+    def handle_update_running_recipe_clicked(self) -> None:
+        """Apply runtime-safe recipe edits to the active automatic run."""
+
+        if not self.process_running:
+            return
+        self._sync_runtime_settings()
+        self._store_loop_preferences()
+        if getattr(self, "operation_mode", 2) != 2:
+            self.update_time_estimate()
+            self._show_status_message("Updated running settings.")
+            return
+        if self.current_increment != 0:
+            self.current_increment = math.copysign(abs(self.current_step_A), self.current_increment)
+        if self.direction_ascending and self.current_increment > 0:
+            current_set_mA = float(getattr(self, "current_current_set", 0.0) or 0.0) * 1000.0
+            if current_set_mA >= float(getattr(self, "max_current_mA", current_set_mA)):
+                self.current_increment = -abs(self.current_step_A)
+                self.line_color = "b"
+                self.direction_ascending = False
+                self._reset_voltage_projection()
+                self._adjust_progress_for_reverse()
+        self._refresh_running_recipe_plan()
+        self._show_status_message(
+            f"Updated running recipe: max {int(getattr(self, 'max_current_mA', 0))} mA, "
+            f"ramp {float(getattr(self, 'current_step_mA', 0.0)):.1f} mA/s."
+        )
+
     def _set_process_controls_enabled(self, enabled: bool) -> None:
         if not hasattr(self.ui, 'groupBox_process_settings'):
             return
@@ -4905,10 +4975,31 @@ class MainWindow(QtWidgets.QMainWindow):
             keep.add(self.ui.progressBar_process)
         if hasattr(self.ui, 'label_time_remaining'):
             keep.add(self.ui.label_time_remaining)
+        if hasattr(self.ui, 'pushButton_update_running_recipe'):
+            keep.add(self.ui.pushButton_update_running_recipe)
         if hasattr(self.ui, 'groupBox_live_values'):
             keep.add(self.ui.groupBox_live_values)
+        runtime_editable = {
+            getattr(self.ui, name, None)
+            for name in (
+                'spinBox_max_current',
+                'spinBox_step_mA',
+                'spinBox_start_current',
+                'spinBox_loops',
+                'checkBox_infinite_loops',
+                'label_max_current',
+                'label_max_current_density',
+                'label_step',
+                'label_step_density',
+                'label_start_current',
+                'label_start_current_density',
+            )
+        }
         for child in self.ui.groupBox_process_settings.findChildren(QtWidgets.QWidget):
             if child in keep:
+                continue
+            if not enabled and child in runtime_editable:
+                child.setEnabled(True)
                 continue
             child.setEnabled(enabled)
 
@@ -4919,6 +5010,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_mode_action_state()
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
+        if hasattr(self.ui, 'pushButton_update_running_recipe'):
+            self.ui.pushButton_update_running_recipe.setEnabled(False)
+            self.ui.pushButton_update_running_recipe.setVisible(False)
 
     def stop_annealing(self, reason: str | None = None, *, show_dialog: bool = False):
         """Abort the annealing run and power down the supply safely."""
@@ -4965,6 +5059,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_process_controls_enabled(True)
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
+        if hasattr(self.ui, 'pushButton_update_running_recipe'):
+            self.ui.pushButton_update_running_recipe.setEnabled(False)
+            self.ui.pushButton_update_running_recipe.setVisible(False)
         self._update_mode_action_state()
         self._reset_voltage_projection()
         if hasattr(self.ui, 'label_time_to_limit'):

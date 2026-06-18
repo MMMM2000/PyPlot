@@ -767,6 +767,53 @@ def test_current_annealing_planned_time_has_no_hidden_hold_duration(qtbot) -> No
     assert window.compute_planned_seconds() == 4
 
 
+def test_current_annealing_runtime_recipe_fields_stay_editable(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    window._set_process_controls_enabled(False)
+
+    assert window.ui.spinBox_max_current.isEnabled()
+    assert window.ui.spinBox_step_mA.isEnabled()
+    assert window.ui.spinBox_start_current.isEnabled()
+    assert window.ui.spinBox_loops.isEnabled()
+    assert window.ui.checkBox_infinite_loops.isEnabled()
+    assert window.ui.label_max_current.isEnabled()
+    assert not window.ui.lineEdit_log_dir.isEnabled()
+
+
+def test_current_annealing_update_running_recipe_refreshes_live_plan(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.operation_mode = 2
+    window.process_running = True
+    window.direction_ascending = True
+    window.current_current_set = 0.007
+    window.current_increment = 0.001
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.loop_idx = 0
+    window.ui.spinBox_start_current.setValue(1)
+    window.ui.spinBox_max_current.setValue(10)
+    window.ui.spinBox_step_mA.setValue(1.0)
+    window.ui.spinBox_loops.setValue(2)
+    window._init_loop_tracking(window._planned_automatic_loop_steps(), 2, False)
+
+    window.ui.spinBox_max_current.setValue(6)
+    window.ui.spinBox_step_mA.setValue(0.2)
+    window.ui.spinBox_loops.setValue(3)
+    window.handle_update_running_recipe_clicked()
+
+    assert window.max_current_mA == 6
+    assert window.current_step_mA == pytest.approx(0.2)
+    assert window.current_step_A == pytest.approx(0.0002)
+    assert window.current_increment == pytest.approx(-0.0002)
+    assert window.direction_ascending is False
+    assert window.loop_target == 3
+    assert window._planned_loop_steps == 50
+    assert window.total_steps >= window.step_idx
+
+
 def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

@@ -680,6 +680,14 @@ class Ui_MainWindow(object):
         sticky_status_layout.addWidget(self.label_time_remaining)
         self.label_time_to_limit = QtWidgets.QLabel("To limit: N/A")
         sticky_status_layout.addWidget(self.label_time_to_limit)
+        self.pushButton_update_running_recipe = QtWidgets.QPushButton("Update running recipe")
+        self.pushButton_update_running_recipe.setEnabled(False)
+        self.pushButton_update_running_recipe.setVisible(False)
+        self.pushButton_update_running_recipe.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        sticky_status_layout.addWidget(self.pushButton_update_running_recipe)
 
         # Live values group
         self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
