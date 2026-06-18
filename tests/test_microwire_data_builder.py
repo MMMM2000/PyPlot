@@ -1211,6 +1211,111 @@ def test_annealing_section_migrates_low_graph_column_to_other_annealing() -> Non
         section.close()
 
 
+def test_annealing_high_preview_shows_missing_1000_placeholder_with_available_setpoints() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        def record(setpoint_mA: float, file_name: str) -> builder_ui.MeasurementRecord:
+            return builder_ui.MeasurementRecord(
+                path=Path(file_name),
+                metadata=core.MeasurementMetadata(
+                    composition_token="Ni42Fe27Ga23Cu4Co4",
+                    draw_x=1,
+                    piece_y=2,
+                    setpoint_mA=setpoint_mA,
+                    alt_variant=False,
+                    file_name=file_name,
+                    measurement_id=file_name,
+                    relpath=file_name,
+                    timestamp_mtime_utc="2026-06-18T00:00:00+00:00",
+                ),
+                dataframe=pd.DataFrame(
+                    {
+                        "I_mA": [10.0, 20.0, 30.0],
+                        "R_ohm": [35.0, 40.0, 45.0],
+                    }
+                ),
+                sanity_ok=True,
+                sanity_error=None,
+            )
+
+        key = "Ni42Fe27Ga23Cu4Co4|1|2"
+        records = [
+            record(60.0, "Ni42Fe27Ga23Cu4Co4 1_2 60mA.txt"),
+            record(120.0, "Ni42Fe27Ga23Cu4Co4 1_2 120mA.txt"),
+        ]
+        section._record_groups = {key: records}
+        row = pd.Series(
+            {
+                "Composition": "Ni42Fe27Ga23Cu4Co4",
+                "Microwire": "1/2",
+                builder_ui.ANNEALING_HIGH_GRAPH_COLUMN: None,
+                builder_ui.ANNEALING_OTHER_GRAPH_COLUMN: None,
+                "_group_key": key,
+                "_sources": [],
+            }
+        )
+
+        pixmap = section._preview_decoration(row, builder_ui.ANNEALING_HIGH_GRAPH_COLUMN)
+        tooltip = section._tooltip_for_cell(row, builder_ui.ANNEALING_HIGH_GRAPH_COLUMN)
+
+        assert isinstance(pixmap, QtGui.QPixmap)
+        assert not pixmap.isNull()
+        assert tooltip is not None
+        assert "No exact 1000 mA measurement available" in tooltip
+        assert "60, 120 mA" in tooltip
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_imported_rows_gain_imported_source_label_in_assemble_preview() -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_args: None)
+    try:
+        measured = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "5/4",
+                    "Data source": "Measured",
+                }
+            ]
+        )
+        assembly._imported_rows = {
+            "Ni50Fe27Ga23|5|4": {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4",
+                "Notes": "imported note",
+            }
+        }
+
+        merged = assembly._merge_imported_rows(measured)
+        with_labels = builder_ui._with_source_label_column(merged)
+
+        assert with_labels.loc[0, "Data source"] == "Measured + Imported"
+        assert with_labels.loc[0, builder_ui.SOURCE_LABEL_COLUMN] == "Imported"
+    finally:
+        assembly.close()
+
+
+def test_builder_window_import_menu_uses_source_wording(qtbot) -> None:
+    _ensure_qapp()
+    window = builder_ui.BuilderWindow()
+    qtbot.addWidget(window)
+    try:
+        assert window._show_imported_action is not None
+        assert window._separate_imported_action is not None
+        assert window._remove_imported_action is not None
+        assert window._show_imported_action.text() == "Show imported workbook rows"
+        assert window._separate_imported_action.text() == "Separate imported source rows"
+        assert window._remove_imported_action.text() == "Remove imported workbook data"
+        assert window._imported_item is not None
+        assert window._imported_item.text(0) == builder_ui.ANNEALING_IMPORTED_ITEM_LABEL
+    finally:
+        window.close()
+
+
 def test_annealing_section_merges_both_legacy_graph_columns_into_other_annealing() -> None:
     _ensure_qapp()
     section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
