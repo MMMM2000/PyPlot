@@ -55,6 +55,7 @@ The multi-agent workspace was not isolated as expected, so the resulting patch q
 - Mini DMA sample/project condition-only import-skip slice: `10 passed`; broader sample/naming/project slice: `60 passed`.
 - Mini DMA run-quality/core-plot CLI focused slice: `11 passed`.
 - AC sweep-start failure cleanup slice: `6 passed`; full AC plus shared-broker files after baseline-startup cleanup: `150 passed`.
+- 2026-06-18 integration pass merged `codex/mini-dma-current-hold-live-optimization` at `ab78c32` plus the master-thread fatigue recipe follow-up from `codex/ac-susceptibility-ui-stabilization`. Combined checks on Python 3.14.4: Mini DMA logger/bench/run-quality/fatigue-learning files `615 passed`; AC/shared-HMP files `150 passed`; Mini DMA module/script `py_compile` passed; `git diff --check` passed.
 
 ## Artifacts
 

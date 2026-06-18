@@ -1,5 +1,5 @@
 ledger:
-  updated_utc: "2026-06-15 11:09"
+  updated_utc: "2026-06-18 05:30"
   integration_branch: "codex/integration-mini-dma-ready-review"
   notes: >
     Master coordination ledger for active and recently handed-off PyPlot worker
@@ -261,6 +261,84 @@ tasks:
       final_status: "integrated into current branch; focused combined checks passed"
     links:
       handoff: "read from worker and prior master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "mini-dma-current-hold-live-optimization"
+    title: "Mini DMA current-hold live optimization and fatigue follow-up"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "019ed0b9-21d0-70d0-a15e-6d58b0404495"
+      thread_title: "Mini DMA current-hold optimization"
+      role: "worker"
+    git:
+      base_branch: "codex/integration-mini-dma-ready-review"
+      branch: "codex/mini-dma-current-hold-live-optimization"
+      upstream: "origin/codex/mini-dma-current-hold-live-optimization"
+      commit: "ab78c3276d4fd363a07a7e639c74c773f34fb140"
+      worktree: "83c1"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Integrates adaptive current-hold recovery live optimization, progress
+        reporting fixes during current-hold ramps, one-way current-sweep support,
+        bench-summary refresh during execution, offline stiff-sample guard
+        tooling, and the master-thread iso-stress fatigue recipe/learning
+        follow-up from `codex/ac-susceptibility-ui-stabilization`.
+      touched_files:
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "data_logging/mini_dma_logger/bench_automation.py"
+        - "data_logging/mini_dma_logger/stiff_sample_guard.py"
+        - "data_logging/mini_dma_logger/fatigue_learning.py"
+        - "scripts/mini_dma_stiff_sample_guard.py"
+        - "scripts/mini_dma_fatigue_learning.py"
+        - "tests/test_mini_dma_logger.py"
+        - "tests/test_mini_dma_bench_automation.py"
+        - "tests/test_mini_dma_fatigue_learning.py"
+      conflict_areas:
+        - "Mini DMA current-hold recovery"
+        - "Mini DMA current-sweep recipe generation"
+        - "Mini DMA fatigue recipe JSON/UI"
+        - "Mini DMA bench automation summaries"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Current-hold recovery adapts faster for improving stiff-sample errors while historical oscillation cases decline dynamic escape."
+        - "Current-sweep hold progress uses active current fraction instead of nominally reporting 100% too early."
+        - "Recipes can opt out of reverse current sweeps with `reverse_current: false`, while default behavior still sweeps back."
+        - "Bench supervisor summaries refresh during execution instead of showing stale previous-run data."
+        - "Offline stiff-sample guard reports soft/stiff/extreme-stiff and historical oscillation decisions."
+        - "Iso-stress fatigue repeats fixed-stress current cycles, can start with optional first overheating, and has offline fatigue-learning reports."
+      tests:
+        - "Worker reported full tests/test_mini_dma_logger.py: 582 passed."
+        - "Worker reported focused stiff guard tests: 2 passed."
+        - "Worker reported py_compile for Mini DMA modules/scripts passed."
+        - "Worker reported campaign checker OK on the final live campaign manifest."
+      screenshots_or_artifacts:
+        - "G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-17_Ni50Fe25Ga25_2-3_150MPa_60mA_control_opt/analysis/stiff_sample_guard.json"
+        - "G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-17_Ni50Fe25Ga25_2-3_150MPa_60mA_control_opt/analysis/completion_audit.md"
+      changelog_status: "Fragments added."
+      risks:
+        - "Live proof is on Ni50Fe25Ga25 2/3; a separate later campaign should physically validate a different/stiffer wire."
+        - "No live hardware was run from the master integration thread."
+    integration:
+      decision: "merge"
+      merged_commit: "ea58624, b731b76"
+      combined_checks:
+        - "2026-06-18 integration: py_compile Mini DMA modules/scripts passed."
+        - "2026-06-18 integration: tests/test_mini_dma_logger.py tests/test_mini_dma_bench_automation.py tests/test_mini_dma_run_quality.py tests/test_mini_dma_fatigue_learning.py: 615 passed."
+        - "2026-06-18 integration: tests/test_ac_susceptibility_logger.py tests/test_shared_power_supply_broker.py tests/test_shared_power_supply_setup_ui.py: 150 passed."
+        - "2026-06-18 integration: git diff --check passed."
+      regression_guarantees_to_recheck:
+        - "First-overheating and fatigue cycle numbering remain stable in UI and saved recipes."
+        - "Current-hold recovery does not reintroduce oscillation on historically stiff wires."
+        - "One-way current sweeps do not change default up/down sweep recipes."
+      final_status: "integrated into temporary integration merge branch; combined checks passed"
+    links:
+      handoff: "pasted in master thread"
       pr: ""
       artifacts: []
 
