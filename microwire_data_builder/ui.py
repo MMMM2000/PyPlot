@@ -35092,39 +35092,20 @@ def main() -> QtWidgets.QWidget | None:
         app = QtWidgets.QApplication(sys.argv)
         ensure_app_theme(app)
         owns_app = True
-    placeholder = QtWidgets.QMainWindow()
-    placeholder.setWindowTitle("Microwire Data Builder")
-    placeholder.resize(420, 260)
-    loading_label = QtWidgets.QLabel("Loading Microwire Data Builder...", placeholder)
-    loading_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-    loading_label.setStyleSheet("font-size: 16px; font-weight: 600;")
-    placeholder.setCentralWidget(loading_label)
-    placeholder.show()
-    try:
-        app.processEvents()
-    except Exception:
-        pass
 
     window_holder: dict[str, QtWidgets.QWidget] = {}
 
     def _launch() -> None:
         window = BuilderWindow()
         window_holder["window"] = window
-        try:
-            window.show()
-        except Exception:
-            window.show()
-        placeholder.close()
+        window.show()
         try:
             app.processEvents()
         except Exception:
             pass
-        scheduler = getattr(window, "schedule_startup_auto_open", None)
-        if callable(scheduler):
-            scheduler()
 
     if owns_app:
-        QtCore.QTimer.singleShot(0, _launch)
+        _launch()
         app.exec()
         return window_holder.get("window")
 
