@@ -21043,7 +21043,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._refresh_record_groups()
 
     def _preview_icon_width(self) -> int:
-        count = max(int(getattr(self, "_preview_group_count", 1)), 1)
+        count = min(max(int(getattr(self, "_preview_group_count", 1)), 1), 2)
         return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
@@ -21543,6 +21543,9 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
+            # Keep table refresh responsive. The explicit Open graphs action
+            # still renders all records; table thumbnails only need a preview.
+            records = list(records)[:2]
             items = _vsm_temperature_preview_items(
                 records,
                 self.logger,
@@ -33646,6 +33649,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._startup_auto_open_scheduled = False
 
     def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
+        if os.environ.get("MICROWIRE_BUILDER_ENABLE_STARTUP_AUTO_OPEN", "").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return
         if getattr(self, "_startup_auto_open_scheduled", False):
             return
         self._startup_auto_open_scheduled = True
