@@ -6865,11 +6865,31 @@ def test_annealing_transition_review_pick_writes_selected_manual_label() -> None
         record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
         payload = stored[record_id]
         assert payload["final_values_mA"]["Af1"] == pytest.approx(21.5)
-        assert dialog._tree.topLevelItem(0).text(1) == "manual adjusted"  # noqa: SLF001
-        assert "Reviewed: Af1 21.5 mA" in dialog._summary_label.text()  # noqa: SLF001
+        assert dialog._tree.topLevelItem(0).text(1) == "Manual adjusted"  # noqa: SLF001
+        assert "Reviewed: I_Af1 21.5 mA" in dialog._summary_label.text()  # noqa: SLF001
     finally:
         dialog.hide()
         dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_plot_display_single_click_picks_transition_value() -> None:
+    _ensure_qapp()
+    display = builder_ui._AnnealingPlotDisplay(  # noqa: SLF001
+        "Current annealing transition review",
+        logging.getLogger("test"),
+        show_transition_markers=True,
+    )
+    picked: list[float] = []
+    display.valuePicked.connect(picked.append)
+    try:
+        display._handle_click(SimpleNamespace(button=1, xdata=18.25))  # noqa: SLF001
+
+        assert picked == [pytest.approx(18.25)]
+        assert "18.25 mA" in display.cursor_label.text()
+    finally:
+        display.hide()
+        display.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 
@@ -6912,6 +6932,7 @@ def test_annealing_transition_review_manual_values_are_record_scoped() -> None:
         dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
         dialog._phase_controls.set_target("As1")  # noqa: SLF001
         dialog._handle_plot_pick(37.428)  # noqa: SLF001
+        dialog._handle_plot_pick(38.125)  # noqa: SLF001
         dialog._phase_controls.set_target("Af1")  # noqa: SLF001
         dialog._handle_plot_pick(52.961)  # noqa: SLF001
 
@@ -6924,8 +6945,114 @@ def test_annealing_transition_review_manual_values_are_record_scoped() -> None:
         values = dialog._phase_controls.values()  # noqa: SLF001
         assert values["As1"] is None
         assert values["Af1"] is None
-        assert stored[first_id]["final_values_mA"]["As1"] == pytest.approx(37.428)
+        assert stored[first_id]["final_values_mA"]["As1"] == pytest.approx(38.125)
         assert stored[first_id]["final_values_mA"]["Af1"] == pytest.approx(52.961)
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_actions_update_visible_statuses() -> None:
+    _ensure_qapp()
+
+    def _record(setpoint: int, name: str) -> MeasurementRecord:
+        return MeasurementRecord(
+            path=Path(name),
+            metadata=MeasurementMetadata(
+                composition_token="Ni44Fe27Ga23Cu3Co3",
+                draw_x=1,
+                piece_y=2,
+                setpoint_mA=setpoint,
+                alt_variant=False,
+                measurement_id=name,
+                file_name=name,
+                relpath=name,
+                timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, float(setpoint)], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+
+    records = [
+        _record(60, "Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt"),
+        _record(70, "Ni44Fe27Ga23Cu3Co3 1_2 70mA 2loops.txt"),
+        _record(80, "Ni44Fe27Ga23Cu3Co3 1_2 80mA 2loops.txt"),
+    ]
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        records,
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    try:
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        dialog._phase_controls.set_target("As1")  # noqa: SLF001
+        dialog._handle_plot_pick(12.5)  # noqa: SLF001
+        dialog._accept_current_and_next()  # noqa: SLF001
+        assert dialog._tree.topLevelItem(0).text(1) == "Accepted"  # noqa: SLF001
+
+        dialog._mark_current_no_transition()  # noqa: SLF001
+        assert dialog._tree.topLevelItem(1).text(1) == "No transition"  # noqa: SLF001
+
+        dialog._exclude_current_graph()  # noqa: SLF001
+        assert dialog._tree.topLevelItem(2).text(1) == "Excluded"  # noqa: SLF001
+        detail = dialog._summary_label.text()  # noqa: SLF001
+        assert "Review state: Excluded" in detail
+        assert "Review state: Unreviewed" not in detail
+        assert "No transition" not in detail
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_no_transition_detail_is_not_excluded() -> None:
+    _ensure_qapp()
+    record = MeasurementRecord(
+        path=Path("Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt"),
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=60,
+            alt_variant=False,
+            measurement_id="no-transition-status",
+            file_name="Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt",
+            relpath="Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt",
+            timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [1.0, 60.0], "R_Ohm": [100.0, 120.0]}),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    try:
+        dialog._mark_current_no_transition()  # noqa: SLF001
+        detail = dialog._summary_label.text()  # noqa: SLF001
+
+        assert dialog._tree.topLevelItem(0).text(1) == "No transition"  # noqa: SLF001
+        assert "Review state: No transition" in detail
+        assert "Excluded from current-density" not in detail
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        assert stored[record_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert stored[record_id]["included"] is False
     finally:
         dialog.hide()
         dialog.deleteLater()

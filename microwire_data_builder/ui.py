@@ -4135,7 +4135,7 @@ def _add_reviewed_transition_markers(
             linestyle=linestyle,
             linewidth=1.8,
             alpha=0.95,
-            label=f"review {label} {float(value):.1f} mA",
+            label=f"review I_{label} {float(value):.1f} mA",
         )
         added = True
     if added:
@@ -5352,7 +5352,10 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self._update_cursor_label(value)
 
     def _handle_click(self, event: Any) -> None:
-        if event is None or not getattr(event, "dblclick", False):
+        if event is None:
+            return
+        button = getattr(event, "button", None)
+        if button not in (None, 1):
             return
         if event.xdata is None:
             return
@@ -5686,6 +5689,49 @@ def _format_phase_current_value(value: float) -> str:
     return f"{float(value):.3f}".rstrip("0").rstrip(".")
 
 
+def _phase_current_label(label: str) -> str:
+    return f"I_{label}"
+
+
+def _transition_review_status_label(
+    status: str | None,
+    *,
+    has_values: bool = False,
+    has_auto_values: bool = False,
+) -> str:
+    normalized = str(status or "").strip()
+    if normalized == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+        return "Accepted"
+    if normalized == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+        return "Manual adjusted"
+    if normalized == TRANSITION_REVIEW_STATUS_NO_TRANSITION:
+        return "No transition"
+    if normalized == TRANSITION_REVIEW_STATUS_EXCLUDED:
+        return "Excluded"
+    if normalized == TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION:
+        return "Needs attention"
+    if has_values:
+        return "Manual adjusted"
+    if has_auto_values:
+        return "Auto candidates"
+    return "Unreviewed"
+
+
+def _transition_review_status_color(status_label: str) -> str:
+    normalized = status_label.lower()
+    if normalized in {"accepted", "manual adjusted"}:
+        return "#4ade80"
+    if normalized == "no transition":
+        return "#93c5fd"
+    if normalized == "excluded":
+        return "#f87171"
+    if normalized == "needs attention":
+        return "#facc15"
+    if normalized == "auto candidates":
+        return "#fbbf24"
+    return "#d1d5db"
+
+
 class _PhasePointEditorControls(QtWidgets.QWidget):
     valuesEdited = QtCore.pyqtSignal(dict)
 
@@ -5708,6 +5754,14 @@ class _PhasePointEditorControls(QtWidgets.QWidget):
         header.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(header)
 
+        hint = QtWidgets.QLabel(
+            "Select a transition current, then click the graph to add or move its vertical line.",
+            self,
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(mid); font-size: 10px;")
+        layout.addWidget(hint)
+
         grid = QtWidgets.QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(6)
@@ -5717,13 +5771,17 @@ class _PhasePointEditorControls(QtWidgets.QWidget):
         for index, label in enumerate(PHASE_POINT_LABELS):
             row = index // 4
             col = (index % 4) * 2
-            radio = QtWidgets.QRadioButton(label, self)
+            radio = QtWidgets.QRadioButton(_phase_current_label(label), self)
+            radio.setToolTip(
+                f"Select {_phase_current_label(label)}, then click the graph to place its reviewed current."
+            )
             if index == 0:
                 radio.setChecked(True)
             edit = QtWidgets.QLineEdit(self)
             edit.setValidator(validator)
             edit.setMaximumWidth(72)
             edit.setPlaceholderText("mA")
+            edit.setToolTip(f"Reviewed {_phase_current_label(label)} current in mA.")
             edit.returnPressed.connect(self._emit_values)
             self._target_buttons[label] = radio
             self._edits[label] = edit
@@ -5893,6 +5951,12 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._tree.setUniformRowHeights(True)
         self._tree.setRootIsDecorated(False)
         self._tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        try:
+            self._tree.header().setStretchLastSection(False)
+        except Exception:
+            pass
+        self._tree.setColumnWidth(0, 240)
+        self._tree.setColumnWidth(1, 120)
         splitter.addWidget(self._tree)
 
         right = QtWidgets.QWidget(splitter)
@@ -5902,7 +5966,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         action_row = QtWidgets.QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(6)
-        self._accept_next_button = QtWidgets.QPushButton("Accept & next", right)
+        self._accept_next_button = QtWidgets.QPushButton("Accept && next", right)
         self._accept_next_button.clicked.connect(self._accept_current_and_next)
         action_row.addWidget(self._accept_next_button)
         self._no_transition_button = QtWidgets.QPushButton("No transition", right)
@@ -5969,8 +6033,10 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
             if entry.summary_lines:
                 item.setToolTip(0, "\n".join(entry.summary_lines))
+            self._apply_status_to_item(item, entry, payload, values)
             self._tree.addTopLevelItem(item)
-        self._tree.resizeColumnToContents(0)
+        self._tree.setColumnWidth(0, 240)
+        self._tree.setColumnWidth(1, 120)
 
     def _review_payload_for_id(self, record_id: Optional[str]) -> Dict[str, Any]:
         if not record_id or not callable(self._transition_reviews_provider):
@@ -5987,6 +6053,12 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         entry: _AnnealingTransitionReviewEntry,
         payload: Mapping[str, Any],
     ) -> Dict[str, float]:
+        status = str(payload.get("status") or "").strip()
+        if status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            return {}
         manual = _clean_transition_values(payload.get("manual_values_mA"))
         if manual:
             return manual
@@ -6004,14 +6076,26 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         values: Mapping[str, Any],
     ) -> str:
         status = str(payload.get("status") or "").strip()
-        if status:
-            return status.replace("_", " ")
         has_values = any(CurrentDensitySection._coerce_phase_value(values.get(label)) is not None for label in PHASE_POINT_LABELS)
-        if has_values:
-            return "reviewed"
-        if entry.auto_values:
-            return "auto candidates"
-        return entry.status
+        return _transition_review_status_label(
+            status,
+            has_values=has_values,
+            has_auto_values=bool(entry.auto_values),
+        )
+
+    @staticmethod
+    def _apply_status_to_item(
+        item: QtWidgets.QTreeWidgetItem,
+        entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
+        values: Mapping[str, Any],
+    ) -> None:
+        status_label = _AnnealingTransitionReviewDialog._status_for_entry(entry, payload, values)
+        item.setText(1, status_label)
+        color = _transition_review_status_color(status_label)
+        brush = QtGui.QBrush(QtGui.QColor(color))
+        item.setForeground(1, brush)
+        item.setToolTip(1, status_label)
 
     @staticmethod
     def _manual_summary(values: Mapping[str, Any]) -> str:
@@ -6019,7 +6103,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         for label in PHASE_POINT_LABELS:
             value = CurrentDensitySection._coerce_phase_value(values.get(label))
             if value is not None:
-                parts.append(f"{label} {_format_phase_current_value(value)} mA")
+                parts.append(f"{_phase_current_label(label)} {_format_phase_current_value(value)} mA")
         return ", ".join(parts)
 
     def _summary_text(
@@ -6028,18 +6112,34 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         payload: Mapping[str, Any],
         values: Mapping[str, Any],
     ) -> str:
-        lines = list(entry.summary_lines)
+        status = str(payload.get("status") or "").strip()
+        has_values = any(
+            CurrentDensitySection._coerce_phase_value(values.get(label)) is not None
+            for label in PHASE_POINT_LABELS
+        )
+        status_label = _transition_review_status_label(
+            status,
+            has_values=has_values,
+            has_auto_values=bool(entry.auto_values),
+        )
+        lines = [f"Review state: {status_label}"]
+        if status_label in {"Accepted", "Manual adjusted"}:
+            lines.append("Included in current-density and Assemble transition summaries.")
+        elif status_label == "No transition":
+            lines.append("Reviewed as no transition; the graph remains valid but contributes no transition currents.")
+        elif status_label == "Excluded":
+            lines.append("Excluded from current-density and Assemble transition summaries.")
+        elif status_label == "Auto candidates":
+            lines.append("Automatic candidates are available but have not been accepted yet.")
+        else:
+            lines.append("Not yet reviewed for transition summaries.")
+        if entry.summary_lines:
+            lines.append("")
+            lines.extend(entry.summary_lines)
         manual = self._manual_summary(values)
         if manual:
             lines.append(f"Reviewed: {manual}")
-        status = str(payload.get("status") or "").strip()
-        if status:
-            lines.append(f"Status: {status.replace('_', ' ')}")
-        if payload.get("included") is False:
-            lines.append("Excluded from Assemble/current-density summary.")
-        if lines:
-            return "\n".join(lines)
-        return "No automatic transition candidates were detected."
+        return "\n".join(lines)
 
     def _handle_current_item_changed(
         self,
@@ -6072,7 +6172,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._phase_controls.setEnabled(bool(self._current_record_id and callable(self._transition_reviews_setter)))
         self._phase_controls.set_values(values)
         self._summary_label.setText(self._summary_text(entry, payload, values))
-        current.setText(1, self._status_for_entry(entry, payload, values))
+        self._apply_status_to_item(current, entry, payload, values)
         self._display.set_record(
             entry.record,
             setpoint=_extract_setpoint(entry.record),
@@ -6121,7 +6221,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
                 reviewed_values=stored_values,
             )
             if self._current_item is not None:
-                self._current_item.setText(1, self._status_for_entry(entry, stored_payload, stored_values))
+                self._apply_status_to_item(self._current_item, entry, stored_payload, stored_values)
 
     def _store_current_review(self, status: str, *, included: bool, values: Optional[Mapping[str, Any]] = None) -> None:
         record_id = self._current_record_id
@@ -6157,7 +6257,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             reviewed_values=refreshed_values,
         )
         if self._current_item is not None:
-            self._current_item.setText(1, self._status_for_entry(entry, refreshed, refreshed_values))
+            self._apply_status_to_item(self._current_item, entry, refreshed, refreshed_values)
 
     def _accept_current_and_next(self) -> None:
         entry = self._current_entry()
@@ -6165,7 +6265,10 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             return
         payload = self._review_payload_for_id(entry.record_id)
         values = self._values_for_entry(entry, payload) or dict(entry.auto_values)
-        self._store_current_review(TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO, included=bool(values), values=values)
+        if values:
+            self._store_current_review(TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO, included=True, values=values)
+        else:
+            self._store_current_review(TRANSITION_REVIEW_STATUS_NO_TRANSITION, included=False)
         self._select_next_unreviewed(fallback_next=True)
 
     def _mark_current_no_transition(self) -> None:
