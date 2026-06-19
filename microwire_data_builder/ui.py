@@ -4070,7 +4070,7 @@ def _annotate_transition_marker(
     reviewed: bool = False,
 ) -> None:
     try:
-        axis.text(
+        text = axis.text(
             float(value),
             0.985 if reviewed else 0.92,
             label,
@@ -4092,6 +4092,10 @@ def _annotate_transition_marker(
             clip_on=False,
             zorder=8 if reviewed else 6,
         )
+        try:
+            text.set_gid("reviewed_transition_label" if reviewed else "auto_transition_label")
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -4167,7 +4171,7 @@ def _add_reviewed_transition_markers(
         base = label[:2]
         color, linestyle = style_map.get(base, ("#111827", "-"))
         numeric = float(value)
-        axis.axvline(
+        line = axis.axvline(
             numeric,
             color=color,
             linestyle=linestyle,
@@ -4176,6 +4180,10 @@ def _add_reviewed_transition_markers(
             label="_nolegend_",
             zorder=7,
         )
+        try:
+            line.set_gid("reviewed_transition_marker")
+        except Exception:
+            pass
         _annotate_transition_marker(
             axis,
             numeric,
@@ -5508,6 +5516,35 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             pass
         return figure
 
+    def update_reviewed_values(self, values: Optional[Mapping[str, Any]]) -> bool:
+        canvas = self._canvas
+        if canvas is None:
+            return False
+        figure = getattr(canvas, "figure", None)
+        if figure is None or not getattr(figure, "axes", None):
+            return False
+        axis = figure.axes[0]
+        for artist in list(getattr(axis, "lines", [])) + list(getattr(axis, "texts", [])):
+            try:
+                gid = artist.get_gid()
+            except Exception:
+                gid = None
+            if gid not in {"reviewed_transition_marker", "reviewed_transition_label"}:
+                continue
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        _add_reviewed_transition_markers(figure, values)
+        try:
+            canvas.draw_idle()
+        except Exception:
+            try:
+                canvas.draw()
+            except Exception:
+                return False
+        return True
+
 
 class _AnnealingPlotGallery(QtWidgets.QWidget):
     valuePicked = QtCore.pyqtSignal(float)
@@ -6139,8 +6176,18 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             "unreviewed": 0,
             "auto_candidates": 0,
         }
+        snapshot: Dict[str, Any] = {}
+        if callable(self._transition_reviews_provider):
+            try:
+                raw_snapshot = self._transition_reviews_provider()
+            except Exception:
+                raw_snapshot = {}
+            if isinstance(raw_snapshot, dict):
+                snapshot = raw_snapshot
         for entry in self._entries:
-            payload = self._review_payload_for_id(entry.record_id)
+            payload = snapshot.get(entry.record_id, {}) if entry.record_id else {}
+            if not isinstance(payload, dict):
+                payload = {}
             values = self._values_for_entry(entry, payload)
             status_label = self._status_for_entry(entry, payload, values)
             if entry.auto_values:
@@ -6363,17 +6410,25 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             stored_values = self._values_for_entry(entry, stored_payload)
             self._phase_controls.set_auto_values(entry.auto_values)
             self._summary_label.setText(self._summary_text(entry, stored_payload, stored_values))
-            self._display.set_record(
-                entry.record,
-                setpoint=_extract_setpoint(entry.record),
-                description="Select an annealing run to review.",
-                reviewed_values=stored_values,
-            )
+            if not self._display.update_reviewed_values(stored_values):
+                self._display.set_record(
+                    entry.record,
+                    setpoint=_extract_setpoint(entry.record),
+                    description="Select an annealing run to review.",
+                    reviewed_values=stored_values,
+                )
             if self._current_item is not None:
                 self._apply_status_to_item(self._current_item, entry, stored_payload, stored_values)
             self._refresh_counts()
 
-    def _store_current_review(self, status: str, *, included: bool, values: Optional[Mapping[str, Any]] = None) -> None:
+    def _store_current_review(
+        self,
+        status: str,
+        *,
+        included: bool,
+        values: Optional[Mapping[str, Any]] = None,
+        refresh_display: bool = True,
+    ) -> None:
         record_id = self._current_record_id
         entry = self._current_entry()
         if not record_id or entry is None or not callable(self._transition_reviews_setter):
@@ -6401,12 +6456,14 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._phase_controls.set_auto_values(entry.auto_values)
         self._phase_controls.set_values(refreshed_values)
         self._summary_label.setText(self._summary_text(entry, refreshed, refreshed_values))
-        self._display.set_record(
-            entry.record,
-            setpoint=_extract_setpoint(entry.record),
-            description="Select an annealing run to review.",
-            reviewed_values=refreshed_values,
-        )
+        if refresh_display:
+            if not self._display.update_reviewed_values(refreshed_values):
+                self._display.set_record(
+                    entry.record,
+                    setpoint=_extract_setpoint(entry.record),
+                    description="Select an annealing run to review.",
+                    reviewed_values=refreshed_values,
+                )
         if self._current_item is not None:
             self._apply_status_to_item(self._current_item, entry, refreshed, refreshed_values)
         self._refresh_counts()
@@ -6418,17 +6475,34 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         payload = self._review_payload_for_id(entry.record_id)
         values = self._values_for_entry(entry, payload) or dict(entry.auto_values)
         if values:
-            self._store_current_review(TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO, included=True, values=values)
+            self._store_current_review(
+                TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                included=True,
+                values=values,
+                refresh_display=False,
+            )
         else:
-            self._store_current_review(TRANSITION_REVIEW_STATUS_NO_TRANSITION, included=False)
+            self._store_current_review(
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                included=False,
+                refresh_display=False,
+            )
         self._select_next_unreviewed(fallback_next=True)
 
     def _mark_current_no_transition(self) -> None:
-        self._store_current_review(TRANSITION_REVIEW_STATUS_NO_TRANSITION, included=False)
+        self._store_current_review(
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            included=False,
+            refresh_display=False,
+        )
         self._select_next_unreviewed(fallback_next=True)
 
     def _exclude_current_graph(self) -> None:
-        self._store_current_review(TRANSITION_REVIEW_STATUS_EXCLUDED, included=False)
+        self._store_current_review(
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+            included=False,
+            refresh_display=False,
+        )
         self._select_next_unreviewed(fallback_next=True)
 
     def _select_previous_item(self) -> None:
@@ -6444,6 +6518,14 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         if count <= 0:
             return
         current_row = self._tree.indexOfTopLevelItem(self._current_item) if self._current_item is not None else -1
+        snapshot: Dict[str, Any] = {}
+        if callable(self._transition_reviews_provider):
+            try:
+                raw_snapshot = self._transition_reviews_provider()
+            except Exception:
+                raw_snapshot = {}
+            if isinstance(raw_snapshot, dict):
+                snapshot = raw_snapshot
         for offset in range(1, count + 1):
             row = (current_row + offset) % count
             item = self._tree.topLevelItem(row)
@@ -6454,7 +6536,9 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
                 entry = self._entries[int(index)]
             except Exception:
                 continue
-            payload = self._review_payload_for_id(entry.record_id)
+            payload = snapshot.get(entry.record_id, {}) if entry.record_id else {}
+            if not isinstance(payload, dict):
+                payload = {}
             status = str(payload.get("status") or "").strip()
             if not status or status == TRANSITION_REVIEW_STATUS_UNREVIEWED:
                 self._tree.setCurrentItem(item)
