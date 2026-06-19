@@ -4061,6 +4061,41 @@ def _render_measurement_pixmap(
             plt.close(figure)
 
 
+def _annotate_transition_marker(
+    axis: Any,
+    value: float,
+    label: str,
+    color: str,
+    *,
+    reviewed: bool = False,
+) -> None:
+    try:
+        axis.text(
+            float(value),
+            0.985 if reviewed else 0.92,
+            label,
+            transform=axis.get_xaxis_transform(),
+            rotation=90,
+            rotation_mode="anchor",
+            va="top",
+            ha="right",
+            color=color,
+            fontsize=8,
+            fontweight="bold" if reviewed else "normal",
+            bbox={
+                "boxstyle": "round,pad=0.16",
+                "facecolor": "white",
+                "edgecolor": color,
+                "alpha": 0.86 if reviewed else 0.68,
+                "linewidth": 0.6,
+            },
+            clip_on=False,
+            zorder=8 if reviewed else 6,
+        )
+    except Exception:
+        pass
+
+
 def _add_annealing_transition_markers(
     figure: Figure | None,
     plot_df: pd.DataFrame,
@@ -4076,27 +4111,29 @@ def _add_annealing_transition_markers(
         return
     axis = figure.axes[0]
     added = False
-    multiple = len(summaries) > 1
     for summary in summaries:
         loop_index = getattr(summary, "loop_index", None)
-        suffix = str(loop_index) if loop_index is not None and (multiple or loop_index != 1) else ""
+        suffix = str(loop_index) if loop_index is not None else ""
         markers = (
-            (f"As{suffix}", getattr(summary, "as_current_mA", None), "#2ca02c", "--"),
-            (f"Af{suffix}", getattr(summary, "af_current_mA", None), "#2ca02c", ":"),
-            (f"Ms{suffix}", getattr(summary, "ms_current_mA", None), "#9467bd", "--"),
-            (f"Mf{suffix}", getattr(summary, "mf_current_mA", None), "#9467bd", ":"),
+            (f"As{suffix}", getattr(summary, "as_current_mA", None), "#65a30d", "--"),
+            (f"Af{suffix}", getattr(summary, "af_current_mA", None), "#65a30d", ":"),
+            (f"Ms{suffix}", getattr(summary, "ms_current_mA", None), "#7e22ce", "--"),
+            (f"Mf{suffix}", getattr(summary, "mf_current_mA", None), "#7e22ce", ":"),
         )
         for label, value, color, linestyle in markers:
             if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 continue
+            numeric = float(value)
             axis.axvline(
-                float(value),
+                numeric,
                 color=color,
                 linestyle=linestyle,
-                linewidth=1.1,
-                alpha=0.9,
-                label=f"{label} {float(value):.0f} mA",
+                linewidth=0.95,
+                alpha=0.48,
+                label="_nolegend_",
+                zorder=3,
             )
+            _annotate_transition_marker(axis, numeric, label, color, reviewed=False)
             added = True
     if not added:
         return
@@ -4129,13 +4166,22 @@ def _add_reviewed_transition_markers(
             continue
         base = label[:2]
         color, linestyle = style_map.get(base, ("#111827", "-"))
+        numeric = float(value)
         axis.axvline(
-            float(value),
+            numeric,
             color=color,
             linestyle=linestyle,
             linewidth=1.8,
             alpha=0.95,
-            label=f"review I_{label} {float(value):.1f} mA",
+            label="_nolegend_",
+            zorder=7,
+        )
+        _annotate_transition_marker(
+            axis,
+            numeric,
+            _phase_current_label(label),
+            color,
+            reviewed=True,
         )
         added = True
     if added:
@@ -5744,6 +5790,7 @@ class _PhasePointEditorControls(QtWidgets.QWidget):
         super().__init__(parent)
         self._updating = False
         self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
+        self._auto_labels: Dict[str, QtWidgets.QLabel] = {}
         self._edits: Dict[str, QtWidgets.QLineEdit] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -5770,13 +5817,17 @@ class _PhasePointEditorControls(QtWidgets.QWidget):
         validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
         for index, label in enumerate(PHASE_POINT_LABELS):
             row = index // 4
-            col = (index % 4) * 2
+            col = (index % 4) * 3
             radio = QtWidgets.QRadioButton(_phase_current_label(label), self)
             radio.setToolTip(
                 f"Select {_phase_current_label(label)}, then click the graph to place its reviewed current."
             )
             if index == 0:
                 radio.setChecked(True)
+            auto_label = QtWidgets.QLabel("Auto: --", self)
+            auto_label.setMinimumWidth(64)
+            auto_label.setStyleSheet("color: #fbbf24; font-size: 10px;")
+            auto_label.setToolTip(f"Automatic candidate for {_phase_current_label(label)}.")
             edit = QtWidgets.QLineEdit(self)
             edit.setValidator(validator)
             edit.setMaximumWidth(72)
@@ -5784,9 +5835,11 @@ class _PhasePointEditorControls(QtWidgets.QWidget):
             edit.setToolTip(f"Reviewed {_phase_current_label(label)} current in mA.")
             edit.returnPressed.connect(self._emit_values)
             self._target_buttons[label] = radio
+            self._auto_labels[label] = auto_label
             self._edits[label] = edit
             grid.addWidget(radio, row, col)
-            grid.addWidget(edit, row, col + 1)
+            grid.addWidget(auto_label, row, col + 1)
+            grid.addWidget(edit, row, col + 2)
         layout.addLayout(grid)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -5826,8 +5879,30 @@ class _PhasePointEditorControls(QtWidgets.QWidget):
                     value = values.get("Ms")
                 numeric = CurrentDensitySection._coerce_phase_value(value)
                 edit.setText(_format_phase_current_value(numeric) if numeric is not None else "")
+                if numeric is not None:
+                    edit.setStyleSheet("color: #22c55e; font-weight: 600;")
+                else:
+                    edit.setStyleSheet("")
         finally:
             self._updating = False
+
+    def set_auto_values(self, values: Mapping[str, Any]) -> None:
+        for label in PHASE_POINT_LABELS:
+            widget = self._auto_labels.get(label)
+            if widget is None:
+                continue
+            value = values.get(label)
+            if value is None and label == "As1":
+                value = values.get("As")
+            if value is None and label == "Ms1":
+                value = values.get("Ms")
+            numeric = CurrentDensitySection._coerce_phase_value(value)
+            if numeric is None:
+                widget.setText("Auto: --")
+                widget.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            else:
+                widget.setText(f"Auto: {_format_phase_current_value(numeric)}")
+                widget.setStyleSheet("color: #fbbf24; font-size: 10px; font-weight: 600;")
 
     def values(self) -> Dict[str, Optional[float]]:
         result: Dict[str, Optional[float]] = {}
@@ -6150,6 +6225,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._display.clear("Select an annealing run to review.")
             self._summary_label.setText("")
             self._phase_controls.setEnabled(False)
+            self._phase_controls.set_auto_values({})
             self._phase_controls.set_values({})
             self._current_record_id = None
             self._current_item = None
@@ -6161,6 +6237,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._display.clear("Select an annealing run to review.")
             self._summary_label.setText("")
             self._phase_controls.setEnabled(False)
+            self._phase_controls.set_auto_values({})
             self._phase_controls.set_values({})
             self._current_record_id = None
             self._current_item = None
@@ -6170,6 +6247,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         payload = self._review_payload_for_id(entry.record_id)
         values = self._values_for_entry(entry, payload)
         self._phase_controls.setEnabled(bool(self._current_record_id and callable(self._transition_reviews_setter)))
+        self._phase_controls.set_auto_values(entry.auto_values)
         self._phase_controls.set_values(values)
         self._summary_label.setText(self._summary_text(entry, payload, values))
         self._apply_status_to_item(current, entry, payload, values)
@@ -6213,6 +6291,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         if entry is not None:
             stored_payload = self._review_payload_for_id(record_id)
             stored_values = self._values_for_entry(entry, stored_payload)
+            self._phase_controls.set_auto_values(entry.auto_values)
             self._summary_label.setText(self._summary_text(entry, stored_payload, stored_values))
             self._display.set_record(
                 entry.record,
@@ -6248,6 +6327,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             return
         refreshed = self._review_payload_for_id(record_id)
         refreshed_values = self._values_for_entry(entry, refreshed)
+        self._phase_controls.set_auto_values(entry.auto_values)
         self._phase_controls.set_values(refreshed_values)
         self._summary_label.setText(self._summary_text(entry, refreshed, refreshed_values))
         self._display.set_record(

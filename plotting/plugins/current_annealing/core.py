@@ -534,14 +534,14 @@ def _fit_cooling_resistance_increase_segment(
     *,
     max_current_mA: float,
 ) -> _AnnealingTransitionCandidate | None:
-    if len(segment.index) < 18:
+    if len(segment.index) < 12:
         return None
     current = pd.to_numeric(segment["I_mA"], errors="coerce")
     resistance = pd.to_numeric(segment["R_Ohm"], errors="coerce")
     valid = current.notna() & resistance.notna()
     x = current.loc[valid].to_numpy(dtype=float)
     y = resistance.loc[valid].to_numpy(dtype=float)
-    if len(x) < 18 or len(np.unique(x)) < 18:
+    if len(x) < 12 or len(np.unique(x)) < 12:
         return None
     order = np.argsort(x, kind="stable")
     x = x[order]
@@ -549,7 +549,7 @@ def _fit_cooling_resistance_increase_segment(
     eligible = x < float(max_current_mA)
     x = x[eligible]
     y = y[eligible]
-    if len(x) < 14 or len(np.unique(x)) < 14:
+    if len(x) < 10 or len(np.unique(x)) < 10:
         return None
     scan_width = float(np.nanmax(x) - np.nanmin(x))
     if not math.isfinite(scan_width) or scan_width <= 0.0:

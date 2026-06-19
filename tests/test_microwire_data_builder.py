@@ -795,10 +795,9 @@ def test_annealing_display_review_mode_marks_auto_transition_currents(
     try:
         axes = figure.axes[0]
         labels = [text.get_text() for text in axes.get_legend().get_texts()]
-        assert "As 25 mA" in labels
-        assert "Af 40 mA" in labels
-        assert "Ms 38 mA" in labels
-        assert "Mf 20 mA" in labels
+        assert labels == ["Increasing 1"]
+        inline_labels = {text.get_text() for text in axes.texts}
+        assert {"As1", "Af1", "Ms1", "Mf1"}.issubset(inline_labels)
     finally:
         builder_ui.plt.close(figure)
 
@@ -6890,6 +6889,72 @@ def test_annealing_plot_display_single_click_picks_transition_value() -> None:
     finally:
         display.hide()
         display.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_markers_use_inline_labels_without_legend_clutter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    figure = builder_ui.Figure(figsize=(4, 3))
+    axis = figure.add_subplot(111)
+    axis.plot([1.0, 60.0], [100.0, 140.0], label="Increasing 1")
+    summary = SimpleNamespace(
+        loop_index=1,
+        as_current_mA=12.0,
+        af_current_mA=24.0,
+        ms_current_mA=36.0,
+        mf_current_mA=18.0,
+    )
+    monkeypatch.setattr(builder_ui, "summarize_annealing_transition_loops", lambda _df: (summary,))
+    try:
+        builder_ui._add_annealing_transition_markers(  # noqa: SLF001
+            figure,
+            pd.DataFrame({"I_mA": [1.0, 60.0], "R_Ohm": [100.0, 140.0]}),
+        )
+
+        text_labels = {text.get_text() for text in axis.texts}
+        assert {"As1", "Af1", "Ms1", "Mf1"}.issubset(text_labels)
+        legend_labels = axis.get_legend_handles_labels()[1]
+        assert legend_labels == ["Increasing 1"]
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_reviewed_transition_markers_use_inline_current_labels() -> None:
+    figure = builder_ui.Figure(figsize=(4, 3))
+    axis = figure.add_subplot(111)
+    axis.plot([1.0, 60.0], [100.0, 140.0], label="Increasing 1")
+    try:
+        builder_ui._add_reviewed_transition_markers(  # noqa: SLF001
+            figure,
+            {"As1": 12.5, "Af1": 42.0},
+        )
+
+        text_labels = {text.get_text() for text in axis.texts}
+        assert {"I_As1", "I_Af1"}.issubset(text_labels)
+        assert all(line.get_label() == "_nolegend_" for line in axis.lines[1:])
+    finally:
+        builder_ui.plt.close(figure)
+
+
+def test_phase_point_editor_displays_auto_and_reviewed_values_distinctly() -> None:
+    _ensure_qapp()
+    controls = builder_ui._PhasePointEditorControls(  # noqa: SLF001
+        title="Reviewed transition currents I_As/I_Af/I_Ms/I_Mf (mA)"
+    )
+    try:
+        controls.set_auto_values({"As1": 12.0, "Af1": 24.0})  # noqa: SLF001
+        controls.set_values({"As1": 14.0})
+
+        assert controls._auto_labels["As1"].text() == "Auto: 12"  # noqa: SLF001
+        assert controls._auto_labels["Af1"].text() == "Auto: 24"  # noqa: SLF001
+        assert controls._edits["As1"].text() == "14"  # noqa: SLF001
+        assert controls._edits["Af1"].text() == ""  # noqa: SLF001
+        assert "#22c55e" in controls._edits["As1"].styleSheet()  # noqa: SLF001
+        assert "#fbbf24" in controls._auto_labels["As1"].styleSheet()  # noqa: SLF001
+    finally:
+        controls.hide()
+        controls.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 
