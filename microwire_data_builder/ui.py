@@ -640,6 +640,25 @@ def _builder_dialogs_suppressed() -> bool:
     }
 
 
+def _builder_project_load_active() -> bool:
+    return bool(getattr(MiniDatabaseSection, "_project_load_batch_mode", False))
+
+
+def _log_builder_timing(
+    logger: logging.Logger,
+    event: str,
+    started_s: float,
+    **fields: object,
+) -> None:
+    duration_ms = (time.perf_counter() - started_s) * 1000.0
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    suffix = f" {details}" if details else ""
+    try:
+        logger.debug("Builder timing: %s duration_ms=%.1f%s", event, duration_ms, suffix)
+    except Exception:
+        pass
+
+
 def _open_microwire_eda_window(config: object, parent: QtWidgets.QWidget | None = None) -> None:
     from microwire_eda import launch_eda_window
 
@@ -11205,10 +11224,21 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
         """Restore section state from a project payload."""
 
+        started_s = time.perf_counter()
         if not isinstance(payload, Mapping):
             self.reset_to_blank()
+            _log_builder_timing(
+                self.logger,
+                "section_import",
+                started_s,
+                section=self.section_key,
+                rows=0,
+                payloads=0,
+                reset=True,
+            )
             return
 
+        decoded_payload_count = 0
         columns_payload = payload.get("columns")
         if isinstance(columns_payload, (list, tuple)):
             column_names = [str(column) for column in columns_payload]
@@ -11255,17 +11285,34 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.model.set_frame(frame)
         self._refresh_source_filter_options()
         self._pending_count_cache = 0
+        save_started_s = time.perf_counter()
         self.store.save(self.data)
+        _log_builder_timing(
+            self.logger,
+            "section_import_store_save",
+            save_started_s,
+            section=self.section_key,
+            rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
+        )
         project_payloads = payload.get("payloads")
         if isinstance(project_payloads, Mapping):
             for name, encoded in project_payloads.items():
                 if not isinstance(name, str) or not name.strip():
                     continue
+                payload_started_s = time.perf_counter()
                 decoded = _decode_project_payload(encoded)
                 if decoded is None:
                     continue
                 try:
                     self.store.save_payload(name.strip(), decoded)
+                    decoded_payload_count += 1
+                    _log_builder_timing(
+                        self.logger,
+                        "section_import_payload",
+                        payload_started_s,
+                        section=self.section_key,
+                        payload=name.strip(),
+                    )
                 except Exception:
                     self.logger.exception(
                         "Failed to restore project payload %s for section %s",
@@ -11275,6 +11322,15 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._populate_sources_list()
         if self._project_load_batch_mode:
             self._reset_progress_ui()
+            _log_builder_timing(
+                self.logger,
+                "section_import",
+                started_s,
+                section=self.section_key,
+                rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
+                payloads=decoded_payload_count,
+                batch=True,
+            )
             return
         self._auto_fit_columns()
         self._update_status()
@@ -11288,6 +11344,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.data_updated.emit()
         except Exception:
             pass
+        _log_builder_timing(
+            self.logger,
+            "section_import",
+            started_s,
+            section=self.section_key,
+            rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
+            payloads=decoded_payload_count,
+        )
 
     def _new_project(self) -> None:
         if self._dirty:
@@ -18232,10 +18296,11 @@ class TransitionTempsSection(QtWidgets.QWidget):
             )
         else:
             self._hide_internal_columns()
-        try:
-            self.table_view.resizeColumnsToContents()
-        except Exception:
-            pass
+        if not MiniDatabaseSection._project_load_batch_mode:
+            try:
+                self.table_view.resizeColumnsToContents()
+            except Exception:
+                pass
         self._restore_selection(selected_key)
         self._update_preview()
 
@@ -28949,7 +29014,16 @@ class AssemblySection(QtWidgets.QWidget):
         graph_preview = payload.get("graph_preview")
         if isinstance(graph_preview, bool):
             try:
-                self.graph_panel_checkbox.setChecked(graph_preview)
+                if _builder_project_load_active():
+                    blocker = QtCore.QSignalBlocker(self.graph_panel_checkbox)
+                    try:
+                        self.graph_panel_checkbox.setChecked(False)
+                    finally:
+                        del blocker
+                    if hasattr(self, "graph_preview_panel"):
+                        self.graph_preview_panel.setVisible(False)
+                else:
+                    self.graph_panel_checkbox.setChecked(graph_preview)
             except Exception:
                 pass
         selected_columns = payload.get("selected_columns")
@@ -30543,6 +30617,8 @@ class AssemblySection(QtWidgets.QWidget):
         return pd.DataFrame(expanded_rows)
 
     def _refresh_preview_frame(self) -> None:
+        started_s = time.perf_counter()
+        loading = _builder_project_load_active()
         raw_frame = self._raw_preview_frame
         total_rows = 0
         if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
@@ -30609,12 +30685,22 @@ class AssemblySection(QtWidgets.QWidget):
                     header.setDefaultSectionSize(self.preview_table.fontMetrics().height() + 8)
         except Exception:
             pass
-        try:
-            self.preview_table.resizeColumnsToContents()
-        except Exception:
-            pass
+        if not loading:
+            try:
+                resize_started_s = time.perf_counter()
+                self.preview_table.resizeColumnsToContents()
+                _log_builder_timing(
+                    self.logger,
+                    "assemble_preview_resize",
+                    resize_started_s,
+                    rows=len(display_frame.index) if isinstance(display_frame, pd.DataFrame) else 0,
+                    columns=len(display_frame.columns) if isinstance(display_frame, pd.DataFrame) else 0,
+                )
+            except Exception:
+                pass
         self._update_preview_graph_buttons()
-        self._update_graph_preview_panel()
+        if not loading:
+            self._update_graph_preview_panel()
         row_count = len(display_frame.index) if isinstance(display_frame, pd.DataFrame) else 0
         if row_count:
             if (self._preview_search_text or self._preview_source_filter_text != SOURCE_LABEL_ALL) and total_rows != row_count:
@@ -30630,6 +30716,14 @@ class AssemblySection(QtWidgets.QWidget):
                 self.status_label.setText("Preview is empty.")
         if hasattr(self, "clear_sort_button"):
             self.clear_sort_button.setEnabled(bool(self._sort_spec))
+        _log_builder_timing(
+            self.logger,
+            "assemble_preview_refresh",
+            started_s,
+            rows=row_count,
+            columns=len(display_frame.columns) if isinstance(display_frame, pd.DataFrame) else 0,
+            load=loading,
+        )
 
     @staticmethod
     def _normalise_search_text(value: object) -> str:
@@ -30914,6 +31008,7 @@ class AssemblySection(QtWidgets.QWidget):
         cached = self._graph_pixmap_cache.get(cache_key)
         if cached is not None:
             return cached
+        started_s = time.perf_counter()
         pixmaps = [item.pixmap for item in items if item.pixmap is not None]
         count = max(len(pixmaps), 1)
         spacing = 6
@@ -30935,11 +31030,19 @@ class AssemblySection(QtWidgets.QWidget):
             )
         if combined is not None:
             self._graph_pixmap_cache[cache_key] = combined
+        _log_builder_timing(
+            self.logger,
+            "assemble_preview_pixmap_miss",
+            started_s,
+            key=cache_key[0] if cache_key else "",
+            count=len(pixmaps),
+        )
         return combined
 
     def _preview_decoration(
         self, row: pd.Series, column_label: str
     ) -> Optional[QtGui.QPixmap]:
+        started_s = time.perf_counter()
         if column_label not in self._inline_graph_columns:
             return None
         key = _row_to_microwire_key(row)
@@ -30976,6 +31079,12 @@ class AssemblySection(QtWidgets.QWidget):
                     if pixmap is None:
                         return None
                     self._graph_pixmap_cache[cache_key] = pixmap
+                    _log_builder_timing(
+                        self.logger,
+                        "assemble_preview_decoration_miss",
+                        started_s,
+                        column=column_label,
+                    )
                     return pixmap
                 if not other_records:
                     return None
@@ -31008,13 +31117,25 @@ class AssemblySection(QtWidgets.QWidget):
                 )
                 if combined is not None:
                     self._graph_pixmap_cache[cache_key] = combined
+                _log_builder_timing(
+                    self.logger,
+                    "assemble_preview_decoration_miss",
+                    started_s,
+                    column=column_label,
+                )
                 return combined
             if column_label == VSM_HYSTERESIS_COLUMN:
                 records = self._ensure_vsm_hysteresis_groups().get(key, [])
                 if not records:
                     return None
                 signature = self._record_signature(records)
-                cache_key = ("vsm_hysteresis", key, signature)
+                cache_key = (
+                    "vsm_hysteresis",
+                    key,
+                    signature,
+                    _load_vsm_hysteresis_angle_filter_mode(),
+                    _load_vsm_hysteresis_preview_range_oe(),
+                )
                 items = _vsm_hysteresis_preview_items(
                     records,
                     self.logger,
@@ -31027,7 +31148,12 @@ class AssemblySection(QtWidgets.QWidget):
                 if not records:
                     return None
                 signature = self._record_signature(records)
-                cache_key = ("vsm_temperature", key, signature)
+                cache_key = (
+                    "vsm_temperature",
+                    key,
+                    signature,
+                    _load_vsm_temperature_preview_mode(),
+                )
                 items = _vsm_temperature_preview_items(
                     records,
                     self.logger,
@@ -31439,6 +31565,9 @@ class AssemblySection(QtWidgets.QWidget):
     def _toggle_graph_preview_panel(self, checked: bool) -> None:
         if not hasattr(self, "graph_preview_panel"):
             return
+        if _builder_project_load_active():
+            self.graph_preview_panel.setVisible(False)
+            return
         self.graph_preview_panel.setVisible(bool(checked))
         splitter = getattr(self, "preview_splitter", None)
         if isinstance(splitter, QtWidgets.QSplitter):
@@ -31453,6 +31582,8 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _update_graph_preview_panel(self, *_: Any) -> None:
         try:
+            if _builder_project_load_active():
+                return
             if not getattr(self, "graph_preview_panel", None):
                 return
             if not self.graph_preview_panel.isVisible():
@@ -35181,6 +35312,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if getattr(self, "_project_load_in_progress", False):
             self.logger.warning("Project load already in progress; ignoring request for %s", target)
             return
+        load_started_s = time.perf_counter()
         self._project_load_in_progress = True
         progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         total_steps = max(len(self.sections) + 1, 1)
@@ -35226,7 +35358,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         self._suppress_dirty = True
         try:
+            read_started_s = time.perf_counter()
             payload = json.loads(target.read_text(encoding="utf-8"))
+            _log_builder_timing(self.logger, "project_load_read", read_started_s, path=target)
             _pump_events(0)
 
             if payload.get("kind") != self.PROJECT_KIND:
@@ -35252,7 +35386,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             section.reset_to_blank()
                         section_payload = sections_payload.get(key)
                         try:
+                            section_started_s = time.perf_counter()
                             importer(section_payload or {})
+                            _log_builder_timing(
+                                self.logger,
+                                "project_load_section",
+                                section_started_s,
+                                section=key,
+                            )
                         except Exception as exc:
                             self.logger.error("Failed to load section %s from project: %s", key, exc)
                     _pump_events(index)
@@ -35263,7 +35404,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     importer = getattr(assembly, "import_project_payload", None)
                     if callable(importer):
                         try:
+                            assembly_started_s = time.perf_counter()
                             importer(assembly_payload or {})
+                            _log_builder_timing(
+                                self.logger,
+                                "project_load_section",
+                                assembly_started_s,
+                                section="assemble",
+                            )
                         except Exception as exc:
                             self.logger.error("Failed to load section assemble: %s", exc)
             self._update_imported_data_item()
@@ -35288,7 +35436,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._update_project_title()
+            refresh_started_s = time.perf_counter()
             self._refresh_sections_after_project_load()
+            _log_builder_timing(self.logger, "project_load_post_refresh", refresh_started_s)
             self._update_project_actions()
             self._dirty = False
             self.logger.info("Project loaded from %s", target)
@@ -35308,6 +35458,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 f"Failed to load project file:\n{exc}",
             )
         finally:
+            _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
             self._project_load_in_progress = False
             MiniDatabaseSection._project_load_batch_mode = False
             self._suppress_dirty = False
