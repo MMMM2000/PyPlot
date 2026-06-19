@@ -5616,6 +5616,12 @@ TRANSITION_REVIEW_INCLUDED_STATUSES = {
     TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
 }
 
+MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION = 1
+MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY = "mini_dma_transition_reviews"
+MINI_DMA_REVIEW_STATUS_ACCEPTED = "accepted"
+MINI_DMA_REVIEW_STATUS_NO_TRANSITION = "no_transition"
+MINI_DMA_REVIEW_STATUS_EXCLUDED = "excluded"
+
 
 def _coerce_finite_float(value: Any) -> Optional[float]:
     if value is None:
@@ -6882,6 +6888,55 @@ class _MiniDmaTransitionReviewEntry:
     target_summary: Any
 
 
+def _mini_dma_review_record_id(record: MiniDmaRecord, target_label: str) -> str:
+    path = getattr(record, "path", None)
+    if isinstance(path, Path):
+        try:
+            path_text = str(path.resolve())
+        except Exception:
+            path_text = str(path)
+    else:
+        path_text = repr(record)
+    return f"{path_text}::{target_label}"
+
+
+def _mini_dma_transition_values_from_summary(target_summary: object) -> Dict[str, float]:
+    mapping = {
+        "As": "as_current_mA",
+        "Af": "af_current_mA",
+        "Ms": "ms_current_mA",
+        "Mf": "mf_current_mA",
+    }
+    values: Dict[str, float] = {}
+    for label, attr in mapping.items():
+        value = getattr(target_summary, attr, None)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            values[label] = float(value)
+    return values
+
+
+def _mini_dma_review_status_label(status: str) -> str:
+    if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+        return "Reviewed"
+    if status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
+        return "No transition"
+    if status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
+        return "Excluded"
+    return "Unreviewed"
+
+
+def _mini_dma_display_status(entry: _MiniDmaTransitionReviewEntry, review: Mapping[str, Any] | None) -> str:
+    status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+    label = _mini_dma_review_status_label(status)
+    if label != "Unreviewed":
+        return label
+    if entry.status == "accepted":
+        return "Auto accepted"
+    if entry.status == "partial":
+        return "Auto partial"
+    return "Auto rejected"
+
+
 @dataclass
 class _MiniDmaTransitionReviewRunNode:
     key: str
@@ -6989,11 +7044,16 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         records: Sequence[MiniDmaRecord],
         logger: logging.Logger,
         parent: QtWidgets.QWidget | None = None,
+        *,
+        review_provider: Optional[Callable[[], Dict[str, Dict[str, Any]]]] = None,
+        review_setter: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Mini DMA transition review")
         self.resize(1280, 820)
         self._logger = logger
+        self._review_provider = review_provider
+        self._review_setter = review_setter
         self._runs = self._run_nodes(records)
         self._entries_by_run: Dict[str, List[_MiniDmaTransitionReviewEntry]] = {}
         self._entries: List[_MiniDmaTransitionReviewEntry] = []
@@ -7019,6 +7079,10 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.show_markers_check.setChecked(True)
         self.next_rejected_button = QtWidgets.QPushButton("Next rejected")
         self.next_questionable_button = QtWidgets.QPushButton("Next partial")
+        self.accept_button = QtWidgets.QPushButton("Accept & next")
+        self.no_transition_button = QtWidgets.QPushButton("No transition")
+        self.exclude_button = QtWidgets.QPushButton("Exclude target")
+        self.next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed")
         self.status_label = QtWidgets.QLabel("Select a run to load its transition fits.")
         for widget in (
             self.accepted_only_check,
@@ -7028,6 +7092,10 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             self.show_markers_check,
             self.next_rejected_button,
             self.next_questionable_button,
+            self.accept_button,
+            self.no_transition_button,
+            self.exclude_button,
+            self.next_unreviewed_button,
         ):
             controls.addWidget(widget)
         controls.addWidget(self.status_label, 1)
@@ -7068,6 +7136,10 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.show_markers_check.toggled.connect(lambda *_args: self._redraw_current())
         self.next_rejected_button.clicked.connect(lambda: self._select_next_status({"rejected"}))
         self.next_questionable_button.clicked.connect(lambda: self._select_next_status({"partial"}))
+        self.accept_button.clicked.connect(self._accept_current_and_next)
+        self.no_transition_button.clicked.connect(lambda: self._set_current_review(MINI_DMA_REVIEW_STATUS_NO_TRANSITION, move_next=True))
+        self.exclude_button.clicked.connect(lambda: self._set_current_review(MINI_DMA_REVIEW_STATUS_EXCLUDED, move_next=True))
+        self.next_unreviewed_button.clicked.connect(self._select_next_unreviewed)
         self.tree.currentItemChanged.connect(self._handle_tree_selection)
         self._refresh_tree()
         QtCore.QTimer.singleShot(0, self._select_initial_run)
@@ -7129,6 +7201,19 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             return
         self._refresh_tree()
 
+    def _review_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        if not callable(self._review_provider):
+            return {}
+        try:
+            snapshot = self._review_provider()
+        except Exception:
+            self._logger.exception("Failed to load Mini DMA transition reviews")
+            return {}
+        return snapshot if isinstance(snapshot, dict) else {}
+
+    def _review_for_entry(self, entry: _MiniDmaTransitionReviewEntry) -> Dict[str, Any]:
+        return self._review_snapshot().get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
+
     def _entry_allowed(self, entry: _MiniDmaTransitionReviewEntry) -> bool:
         if self.accepted_only_check.isChecked() and entry.status != "accepted":
             return False
@@ -7176,7 +7261,11 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 ref = (run.key, index)
                 self._visible_refs.append(ref)
                 shown += 1
-                leaf = QtWidgets.QTreeWidgetItem([entry.target_label, entry.status])
+                review = self._review_for_entry(entry)
+                leaf = QtWidgets.QTreeWidgetItem([
+                    entry.target_label,
+                    _mini_dma_display_status(entry, review),
+                ])
                 leaf.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("entry", run.key, index))
                 run_item.addChild(leaf)
                 self._tree_items[ref] = leaf
@@ -7192,6 +7281,39 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         elif not self._visible_refs and not self._runs:
             self._current_ref = None
             self._show_empty()
+        self._update_review_counts()
+
+    def _iter_loaded_entries(self) -> Iterable[Tuple[str, int, _MiniDmaTransitionReviewEntry]]:
+        for key, entries in self._entries_by_run.items():
+            for index, entry in enumerate(entries):
+                yield key, index, entry
+
+    def _review_counts(self) -> Tuple[int, int, int, int, int]:
+        loaded = 0
+        reviewed = 0
+        no_transition = 0
+        excluded = 0
+        snapshot = self._review_snapshot()
+        for _key, _index, entry in self._iter_loaded_entries():
+            loaded += 1
+            review = snapshot.get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
+            status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+            if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                reviewed += 1
+            elif status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
+                no_transition += 1
+            elif status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
+                excluded += 1
+        return loaded, reviewed, no_transition, excluded, max(loaded - reviewed - no_transition - excluded, 0)
+
+    def _update_review_counts(self) -> None:
+        loaded, reviewed, no_transition, excluded, unreviewed = self._review_counts()
+        if loaded <= 0:
+            return
+        self.status_label.setText(
+            f"Loaded {loaded} target(s): {reviewed} reviewed, "
+            f"{no_transition} no transition, {excluded} excluded, {unreviewed} unreviewed."
+        )
 
     def _select_initial_run(self) -> None:
         if self._closing:
@@ -7269,6 +7391,66 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             if item is not None:
                 self.tree.setCurrentItem(item)
                 return
+
+    def _select_next_unreviewed(self) -> None:
+        snapshot = self._review_snapshot()
+        refs: List[Tuple[str, int]] = []
+        for ref in self._visible_refs:
+            entries = self._entries_by_run.get(ref[0], [])
+            if ref[1] < 0 or ref[1] >= len(entries):
+                continue
+            entry = entries[ref[1]]
+            review = snapshot.get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
+            status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+            if status not in {
+                MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                MINI_DMA_REVIEW_STATUS_EXCLUDED,
+            }:
+                refs.append(ref)
+        if not refs:
+            return
+        start_position = 0
+        if self._current_ref in refs:
+            start_position = refs.index(cast(Tuple[str, int], self._current_ref)) + 1
+        for ref in refs[start_position:] + refs[:start_position]:
+            item = self._tree_items.get(ref)
+            if item is not None:
+                self.tree.setCurrentItem(item)
+                return
+
+    def _accept_current_and_next(self) -> None:
+        self._set_current_review(MINI_DMA_REVIEW_STATUS_ACCEPTED, move_next=True)
+
+    def _set_current_review(self, status: str, *, move_next: bool = False) -> None:
+        if self._current_ref is None:
+            return
+        if not callable(self._review_setter):
+            return
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        entry = entries[index]
+        record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+        payload: Dict[str, Any] = {
+            "status": status,
+            "sample": entry.sample,
+            "run_label": entry.run_label,
+            "target_label": entry.target_label,
+            "auto_status": entry.status,
+        }
+        values = _mini_dma_transition_values_from_summary(entry.target_summary)
+        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and values:
+            payload["values"] = values
+        try:
+            self._review_setter(record_id, payload)
+        except Exception:
+            self._logger.exception("Failed to store Mini DMA transition review")
+            return
+        self._refresh_tree()
+        if move_next:
+            self._select_next_unreviewed()
 
     def _ensure_run_loaded(self, key: str, *, select_first: bool = False) -> None:
         if key in self._entries_by_run:
@@ -7379,7 +7561,8 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         if self.show_fit_lines_check.isChecked():
             self._draw_transition_fit_lines(ax, entry, strain)
         ax.set_title(
-            f"{entry.sample} - {entry.run_label} - {entry.target_label} ({entry.status})"
+            f"{entry.sample} - {entry.run_label} - {entry.target_label} "
+            f"({_mini_dma_display_status(entry, self._review_for_entry(entry))})"
         )
         ax.set_ylabel("Strain [%]")
         ax.grid(True, alpha=0.25)
@@ -17027,6 +17210,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
 
         total = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
         annotated = 0
+        auto_estimated = 0
         if total and isinstance(frame, pd.DataFrame):
             series = []
             for column in TRANSITION_TEMP_COLUMN_MAP.values():
@@ -17034,8 +17218,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if series:
                 stacked = pd.concat(series, axis=1)
                 annotated = int(stacked.notna().any(axis=1).sum())
+                auto_estimated = self._auto_estimated_transition_count(
+                    frame,
+                    manually_annotated=stacked.notna().any(axis=1),
+                )
         status_text = (
-            f"{annotated} of {total} sample(s) have transition temps annotated."
+            f"{annotated} of {total} sample(s) have manual transition temps; "
+            f"{auto_estimated} additional sample(s) have automatic estimates."
             if total
             else "No VSM temperature scan data yet."
         )
@@ -17081,6 +17270,43 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 if isinstance(path, Path):
                     sources.append(str(path))
         self._last_sources = list(dict.fromkeys(sources))
+
+    def _auto_estimated_transition_count(
+        self,
+        frame: pd.DataFrame,
+        *,
+        manually_annotated: pd.Series,
+    ) -> int:
+        processor = _get_vsm_temp_processor(self.logger)
+        if processor is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+            return 0
+        count = 0
+        for row_index, row in frame.iterrows():
+            try:
+                if bool(manually_annotated.loc[row_index]):
+                    continue
+            except Exception:
+                pass
+            key = row.get("_group_key")
+            if not isinstance(key, str) or not key.strip():
+                continue
+            records = self._record_groups.get(key, [])
+            for record in records:
+                data = getattr(record, "data", None)
+                if not isinstance(data, pd.DataFrame) or data.empty:
+                    continue
+                try:
+                    estimated = processor.estimate_transition_points(data)
+                except Exception:
+                    continue
+                if any(
+                    isinstance(estimated.get(label), (int, float))
+                    and math.isfinite(float(estimated.get(label)))
+                    for label in TRANSITION_TEMP_LABELS
+                ):
+                    count += 1
+                    break
+        return count
 
     def _build_frame(self) -> pd.DataFrame:
         rows: List[Dict[str, Any]] = []
@@ -20577,6 +20803,7 @@ class MiniDmaSection(MiniDatabaseSection):
         self._record_groups: Dict[str, List[MiniDmaRecord]] = {}
         self._record_groups_by_key: Dict[str, List[MiniDmaRecord]] = {}
         self._all_mini_dma_records: List[MiniDmaRecord] = []
+        self._transition_reviews: Dict[str, Dict[str, Any]] = {}
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._preview_group_count = 1
         self._preview_spacing = 6
@@ -20597,6 +20824,7 @@ class MiniDmaSection(MiniDatabaseSection):
         )
         self.review_transitions_button.clicked.connect(self._open_transition_review)
         self.controls_layout.addWidget(self.review_transitions_button)
+        self._load_transition_reviews()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
@@ -20799,11 +21027,13 @@ class MiniDmaSection(MiniDatabaseSection):
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
         _drop_visible_sample_column(self)
+        self._load_transition_reviews()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self._load_transition_reviews()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
@@ -20946,8 +21176,84 @@ class MiniDmaSection(MiniDatabaseSection):
                 "No Mini DMA runs are available to review.",
             )
             return
-        dialog = _MiniDmaTransitionReviewDialog(records, self.logger, self)
+        dialog = _MiniDmaTransitionReviewDialog(
+            records,
+            self.logger,
+            self,
+            review_provider=self.transition_reviews_snapshot,
+            review_setter=self.set_transition_review_for_target,
+        )
         dialog.exec()
+
+    def _load_transition_reviews(self) -> None:
+        raw = self.data.extra.get(MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY)
+        if not isinstance(raw, dict):
+            self._transition_reviews = {}
+            return
+        records = raw.get("records") if isinstance(raw.get("records"), dict) else raw
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        if isinstance(records, dict):
+            for record_id, payload in records.items():
+                entry = self._clean_transition_review_payload(record_id, payload)
+                if entry:
+                    cleaned[str(record_id)] = entry
+        self._transition_reviews = cleaned
+
+    @staticmethod
+    def _clean_transition_review_payload(
+        record_id: object,
+        payload: object,
+    ) -> Dict[str, Any]:
+        if not isinstance(record_id, str) or not record_id.strip() or not isinstance(payload, dict):
+            return {}
+        status = str(payload.get("status") or "").strip()
+        if status not in {
+            MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            MINI_DMA_REVIEW_STATUS_EXCLUDED,
+        }:
+            return {}
+        entry: Dict[str, Any] = {"status": status}
+        for field in ("sample", "run_label", "target_label", "auto_status"):
+            value = payload.get(field)
+            if isinstance(value, str) and value.strip():
+                entry[field] = value.strip()
+        values = payload.get("values")
+        if isinstance(values, dict):
+            cleaned_values: Dict[str, float] = {}
+            for label in ("As", "Af", "Ms", "Mf"):
+                value = values.get(label)
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    cleaned_values[label] = float(value)
+            if cleaned_values:
+                entry["values"] = cleaned_values
+        return entry
+
+    def _store_transition_reviews(self) -> None:
+        self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
+            "schema_version": MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": self.transition_reviews_snapshot(),
+        }
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist Mini DMA transition reviews")
+
+    def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                snapshot[str(record_id)] = entry
+        return snapshot
+
+    def set_transition_review_for_target(self, record_id: str, payload: Dict[str, Any]) -> None:
+        entry = self._clean_transition_review_payload(record_id, payload)
+        if entry:
+            self._transition_reviews[str(record_id)] = entry
+        else:
+            self._transition_reviews.pop(str(record_id), None)
+        self._store_transition_reviews()
 
     def _open_selected(self, *, open_origin: bool) -> None:
         records = self._selected_records()

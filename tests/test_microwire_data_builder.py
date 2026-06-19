@@ -2028,6 +2028,47 @@ def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_mini_dma_transition_review_actions_persist_target_status() -> None:
+    _ensure_qapp()
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_review(record_id: str, payload: dict[str, object]) -> None:
+        stored[record_id] = dict(payload)
+
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+        review_provider=lambda: stored,
+        review_setter=_set_review,
+    )
+    try:
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+            [_sample_mini_dma_record()],
+            logging.getLogger("test"),
+        )
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, entries)  # noqa: SLF001
+        )
+        first_ref = dialog._visible_refs[0]  # noqa: SLF001
+        dialog.tree.setCurrentItem(dialog._tree_items[first_ref])  # noqa: SLF001
+
+        dialog._set_current_review(  # noqa: SLF001
+            builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            move_next=False,
+        )
+
+        assert len(stored) == 1
+        payload = next(iter(stored.values()))
+        assert payload["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION
+        assert payload["target_label"] == entries[first_ref[1]].target_label
+        assert dialog._tree_items[first_ref].text(1) == "No transition"  # noqa: SLF001
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) -> None:
     iso_current = MiniDmaRecord(
         path=_write_iso_current_mini_dma_run(tmp_path),
@@ -2142,6 +2183,73 @@ def test_mini_dma_section_opens_transition_review_for_all_records_without_select
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_section_cleans_and_snapshots_transition_reviews() -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        section.set_transition_review_for_target(
+            "run::50 MPa",
+            {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                "sample": "Ni50Fe27Ga23 12_2",
+                "target_label": "50 MPa",
+                "values": {"As": 30.0, "Af": 70.0, "bad": "ignored"},
+            },
+        )
+
+        snapshot = section.transition_reviews_snapshot()
+
+        assert snapshot["run::50 MPa"]["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED
+        assert snapshot["run::50 MPa"]["values"] == {"As": 30.0, "Af": 70.0}
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_temps_counts_auto_estimated_unannotated_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcessor:
+        def estimate_transition_points(self, _data: pd.DataFrame) -> dict[str, float]:
+            return {"As": 30.0, "Af": 70.0}
+
+    section = builder_ui.TransitionTempsSection.__new__(builder_ui.TransitionTempsSection)
+    section.logger = logging.getLogger("test")
+    section._record_groups = {  # noqa: SLF001
+        "Ni50Fe27Ga23|12|2|": [
+            VsmTemperatureScanRecord(
+                path=Path("scan.txt"),
+                sample="Ni50Fe27Ga23 12_2",
+                data=pd.DataFrame({"Temperature": [0.0, 1.0], "Signal": [1.0, 2.0]}),
+                key=("Ni50Fe27Ga23", 12, 2),
+                label="scan",
+            )
+        ],
+        "Ni50Fe27Ga23|12|3|": [
+            VsmTemperatureScanRecord(
+                path=Path("scan2.txt"),
+                sample="Ni50Fe27Ga23 12_3",
+                data=pd.DataFrame({"Temperature": [0.0, 1.0], "Signal": [1.0, 2.0]}),
+                key=("Ni50Fe27Ga23", 12, 3),
+                label="scan2",
+            )
+        ],
+    }
+    monkeypatch.setattr(builder_ui, "_get_vsm_temp_processor", lambda _logger: FakeProcessor())
+    frame = pd.DataFrame(
+        {
+            "_group_key": ["Ni50Fe27Ga23|12|2|", "Ni50Fe27Ga23|12|3|"],
+        }
+    )
+    manual = pd.Series([False, True], index=frame.index)
+
+    assert section._auto_estimated_transition_count(  # noqa: SLF001
+        frame,
+        manually_annotated=manual,
+    ) == 1
 
 
 def test_mini_dma_preview_items_render_real_thumbnail() -> None:
