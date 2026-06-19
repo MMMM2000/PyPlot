@@ -85,6 +85,27 @@ def _experiment_process_launcher(
     return factory
 
 
+_BUILDER_PROCESSES: list[subprocess.Popen[Any]] = []
+
+
+def _builder_process_launcher(module: str) -> LauncherFactory:
+    def factory(*_args: Any, **_kwargs: Any) -> QtWidgets.QWidget | None:
+        env = os.environ.copy()
+        env.pop("QT_QPA_PLATFORM", None)
+        env.setdefault("PYPLOT_NO_PAUSE", "1")
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        process = subprocess.Popen(
+            [sys.executable, "-m", module],
+            cwd=str(Path(__file__).resolve().parent),
+            env=env,
+            creationflags=creationflags,
+        )
+        _BUILDER_PROCESSES.append(process)
+        return None
+
+    return factory
+
+
 EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
     "current_annealing": ExperimentProcessSpec(
         display_name="Current Annealing Logger",
@@ -5277,7 +5298,7 @@ EMULATORS: Dict[str, LauncherFactory] = {
 }
 
 BUILDERS: Dict[str, LauncherFactory] = {
-    "Microwire Data Builder": _lazy("microwire_data_builder", "main"),
+    "Microwire Data Builder": _builder_process_launcher("microwire_data_builder"),
     "Universal Video Builder": _lazy("microwire_data_builder.universal_video_builder", "main"),
     "Microwire EDA": _lazy("microwire_eda", "main"),
 }
