@@ -7505,6 +7505,49 @@ def build_database(
             if entry:
                 current_density_map[_microwire_key_to_str(key_parts)] = entry
     current_density_map = dict(current_density_map)
+    current_density_phase_columns = {
+        "As1 (mA)": "J_As1 (A/mm^2)",
+        "Af1 (mA)": "J_Af1 (A/mm^2)",
+        "Ms1 (mA)": "J_Ms1 (A/mm^2)",
+        "Mf1 (mA)": "J_Mf1 (A/mm^2)",
+        "As2 (mA)": "J_As2 (A/mm^2)",
+        "Af2 (mA)": "J_Af2 (A/mm^2)",
+        "Ms2 (mA)": "J_Ms2 (A/mm^2)",
+        "Mf2 (mA)": "J_Mf2 (A/mm^2)",
+    }
+
+    def _backfill_current_densities(row: Dict[str, object]) -> None:
+        diameter_um = _parse_numeric(row.get(d_column))
+        if diameter_um is None or diameter_um <= 0:
+            return
+        diameter_mm = diameter_um / 1000.0
+        area_mm2 = math.pi * (diameter_mm / 2.0) ** 2
+        if area_mm2 <= 0 or not math.isfinite(area_mm2):
+            return
+        for current_column, density_column in current_density_phase_columns.items():
+            if density_column not in output_columns:
+                continue
+            existing = row.get(density_column)
+            if existing not in (None, "") and not _is_nan(existing):
+                continue
+            current_mA = _parse_numeric(row.get(current_column))
+            if current_mA is None or not math.isfinite(current_mA):
+                continue
+            row[density_column] = (current_mA / 1000.0) / area_mm2
+        if (
+            "As current density (A/mm^2)" in output_columns
+            and (row.get("As current density (A/mm^2)") in (None, "") or _is_nan(row.get("As current density (A/mm^2)")))
+            and row.get("J_As1 (A/mm^2)") not in (None, "")
+            and not _is_nan(row.get("J_As1 (A/mm^2)"))
+        ):
+            row["As current density (A/mm^2)"] = row.get("J_As1 (A/mm^2)")
+        if (
+            "Ms current density (A/mm^2)" in output_columns
+            and (row.get("Ms current density (A/mm^2)") in (None, "") or _is_nan(row.get("Ms current density (A/mm^2)")))
+            and row.get("J_Ms1 (A/mm^2)") not in (None, "")
+            and not _is_nan(row.get("J_Ms1 (A/mm^2)"))
+        ):
+            row["Ms current density (A/mm^2)"] = row.get("J_Ms1 (A/mm^2)")
 
     shape_memory_entry_map: Dict[str, Dict[str, object]] = {}
     if shape_memory_entries:
@@ -8363,6 +8406,7 @@ def build_database(
                         other_descriptors.append(cached_origin.descriptor)
                 if other_descriptors:
                     row["Figure — other annealing (Origin)"] = _collapse_asset_references(other_descriptors)
+        _backfill_current_densities(row)
         row_index = len(rows)
         rows.append(row)
         if row_highlights:

@@ -1619,6 +1619,33 @@ def test_builder_rebuild_assemble_overlays_saved_transition_reviews(
                             }
                         ],
                     },
+                    "current_density": {
+                        "section": "current_density",
+                        "columns": [
+                            "Composition",
+                            "Microwire",
+                            builder_ui.MICROSCOPE_D_COLUMN,
+                            "As1 (mA)",
+                            "Af1 (mA)",
+                            "J_As1 (A/mm^2)",
+                            "J_Af1 (A/mm^2)",
+                            "Notes",
+                            "_group_key",
+                        ],
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "10/4",
+                                builder_ui.MICROSCOPE_D_COLUMN: None,
+                                "As1 (mA)": 14.0,
+                                "Af1 (mA)": 22.0,
+                                "J_As1 (A/mm^2)": None,
+                                "J_Af1 (A/mm^2)": None,
+                                "Notes": "Missing diameter",
+                                "_group_key": "Ni50Fe27Ga23|10|4",
+                            }
+                        ],
+                    },
                 },
             }
         ),
@@ -1637,7 +1664,7 @@ def test_builder_rebuild_assemble_overlays_saved_transition_reviews(
                 "commands": [
                     {
                         "action": "rebuild_assemble",
-                        "sections": ["annealing", "microscope"],
+                        "sections": ["annealing", "microscope", "current_density"],
                     },
                 ],
             }

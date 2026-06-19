@@ -16901,7 +16901,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             if key is None:
                 continue
             composition, draw, piece, suffix = key
-            diameter = self._to_positive_float(row.get(MICROSCOPE_D_COLUMN))
+            diameter = _diameter_um_from_mapping(row.to_dict())
             composition_label = self._normalise_text(row.get("Composition")) or composition
             label = self._normalise_text(row.get("Microwire"))
             if not label:
