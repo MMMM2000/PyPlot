@@ -6699,6 +6699,7 @@ def test_current_density_collects_auto_annealing_transition_points() -> None:
             sanity_error=0.0,
         )
         key_text = "Ni50Fe27Ga23|10|4"
+        annealing_section._transition_reviews = {}  # noqa: SLF001
         annealing_section._record_groups = {key_text: [record]}  # noqa: SLF001
 
         auto_points = section._collect_phase_points()  # noqa: SLF001
@@ -6710,6 +6711,20 @@ def test_current_density_collects_auto_annealing_transition_points() -> None:
         assert auto_points[key]["Mf1"] == pytest.approx(3.0, abs=1.0)
 
         annealing_section._phase_points = {key_text: {"As1": 11.0, "Ms1": 5.0}}  # noqa: SLF001
+        legacy_ignored_points = section._collect_phase_points()  # noqa: SLF001
+        assert legacy_ignored_points[key]["As1"] == pytest.approx(auto_points[key]["As1"])
+        assert legacy_ignored_points[key]["Ms1"] == pytest.approx(auto_points[key]["Ms1"])
+
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        annealing_section.set_transition_review_for_record(
+            record_id,
+            {
+                "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                "included": True,
+                "manual_values_mA": {"As1": 11.0, "Ms1": 5.0},
+                "final_values_mA": {"As1": 11.0, "Ms1": 5.0},
+            },
+        )
         merged_points = section._collect_phase_points()  # noqa: SLF001
         assert merged_points[key]["As1"] == pytest.approx(11.0)
         assert merged_points[key]["Ms1"] == pytest.approx(5.0)
@@ -6734,6 +6749,7 @@ def test_current_density_manual_editor_values_persist_to_snapshot() -> None:
     )
     try:
         key_text = "Ni50Fe27Ga23|10|4"
+        annealing_section._transition_reviews = {}  # noqa: SLF001
         metadata = MeasurementMetadata(
             composition_token="Ni50Fe27Ga23",
             draw_x=10,
@@ -6788,8 +6804,10 @@ def test_current_density_manual_editor_values_persist_to_snapshot() -> None:
             }
         )
 
-        stored = annealing_section.phase_points_snapshot()
-        assert stored[key_text]["Af1"] == pytest.approx(18.0)
+        record = annealing_section._record_groups[key_text][0]  # noqa: SLF001
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        stored = annealing_section.transition_reviews_snapshot()
+        assert stored[record_id]["final_values_mA"]["Af1"] == pytest.approx(18.0)
         snapshot = section.current_density_snapshot()
         assert snapshot[key_text]["As1 (mA)"] == pytest.approx(12.0)
         assert snapshot[key_text]["Af2 (mA)"] == pytest.approx(28.0)
@@ -6797,11 +6815,10 @@ def test_current_density_manual_editor_values_persist_to_snapshot() -> None:
         assert snapshot[key_text]["As current density (A/mm^2)"] == pytest.approx(
             (12.0 / 1000.0) / (np.pi * 0.01 * 0.01)
         )
-    finally:
-        annealing_section.set_phase_points_for_key(
-            key_text,
-            phase_values={label: None for label in builder_ui.PHASE_POINT_LABELS},
+        assert snapshot[key_text]["J_Af1 (A/mm^2)"] == pytest.approx(
+            (18.0 / 1000.0) / (np.pi * 0.01 * 0.01)
         )
+    finally:
         for widget in (section, annealing_section, microscope_section):
             widget.hide()
             widget.deleteLater()
@@ -6829,32 +6846,143 @@ def test_annealing_transition_review_pick_writes_selected_manual_label() -> None
         sanity_ok=True,
         sanity_error=0.0,
     )
-    stored: dict[str, dict[str, float]] = {}
+    stored: dict[str, dict[str, object]] = {}
 
     def _set_values(key: str, values: dict[str, object]) -> None:
-        stored[key] = {
-            label: float(value)
-            for label, value in values.items()
-            if isinstance(value, (int, float)) and np.isfinite(float(value))
-        }
+        stored[key] = dict(values)
 
     dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
         [record],
         logging.getLogger("test"),
-        phase_points_provider=lambda: stored,
-        phase_points_setter=_set_values,
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
     )
     try:
         dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
         dialog._phase_controls.set_target("Af1")  # noqa: SLF001
         dialog._handle_plot_pick(21.5)  # noqa: SLF001
 
-        assert stored["Ni50Fe27Ga23|10|4"]["Af1"] == pytest.approx(21.5)
-        assert dialog._tree.topLevelItem(0).text(1) == "manual"  # noqa: SLF001
-        assert "Manual: Af1 21.5 mA" in dialog._summary_label.text()  # noqa: SLF001
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        payload = stored[record_id]
+        assert payload["final_values_mA"]["Af1"] == pytest.approx(21.5)
+        assert dialog._tree.topLevelItem(0).text(1) == "manual adjusted"  # noqa: SLF001
+        assert "Reviewed: Af1 21.5 mA" in dialog._summary_label.text()  # noqa: SLF001
     finally:
         dialog.hide()
         dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_manual_values_are_record_scoped() -> None:
+    _ensure_qapp()
+
+    def _record(setpoint: int, name: str) -> MeasurementRecord:
+        return MeasurementRecord(
+            path=Path(name),
+            metadata=MeasurementMetadata(
+                composition_token="Ni44Fe27Ga23Cu3Co3",
+                draw_x=1,
+                piece_y=2,
+                setpoint_mA=setpoint,
+                alt_variant=False,
+                measurement_id=name,
+                file_name=name,
+                relpath=name,
+                timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, float(setpoint)], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+
+    first = _record(60, "Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt")
+    second = _record(70, "Ni44Fe27Ga23Cu3Co3 1_2 70mA 2loops.txt")
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [first, second],
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    try:
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        dialog._phase_controls.set_target("As1")  # noqa: SLF001
+        dialog._handle_plot_pick(37.428)  # noqa: SLF001
+        dialog._phase_controls.set_target("Af1")  # noqa: SLF001
+        dialog._handle_plot_pick(52.961)  # noqa: SLF001
+
+        first_id = builder_ui._transition_record_id_for_annealing_record(first)  # noqa: SLF001
+        second_id = builder_ui._transition_record_id_for_annealing_record(second)  # noqa: SLF001
+        assert first_id in stored
+        assert second_id not in stored
+
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(1))  # noqa: SLF001
+        values = dialog._phase_controls.values()  # noqa: SLF001
+        assert values["As1"] is None
+        assert values["Af1"] is None
+        assert stored[first_id]["final_values_mA"]["As1"] == pytest.approx(37.428)
+        assert stored[first_id]["final_values_mA"]["Af1"] == pytest.approx(52.961)
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_current_density_ignores_excluded_transition_review_records() -> None:
+    _ensure_qapp()
+    annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    microscope_section = MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        key_text = "Ni50Fe27Ga23|10|4"
+        annealing_section._transition_reviews = {}  # noqa: SLF001
+        record = MeasurementRecord(
+            path=Path("Ni50Fe27Ga23 10_4 80mA.txt"),
+            metadata=MeasurementMetadata(
+                composition_token="Ni50Fe27Ga23",
+                draw_x=10,
+                piece_y=4,
+                setpoint_mA=80,
+                alt_variant=False,
+                measurement_id="excluded-transition",
+                file_name="Ni50Fe27Ga23 10_4 80mA.txt",
+                relpath="Ni50Fe27Ga23 10_4 80mA.txt",
+                timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, 80.0], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+        annealing_section._record_groups = {key_text: [record]}  # noqa: SLF001
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        annealing_section.set_transition_review_for_record(
+            record_id,
+            {
+                "status": builder_ui.TRANSITION_REVIEW_STATUS_EXCLUDED,
+                "included": False,
+                "final_values_mA": {"As1": 12.0, "Af1": 18.0},
+            },
+        )
+
+        phase_points = section._collect_reviewed_transition_phase_points()  # noqa: SLF001
+
+        assert ("Ni50Fe27Ga23", 10, 4, None) not in phase_points
+        assert annealing_section.transition_reviews_snapshot()[record_id]["status"] == (
+            builder_ui.TRANSITION_REVIEW_STATUS_EXCLUDED
+        )
+    finally:
+        for widget in (section, annealing_section, microscope_section):
+            widget.hide()
+            widget.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import difflib
 import faulthandler
+import hashlib
 import html
 import io
 import json
@@ -255,6 +256,16 @@ ANNEALING_MS2_COLUMN = "Ms2 (mA)"
 ANNEALING_MF2_COLUMN = "Mf2 (mA)"
 CURRENT_DENSITY_AS_DENSITY_COLUMN = "As current density (A/mm^2)"
 CURRENT_DENSITY_MS_DENSITY_COLUMN = "Ms current density (A/mm^2)"
+CURRENT_DENSITY_PER_LABEL_COLUMNS = {
+    "As1": "J_As1 (A/mm^2)",
+    "Af1": "J_Af1 (A/mm^2)",
+    "Ms1": "J_Ms1 (A/mm^2)",
+    "Mf1": "J_Mf1 (A/mm^2)",
+    "As2": "J_As2 (A/mm^2)",
+    "Af2": "J_Af2 (A/mm^2)",
+    "Ms2": "J_Ms2 (A/mm^2)",
+    "Mf2": "J_Mf2 (A/mm^2)",
+}
 CURRENT_DENSITY_AS_DELTA_COLUMN = "As2-As1 (mA)"
 CURRENT_DENSITY_AF_DELTA_COLUMN = "Af2-Af1 (mA)"
 CURRENT_DENSITY_MS_DELTA_COLUMN = "Ms2-Ms1 (mA)"
@@ -297,6 +308,7 @@ CURRENT_DENSITY_COLUMNS = [
     ANNEALING_MF2_COLUMN,
     CURRENT_DENSITY_AS_DENSITY_COLUMN,
     CURRENT_DENSITY_MS_DENSITY_COLUMN,
+    *CURRENT_DENSITY_PER_LABEL_COLUMNS.values(),
     CURRENT_DENSITY_AS_DELTA_COLUMN,
     CURRENT_DENSITY_AF_DELTA_COLUMN,
     CURRENT_DENSITY_MS_DELTA_COLUMN,
@@ -4094,6 +4106,45 @@ def _add_annealing_transition_markers(
         pass
 
 
+def _add_reviewed_transition_markers(
+    figure: Figure | None,
+    values: Mapping[str, Any] | None,
+) -> None:
+    if figure is None or not figure.axes:
+        return
+    cleaned = _clean_transition_values(values)
+    if not cleaned:
+        return
+    axis = figure.axes[0]
+    style_map = {
+        "As": ("#16a34a", "-"),
+        "Af": ("#16a34a", "-."),
+        "Ms": ("#7c3aed", "-"),
+        "Mf": ("#7c3aed", "-."),
+    }
+    added = False
+    for label in PHASE_POINT_LABELS:
+        value = cleaned.get(label)
+        if value is None:
+            continue
+        base = label[:2]
+        color, linestyle = style_map.get(base, ("#111827", "-"))
+        axis.axvline(
+            float(value),
+            color=color,
+            linestyle=linestyle,
+            linewidth=1.8,
+            alpha=0.95,
+            label=f"review {label} {float(value):.1f} mA",
+        )
+        added = True
+    if added:
+        try:
+            axis.legend(loc="best", fontsize=8)
+        except Exception:
+            pass
+
+
 def _figure_to_pixmap(
     figure: Optional["plt.Figure"],
     logger: logging.Logger,
@@ -5190,6 +5241,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         *,
         setpoint: Optional[float],
         description: str,
+        reviewed_values: Optional[Mapping[str, Any]] = None,
     ) -> None:
         if record is None:
             self._show_placeholder(description)
@@ -5197,7 +5249,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             return
 
         try:
-            figure = self._build_figure(record)
+            figure = self._build_figure(record, reviewed_values=reviewed_values)
         except Exception:
             self._logger.exception("Failed to render annealing preview for %s", getattr(record, "path", "?"))
             self._show_placeholder("Failed to render plot for the selected measurement.")
@@ -5323,7 +5375,12 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             text = f"Cursor: {formatted}{suffix}"
         self.cursor_label.setText(text)
 
-    def _build_figure(self, record: MeasurementRecord):
+    def _build_figure(
+        self,
+        record: MeasurementRecord,
+        *,
+        reviewed_values: Optional[Mapping[str, Any]] = None,
+    ):
         frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             raise ValueError("No data to plot")
@@ -5386,6 +5443,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 plot_df,
                 logger if isinstance(logger, logging.Logger) else None,
             )
+            _add_reviewed_transition_markers(figure, reviewed_values)
         try:
             axes = figure.axes[0] if figure.axes else None
         except Exception:
@@ -5492,6 +5550,115 @@ class _AnnealingTransitionReviewEntry:
     title: str
     status: str
     summary_lines: Tuple[str, ...]
+    record_id: str
+    auto_values: Dict[str, float]
+
+
+TRANSITION_REVIEW_SCHEMA_VERSION = 1
+TRANSITION_REVIEW_EXTRA_KEY = "transition_reviews"
+TRANSITION_REVIEW_STATUS_UNREVIEWED = "unreviewed"
+TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO = "accepted_auto"
+TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED = "manual_adjusted"
+TRANSITION_REVIEW_STATUS_NO_TRANSITION = "no_transition"
+TRANSITION_REVIEW_STATUS_EXCLUDED = "excluded"
+TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION = "needs_attention"
+TRANSITION_REVIEW_INCLUDED_STATUSES = {
+    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+}
+
+
+def _coerce_finite_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _clean_transition_values(values: Mapping[str, Any] | None) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in PHASE_POINT_LABELS:
+        value = _coerce_finite_float(values.get(label))
+        if value is not None:
+            cleaned[label] = value
+    if "As1" not in cleaned:
+        value = _coerce_finite_float(values.get("As"))
+        if value is not None:
+            cleaned["As1"] = value
+    if "Ms1" not in cleaned:
+        value = _coerce_finite_float(values.get("Ms"))
+        if value is not None:
+            cleaned["Ms1"] = value
+    return cleaned
+
+
+def _transition_record_id_for_annealing_record(record: MeasurementRecord) -> str:
+    metadata = getattr(record, "metadata", None)
+    key = _phase_point_key_for_annealing_record(record) or ""
+    parts = [
+        "current_annealing",
+        key,
+        str(getattr(metadata, "measurement_id", "") or ""),
+        str(getattr(metadata, "file_name", "") or ""),
+        str(getattr(metadata, "relpath", "") or ""),
+        str(getattr(metadata, "setpoint_mA", "") or ""),
+    ]
+    path_value = getattr(record, "path", None)
+    if path_value:
+        try:
+            parts.append(str(Path(path_value)))
+        except Exception:
+            parts.append(str(path_value))
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"ca:{digest}"
+
+
+def _auto_transition_values_for_annealing_record(record: MeasurementRecord) -> Dict[str, float]:
+    dataframe = getattr(record, "dataframe", None)
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return {}
+    try:
+        summaries = summarize_annealing_transition_loops(dataframe)
+    except Exception:
+        summaries = ()
+    values: Dict[str, float] = {}
+    for summary in summaries:
+        loop_index = getattr(summary, "loop_index", None)
+        if loop_index not in (1, 2):
+            continue
+        suffix = str(loop_index)
+        mapping = {
+            f"As{suffix}": getattr(summary, "as_current_mA", None),
+            f"Af{suffix}": getattr(summary, "af_current_mA", None),
+            f"Ms{suffix}": getattr(summary, "ms_current_mA", None),
+            f"Mf{suffix}": getattr(summary, "mf_current_mA", None),
+        }
+        for label, raw in mapping.items():
+            value = _coerce_finite_float(raw)
+            if value is not None:
+                values[label] = value
+    if not values:
+        try:
+            summary = summarize_annealing_transition_currents(dataframe)
+        except Exception:
+            summary = None
+        if summary is not None:
+            mapping = {
+                "As1": getattr(summary, "as_current_mA", None),
+                "Af1": getattr(summary, "af_current_mA", None),
+                "Ms1": getattr(summary, "ms_current_mA", None),
+                "Mf1": getattr(summary, "mf_current_mA", None),
+            }
+            for label, raw in mapping.items():
+                value = _coerce_finite_float(raw)
+                if value is not None:
+                    values[label] = value
+    return values
 
 
 def _phase_point_key_for_annealing_record(record: MeasurementRecord) -> Optional[str]:
@@ -5678,12 +5845,16 @@ def _annealing_transition_review_entries(
                     logger.exception("Failed to summarize annealing transitions for %s", file_name or record)
                 lines = ()
         status = "auto candidates" if lines else "no candidates"
+        record_id = _transition_record_id_for_annealing_record(record)
+        auto_values = _auto_transition_values_for_annealing_record(record)
         entries.append(
             _AnnealingTransitionReviewEntry(
                 record=record,
                 title=title,
                 status=status,
                 summary_lines=lines,
+                record_id=record_id,
+                auto_values=auto_values,
             )
         )
     return entries
@@ -5696,18 +5867,18 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         logger: logging.Logger,
         parent: QtWidgets.QWidget | None = None,
         *,
-        phase_points_provider: Optional[Callable[[], Dict[str, Dict[str, float]]]] = None,
-        phase_points_setter: Optional[
-            Callable[[str, Dict[str, Optional[float]]], None]
+        transition_reviews_provider: Optional[Callable[[], Dict[str, Dict[str, Any]]]] = None,
+        transition_reviews_setter: Optional[
+            Callable[[str, Dict[str, Any]], None]
         ] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Current annealing transition review")
         self.resize(1280, 780)
         self._entries = _annealing_transition_review_entries(records, logger)
-        self._phase_points_provider = phase_points_provider
-        self._phase_points_setter = phase_points_setter
-        self._current_key: Optional[str] = None
+        self._transition_reviews_provider = transition_reviews_provider
+        self._transition_reviews_setter = transition_reviews_setter
+        self._current_record_id: Optional[str] = None
         self._current_item: Optional[QtWidgets.QTreeWidgetItem] = None
 
         root = QtWidgets.QVBoxLayout(self)
@@ -5728,6 +5899,27 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         right_layout = QtWidgets.QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
+        self._accept_next_button = QtWidgets.QPushButton("Accept & next", right)
+        self._accept_next_button.clicked.connect(self._accept_current_and_next)
+        action_row.addWidget(self._accept_next_button)
+        self._no_transition_button = QtWidgets.QPushButton("No transition", right)
+        self._no_transition_button.clicked.connect(self._mark_current_no_transition)
+        action_row.addWidget(self._no_transition_button)
+        self._exclude_button = QtWidgets.QPushButton("Exclude graph", right)
+        self._exclude_button.clicked.connect(self._exclude_current_graph)
+        action_row.addWidget(self._exclude_button)
+        self._previous_button = QtWidgets.QPushButton("Previous", right)
+        self._previous_button.clicked.connect(self._select_previous_item)
+        action_row.addWidget(self._previous_button)
+        self._next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed", right)
+        self._next_unreviewed_button.clicked.connect(lambda _checked=False: self._select_next_unreviewed())
+        action_row.addWidget(self._next_unreviewed_button)
+        action_row.addStretch(1)
+        right_layout.addLayout(action_row)
+
         self._summary_label = QtWidgets.QLabel("")
         self._summary_label.setWordWrap(True)
         self._summary_label.setTextInteractionFlags(
@@ -5744,7 +5936,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         right_layout.addWidget(self._display, 1)
         self._phase_controls = _PhasePointEditorControls(
             right,
-            title="Manual transition currents (mA)",
+            title="Reviewed transition currents I_As/I_Af/I_Ms/I_Mf (mA)",
         )
         self._phase_controls.valuesEdited.connect(self._handle_phase_values_edited)
         right_layout.addWidget(self._phase_controls)
@@ -5771,42 +5963,54 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
     def _populate(self) -> None:
         self._tree.clear()
         for index, entry in enumerate(self._entries):
-            key = _phase_point_key_for_annealing_record(entry.record)
-            values = self._phase_points_for_key(key)
-            item = QtWidgets.QTreeWidgetItem([entry.title, self._status_for_entry(entry, values)])
+            payload = self._review_payload_for_id(entry.record_id)
+            values = self._values_for_entry(entry, payload)
+            item = QtWidgets.QTreeWidgetItem([entry.title, self._status_for_entry(entry, payload, values)])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
             if entry.summary_lines:
                 item.setToolTip(0, "\n".join(entry.summary_lines))
             self._tree.addTopLevelItem(item)
         self._tree.resizeColumnToContents(0)
 
-    def _phase_points_for_key(self, key: Optional[str]) -> Dict[str, float]:
-        if not key or not callable(self._phase_points_provider):
+    def _review_payload_for_id(self, record_id: Optional[str]) -> Dict[str, Any]:
+        if not record_id or not callable(self._transition_reviews_provider):
             return {}
         try:
-            snapshot = self._phase_points_provider()
+            snapshot = self._transition_reviews_provider()
         except Exception:
             return {}
-        payload = snapshot.get(key, {}) if isinstance(snapshot, dict) else {}
-        if not isinstance(payload, dict):
-            return {}
-        result: Dict[str, float] = {}
-        for label in PHASE_POINT_LABELS + ("As", "Ms"):
-            value = CurrentDensitySection._coerce_phase_value(payload.get(label))
-            if value is not None:
-                result[label] = value
-        return result
+        payload = snapshot.get(record_id, {}) if isinstance(snapshot, dict) else {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _values_for_entry(
+        entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, float]:
+        manual = _clean_transition_values(payload.get("manual_values_mA"))
+        if manual:
+            return manual
+        final = _clean_transition_values(payload.get("final_values_mA"))
+        if final:
+            return final
+        if str(payload.get("status") or "") == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            return dict(entry.auto_values)
+        return {}
 
     @staticmethod
     def _status_for_entry(
         entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
         values: Mapping[str, Any],
     ) -> str:
-        has_manual = any(CurrentDensitySection._coerce_phase_value(values.get(label)) is not None for label in PHASE_POINT_LABELS)
-        if entry.summary_lines and has_manual:
-            return "auto + manual"
-        if has_manual:
-            return "manual"
+        status = str(payload.get("status") or "").strip()
+        if status:
+            return status.replace("_", " ")
+        has_values = any(CurrentDensitySection._coerce_phase_value(values.get(label)) is not None for label in PHASE_POINT_LABELS)
+        if has_values:
+            return "reviewed"
+        if entry.auto_values:
+            return "auto candidates"
         return entry.status
 
     @staticmethod
@@ -5821,12 +6025,18 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
     def _summary_text(
         self,
         entry: _AnnealingTransitionReviewEntry,
+        payload: Mapping[str, Any],
         values: Mapping[str, Any],
     ) -> str:
         lines = list(entry.summary_lines)
         manual = self._manual_summary(values)
         if manual:
-            lines.append(f"Manual: {manual}")
+            lines.append(f"Reviewed: {manual}")
+        status = str(payload.get("status") or "").strip()
+        if status:
+            lines.append(f"Status: {status.replace('_', ' ')}")
+        if payload.get("included") is False:
+            lines.append("Excluded from Assemble/current-density summary.")
         if lines:
             return "\n".join(lines)
         return "No automatic transition candidates were detected."
@@ -5841,7 +6051,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._summary_label.setText("")
             self._phase_controls.setEnabled(False)
             self._phase_controls.set_values({})
-            self._current_key = None
+            self._current_record_id = None
             self._current_item = None
             return
         index = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
@@ -5852,20 +6062,22 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._summary_label.setText("")
             self._phase_controls.setEnabled(False)
             self._phase_controls.set_values({})
-            self._current_key = None
+            self._current_record_id = None
             self._current_item = None
             return
-        self._current_key = _phase_point_key_for_annealing_record(entry.record)
+        self._current_record_id = entry.record_id
         self._current_item = current
-        values = self._phase_points_for_key(self._current_key)
-        self._phase_controls.setEnabled(bool(self._current_key and callable(self._phase_points_setter)))
+        payload = self._review_payload_for_id(entry.record_id)
+        values = self._values_for_entry(entry, payload)
+        self._phase_controls.setEnabled(bool(self._current_record_id and callable(self._transition_reviews_setter)))
         self._phase_controls.set_values(values)
-        self._summary_label.setText(self._summary_text(entry, values))
-        current.setText(1, self._status_for_entry(entry, values))
+        self._summary_label.setText(self._summary_text(entry, payload, values))
+        current.setText(1, self._status_for_entry(entry, payload, values))
         self._display.set_record(
             entry.record,
             setpoint=_extract_setpoint(entry.record),
             description="Select an annealing run to review.",
+            reviewed_values=values,
         )
 
     def _current_entry(self) -> Optional[_AnnealingTransitionReviewEntry]:
@@ -5882,19 +6094,118 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._phase_controls.apply_picked_value(value)
 
     def _handle_phase_values_edited(self, values: Dict[str, Optional[float]]) -> None:
-        key = self._current_key
-        if not key or not callable(self._phase_points_setter):
+        record_id = self._current_record_id
+        if not record_id or not callable(self._transition_reviews_setter):
             return
+        cleaned = _clean_transition_values(values)
+        entry = self._current_entry()
+        payload: Dict[str, Any] = dict(self._review_payload_for_id(record_id))
+        payload["status"] = TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if cleaned else TRANSITION_REVIEW_STATUS_UNREVIEWED
+        payload["included"] = bool(cleaned)
+        payload["manual_values_mA"] = cleaned
+        payload["final_values_mA"] = cleaned
+        if entry is not None:
+            payload.setdefault("auto_values_mA", dict(entry.auto_values))
         try:
-            self._phase_points_setter(key, values)
+            self._transition_reviews_setter(record_id, payload)
         except Exception:
             return
-        entry = self._current_entry()
         if entry is not None:
-            stored_values = self._phase_points_for_key(key)
-            self._summary_label.setText(self._summary_text(entry, stored_values))
+            stored_payload = self._review_payload_for_id(record_id)
+            stored_values = self._values_for_entry(entry, stored_payload)
+            self._summary_label.setText(self._summary_text(entry, stored_payload, stored_values))
+            self._display.set_record(
+                entry.record,
+                setpoint=_extract_setpoint(entry.record),
+                description="Select an annealing run to review.",
+                reviewed_values=stored_values,
+            )
             if self._current_item is not None:
-                self._current_item.setText(1, self._status_for_entry(entry, stored_values))
+                self._current_item.setText(1, self._status_for_entry(entry, stored_payload, stored_values))
+
+    def _store_current_review(self, status: str, *, included: bool, values: Optional[Mapping[str, Any]] = None) -> None:
+        record_id = self._current_record_id
+        entry = self._current_entry()
+        if not record_id or entry is None or not callable(self._transition_reviews_setter):
+            return
+        cleaned = _clean_transition_values(values or {})
+        payload: Dict[str, Any] = dict(self._review_payload_for_id(record_id))
+        payload["status"] = status
+        payload["included"] = bool(included)
+        payload["auto_values_mA"] = dict(entry.auto_values)
+        if cleaned:
+            payload["final_values_mA"] = cleaned
+            if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+                payload["manual_values_mA"] = cleaned
+        elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            payload["final_values_mA"] = dict(entry.auto_values)
+        else:
+            payload["final_values_mA"] = {}
+            payload["manual_values_mA"] = {}
+        try:
+            self._transition_reviews_setter(record_id, payload)
+        except Exception:
+            return
+        refreshed = self._review_payload_for_id(record_id)
+        refreshed_values = self._values_for_entry(entry, refreshed)
+        self._phase_controls.set_values(refreshed_values)
+        self._summary_label.setText(self._summary_text(entry, refreshed, refreshed_values))
+        self._display.set_record(
+            entry.record,
+            setpoint=_extract_setpoint(entry.record),
+            description="Select an annealing run to review.",
+            reviewed_values=refreshed_values,
+        )
+        if self._current_item is not None:
+            self._current_item.setText(1, self._status_for_entry(entry, refreshed, refreshed_values))
+
+    def _accept_current_and_next(self) -> None:
+        entry = self._current_entry()
+        if entry is None:
+            return
+        payload = self._review_payload_for_id(entry.record_id)
+        values = self._values_for_entry(entry, payload) or dict(entry.auto_values)
+        self._store_current_review(TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO, included=bool(values), values=values)
+        self._select_next_unreviewed(fallback_next=True)
+
+    def _mark_current_no_transition(self) -> None:
+        self._store_current_review(TRANSITION_REVIEW_STATUS_NO_TRANSITION, included=False)
+        self._select_next_unreviewed(fallback_next=True)
+
+    def _exclude_current_graph(self) -> None:
+        self._store_current_review(TRANSITION_REVIEW_STATUS_EXCLUDED, included=False)
+        self._select_next_unreviewed(fallback_next=True)
+
+    def _select_previous_item(self) -> None:
+        item = self._current_item
+        if item is None:
+            return
+        row = self._tree.indexOfTopLevelItem(item)
+        if row > 0:
+            self._tree.setCurrentItem(self._tree.topLevelItem(row - 1))
+
+    def _select_next_unreviewed(self, *, fallback_next: bool = False) -> None:
+        count = self._tree.topLevelItemCount()
+        if count <= 0:
+            return
+        current_row = self._tree.indexOfTopLevelItem(self._current_item) if self._current_item is not None else -1
+        for offset in range(1, count + 1):
+            row = (current_row + offset) % count
+            item = self._tree.topLevelItem(row)
+            if item is None:
+                continue
+            index = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            try:
+                entry = self._entries[int(index)]
+            except Exception:
+                continue
+            payload = self._review_payload_for_id(entry.record_id)
+            status = str(payload.get("status") or "").strip()
+            if not status or status == TRANSITION_REVIEW_STATUS_UNREVIEWED:
+                self._tree.setCurrentItem(item)
+                return
+        if fallback_next and current_row + 1 < count:
+            self._tree.setCurrentItem(self._tree.topLevelItem(current_row + 1))
 
 
 @dataclass
@@ -11496,6 +11807,7 @@ class AnnealingSection(MiniDatabaseSection):
         self._all_records: List[MeasurementRecord] = []
         self._pixmap_cache: Dict[Tuple[object, ...], Optional[QtGui.QPixmap]] = {}
         self._phase_points: Dict[str, Dict[str, float]] = {}
+        self._transition_reviews: Dict[str, Dict[str, Any]] = {}
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, dict):
             cleaned: Dict[str, Dict[str, float]] = {}
@@ -11506,6 +11818,7 @@ class AnnealingSection(MiniDatabaseSection):
                 if entry:
                     cleaned[key] = entry
             self._phase_points = cleaned
+        self._load_transition_reviews()
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
@@ -11602,9 +11915,11 @@ class AnnealingSection(MiniDatabaseSection):
 
     def apply_data(self, data: MiniDatabaseData) -> None:  # type: ignore[override]
         super().apply_data(data)
+        self._load_transition_reviews()
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
+        self._prune_transition_reviews()
         self._prune_phase_points()
         self._update_export_enabled()
 
@@ -11691,7 +12006,10 @@ class AnnealingSection(MiniDatabaseSection):
             table=table,
             processed=processed,
             payloads={"annealing_records": records},
-            extra={"phase_points": dict(self._phase_points)},
+            extra={
+                "phase_points": dict(self._phase_points),
+                TRANSITION_REVIEW_EXTRA_KEY: self._transition_reviews_payload(),
+            },
         )
 
     def refresh(self) -> None:
@@ -11699,14 +12017,17 @@ class AnnealingSection(MiniDatabaseSection):
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
+        self._prune_transition_reviews()
         self._prune_phase_points()
         self._update_export_enabled()
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._load_transition_reviews()
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
+        self._prune_transition_reviews()
         self._prune_phase_points()
         self._update_export_enabled()
 
@@ -11798,13 +12119,190 @@ class AnnealingSection(MiniDatabaseSection):
             records,
             self.logger,
             self,
-            phase_points_provider=self.phase_points_snapshot,
-            phase_points_setter=lambda key, values: self.set_phase_points_for_key(
-                key,
-                phase_values=values,
-            ),
+            transition_reviews_provider=self.transition_reviews_snapshot,
+            transition_reviews_setter=self.set_transition_review_for_record,
         )
         dialog.exec()
+
+    def _load_transition_reviews(self) -> None:
+        raw = self.data.extra.get(TRANSITION_REVIEW_EXTRA_KEY)
+        if isinstance(raw, dict) and isinstance(raw.get("records"), dict):
+            raw_records = raw.get("records")
+        elif isinstance(raw, dict):
+            raw_records = raw
+        else:
+            raw_records = {}
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw_records, dict):
+            for record_id, payload in raw_records.items():
+                if not isinstance(record_id, str) or not isinstance(payload, dict):
+                    continue
+                entry = self._clean_transition_review_payload(record_id, payload)
+                if entry:
+                    cleaned[record_id] = entry
+        self._transition_reviews = cleaned
+
+    def _transition_reviews_payload(self) -> Dict[str, Any]:
+        return {
+            "schema_version": TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": self.transition_reviews_snapshot(),
+        }
+
+    def _clean_transition_review_payload(
+        self,
+        record_id: str,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        record_id = str(record_id).strip()
+        if not record_id:
+            return {}
+        status = str(payload.get("status") or TRANSITION_REVIEW_STATUS_UNREVIEWED).strip()
+        if status not in {
+            TRANSITION_REVIEW_STATUS_UNREVIEWED,
+            TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+            TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION,
+        }:
+            status = TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION
+        included = bool(payload.get("included", status in TRANSITION_REVIEW_INCLUDED_STATUSES))
+        if status in {TRANSITION_REVIEW_STATUS_NO_TRANSITION, TRANSITION_REVIEW_STATUS_EXCLUDED}:
+            included = False
+        entry: Dict[str, Any] = {
+            "transition_record_id": record_id,
+            "source_kind": str(payload.get("source_kind") or "current_annealing"),
+            "status": status,
+            "included": included,
+            "auto_values_mA": _clean_transition_values(payload.get("auto_values_mA")),
+            "manual_values_mA": _clean_transition_values(payload.get("manual_values_mA")),
+            "final_values_mA": _clean_transition_values(payload.get("final_values_mA")),
+        }
+        for key in (
+            "sample_key",
+            "composition",
+            "microwire",
+            "source_path",
+            "graph_label",
+            "setpoint_mA",
+            "notes",
+            "updated_at",
+        ):
+            value = payload.get(key)
+            if value not in (None, ""):
+                entry[key] = value
+        return entry
+
+    def _store_transition_reviews(self) -> None:
+        self.data.extra[TRANSITION_REVIEW_EXTRA_KEY] = self._transition_reviews_payload()
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist transition review records")
+
+    def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            cleaned = self._clean_transition_review_payload(record_id, payload)
+            if cleaned:
+                snapshot[record_id] = cleaned
+        return snapshot
+
+    def set_transition_review_for_record(
+        self,
+        record_id: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        record_id = str(record_id).strip()
+        if not record_id:
+            return
+        entry = self._clean_transition_review_payload(record_id, payload)
+        if not entry:
+            self._transition_reviews.pop(record_id, None)
+        else:
+            record = self._record_by_transition_id(record_id)
+            if record is not None:
+                entry.update(self._transition_review_metadata(record_id, record))
+            entry["updated_at"] = datetime.now(UTC).isoformat()
+            self._transition_reviews[record_id] = entry
+        self._store_transition_reviews()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+
+    def _record_by_transition_id(self, record_id: str) -> Optional[MeasurementRecord]:
+        for record in self._all_records:
+            if _transition_record_id_for_annealing_record(record) == record_id:
+                return record
+        for records in self._record_groups.values():
+            for record in records:
+                if _transition_record_id_for_annealing_record(record) == record_id:
+                    return record
+        return None
+
+    def _prune_transition_reviews(self, *, store: bool = True) -> None:
+        records = list(self._all_records)
+        if not records:
+            for group in self._record_groups.values():
+                records.extend(group)
+        valid_ids = {
+            _transition_record_id_for_annealing_record(record)
+            for record in records
+        }
+        if not valid_ids:
+            if self._transition_reviews:
+                self._transition_reviews.clear()
+                if store:
+                    self._store_transition_reviews()
+            return
+        removed = False
+        for record_id in list(self._transition_reviews.keys()):
+            if record_id not in valid_ids:
+                self._transition_reviews.pop(record_id, None)
+                removed = True
+        if removed and store:
+            self._store_transition_reviews()
+
+    def _transition_review_metadata(
+        self,
+        record_id: str,
+        record: MeasurementRecord,
+    ) -> Dict[str, Any]:
+        metadata = getattr(record, "metadata", None)
+        sample_key = _phase_point_key_for_annealing_record(record)
+        path = getattr(record, "path", None)
+        setpoint = _extract_setpoint(record)
+        composition = getattr(metadata, "composition_token", None)
+        draw = getattr(metadata, "draw_x", None)
+        piece = getattr(metadata, "piece_y", None)
+        suffix = None
+        if sample_key:
+            parsed = _microwire_key_from_string(sample_key)
+            if parsed is not None:
+                _composition, _draw, _piece, suffix = parsed
+        microwire = ""
+        if draw is not None and piece is not None:
+            try:
+                microwire = _microwire_label(int(draw), int(piece), suffix)
+            except Exception:
+                microwire = f"{draw}/{piece}"
+        graph_label = str(getattr(metadata, "file_name", "") or "")
+        if not graph_label and path:
+            try:
+                graph_label = Path(path).name
+            except Exception:
+                graph_label = str(path)
+        return {
+            "transition_record_id": record_id,
+            "source_kind": "current_annealing",
+            "sample_key": sample_key or "",
+            "composition": str(composition or ""),
+            "microwire": microwire,
+            "source_path": str(path or ""),
+            "graph_label": graph_label,
+            "setpoint_mA": setpoint,
+        }
 
     def _clean_phase_points_payload(self, payload: Dict[str, Any]) -> Dict[str, float]:
         entry: Dict[str, float] = {}
@@ -15220,9 +15718,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         relevant = set(PHASE_POINT_COLUMN_MAP.values())
         if not any(column in relevant for column in columns_slice):
             return
-        setter = getattr(self._annealing_section, "set_phase_points_for_key", None)
         updated = False
-        setter_used = False
         for row in range(top_left.row(), bottom_right.row() + 1):
             if row < 0 or row >= len(frame.index):
                 continue
@@ -15236,37 +15732,14 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 for label, column in PHASE_POINT_COLUMN_MAP.items()
             }
             try:
-                if callable(setter):
-                    setter(key, phase_values=phase_values)
-                    setter_used = True
-                else:
-                    phase_points = getattr(self._annealing_section, "_phase_points", {})
-                    if isinstance(phase_points, dict):
-                        entry: Dict[str, float] = {}
-                        for label, value in phase_values.items():
-                            if value is not None:
-                                entry[label] = value
-                        if "As1" in entry:
-                            entry["As"] = entry["As1"]
-                        if "Ms1" in entry:
-                            entry["Ms"] = entry["Ms1"]
-                        if entry:
-                            phase_points[key] = entry
-                        elif key in phase_points:
-                            phase_points.pop(key, None)
-                        store = getattr(self._annealing_section, "_store_phase_points", None)
-                        if callable(store):
-                            store()
-                        updated_signal = getattr(self._annealing_section, "data_updated", None)
-                        if hasattr(updated_signal, "emit"):
-                            try:
-                                updated_signal.emit()
-                            except Exception:
-                                pass
+                parsed_key = self._parse_group_key(key)
+                if parsed_key is None:
+                    continue
+                self._store_transition_review_for_key(parsed_key, phase_values)
                 updated = True
             except Exception:
                 self.logger.exception("Failed to persist phase transition points for %s", key)
-        if updated and not setter_used:
+        if updated:
             QtCore.QTimer.singleShot(0, self.refresh_data)
 
     def _column_index_for_label(self, label: str) -> Optional[int]:
@@ -15315,20 +15788,39 @@ class CurrentDensitySection(QtWidgets.QWidget):
         key = self._current_selection_key()
         if key is None:
             return
-        key_text = _microwire_key_to_str(key)
-        setter = getattr(self._annealing_section, "set_phase_points_for_key", None)
-        if not callable(setter):
-            return
         cleaned = {
             label: self._coerce_phase_value(values.get(label))
             for label in PHASE_POINT_LABELS
         }
         try:
-            setter(key_text, phase_values=cleaned)
+            self._store_transition_review_for_key(key, cleaned)
         except Exception:
-            self.logger.exception("Failed to persist phase transition points for %s", key_text)
+            self.logger.exception("Failed to persist phase transition points for %s", _microwire_key_to_str(key))
             return
         self.refresh_data()
+
+    def _store_transition_review_for_key(
+        self,
+        key: MicrowireKey,
+        phase_values: Mapping[str, Any],
+    ) -> None:
+        high, other_records = self._fetch_records_for_key(key)
+        record = high or (other_records[0] if other_records else None)
+        if record is None:
+            return
+        record_id = _transition_record_id_for_annealing_record(record)
+        setter = getattr(self._annealing_section, "set_transition_review_for_record", None)
+        if not callable(setter):
+            return
+        cleaned = _clean_transition_values(phase_values)
+        payload = {
+            "status": TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if cleaned else TRANSITION_REVIEW_STATUS_UNREVIEWED,
+            "included": bool(cleaned),
+            "manual_values_mA": cleaned,
+            "final_values_mA": cleaned,
+            "auto_values_mA": _auto_transition_values_for_annealing_record(record),
+        }
+        setter(record_id, payload)
 
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
@@ -15441,6 +15933,10 @@ class CurrentDensitySection(QtWidgets.QWidget):
             mf2_value = phase_info.get("Mf2")
             as_density = self._compute_density(as1_value, area_mm2)
             ms_density = self._compute_density(ms1_value, area_mm2)
+            per_label_densities = {
+                column: self._compute_density(phase_info.get(label), area_mm2)
+                for label, column in CURRENT_DENSITY_PER_LABEL_COLUMNS.items()
+            }
             as_delta = self._compute_delta(as2_value, as1_value)
             af_delta = self._compute_delta(af2_value, af1_value)
             ms_delta = self._compute_delta(ms2_value, ms1_value)
@@ -15468,6 +15964,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     ANNEALING_MF2_COLUMN: mf2_value,
                     CURRENT_DENSITY_AS_DENSITY_COLUMN: as_density,
                     CURRENT_DENSITY_MS_DENSITY_COLUMN: ms_density,
+                    **per_label_densities,
                     CURRENT_DENSITY_AS_DELTA_COLUMN: as_delta,
                     CURRENT_DENSITY_AF_DELTA_COLUMN: af_delta,
                     CURRENT_DENSITY_MS_DELTA_COLUMN: ms_delta,
@@ -15574,47 +16071,59 @@ class CurrentDensitySection(QtWidgets.QWidget):
 
     def _collect_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
         result = self._collect_auto_annealing_phase_points()
-        snapshot_provider = getattr(self._annealing_section, "phase_points_snapshot", None)
+        for key_tuple, values in self._collect_reviewed_transition_phase_points().items():
+            combined = dict(result.get(key_tuple, {}))
+            combined.update(values)
+            result[key_tuple] = combined
+        return result
+
+    def _collect_reviewed_transition_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
+        annealing = self._annealing_section
+        snapshot_provider = getattr(annealing, "transition_reviews_snapshot", None)
         if callable(snapshot_provider):
-            raw = snapshot_provider()
+            raw_reviews = snapshot_provider()
         else:
-            raw = getattr(self._annealing_section, "_phase_points", {})
-        if not isinstance(raw, dict):
-            return result
-        for key, payload in raw.items():
-            if not isinstance(key, str) or not isinstance(payload, dict):
+            raw_reviews = getattr(annealing, "_transition_reviews", {})
+        if not isinstance(raw_reviews, dict):
+            return {}
+        candidates: Dict[MicrowireKey, List[Tuple[Tuple[int, float, str], Dict[str, float]]]] = {}
+        for record_id, payload in raw_reviews.items():
+            if not isinstance(payload, dict):
                 continue
-            parts = _microwire_key_from_string(key)
-            if parts is None:
+            if payload.get("included") is False:
                 continue
-            composition, draw, piece, suffix = parts
-            cleaned: Dict[str, float] = {}
-            for label in PHASE_POINT_LABELS:
-                try:
-                    numeric = float(payload.get(label))
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(numeric):
-                    cleaned[label] = numeric
-            if "As1" not in cleaned:
-                try:
-                    numeric = float(payload.get("As"))
-                except (TypeError, ValueError):
-                    numeric = None
-                if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
-                    cleaned["As1"] = float(numeric)
-            if "Ms1" not in cleaned:
-                try:
-                    numeric = float(payload.get("Ms"))
-                except (TypeError, ValueError):
-                    numeric = None
-                if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
-                    cleaned["Ms1"] = float(numeric)
-            if cleaned:
-                key_tuple = (composition, draw, piece, suffix)
-                combined = dict(result.get(key_tuple, {}))
-                combined.update(cleaned)
-                result[key_tuple] = combined
+            status = str(payload.get("status") or "").strip()
+            if status and status not in TRANSITION_REVIEW_INCLUDED_STATUSES:
+                continue
+            key_text = str(payload.get("sample_key") or "").strip()
+            if not key_text:
+                record = None
+                lookup = getattr(annealing, "_record_by_transition_id", None)
+                if callable(lookup):
+                    record = lookup(str(record_id))
+                if record is not None:
+                    key_text = _phase_point_key_for_annealing_record(record) or ""
+            key_tuple = _microwire_key_from_string(key_text)
+            if key_tuple is None:
+                continue
+            values = _clean_transition_values(payload.get("final_values_mA"))
+            if not values:
+                values = _clean_transition_values(payload.get("manual_values_mA"))
+            if not values and status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+                values = _clean_transition_values(payload.get("auto_values_mA"))
+            if not values:
+                continue
+            setpoint = _coerce_finite_float(payload.get("setpoint_mA"))
+            setpoint_sort = -setpoint if setpoint is not None else float("inf")
+            status_rank = 0 if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED else 1
+            graph_label = str(payload.get("graph_label") or record_id)
+            candidates.setdefault(key_tuple, []).append(((status_rank, setpoint_sort, graph_label), values))
+        result: Dict[MicrowireKey, Dict[str, float]] = {}
+        for key_tuple, entries in candidates.items():
+            if not entries:
+                continue
+            _sort_key, selected = min(entries, key=lambda item: item[0])
+            result[key_tuple] = dict(selected)
         return result
 
     def _collect_auto_annealing_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
@@ -27035,7 +27544,12 @@ class AssemblySection(QtWidgets.QWidget):
         if "current_density" in selected:
             annealing_section = self.sections.get("annealing")
             if isinstance(annealing_section, AnnealingSection):
-                phase_points = dict(getattr(annealing_section, "_phase_points", {}))
+                current_section = self.sections.get("current_density")
+                if isinstance(current_section, CurrentDensitySection):
+                    phase_points = {
+                        _microwire_key_to_str(key): values
+                        for key, values in current_section._collect_phase_points().items()
+                    }
         transition_points: Dict[str, Dict[str, float]] = {}
         if "transition_temps" in selected:
             transition_section = self.sections.get("transition_temps")
