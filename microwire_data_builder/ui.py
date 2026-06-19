@@ -33798,13 +33798,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._startup_auto_open_scheduled = False
 
     def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
-        if os.environ.get("MICROWIRE_BUILDER_ENABLE_STARTUP_AUTO_OPEN", "").strip().lower() not in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
-            return
         if getattr(self, "_startup_auto_open_scheduled", False):
             return
         self._startup_auto_open_scheduled = True
@@ -35242,6 +35235,19 @@ def main() -> QtWidgets.QWidget | None:
         ensure_app_theme(app)
         owns_app = True
 
+    placeholder = QtWidgets.QMainWindow()
+    placeholder.setWindowTitle("Microwire Data Builder")
+    placeholder.resize(420, 260)
+    loading_label = QtWidgets.QLabel("Loading Microwire Data Builder...", placeholder)
+    loading_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    loading_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+    placeholder.setCentralWidget(loading_label)
+    placeholder.show()
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+
     window_holder: dict[str, QtWidgets.QWidget] = {}
 
     def _launch() -> None:
@@ -35252,9 +35258,13 @@ def main() -> QtWidgets.QWidget | None:
             app.processEvents()
         except Exception:
             pass
+        placeholder.close()
+        scheduler = getattr(window, "schedule_startup_auto_open", None)
+        if callable(scheduler):
+            scheduler(150)
 
     if owns_app:
-        _launch()
+        QtCore.QTimer.singleShot(0, _launch)
         app.exec()
         return window_holder.get("window")
 

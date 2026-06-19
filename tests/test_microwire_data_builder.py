@@ -8810,6 +8810,93 @@ def test_builder_auto_open_skips_reentrant_project_load(
         QtWidgets.QApplication.processEvents()
 
 
+def test_builder_startup_auto_open_scheduler_no_env_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    monkeypatch.delenv("MICROWIRE_BUILDER_ENABLE_STARTUP_AUTO_OPEN", raising=False)
+    scheduled_delays: list[int] = []
+    window = BuilderWindow()
+    try:
+        monkeypatch.setattr(
+            builder_ui.QtCore.QTimer,
+            "singleShot",
+            lambda delay, _callback: scheduled_delays.append(int(delay)),
+        )
+        window.schedule_startup_auto_open(25)
+        window.schedule_startup_auto_open(99)
+
+        assert scheduled_delays == [25]
+        assert window._startup_auto_open_scheduled is True
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_main_shows_placeholder_before_scheduling_auto_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_qapp()
+    events: list[object] = []
+
+    class FakeBuilderWindow(QtWidgets.QWidget):
+        def __init__(self) -> None:
+            super().__init__()
+            placeholder = next(
+                (
+                    widget
+                    for widget in app.topLevelWidgets()
+                    if widget is not self
+                    and any(
+                        label.text() == "Loading Microwire Data Builder..."
+                        for label in widget.findChildren(QtWidgets.QLabel)
+                    )
+                ),
+                None,
+            )
+            events.append(
+                (
+                    "construct",
+                    placeholder is not None,
+                    placeholder.isVisible() if isinstance(placeholder, QtWidgets.QWidget) else False,
+                )
+            )
+
+        def show(self) -> None:
+            events.append("show")
+            super().show()
+
+        def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
+            events.append(("schedule", delay_ms, self.isVisible()))
+
+    monkeypatch.setattr(builder_ui, "BuilderWindow", FakeBuilderWindow)
+
+    window = builder_ui.main()
+    try:
+        assert isinstance(window, FakeBuilderWindow)
+        assert events == [
+            ("construct", True, True),
+            "show",
+            ("schedule", 150, True),
+        ]
+        assert not any(
+            widget.windowTitle() == "Microwire Data Builder" and widget.isVisible()
+            for widget in app.topLevelWidgets()
+            if widget is not window
+        )
+    finally:
+        if isinstance(window, QtWidgets.QWidget):
+            window.hide()
+            window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_builder_settings_menu_names_latest_database_option(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
