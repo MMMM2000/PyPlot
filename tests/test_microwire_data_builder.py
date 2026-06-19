@@ -912,7 +912,12 @@ def test_annealing_section_opens_transition_review_for_visible_records(
     opened: list[list[MeasurementRecord]] = []
 
     class _FakeDialog:
-        def __init__(self, records: list[MeasurementRecord], *_args: object) -> None:
+        def __init__(
+            self,
+            records: list[MeasurementRecord],
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
             opened.append(list(records))
 
         def exec(self) -> int:
@@ -6661,6 +6666,7 @@ def test_current_density_collects_auto_annealing_transition_points() -> None:
         lambda *_args: None,
     )
     try:
+        annealing_section._phase_points = {}  # noqa: SLF001
         up_current = np.linspace(1.0, 100.0, 160)
         down_current = np.linspace(100.0, 1.0, 160)
         up_drop = np.clip(1.0 - np.abs(up_current - 42.5) / 7.5, 0.0, 1.0)
@@ -6713,6 +6719,142 @@ def test_current_density_collects_auto_annealing_transition_points() -> None:
         for widget in (section, annealing_section, microscope_section):
             widget.hide()
             widget.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_current_density_manual_editor_values_persist_to_snapshot() -> None:
+    _ensure_qapp()
+    annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    microscope_section = MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        key_text = "Ni50Fe27Ga23|10|4"
+        metadata = MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=10,
+            piece_y=4,
+            setpoint_mA=80,
+            alt_variant=False,
+            measurement_id="manual-transition",
+            file_name="Ni50Fe27Ga23 10_4 80mA.txt",
+            relpath="Ni50Fe27Ga23 10_4 80mA.txt",
+            timestamp_mtime_utc="2026-06-08T00:00:00+00:00",
+        )
+        annealing_section._record_groups = {  # noqa: SLF001
+            key_text: [
+                MeasurementRecord(
+                    path=Path(metadata.file_name),
+                    metadata=metadata,
+                    dataframe=pd.DataFrame({"I_mA": [1.0, 80.0], "R_Ohm": [100.0, 120.0]}),
+                    sanity_ok=True,
+                    sanity_error=0.0,
+                )
+            ]
+        }
+        microscope_section.apply_data(
+            MiniDatabaseData(
+                table=pd.DataFrame(
+                    [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "10/4",
+                                builder_ui.MICROSCOPE_D_COLUMN: 20.0,
+                                "_key": key_text,
+                            }
+                    ]
+                )
+            )
+        )
+        section.refresh_data()
+        section.table_view.selectRow(0)
+        section.table_view.setCurrentIndex(section._search_proxy.index(0, 0))  # noqa: SLF001
+        QtWidgets.QApplication.processEvents()
+
+        section._apply_phase_values(  # noqa: SLF001
+            {
+                "As1": 12.0,
+                "Af1": 18.0,
+                "Ms1": 16.0,
+                "Mf1": 9.0,
+                "As2": 22.0,
+                "Af2": 28.0,
+                "Ms2": 26.0,
+                "Mf2": 19.0,
+            }
+        )
+
+        stored = annealing_section.phase_points_snapshot()
+        assert stored[key_text]["Af1"] == pytest.approx(18.0)
+        snapshot = section.current_density_snapshot()
+        assert snapshot[key_text]["As1 (mA)"] == pytest.approx(12.0)
+        assert snapshot[key_text]["Af2 (mA)"] == pytest.approx(28.0)
+        assert snapshot[key_text]["As2-As1 (mA)"] == pytest.approx(10.0)
+        assert snapshot[key_text]["As current density (A/mm^2)"] == pytest.approx(
+            (12.0 / 1000.0) / (np.pi * 0.01 * 0.01)
+        )
+    finally:
+        annealing_section.set_phase_points_for_key(
+            key_text,
+            phase_values={label: None for label in builder_ui.PHASE_POINT_LABELS},
+        )
+        for widget in (section, annealing_section, microscope_section):
+            widget.hide()
+            widget.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_pick_writes_selected_manual_label() -> None:
+    _ensure_qapp()
+    frame = pd.DataFrame({"I_mA": [1.0, 20.0, 40.0], "R_Ohm": [100.0, 95.0, 110.0]})
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=10,
+        piece_y=4,
+        setpoint_mA=40,
+        alt_variant=False,
+        measurement_id="review-transition",
+        file_name="Ni50Fe27Ga23 10_4 40mA.txt",
+        relpath="Ni50Fe27Ga23 10_4 40mA.txt",
+        timestamp_mtime_utc="2026-06-08T00:00:00+00:00",
+    )
+    record = MeasurementRecord(
+        path=Path(metadata.file_name),
+        metadata=metadata,
+        dataframe=frame,
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    stored: dict[str, dict[str, float]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = {
+            label: float(value)
+            for label, value in values.items()
+            if isinstance(value, (int, float)) and np.isfinite(float(value))
+        }
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        phase_points_provider=lambda: stored,
+        phase_points_setter=_set_values,
+    )
+    try:
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        dialog._phase_controls.set_target("Af1")  # noqa: SLF001
+        dialog._handle_plot_pick(21.5)  # noqa: SLF001
+
+        assert stored["Ni50Fe27Ga23|10|4"]["Af1"] == pytest.approx(21.5)
+        assert dialog._tree.topLevelItem(0).text(1) == "manual"  # noqa: SLF001
+        assert "Manual: Af1 21.5 mA" in dialog._summary_label.text()  # noqa: SLF001
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 
