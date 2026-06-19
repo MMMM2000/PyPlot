@@ -24,6 +24,7 @@ from experiments.thermal_camera_viewer import (
     ThermalFrame,
     parse_cube_eeprom_packet,
     parse_binary_frame,
+    parse_mlx90614_line,
     parse_frame_lines,
     parse_raw_cube_frame,
     pop_binary_frames,
@@ -256,12 +257,56 @@ def test_frame_rate_tracker_prefers_device_timestamps_over_gui_delivery_time() -
     assert fps == 2.0
 
 
+def test_parse_mlx90614_line_returns_spot_temperature_frame() -> None:
+    frame = parse_mlx90614_line("MLX90614,7,1234,810,24.25,36.50,14870,15482,0")
+
+    assert frame is not None
+    assert frame.sequence == 7
+    assert frame.elapsed_ms == 1234
+    assert frame.raw_read_us == 810
+    assert frame.ambient_c == 24.25
+    assert frame.values == (36.50,)
+    assert frame.width == 1
+    assert frame.height == 1
+
+
+def test_parse_mlx90614_line_rejects_malformed_sample() -> None:
+    assert parse_mlx90614_line("MLX90614,7,1234,810,24.25") is None
+    assert parse_mlx90614_line("FRAME_BEGIN,1234,25.50") is None
+
+
+def test_parse_mlx90614_line_can_fall_back_to_raw_words() -> None:
+    frame = parse_mlx90614_line("MLX90614,7,1234,810,,,14870,15482,2")
+
+    assert frame is not None
+    assert round(frame.ambient_c or 0.0, 2) == 24.25
+    assert round(frame.values[0], 2) == 36.49
+
+
 def test_viewer_uses_baud_rate_dropdown(qtbot) -> None:  # type: ignore[no-untyped-def]
     window = ThermalCameraViewer()
     qtbot.addWidget(window)
 
     assert window.baud_combo.currentData() == 2000000
     assert window.baud_combo.findData(115200) >= 0
+
+
+def test_viewer_exposes_mlx90614_protocol(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = ThermalCameraViewer()
+    qtbot.addWidget(window)
+
+    assert window.protocol_combo.findData("mlx90614_text") >= 0
+
+
+def test_viewer_switches_mlx90614_to_spot_interval_options(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = ThermalCameraViewer()
+    qtbot.addWidget(window)
+
+    window.protocol_combo.setCurrentIndex(window.protocol_combo.findData("mlx90614_text"))
+
+    labels = [window.refresh_rate_combo.itemText(index) for index in range(window.refresh_rate_combo.count())]
+    assert labels == ["10 Hz", "50 Hz", "100 Hz", "Max stream"]
+    assert window.baud_combo.currentData() == 2000000
 
 
 def test_viewer_uses_refresh_rate_dropdown(qtbot) -> None:  # type: ignore[no-untyped-def]

@@ -103,6 +103,35 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Thermal camera viewer",
         "body": dedent(
             """
+            ### NUCLEO-H753ZI wiring
+            Power the Nucleo from its ST-LINK USB connector and turn power off before
+            rewiring the sensor. Connect only one thermal module to the checked-in
+            firmware at a time.
+
+            **Dratek MLX90614ESF-DCI spot thermometer module** (`0x5A`,
+            STM32Cube MLX90614 probe firmware):
+
+            * Nucleo **3V3** -> module **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> module **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> module **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> module **SCL**
+
+            **MLX90640 110 degree, 32 x 24 thermal camera module** (`0x33`,
+            STM32Cube MLX90640 raw-stream firmware):
+
+            * Nucleo **3V3** -> camera **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> camera **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> camera **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> camera **SCL**
+            * Leave **INT**, **AD**, or other optional breakout pins unconnected unless
+              you are using a different firmware that explicitly needs them.
+
+            Do not power these modules from **5V** or add 5 V I2C pullups unless a
+            level shifter is installed. The firmware enables weak internal pullups on
+            PB8/PB9, and most breakouts already include suitable 3.3 V I2C pullups.
+            The PC serial connection is the Nucleo ST-LINK virtual COM port; no module
+            UART pins need to be connected.
+
             ### Live MLX90640 view
             1. Keep the Nucleo running the STM32Cube MLX90640 raw-stream firmware for the
                fastest live diagnostic view, or the older Arduino firmware for calibrated
@@ -121,6 +150,77 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                comparing before/after current frames so colour changes are easier to judge.
             5. Press **Export frame** to save the current PNG heatmap and raw text frame to
                Downloads.
+
+            ### Live MLX90614 spot thermometer
+            1. Keep the Nucleo running the STM32Cube MLX90614 probe firmware with the
+               module connected on PB9/PB8 I2C.
+            2. Select **MLX90614 spot thermometer**, use the Nucleo serial port at
+               `2000000` baud, choose an interval, and press **Connect**.
+            3. The MLX90614 reports one object-temperature spot plus sensor ambient
+               temperature. It is not a 32 x 24 camera, so the display is a single live
+               temperature cell rather than a thermal image.
+            """
+        ).strip(),
+    },
+    "mini_dma_logger": {
+        "title": "Mini DMA Logger",
+        "body": dedent(
+            """
+            ### IR thermometer wiring
+            Use the NUCLEO-H753ZI ST-LINK USB connector for board power and the PC
+            virtual COM port. Turn the Nucleo power off before rewiring, and connect one
+            thermal module at a time to the checked-in firmware.
+
+            **Dratek MLX90614ESF-DCI spot thermometer module** (`0x5A`):
+
+            * Nucleo **3V3** -> module **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> module **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> module **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> module **SCL**
+
+            **MLX90640 110 degree, 32 x 24 thermal camera module** (`0x33`):
+
+            * Nucleo **3V3** -> camera **VCC/VIN** input that accepts 3.3 V
+            * Nucleo **GND** -> camera **GND**
+            * Nucleo **D14 / PB9 / I2C1_SDA** -> camera **SDA**
+            * Nucleo **D15 / PB8 / I2C1_SCL** -> camera **SCL**
+            * Leave **INT**, **AD**, and other optional breakout pins unconnected unless
+              a custom firmware explicitly needs them.
+
+            Do not use **5V** power or 5 V I2C pullups unless a level shifter is
+            installed. The Nucleo side is a 3.3 V I2C bus; most breakout modules already
+            include suitable pullups.
+
+            ### Choosing the sensor
+            * Choose the connected sensor explicitly. Mini DMA does not auto-detect the
+              sensor because the current Nucleo firmware images are sensor-specific.
+            * **MLX90614 spot thermometer** expects STM32Cube MLX90614 probe lines at
+              `2000000` baud. Its setting is the probe sample interval. The logger
+              records the single apparent object temperature plus sensor ambient
+              temperature.
+            * **MLX90640 Cube raw camera** expects the STM32Cube raw-stream camera
+              firmware at `2000000` baud. Its setting is the camera refresh code. The
+              logger records the frame maximum as the apparent object temperature and
+              saves frame min/mean/center/hotspot details in `ir_temperature.csv`.
+
+            The NUCLEO-H753ZI hardware can use either module on the same pins because the
+            sensors have different I2C addresses (`0x5A` and `0x33`). The checked-in
+            firmware images are separate, though: flash the MLX90614 probe firmware for
+            the spot thermometer, or the MLX90640 firmware/bridge for the camera. A
+            combined firmware is possible later, but that is not the current bench setup.
+
+            Use **Live camera** in the IR panel to open a passive MLX90640 heatmap popup
+            inside Mini DMA. During a measurement it shows the calibrated frames already
+            being read by Mini DMA IR logging, so it does not open a second serial
+            connection or steal the COM port.
+
+            Use **Flash firmware** after selecting **MLX90614 spot thermometer** or
+            **MLX90640 Cube raw camera** to build and flash the matching STM32Cube
+            firmware over SWD.
+
+            Mini DMA logging intentionally stores a compact temperature summary instead
+            of every pixel, while the popup keeps the full live heatmap available for
+            alignment and sanity checks.
             """
         ).strip(),
     },

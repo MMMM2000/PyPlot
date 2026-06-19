@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from data_logging.mini_dma_logger.run_quality import analyze_run_quality
+
 
 INDEX_COLUMNS = [
     "indexed_utc",
@@ -36,7 +38,31 @@ INDEX_COLUMNS = [
     "setup_rows",
     "control_trace_rows",
     "ui_telemetry_rows",
+    "quality_analyzer_version",
+    "run_type",
+    "include_in_optimization_summary",
+    "exclusion_reasons",
+    "current_loop_count_estimate",
+    "stress_error_rms_mpa",
+    "stress_error_p95_abs_mpa",
+    "stress_error_max_abs_mpa",
+    "stress_error_median_abs_mpa",
+    "current_hold_elapsed_s",
+    "total_elapsed_s",
+    "current_compliance_ratio",
+    "biggest_problems",
 ]
+
+DEFAULT_EXCLUDED_DIR_NAMES = {
+    "archive",
+    "automated",
+    "automated_control_tests",
+    "automation_history",
+    "campaigns",
+    "legacy_imports",
+    "plans",
+    "reports",
+}
 
 
 @dataclass(frozen=True)
@@ -70,6 +96,23 @@ def _csv_data_row_count(path: Path) -> int | None:
         return None
 
 
+def _quality_row(run_dir: Path) -> dict[str, Any]:
+    quality_path = run_dir / "run_quality.json"
+    cached = _read_json(quality_path)
+    if cached is None:
+        try:
+            cached = analyze_run_quality(run_dir).to_dict()
+        except Exception:
+            cached = {}
+    return cached
+
+
+def _join_list(value: Any) -> str:
+    if isinstance(value, list):
+        return ";".join(str(item) for item in value)
+    return str(value or "")
+
+
 def _file_last_write_utc(path: Path) -> str:
     try:
         stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -96,6 +139,7 @@ def _run_row(source: SourceRoot, run_dir: Path, indexed_utc: str) -> dict[str, A
     logging = metadata.get("logging")
     if not isinstance(logging, Mapping):
         logging = {}
+    quality = _quality_row(run_dir)
 
     row = {
         "indexed_utc": indexed_utc,
@@ -124,20 +168,38 @@ def _run_row(source: SourceRoot, run_dir: Path, indexed_utc: str) -> dict[str, A
         "setup_rows": _csv_data_row_count(run_dir / "setup.csv"),
         "control_trace_rows": _csv_data_row_count(run_dir / "control_trace.csv"),
         "ui_telemetry_rows": _csv_data_row_count(run_dir / "ui_telemetry.csv"),
+        "quality_analyzer_version": quality.get("analyzer_version", ""),
+        "run_type": quality.get("run_type", ""),
+        "include_in_optimization_summary": quality.get("include_in_optimization_summary", ""),
+        "exclusion_reasons": _join_list(quality.get("exclusion_reasons")),
+        "current_loop_count_estimate": quality.get("current_loop_count_estimate", ""),
+        "stress_error_rms_mpa": quality.get("stress_error_rms_mpa", ""),
+        "stress_error_p95_abs_mpa": quality.get("stress_error_p95_abs_mpa", ""),
+        "stress_error_max_abs_mpa": quality.get("stress_error_max_abs_mpa", ""),
+        "stress_error_median_abs_mpa": quality.get("stress_error_median_abs_mpa", ""),
+        "current_hold_elapsed_s": quality.get("current_hold_elapsed_s", ""),
+        "total_elapsed_s": quality.get("total_elapsed_s", ""),
+        "current_compliance_ratio": quality.get("current_compliance_ratio", ""),
+        "biggest_problems": _join_list(quality.get("biggest_problems")),
     }
     if not row["raw_scale_sample_count"]:
         row["raw_scale_sample_count"] = logging.get("raw_scale_sample_count", "")
     return row
 
 
-def discover_runs(sources: Sequence[SourceRoot]) -> list[dict[str, Any]]:
+def discover_runs(
+    sources: Sequence[SourceRoot], exclude_names: Iterable[str] = ()
+) -> list[dict[str, Any]]:
     indexed_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    excluded = {name.lower() for name in exclude_names}
     rows: list[dict[str, Any]] = []
     for source in sources:
         if not source.path.exists():
             continue
         for run_dir in sorted((path for path in source.path.iterdir() if path.is_dir()), key=lambda path: path.name.lower()):
-            if run_dir.name.lower() in {"reports", "plans", "campaigns", "legacy_imports"}:
+            if run_dir.name.lower() in DEFAULT_EXCLUDED_DIR_NAMES:
+                continue
+            if run_dir.name.lower() in excluded:
                 continue
             rows.append(_run_row(source, run_dir, indexed_utc))
     rows.sort(key=lambda row: (str(row["source_name"]).lower(), str(row["run_name"]).lower()))
@@ -174,6 +236,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Source root to scan, either NAME=PATH or PATH. Repeat for multiple roots.",
     )
+    parser.add_argument(
+        "--exclude-name",
+        action="append",
+        default=[],
+        help="Exact run-folder name to skip. Repeat for multiple active or out-of-scope runs.",
+    )
     parser.add_argument("--output-dir", required=True, help="Directory that receives runs_index.csv/jsonl.")
     return parser
 
@@ -181,7 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     sources = [_parse_source(value) for value in args.source]
-    rows = discover_runs(sources)
+    rows = discover_runs(sources, exclude_names=args.exclude_name)
     write_index(rows, Path(args.output_dir).expanduser())
     print(f"Indexed {len(rows)} Mini DMA automation runs into {Path(args.output_dir).expanduser()}")
     return 0

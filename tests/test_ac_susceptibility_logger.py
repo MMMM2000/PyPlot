@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import csv
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from data_logging.ac_susceptibility_logger import lcr6000
+from data_logging.ac_susceptibility_logger import offline_baseline
 from data_logging.ac_susceptibility_logger import psu_watchdog
 from data_logging.ac_susceptibility_logger import sweep
 
@@ -21,22 +23,86 @@ ac_logger = pytest.importorskip(
 )
 
 
-def _isolate_ac_qsettings(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+class _FailingBrokerClient:
+    def snapshot(self) -> dict[str, object]:
+        raise RuntimeError("connection refused")
+
+
+class _FakeBrokerClient:
+    def snapshot(self) -> dict[str, object]:
+        return {"profile": {"profile_id": "hmp4040", "channel_count": 4}}
+
+
+class _FakeHmpDriver:
+    instances: list["_FakeHmpDriver"] = []
+
+    def __init__(self, *, port_name: str, baudrate: int, timeout_s: float) -> None:
+        self.port_name = port_name
+        self.baudrate = baudrate
+        self.timeout_s = timeout_s
+        self.profile = ac_logger.HMP4040_PROFILE
+        self.closed = False
+        _FakeHmpDriver.instances.append(self)
+
+    def connect(self) -> None:
+        pass
+
+    def identify(self) -> str:
+        return "ROHDE&SCHWARZ,HMP4040,102416,HW50020003/SW2.62"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeOwnedBroker:
+    def __init__(self, driver: object, profile: object) -> None:
+        self.driver = driver
+        self.profile = profile
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def assign_role(self, **payload: object) -> object:
+        self.calls.append(("assign_role", payload))
+        return object()
+
+    def confirm_profile(self, **payload: object) -> object:
+        self.calls.append(("confirm_profile", payload))
+        return object()
+
+
+def _isolate_ac_qsettings(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    clear_each_time: bool = True,
+) -> None:
     original = QtCore.QSettings
     ini_format = original.Format.IniFormat
     user_scope = original.Scope.UserScope
+    cleared = False
 
     def factory(_organization: str, _application: str) -> QtCore.QSettings:
+        nonlocal cleared
         settings = original(
             ini_format,
             user_scope,
             "microwire_tests",
             name,
         )
-        settings.clear()
+        if clear_each_time or not cleared:
+            settings.clear()
+            settings.sync()
+            cleared = True
         return settings
 
     monkeypatch.setattr(ac_logger.QtCore, "QSettings", factory)
+
+
+def _make_ac_broker_channel_combo() -> QtWidgets.QComboBox:
+    combo = QtWidgets.QComboBox()
+    combo.addItem("Select channel...", 0)
+    for channel in range(1, 5):
+        combo.addItem(f"CH{channel}", channel)
+    return combo
 
 
 def _show_single_ac_plot_tile(window: object, tile_index: int = 0) -> object:
@@ -227,7 +293,8 @@ def test_power_supply_serial_resource_is_normalized_for_windows_paths() -> None:
 def test_owon_voltage_limit_is_clamped_to_bench_scpi_maximum() -> None:
     assert sweep.effective_power_supply_voltage_limit("owon_spe6102", 62.0) == pytest.approx(61.0)
     assert sweep.effective_power_supply_voltage_limit("owon_spe6102", 48.0) == pytest.approx(48.0)
-    assert sweep.effective_power_supply_voltage_limit("hmp4030", 62.0) == pytest.approx(62.0)
+    assert sweep.effective_power_supply_voltage_limit("hmp4030", 62.0) == pytest.approx(32.05)
+    assert sweep.effective_power_supply_voltage_limit("shared_hmp_broker", 62.0) == pytest.approx(32.05)
 
 
 def test_serial_scpi_current_source_requires_supported_id_before_commands(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -812,6 +879,902 @@ def test_sweep_metadata_snapshot_includes_full_settings(tmp_path: Path) -> None:
     assert snapshot["acquisition"]["point_duration_s"] == 10.0
     assert snapshot["current_loop"]["points_mA"] == [0.0, 20.0, 40.0]
     assert snapshot["lcr_settings"][1]["function"] == "Lp-Rp"
+    assert snapshot["lcr_correction"]["source"] == "not_checked"
+
+
+def test_sweep_metadata_snapshot_includes_shared_broker_and_debug_settings(tmp_path: Path) -> None:
+    path = tmp_path / "shared-broker.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.3, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=10.0,
+        repeats=1,
+        dwell_s=1.0,
+        psu_backend="shared_hmp_broker",
+        psu_resource="127.0.0.1:8765/CH2",
+        voltage_limit_v=30.0,
+        shared_broker_host="127.0.0.1",
+        shared_broker_port=8765,
+        shared_broker_channel=2,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(tmp_path / "shared-broker_lcr_debug.jsonl"),
+        lcr_continuous_log_cadence_s=1.5,
+        lcr_continuous_log_max_rows_per_point=42,
+        lcr_correction={
+            "open_enabled": True,
+            "short_enabled": False,
+            "checked_utc": "2026-06-05T12:00:00+00:00",
+            "source": "queried_meter",
+        },
+    )
+
+    writer = sweep.AcSweepTsvWriter(path, config)
+    writer.write_metadata()
+    writer.close()
+
+    line = next(line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("# config_json="))
+    snapshot = json.loads(line.removeprefix("# config_json="))
+    assert snapshot["psu"]["backend"] == "shared_hmp_broker"
+    assert snapshot["psu"]["shared_broker"] == {
+        "enabled": True,
+        "host": "127.0.0.1",
+        "port": 8765,
+        "channel": 2,
+    }
+    assert snapshot["lcr_continuous_log"]["enabled"] is True
+    assert snapshot["lcr_continuous_log"]["cadence_s"] == 1.5
+    assert snapshot["lcr_continuous_log"]["max_rows_per_point"] == 42
+    assert snapshot["lcr_correction"]["open_enabled"] is True
+    assert snapshot["lcr_correction"]["short_enabled"] is False
+    assert snapshot["lcr_correction"]["source"] == "queried_meter"
+
+
+def test_offline_empty_coil_baseline_subtraction_preserves_raw_columns(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.tsv"
+    sweep_path = tmp_path / "sweep.tsv"
+    output = tmp_path / "sweep_empty_coil_subtracted.tsv"
+    baseline.write_text(
+        "\n".join(
+            [
+                "# baseline",
+                "# Timestamp UTC\tBaseline setting index\tBaseline repeat index\tLCR frequency (Hz)\tLCR level mode\tLCR level\tLCR function\tLCR primary\tLCR secondary\tLCR monitor1\tLCR monitor2\tLCR comparator\tLCR raw",
+                "2026-06-05T10:00:00Z\t1\t1\t1000\tcurrent\t0.01\tLs-Rs\t20\t2\t\t\t\t",
+                "2026-06-05T10:00:01Z\t1\t2\t1000\tcurrent\t0.01\tLs-Rs\t22\t4\t\t\t\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    sweep_path.write_text(
+        "\n".join(
+            [
+                "# sweep",
+                sweep.SWEEP_HEADER_LINE,
+                "2026-06-05T11:00:00Z\t0\t1\t1\tLs-Rs\t1000\tcurrent\t0.01\t0.02\t0.021\t1\t47.6\t0.021\tup\t1\t25\t7\t\t\t\tshared_hmp_broker\t127.0.0.1:8765/CH1\tok\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = offline_baseline.subtract_file(
+        sweep_path=sweep_path,
+        baseline_path=baseline,
+        output_path=output,
+    )
+
+    assert summary.total_rows == 1
+    assert summary.subtracted_rows == 1
+    text = output.read_text(encoding="utf-8")
+    assert "# baseline_subtraction_json=" in text
+    lines = text.splitlines()
+    header = [line.removeprefix("# ").split("\t") for line in lines if line.startswith("# Timestamp UTC")][-1]
+    data_lines = [line for line in lines if line and not line.startswith("#")]
+    row = next(csv.DictReader(data_lines, fieldnames=header, delimiter="\t"))
+    assert row["LCR primary"] == "25"
+    assert row["LCR secondary"] == "7"
+    assert row["LCR primary empty-coil baseline"] == "21"
+    assert row["LCR secondary empty-coil baseline"] == "3"
+    assert row["LCR primary baseline subtracted"] == "4"
+    assert row["LCR secondary baseline subtracted"] == "4"
+    assert row["Empty-coil baseline status"] == "subtracted"
+
+
+def test_shared_broker_current_source_leases_turns_off_and_releases_only_channel() -> None:
+    class FakeBrokerClient:
+        def __init__(self, *, host: str, port: int, timeout_s: float) -> None:
+            self.host = host
+            self.port = port
+            self.timeout_s = timeout_s
+            self.events: list[tuple[str, object]] = []
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            self.events.append(("request", action))
+            return {"snapshot": {}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.events.append(("lease", (channel, owner, role)))
+            return {"lease_id": "lease-ac-2"}
+
+        def configure_channel(self, **payload: object) -> None:
+            self.events.append(("configure", payload))
+
+        def set_current(self, **payload: object) -> None:
+            self.events.append(("current", payload))
+
+        def measure_channel(self, *, channel: int) -> dict[str, float]:
+            self.events.append(("measure", channel))
+            return {"current_mA": 19.8, "voltage_V": 1.23}
+
+        def set_output(self, **payload: object) -> None:
+            self.events.append(("output", payload))
+
+        def release(self, **payload: object) -> None:
+            self.events.append(("release", payload))
+
+    clients: list[FakeBrokerClient] = []
+
+    def factory(**kwargs: object) -> FakeBrokerClient:
+        client = FakeBrokerClient(**kwargs)  # type: ignore[arg-type]
+        clients.append(client)
+        return client
+
+    source = sweep.SharedBrokerCurrentSource(
+        host="127.0.0.1",
+        port=8765,
+        channel=2,
+        voltage_limit_v=30.0,
+        client_factory=factory,
+    )
+
+    source.connect()
+    source.initialize(voltage_limit_v=30.0)
+    source.set_current(0.02)
+    measurement = source.measure()
+    source.output_off()
+    source.close()
+
+    assert measurement.current_actual_a == pytest.approx(0.0198)
+    client = clients[0]
+    assert ("lease", (2, "ac_susceptibility_logger", "ac_susceptibility")) in client.events
+    assert (
+        "configure",
+        {
+            "channel": 2,
+            "lease_id": "lease-ac-2",
+            "voltage_v": 30.0,
+            "current_a": 0.02,
+            "output_on": True,
+        },
+    ) in client.events
+    assert client.events[-2:] == [
+        ("output", {"channel": 2, "lease_id": "lease-ac-2", "output_on": False}),
+        ("release", {"channel": 2, "lease_id": "lease-ac-2"}),
+    ]
+
+
+def test_shared_broker_current_source_reports_operator_diagnostics() -> None:
+    class FailingBrokerClient:
+        def __init__(self, *, host: str, port: int, timeout_s: float) -> None:
+            self.host = host
+            self.port = port
+            self.timeout_s = timeout_s
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            return {"snapshot": {}}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            return {"lease_id": "lease-stale"}
+
+        def configure_channel(self, **_payload: object) -> None:
+            raise RuntimeError("valid lease required for CH1")
+
+    source = sweep.SharedBrokerCurrentSource(
+        host="127.0.0.1",
+        port=8765,
+        channel=1,
+        voltage_limit_v=32.0,
+        client_factory=FailingBrokerClient,
+    )
+
+    source.connect()
+
+    with pytest.raises(RuntimeError, match="AC shared HMP broker: stale channel lease detected"):
+        source.initialize(voltage_limit_v=32.0)
+
+
+def test_run_ac_sweep_writes_bounded_lcr_debug_sidecar(tmp_path: Path) -> None:
+    class FakeLcr:
+        def __init__(self) -> None:
+            self.fetch_count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.fetch_count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-06-04T00:00:0{self.fetch_count}.000+00:00",
+                raw=f"+{self.fetch_count}.0,+2.0,+0.0,+0.0,OK",
+                primary=float(self.fetch_count),
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    debug_path = tmp_path / "sweep_lcr_debug.jsonl"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=5,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(debug_path),
+        lcr_continuous_log_cadence_s=0.1,
+        lcr_continuous_log_max_rows_per_point=2,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakePsu(),
+        output_path=tmp_path / "sweep.tsv",
+        sleep=lambda _seconds: None,
+    )
+
+    records = [json.loads(line) for line in debug_path.read_text(encoding="utf-8").splitlines()]
+    sample_records = [record for record in records if record["event"] == "lcr_sample"]
+    assert records[0]["event"] == "metadata"
+    assert records[-1]["event"] == "closed"
+    assert len(sample_records) <= 2
+    assert {record["phase"] for record in sample_records} == {"measure"}
+
+
+def test_run_ac_sweep_writes_completed_run_status(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-12T00:00:00.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "sweep.tsv"
+    debug_path = tmp_path / "sweep_lcr_debug.jsonl"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(debug_path),
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakePsu(),
+        output_path=output_path,
+        sleep=lambda _seconds: None,
+    )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["status"] == "completed"
+    assert status["phase"] == "closed"
+    assert status["rows_written"] == 1
+    assert status["setting_index"] == 1
+    assert status["current_point_index"] == 1
+    assert status["output_path"] == str(output_path)
+    assert status["lcr_continuous_log_path"] == str(debug_path)
+    assert status["lcr_continuous_log"]["cadence_s"] == 1.0
+    assert status["psu"]["shared_broker"]["enabled"] is False
+    closed = json.loads(debug_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert closed["event"] == "closed"
+    assert closed["status"] == "completed"
+
+
+def test_run_ac_sweep_uses_local_status_fallback_when_output_path_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-16T00:15:58.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "shared_hmp_broker"
+        resource = "127.0.0.1:8765/CH1"
+
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def connect(self) -> None:
+            self.events.append("connect")
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.events.append(f"initialize:{voltage_limit_v:g}")
+
+        def set_current(self, current_a: float) -> None:
+            self.events.append(f"set_current:{current_a:g}")
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            self.events.append(f"set_voltage:{voltage_v:g}")
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            self.events.append("output_off")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    class DisappearingTsvWriter(sweep.AcSweepTsvWriter):
+        def write_metadata(self) -> None:
+            return None
+
+        def write_row(self, row: sweep.AcSweepRow) -> None:
+            raise sweep.AcOutputPathError(self.path, "write/flush", FileNotFoundError(3, "lost drive", "G:\\"))
+
+        def close(self) -> None:
+            return None
+
+    fallback_dir = tmp_path / "local_fallback"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+    monkeypatch.setattr(sweep, "AcSweepTsvWriter", DisappearingTsvWriter)
+    real_write_json_atomic = sweep._write_json_atomic
+
+    def flaky_primary_status_write(path: Path, payload: dict[str, object]) -> None:
+        if str(path).replace("/", "\\").startswith("G:\\"):
+            raise FileNotFoundError(3, "lost drive", "G:\\")
+        real_write_json_atomic(path, payload)
+
+    monkeypatch.setattr(sweep, "_write_json_atomic", flaky_primary_status_write)
+
+    output_path = Path("G:/missing/ac_run.tsv")
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="shared_hmp_broker",
+        psu_resource="127.0.0.1:8765/CH1",
+        voltage_limit_v=32.0,
+        shared_broker_channel=1,
+    )
+    psu = FakePsu()
+
+    with pytest.raises(sweep.AcOutputPathError, match="write/flush failed"):
+        sweep.run_ac_sweep(
+            config=config,
+            lcr=FakeLcr(),
+            psu=psu,
+            output_path=output_path,
+            sleep=lambda _seconds: None,
+        )
+
+    fallback_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+    status = json.loads(fallback_path.read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["phase"] == "closed"
+    assert "write/flush failed" in status["stop_reason"]
+    assert status["local_fallback_status_path"] == str(fallback_path)
+    assert status["status_path_is_local_fallback"] is True
+    assert "status_write_errors" in status
+    assert psu.events[-2:] == ["output_off", "close"]
+
+
+def test_run_ac_sweep_status_tracks_last_completed_repeat(tmp_path: Path) -> None:
+    class FakeLcr:
+        def __init__(self) -> None:
+            self.count = 0
+
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            self.count += 1
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc=f"2026-06-16T00:00:{self.count:02d}.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "repeat.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=3,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakePsu(),
+        output_path=output_path,
+        sleep=lambda _seconds: None,
+    )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["rows_written"] == 3
+    assert status["last_completed_point"]["setting_index"] == 1
+    assert status["last_completed_point"]["current_point_index"] == 1
+    assert status["last_completed_point"]["repeat_index"] == 3
+    assert status["last_completed_point"]["direction"] == "up"
+
+
+def test_run_ac_sweep_run_status_records_shared_broker_lease(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-12T00:00:00.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakeSharedPsu:
+        backend_id = "shared_hmp_broker"
+        resource = "127.0.0.1:8765/CH1"
+        host = "127.0.0.1"
+        port = 8765
+        channel = 1
+        owner = "ac_susceptibility_logger"
+
+        def __init__(self) -> None:
+            self.lease_id: str | None = None
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.lease_id = "lease-ac-ch1"
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.lease_id = None
+
+    output_path = tmp_path / "shared.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="shared_hmp_broker",
+        psu_resource="127.0.0.1:8765/CH1",
+        voltage_limit_v=32.0,
+        shared_broker_host="127.0.0.1",
+        shared_broker_port=8765,
+        shared_broker_channel=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=FakeSharedPsu(),
+        output_path=output_path,
+        sleep=lambda _seconds: None,
+    )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["psu"]["shared_broker"] == {
+        "enabled": True,
+        "host": "127.0.0.1",
+        "port": 8765,
+        "channel": 1,
+    }
+    assert status["psu_runtime"]["shared_broker"]["channel"] == 1
+    assert status["psu_runtime"]["shared_broker"]["lease_id"] == "lease-ac-ch1"
+
+
+def test_run_ac_sweep_writes_stopped_run_status(tmp_path: Path) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-12T00:00:00.000+00:00",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "stopped.tsv"
+    debug_path = tmp_path / "stopped_lcr_debug.jsonl"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up"), sweep.CurrentLoopPoint(0.04, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+        lcr_continuous_log_enabled=True,
+        lcr_continuous_log_path=str(debug_path),
+    )
+    should_stop = False
+
+    def progress(_row: sweep.AcSweepRow) -> None:
+        nonlocal should_stop
+        should_stop = True
+
+    with pytest.raises(RuntimeError, match="stopped by user"):
+        sweep.run_ac_sweep(
+            config=config,
+            lcr=FakeLcr(),
+            psu=FakePsu(),
+            output_path=output_path,
+            sleep=lambda _seconds: None,
+            progress=progress,
+            stop_requested=lambda: should_stop,
+        )
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["status"] == "stopped"
+    assert status["stop_reason"] == "AC sweep stopped by user"
+    closed = json.loads(debug_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert closed["status"] == "stopped"
+
+
+def test_ac_sweep_worker_records_worker_exception_status(tmp_path: Path) -> None:
+    class FailingLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            raise RuntimeError("lcr configure failed")
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            raise AssertionError("not reached")
+
+    class FakePsu:
+        backend_id = "owon_spe6102"
+        resource = "COM7"
+
+        def connect(self) -> None:
+            return None
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            return None
+
+        def set_current(self, current_a: float) -> None:
+            return None
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            return None
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            return sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.2, status="OK")
+
+        def output_off(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    output_path = tmp_path / "failed.tsv"
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+
+    worker = ac_logger.AcSweepWorker(config=config, lcr=FailingLcr(), psu=FakePsu(), output_path=output_path)
+    worker.run()
+
+    status = json.loads(sweep.ac_run_status_path_for_output(output_path).read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["phase"] == "worker_exception"
+    assert status["exception"]["type"] == "RuntimeError"
+    assert "lcr configure failed" in status["exception"]["message"]
+
+
+def test_classify_ac_run_status_detects_stale_missing_closed_marker(tmp_path: Path) -> None:
+    output_path = tmp_path / "partial.tsv"
+    output_path.write_text("# AC susceptibility sweep\n", encoding="utf-8")
+    debug_path = sweep.ac_lcr_debug_path_for_output(output_path)
+    debug_path.write_text(
+        json.dumps({"event": "metadata"}) + "\n" + json.dumps({"event": "lcr_sample"}) + "\n",
+        encoding="utf-8",
+    )
+    old = datetime(2026, 6, 12, 1, 0, tzinfo=timezone.utc)
+    sweep.ac_run_status_path_for_output(output_path).write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "running",
+                "phase": "measure",
+                "updated_utc": old.isoformat(),
+                "output_path": str(output_path),
+                "rows_written": 123,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = sweep.classify_ac_run_status(
+        output_path,
+        stale_after_s=60.0,
+        now_utc=old + timedelta(minutes=10),
+    )
+
+    assert summary.status == "unclean_stale_heartbeat"
+    assert summary.is_unclean
+    assert summary.stale
+    assert summary.lcr_debug_closed is False
+    assert summary.rows_written == 123
+
+
+def test_classify_ac_run_status_reads_local_fallback_when_primary_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+    output_path = Path("G:/missing/partial.tsv")
+    fallback_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "failed",
+                "phase": "closed",
+                "updated_utc": "2026-06-16T00:15:58+00:00",
+                "output_path": str(output_path),
+                "rows_written": 327690,
+                "last_completed_point": {
+                    "setting_index": 28,
+                    "current_point_index": 3,
+                    "repeat_index": 10,
+                },
+                "stop_reason": "AC sweep output write/flush failed for G:\\run.tsv: [WinError 3]",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = sweep.classify_ac_run_status(output_path)
+
+    assert summary.status == "failed"
+    assert summary.status_path == fallback_path
+    assert summary.rows_written == 327690
+    assert not summary.is_unclean
+    assert "write/flush failed" in summary.stop_reason
+
+
+def test_resume_plan_reports_unclean_partial_setting_metadata(tmp_path: Path) -> None:
+    current_points = [
+        sweep.CurrentLoopPoint(0.02, "up"),
+        sweep.CurrentLoopPoint(0.04, "up"),
+    ]
+    settings = [
+        lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs"),
+        lcr6000.Lcr6000Settings(2000.0, 0.1, function="Ls-Rs"),
+    ]
+    config = sweep.AcSweepConfig(
+        lcr_settings=settings,
+        current_points=current_points,
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend="owon_spe6102",
+        psu_resource="COM7",
+        voltage_limit_v=5.0,
+    )
+    output_path = tmp_path / "partial.tsv"
+    reading = lcr6000.Lcr6000Reading(
+        timestamp_utc="2026-06-12T00:00:00.000+00:00",
+        raw="+1.0,+2.0,+0.0,+0.0,OK",
+        primary=1.0,
+        secondary=2.0,
+        monitor1=0.0,
+        monitor2=0.0,
+        comparator="OK",
+    )
+    writer = sweep.AcSweepTsvWriter(output_path, config)
+    writer.write_metadata()
+    writer.write_row(
+        sweep.AcSweepRow(
+            timestamp_utc="2026-06-12T00:00:01.000+00:00",
+            elapsed_s=1.0,
+            setting_index=1,
+            total_settings=2,
+            setting=settings[0],
+            current_point=current_points[0],
+            repeat_index=1,
+            lcr_reading=reading,
+            psu_measurement=sweep.PowerSupplyMeasurement(current_actual_a=0.02, voltage_actual_v=1.0, status="OK"),
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+        )
+    )
+    writer.close()
+    old = datetime(2026, 6, 12, 1, 0, tzinfo=timezone.utc)
+    sweep.ac_run_status_path_for_output(output_path).write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "running",
+                "phase": "measure",
+                "updated_utc": old.isoformat(),
+                "output_path": str(output_path),
+                "rows_written": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    sweep.ac_lcr_debug_path_for_output(output_path).write_text(json.dumps({"event": "lcr_sample"}) + "\n", encoding="utf-8")
+
+    plan = sweep.build_resume_plan(config, [output_path])
+
+    assert plan.completed_setting_indices == []
+    assert plan.partial_setting_indices == [1]
+    assert [setting.frequency_hz for setting in plan.config.lcr_settings] == [1000.0, 2000.0]
+    assert plan.run_statuses[0].is_unclean
+    assert "uncleanly" in plan.summary
 
 
 def test_run_ac_sweep_aborts_when_psu_actual_current_is_missing(tmp_path: Path) -> None:
@@ -973,6 +1936,94 @@ def test_run_ac_sweep_adjusts_owon_voltage_until_measured_current_is_ready(tmp_p
     assert lcr.fetch_count == 1
     voltage_events = [event for event in psu.events if event.startswith("voltage:")]
     assert voltage_events
+    assert psu.events[-2:] == ["off", "close"]
+
+
+@pytest.mark.parametrize("backend", ["hmp4030", "shared_hmp_broker"])
+def test_run_ac_sweep_keeps_hmp_voltage_limit_fixed_during_current_points(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    class FakeLcr:
+        def configure(self, _setting: lcr6000.Lcr6000Settings) -> None:
+            return None
+
+        def fetch_impedance(self) -> lcr6000.Lcr6000Reading:
+            return lcr6000.Lcr6000Reading(
+                timestamp_utc="2026-06-04T00:00:00Z",
+                raw="+1.0,+2.0,+0.0,+0.0,OK",
+                primary=1.0,
+                secondary=2.0,
+                monitor1=0.0,
+                monitor2=0.0,
+                comparator="OK",
+            )
+
+    class FakePsu:
+        resource = "127.0.0.1:8765/CH1"
+
+        def __init__(self) -> None:
+            self.backend_id = backend
+            self.events: list[str] = []
+            self.current_a = 0.0
+
+        def connect(self) -> None:
+            self.events.append("connect")
+
+        def initialize(self, *, voltage_limit_v: float) -> None:
+            self.events.append(f"initialize:{voltage_limit_v:g}")
+
+        def set_current(self, current_a: float) -> None:
+            self.current_a = float(current_a)
+            self.events.append(f"current:{current_a:g}")
+
+        def set_voltage_limit(self, voltage_v: float) -> None:
+            self.events.append(f"voltage:{voltage_v:.3f}")
+
+        def measure(self) -> sweep.PowerSupplyMeasurement:
+            self.events.append("measure")
+            return sweep.PowerSupplyMeasurement(
+                current_actual_a=self.current_a,
+                voltage_actual_v=32.0 if self.current_a > 0.0 else 0.0,
+                status="OK",
+            )
+
+        def output_off(self) -> None:
+            self.events.append("off")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    psu = FakePsu()
+    config = sweep.AcSweepConfig(
+        lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+        current_points=[
+            sweep.CurrentLoopPoint(0.0, "zero"),
+            sweep.CurrentLoopPoint(0.057, "up"),
+        ],
+        point_duration_s=0.0,
+        repeats=1,
+        dwell_s=0.0,
+        psu_backend=backend,
+        psu_resource=psu.resource,
+        voltage_limit_v=32.0,
+        psu_current_ready_timeout_s=0.05,
+        psu_current_ready_poll_s=0.01,
+        psu_measure_attempts=1,
+    )
+
+    sweep.run_ac_sweep(
+        config=config,
+        lcr=FakeLcr(),
+        psu=psu,
+        output_path=tmp_path / f"{backend}-fixed-voltage.tsv",
+        sleep=lambda _seconds: None,
+    )
+
+    assert "initialize:32" in psu.events
+    assert "current:0" in psu.events
+    assert "current:0.057" in psu.events
+    assert not [event for event in psu.events if event.startswith("voltage:")]
     assert psu.events[-2:] == ["off", "close"]
 
 
@@ -1734,6 +2785,74 @@ def test_ac_logger_defaults_to_lcr_current_excitation(monkeypatch: pytest.Monkey
         app.processEvents()
 
 
+def test_ac_logger_lcr_chips_drive_scan_lists_and_keep_panel_compact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "lcr_chip_scan_lists", clear_each_time=False)
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        frequency_chips = window.frame_lcr_frequency_chips.findChildren(ac_logger.AcValueChip)
+        level_chips = window.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
+        assert len(frequency_chips) == len(ac_logger.DEFAULT_FREQUENCY_PRESETS_HZ)
+        assert len(level_chips) == len(ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
+        assert all(chip.isChecked() for chip in frequency_chips)
+        assert all(chip.isChecked() for chip in level_chips)
+
+        frequency_chips[-1].setChecked(False)
+        assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(
+            ac_logger.DEFAULT_FREQUENCY_PRESETS_HZ[:-1]
+        )
+        for chip in level_chips:
+            if chip.text() == "20 mA":
+                chip.setChecked(False)
+        assert window.lineEdit_lcr_levels.text() == "0.1, 0.5, 1, 5, 10"
+
+        assert window.ui.left_scroll.maximumWidth() <= 720
+    finally:
+        window.close()
+        app.processEvents()
+
+    reopened = ac_logger.MainWindow()
+    try:
+        reopened_frequency_chips = reopened.frame_lcr_frequency_chips.findChildren(ac_logger.AcValueChip)
+        assert [chip.isChecked() for chip in reopened_frequency_chips] == [
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            False,
+        ]
+        reopened_level_chips = reopened.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
+        assert [chip.isChecked() for chip in reopened_level_chips] == [True, True, True, True, True, False]
+        assert reopened.comboBox_lcr_level_mode.currentData() == "current"
+        assert reopened.lineEdit_lcr_levels.text() == "0.1, 0.5, 1, 5, 10"
+
+        reopened._set_combo_data(reopened.comboBox_lcr_level_mode, "voltage")
+        reopened._handle_lcr_level_mode_changed()
+        voltage_chips = reopened.frame_lcr_level_chips.findChildren(ac_logger.AcValueChip)
+        assert [chip.text() for chip in voltage_chips] == ["0.01 V", "0.1 V", "0.3 V", "0.5 V", "1 V", "1.5 V", "2 V"]
+        assert reopened.lineEdit_lcr_levels.text() == ac_logger.MainWindow._format_numeric_list(
+            ac_logger.LCR_FRONT_PANEL_VOLTAGE_PRESETS_V
+        )
+    finally:
+        reopened.close()
+        app.processEvents()
+
+
 def test_ac_logger_can_switch_lcr_excitation_between_current_and_voltage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1804,6 +2923,207 @@ def test_ac_logger_uses_ac_specific_owon_supply_defaults_for_sweep_config() -> N
     assert window._selected_ac_psu_baudrate() == 9600
     assert config.voltage_limit_v == pytest.approx(61.0)
     app.processEvents()
+
+
+def test_ac_logger_shared_broker_requires_manual_channel_selection_for_sweep_config() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.ac_settings = QtCore.QSettings("microwire", "ac_susceptibility_logger_test_shared_broker_channel")
+    window.ac_settings.clear()
+    window._lcr_plan = []
+    window.ui = type("Ui", (), {})()
+    window.ui.comboBox_supply = QtWidgets.QComboBox()
+    window.ui.comboBox_supply.addItem("Shared HMP broker", "shared_hmp_broker")
+    window.ui.comboBox_port = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate.addItem("9600")
+    window._ac_psu_backend = "shared_hmp_broker"
+    window._ac_psu_resource = ""
+    window._ac_psu_baudrate = 9600
+    window._ac_shared_broker_host = "127.0.0.1"
+    window._ac_shared_broker_port = 8765
+    window._ac_shared_broker_channel = 0
+    window.lineEdit_ac_broker_host = QtWidgets.QLineEdit()
+    window.lineEdit_ac_broker_host.setText("127.0.0.1")
+    window.spinBox_ac_broker_port = QtWidgets.QSpinBox()
+    window.spinBox_ac_broker_port.setRange(1, 65535)
+    window.spinBox_ac_broker_port.setValue(8765)
+    window.comboBox_ac_broker_channel = _make_ac_broker_channel_combo()
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(0))
+    window.label_ac_broker_host = QtWidgets.QLabel()
+    window.label_ac_broker_port = QtWidgets.QLabel()
+    window.label_ac_broker_channel = QtWidgets.QLabel()
+    window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
+    window.spinBox_ac_voltage_limit.setValue(32.0)
+    window.spinBox_ac_current_start = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_start.setValue(20.0)
+    window.spinBox_ac_current_stop = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_stop.setValue(20.0)
+    window.spinBox_ac_current_step = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_current_step.setValue(20.0)
+    window.comboBox_ac_direction = QtWidgets.QComboBox()
+    window.comboBox_ac_direction.addItem("Up only", "up")
+    window.spinBox_ac_dwell = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_dwell.setValue(0.5)
+    window.spinBox_ac_point_duration = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_point_duration.setValue(1.0)
+    window.checkBox_ac_include_zero_current = QtWidgets.QCheckBox()
+    window._prepare_lcr_plan = lambda: [lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")]
+
+    with pytest.raises(ValueError, match="shared HMP broker channel"):
+        window._build_ac_sweep_config()
+
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(1))
+    window._handle_ac_broker_channel_changed()
+    config = window._build_ac_sweep_config()
+
+    assert config.psu_backend == "shared_hmp_broker"
+    assert config.psu_resource == "127.0.0.1:8765/CH1"
+    assert config.shared_broker_channel == 1
+    assert window._selected_ac_broker_channel() == 1
+    app.processEvents()
+
+
+def test_ac_logger_shared_broker_ignores_legacy_unconfirmed_channel_and_shows_picker() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    settings = QtCore.QSettings(
+        QtCore.QSettings.Format.IniFormat,
+        QtCore.QSettings.Scope.UserScope,
+        "microwire_tests",
+        "ac_legacy_unconfirmed_broker_channel",
+    )
+    settings.clear()
+    settings.setValue("psu_profiles/shared_hmp_broker/broker_host", "127.0.0.1")
+    settings.setValue("psu_profiles/shared_hmp_broker/broker_port", 8765)
+    settings.setValue("psu_profiles/shared_hmp_broker/broker_channel", 1)
+
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window.ac_settings = settings
+    window._ac_loading_settings = False
+    window._ac_psu_backend = "shared_hmp_broker"
+    window._ac_psu_resource = ""
+    window._ac_psu_baudrate = 115200
+    window._ac_shared_broker_host = "127.0.0.1"
+    window._ac_shared_broker_port = 8765
+    window._ac_shared_broker_channel = 0
+    window._ac_shared_broker_channel_confirmed = False
+    window.ui = type("Ui", (), {})()
+    window.ui.comboBox_supply = QtWidgets.QComboBox()
+    window.ui.comboBox_supply.addItem("Shared HMP broker", "shared_hmp_broker")
+    window.ui.comboBox_port = QtWidgets.QComboBox()
+    window.ui.comboBox_port.addItem("COM3", "COM3")
+    window.ui.comboBox_baudrate = QtWidgets.QComboBox()
+    window.ui.comboBox_baudrate.addItem("115200")
+    window.label_ac_psu_port = QtWidgets.QLabel()
+    window.label_ac_psu_baud = QtWidgets.QLabel()
+    window.label_ac_broker_host = QtWidgets.QLabel()
+    window.label_ac_broker_port = QtWidgets.QLabel()
+    window.label_ac_broker_channel = QtWidgets.QLabel()
+    window.label_ac_psu_status = QtWidgets.QLabel()
+    window.label_ac_hardware_status = QtWidgets.QLabel()
+    window.lineEdit_ac_broker_host = QtWidgets.QLineEdit()
+    window.spinBox_ac_broker_port = QtWidgets.QSpinBox()
+    window.spinBox_ac_broker_port.setRange(1, 65535)
+    window.comboBox_ac_broker_channel = _make_ac_broker_channel_combo()
+    window.spinBox_ac_voltage_limit = QtWidgets.QDoubleSpinBox()
+    window.spinBox_ac_voltage_limit.setRange(0.1, 120.0)
+    window.spinBox_ac_voltage_limit.setValue(30.0)
+
+    window._load_ac_psu_profile_settings("shared_hmp_broker")
+    window._sync_ac_psu_from_shared_controls()
+
+    assert window.comboBox_ac_broker_channel.currentData() == 0
+    assert window.comboBox_ac_broker_channel.currentText() == "Select channel..."
+    assert window._ac_shared_broker_channel_confirmed is False
+    assert "Select channel" in window.label_ac_psu_status.text()
+    assert "Select channel" in window.label_ac_hardware_status.text()
+    assert window.ui.comboBox_port.isHidden()
+    assert window.ui.comboBox_baudrate.isHidden()
+    assert window.lineEdit_ac_broker_host.isVisible()
+    assert window.comboBox_ac_broker_channel.isVisible()
+    with pytest.raises(ValueError, match="shared HMP broker channel"):
+        window._selected_ac_broker_channel()
+
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(1))
+    window._handle_ac_broker_channel_changed()
+
+    assert window._selected_ac_broker_channel() == 1
+    assert settings.value("psu_profiles/shared_hmp_broker/broker_channel_confirmed", False, type=bool) is True
+    assert "CH1" in window.label_ac_hardware_status.text()
+
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(3))
+    window._handle_ac_broker_channel_changed()
+
+    assert window._selected_ac_broker_channel() == 3
+    assert settings.value("psu_profiles/shared_hmp_broker/broker_channel", 0, type=int) == 3
+    assert settings.value("psu_profiles/shared_hmp_broker/broker_channel_confirmed", False, type=bool) is True
+    assert "CH3" in window.label_ac_hardware_status.text()
+    app.processEvents()
+
+
+def test_ac_logger_shared_broker_auto_starts_owned_ac_broker(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolate_ac_qsettings(monkeypatch, "shared_broker_auto_starts_owned_ac")
+    window = ac_logger.MainWindow()
+    qtbot.addWidget(window)
+    window._set_combo_data(window.ui.comboBox_supply, "shared_hmp_broker")
+    window.comboBox_ac_broker_channel.setCurrentIndex(window.comboBox_ac_broker_channel.findData(1))
+    window._handle_ac_broker_channel_changed()
+    window.spinBox_ac_current_stop.setValue(60.0)
+    window.ui.comboBox_port.clear()
+    window.ui.comboBox_port.addItem("COM6 - scale", "COM6")
+    window.ui.comboBox_baudrate.setCurrentText("9600")
+    started: list[tuple[object, str, int]] = []
+
+    def _detect() -> bool:
+        window.ui.comboBox_port.clear()
+        window.ui.comboBox_port.addItem("COM3 - HMP4040", "COM3")
+        window.ui.comboBox_baudrate.setCurrentText("115200")
+        window.port_name = "COM3"
+        window.baudrate = 115200
+        return True
+
+    def _client_factory(*, host: str, port: int) -> object:
+        if not started:
+            return _FailingBrokerClient()
+        return _FakeBrokerClient()
+
+    def _start_server(broker: object, *, host: str, port: int) -> tuple[object, object]:
+        started.append((broker, host, port))
+        return object(), object()
+
+    _FakeHmpDriver.instances = []
+    monkeypatch.setattr(window, "_auto_detect_hmp_port", lambda *, show_errors=False: _detect())
+    monkeypatch.setattr(ac_logger, "BrokerJsonClient", _client_factory)
+    monkeypatch.setattr(ac_logger, "HmpSerialDriver", _FakeHmpDriver)
+    monkeypatch.setattr(ac_logger, "SharedPowerSupplyBroker", _FakeOwnedBroker)
+    monkeypatch.setattr(ac_logger, "start_broker_server", _start_server)
+
+    window._ensure_ac_shared_broker_running()
+
+    assert len(started) == 1
+    assert _FakeHmpDriver.instances[0].port_name == "COM3"
+    owned_broker = started[0][0]
+    assert isinstance(owned_broker, _FakeOwnedBroker)
+    assert owned_broker.calls == [
+        (
+            "assign_role",
+            {
+                "channel": 1,
+                "role": "ac_susceptibility",
+                "confirmed": True,
+                "voltage_limit_v": pytest.approx(30.0),
+                "current_limit_a": pytest.approx(0.06),
+            },
+        ),
+        ("confirm_profile", {"name": "AC Susceptibility auto-started shared HMP broker"}),
+    ]
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        app.processEvents()
 
 
 def test_ac_logger_psu_settings_are_separate_from_current_annealing(
@@ -2018,14 +3338,18 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
     window = ac_logger.MainWindow()
     try:
         assert window.ui.frame_process_settings.isHidden()
-        assert window.frame_ac_plan_actions.isHidden()
+        assert not window.frame_ac_plan_actions.isHidden()
         assert window.comboBox_lcr_function.isHidden()
         assert window.checkBox_lcr_model_lsrs.isHidden()
         assert window.checkBox_lcr_model_lprp.text() == "Also measure Lp-Rp"
         assert window.checkBox_lcr_model_lprp.isChecked() is False
         assert window.pushButton_measure_lcr_baseline.text() == "Measure empty-coil baseline"
         assert window.pushButton_run_ac_sweep.text() == "Run microwire current sweep"
+        assert window.pushButton_continue_ac_sweep.text() == "Continue from previous sweep..."
+        assert window.pushButton_stop_ac_sweep.text() == "Stop"
         assert window.pushButton_lcr_default_presets.text() == "Default full scan"
+        inherited_frame = window.ui.pushButton_start_process.parentWidget()
+        assert inherited_frame.isHidden()
         sticky_texts = {
             window.ui.pushButton_start_process.text(),
             window.ui.pushButton_show_history.text(),
@@ -2045,7 +3369,7 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert settings_action is not None
         assert settings_action.isVisible() is False
         assert window.pushButton_auto_setup.text() == "Auto-connect hardware"
-        assert window.groupBox_ac_hardware.title() == "Hardware"
+        assert window.groupBox_ac_hardware.title() == "2. Setup and hardware status"
         assert window.ui.groupBox_serial_settings.isHidden()
         assert window.frame_ac_hardware_details.isHidden()
         assert window.pushButton_ac_hardware_details.text() == "Show hardware details"
@@ -2058,12 +3382,14 @@ def test_ac_logger_simplified_window_hides_duplicate_controls(monkeypatch: pytes
         assert window.ui.label_log_file.text() == "Microwire sweep base:"
         assert window.ui.label_extension.text() == ".tsv"
         assert window.label_ac_current_task.text() == "Current task: idle"
+        assert window.progress_ac_run.parentWidget() is window.groupBox_ac_plan
+        assert window.label_ac_current_task.parentWidget() is window.groupBox_ac_plan
         assert "ac_susc_empty_coil_baseline" in window.label_ac_baseline_file.text()
         assert not hasattr(window, "comboBox_ac_psu_backend")
         assert not hasattr(window, "comboBox_ac_psu_port")
         assert not hasattr(window, "comboBox_ac_psu_baud")
-        assert "Instrument setup" in window.groupBox_lcr_settings.title()
-        assert "Experiment plan" in window.groupBox_ac_plan.title()
+        assert "AC susceptibility workflow" in window.groupBox_lcr_settings.title()
+        assert "Measurement plan and live run" in window.groupBox_ac_plan.title()
         assert not hasattr(window, "label_ac_read_interval")
         assert not hasattr(window, "spinBox_ac_read_interval")
     finally:
@@ -2552,6 +3878,83 @@ def test_ac_logger_auto_setup_keeps_manual_psu_when_id_probe_fails(monkeypatch: 
         app.processEvents()
 
 
+def test_ac_logger_auto_setup_preserves_selected_lcr_frequency_and_level_chips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "auto_setup_preserves_lcr_chip_subset")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM6 - USB", "COM6")])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window.ui.comboBox_port.clear()
+        window.ui.comboBox_port.addItem("COM6 - USB", "COM6")
+        window._set_combo_data(window.ui.comboBox_supply, "owon_spe6102")
+        window.lineEdit_lcr_frequencies.setText("1000, 5000")
+        window.lineEdit_lcr_levels.setText("1, 10")
+        window._sync_lcr_chips_from_text()
+
+        window.handle_auto_setup_clicked()
+
+        assert window.lineEdit_lcr_frequencies.text() == "1000, 5000"
+        assert window.lineEdit_lcr_levels.text() == "1, 10"
+        assert [(setting.frequency_hz, setting.level_value) for setting in window._prepare_lcr_plan()] == [
+            (1000.0, 0.001),
+            (1000.0, 0.01),
+            (5000.0, 0.001),
+            (5000.0, 0.01),
+        ]
+        assert "kept the manually selected" in window.label_lcr_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_auto_setup_preserves_shared_broker_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "auto_setup_preserves_shared_broker")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [("COM3 - HMP4030", "COM3")])
+    calls = {"detect": 0}
+
+    def _detect(*_args: object, **_kwargs: object) -> list[sweep.PowerSupplyCandidate]:
+        calls["detect"] += 1
+        return [
+            sweep.PowerSupplyCandidate(
+                label="COM3 - HMP4030",
+                resource="COM3",
+                backend_id="hmp4030",
+                baudrate=115200,
+                idn="Rohde&Schwarz,HMP4030",
+            )
+        ]
+
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", _detect)
+
+    window = ac_logger.MainWindow()
+    try:
+        window._set_combo_data(window.ui.comboBox_supply, "shared_hmp_broker")
+        window.pushButton_ac_hardware_details.setChecked(True)
+        window._set_ac_hardware_details_visible(True)
+        window.handle_auto_setup_clicked()
+
+        assert calls["detect"] == 0
+        assert window._selected_ac_psu_backend() == "shared_hmp_broker"
+        assert window.ui.comboBox_supply.currentData() == "shared_hmp_broker"
+        assert window.comboBox_ac_broker_channel.currentText() == "Select channel..."
+        assert not window.comboBox_ac_broker_channel.isHidden()
+        assert window.ui.comboBox_port.isHidden()
+        assert "Shared HMP broker" in window.label_ac_hardware_status.text()
+        assert "Select channel" in window.label_ac_hardware_status.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_auto_setup_trusts_connected_shared_psu_without_id_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2597,13 +4000,17 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         assert window.lineEdit_lcr_frequencies.text() == window._format_numeric_list(ac_logger.PRACTICAL_FREQUENCY_PRESETS_HZ)
         assert window.lineEdit_lcr_levels.text() == window._format_numeric_list(ac_logger.LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
         assert window.progress_ac_run.format() == "AC progress: idle"
-        sticky_frame = window.ui.pushButton_start_process.parentWidget()
-        sticky_parent_layout = sticky_frame.parentWidget().layout()
-        progress_index = sticky_parent_layout.indexOf(window.progress_ac_run)
-        sticky_index = sticky_parent_layout.indexOf(sticky_frame)
+        inherited_progress = getattr(window.ui, "progressBar_process", None)
+        assert isinstance(inherited_progress, QtWidgets.QProgressBar)
+        assert inherited_progress.isHidden()
+        plan_layout = window.groupBox_ac_plan.layout()
+        assert isinstance(plan_layout, QtWidgets.QGridLayout)
+        progress_index = plan_layout.indexOf(window.progress_ac_run)
+        action_index = plan_layout.indexOf(window.frame_ac_plan_actions)
         assert progress_index >= 0
-        assert sticky_index >= 0
-        assert progress_index < sticky_index
+        assert action_index >= 0
+        assert progress_index > action_index
+        assert window.ui.pushButton_start_process.parentWidget().isHidden()
         window.lineEdit_lcr_frequencies.setText("100, 1k")
         window.lineEdit_lcr_levels.setText("0.1, 1")
         window.spinBox_ac_point_duration.setValue(10.0)
@@ -2628,6 +4035,277 @@ def test_ac_logger_uses_shared_point_duration_and_sticky_progress(
         assert "100000/100000" not in window.progress_ac_run.format()
         window._set_ac_current_task("Current task: empty-coil baseline - 100 Hz, 0.1 voltage, read 1")
         assert "100 Hz" in window.label_ac_current_task.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_output_status_shows_run_status_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "output_status_paths")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    fallback_dir = tmp_path / "fallback"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+
+    window = ac_logger.MainWindow()
+    try:
+        output_dir = tmp_path / "ac"
+        window.ui.lineEdit_log_dir.setText(str(output_dir))
+        window.ui.lineEdit_log_file.setText("sweep01")
+        window.sync_full_log_path()
+
+        output_path = output_dir / "sweep01.tsv"
+        status_text = window.label_ac_output_status.text()
+        assert f"Output path ready: {output_path}" in status_text
+        assert f"Run status sidecar: {sweep.ac_run_status_path_for_output(output_path)}" in status_text
+        assert f"local fallback: {sweep.ac_run_status_fallback_path_for_output(output_path)}" in status_text
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_run_attempts_auto_connect_before_missing_hardware_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "run_autoconnect_before_warning")
+    window = ac_logger.MainWindow()
+    try:
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="shared_hmp_broker",
+            psu_resource="127.0.0.1:8765/CH1",
+            voltage_limit_v=32.0,
+            shared_broker_channel=1,
+        )
+        calls = {"auto_connect": 0}
+        info_messages: list[tuple[str, str]] = []
+        warning_messages: list[tuple[str, str]] = []
+
+        class _FakeConnectedLcr:
+            is_open = True
+
+        def _auto_connect() -> None:
+            calls["auto_connect"] += 1
+            window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+
+        def _broker_unavailable(_config: object | None = None) -> None:
+            raise RuntimeError("broker unavailable")
+
+        monkeypatch.setattr(window, "handle_auto_setup_clicked", _auto_connect)
+        monkeypatch.setattr(window, "_ensure_ac_shared_broker_running", _broker_unavailable)
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            lambda _parent, title, text: info_messages.append((title, text)),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "warning",
+            lambda _parent, title, text: warning_messages.append((title, text)),
+        )
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert calls["auto_connect"] == 1
+        assert not info_messages
+        assert warning_messages
+        assert warning_messages[-1][0] == "Shared HMP broker unavailable"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_serial_psu_prepare_failure_stays_idle_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "serial_psu_prepare_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="owon_spe6102",
+            psu_resource="COM7",
+            voltage_limit_v=61.0,
+        )
+        monkeypatch.setattr(
+            window,
+            "_release_inherited_psu_port_for_ac",
+            lambda _resource: (_ for _ in ()).throw(RuntimeError("inherited process active")),
+        )
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert window._ac_sweep_running is False
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert "Power supply preparation failed: inherited process active" in window.label_lcr_status.text()
+        assert warnings == [
+            (
+                "AC power supply unavailable",
+                "Could not prepare the selected power supply for the AC sweep:\ninherited process active",
+            )
+        ]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_worker_launch_failure_resets_running_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "worker_launch_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    class _FailingSweepWorker:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("worker setup exploded")
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        config = sweep.AcSweepConfig(
+            lcr_settings=[
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+            current_points=[sweep.CurrentLoopPoint(current_a=0.001, direction="up")],
+            dwell_s=0.0,
+            psu_backend="shared_hmp_broker",
+            psu_resource="127.0.0.1:8765/CH1",
+            voltage_limit_v=32.0,
+            shared_broker_channel=1,
+        )
+        monkeypatch.setattr(window, "_ensure_ac_shared_broker_running", lambda _config=None: None)
+        monkeypatch.setattr(ac_logger, "AcSweepWorker", _FailingSweepWorker)
+
+        window._start_ac_sweep(config, reset_reason="test")
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window._ac_active_output_path is None
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert window._ac_worker is None
+        assert window._ac_worker_thread is None
+        assert window.label_lcr_status.text() == "AC sweep failed: worker setup exploded"
+        assert warnings == [("AC sweep failed", "worker setup exploded")]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_baseline_worker_launch_failure_resets_running_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "baseline_worker_launch_failure")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, text: warnings.append((title, text)),
+    )
+
+    class _FakeConnectedLcr:
+        is_open = True
+
+    class _FailingBaselineWorker:
+        def __init__(self, **_kwargs: object) -> None:
+            raise RuntimeError("baseline worker setup exploded")
+
+    window = ac_logger.MainWindow()
+    try:
+        window.lcr_meter = _FakeConnectedLcr()  # type: ignore[assignment]
+        monkeypatch.setattr(
+            window,
+            "_prepare_lcr_plan",
+            lambda: [
+                ac_logger.Lcr6000Settings(
+                    frequency_hz=10.0,
+                    level_value=100e-6,
+                    level_mode="current",
+                    function="Ls-Rs",
+                )
+            ],
+        )
+        monkeypatch.setattr(window, "_baseline_output_path", lambda: tmp_path / "baseline.tsv")
+        monkeypatch.setattr(ac_logger, "AcBaselineWorker", _FailingBaselineWorker)
+
+        window.handle_measure_lcr_baseline_clicked()
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window._ac_active_output_path is None
+        assert window.pushButton_measure_lcr_baseline.isEnabled()
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert window._ac_worker is None
+        assert window._ac_worker_thread is None
+        assert window.label_lcr_status.text() == "Baseline failed: baseline worker setup exploded"
+        assert warnings == [("Baseline failed", "baseline worker setup exploded")]
     finally:
         window.close()
         app.processEvents()
@@ -2794,6 +4472,177 @@ def test_ac_logger_formats_current_excitation_in_sweep_status() -> None:
     ) == "20 mA excitation"
 
 
+def test_ac_logger_worker_failure_clears_running_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_failure_state")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._ac_sweep_stop_requested = True
+        window._ac_active_sweep_config = sweep.AcSweepConfig(
+            lcr_settings=[lcr6000.Lcr6000Settings(1000.0, 0.1, function="Ls-Rs")],
+            current_points=[sweep.CurrentLoopPoint(0.02, "up")],
+            point_duration_s=0.0,
+            repeats=1,
+            dwell_s=0.0,
+            psu_backend="shared_hmp_broker",
+            psu_resource="127.0.0.1:8765/CH1",
+            voltage_limit_v=32.0,
+            shared_broker_channel=1,
+        )
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_ac_worker_failed("AC sweep output write/flush failed for G:\\run.tsv: [WinError 3]")
+
+        assert window._ac_sweep_running is False
+        assert window._ac_sweep_stop_requested is False
+        assert window._ac_active_sweep_config is None
+        assert window.pushButton_run_ac_sweep.isEnabled()
+        assert window.pushButton_continue_ac_sweep.isEnabled()
+        assert not window.pushButton_stop_ac_sweep.isEnabled()
+        assert "AC run failed:" in window.label_lcr_status.text()
+        assert "write/flush failed" in window.label_lcr_status.text()
+        assert window.label_ac_current_task.text() == "Current task: failed"
+        assert warnings and warnings[-1][0] == "AC run failed"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_worker_failure_surfaces_local_status_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_failure_status_fallback")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    fallback_dir = tmp_path / "fallback_status"
+    monkeypatch.setattr(sweep, "ac_local_status_fallback_dir", lambda: fallback_dir)
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    output_path = Path("G:/missing/ac_sweep.tsv")
+    fallback_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+    fallback_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "failed",
+                "phase": "closed",
+                "rows_written": 42,
+                "updated_utc": "2026-06-16T20:00:00Z",
+                "output_path": str(output_path),
+                "stop_reason": "AC sweep output write/flush failed for G:\\missing\\ac_sweep.tsv: [WinError 3]",
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._ac_active_output_path = output_path
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_ac_worker_failed(
+            "AC sweep output write/flush failed for G:\\missing\\ac_sweep.tsv: [WinError 3]"
+        )
+
+        status_text = window.label_lcr_status.text()
+        assert "Run status: failed (closed)" in status_text
+        assert "Rows written: 42" in status_text
+        assert f"Local fallback status: {fallback_path}" in status_text
+        assert warnings and warnings[-1][0] == "AC run failed"
+        assert "Rows written: 42" in warnings[-1][1]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_finished_sweep_surfaces_run_status_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "ac_worker_finished_status_summary")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+    infos: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, title, message: infos.append((title, message)),
+    )
+    output_path = tmp_path / "ac_sweep.tsv"
+    status_path = sweep.ac_run_status_path_for_output(output_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema": sweep.RUN_STATUS_SCHEMA,
+                "status": "completed",
+                "phase": "closed",
+                "rows_written": 1234,
+                "updated_utc": "2026-06-16T20:00:00Z",
+                "output_path": str(output_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = ac_logger.MainWindow()
+    try:
+        timer = getattr(window, "_ac_plot_refresh_timer", None)
+        if isinstance(timer, QtCore.QTimer):
+            timer.stop()
+        window._ac_sweep_running = True
+        window._reset_ac_progress("Microwire sweep", 1000, units="time")
+        window.pushButton_run_ac_sweep.setEnabled(False)
+        window.pushButton_continue_ac_sweep.setEnabled(False)
+        window.pushButton_stop_ac_sweep.setEnabled(True)
+
+        window._handle_sweep_worker_finished(str(output_path), stopped=False)
+
+        status_text = window.label_lcr_status.text()
+        assert "AC sweep saved:" in status_text
+        assert "Run status: completed (closed)" in status_text
+        assert "Rows written: 1234" in status_text
+        assert f"Run status file: {status_path}" in status_text
+        assert infos and infos[-1][0] == "AC sweep saved"
+        assert "Rows written: 1234" in infos[-1][1]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ac_logger_writes_optional_diagnostics(tmp_path: Path) -> None:
     window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
     path = tmp_path / "ac_diag.jsonl"
@@ -2956,6 +4805,84 @@ def test_commands_for_settings_can_drive_lcr_current_level() -> None:
     assert "COMP:STAT OFF\n" in commands
 
 
+def test_lcr_correction_state_helpers_use_lcr6000_scpi_spellings() -> None:
+    assert lcr6000.parse_correction_state("on") is True
+    assert lcr6000.parse_correction_state("OFF") is False
+    assert lcr6000.parse_correction_state("unexpected") is None
+    assert lcr6000.correction_state_commands(open_enabled=True, short_enabled=False) == [
+        "CORR:OPEN:STAT ON\n",
+        "CORR:SHOR:STAT OFF\n",
+    ]
+
+
+def test_lcr_serial_runs_open_short_lcr_correction(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSerialPort:
+        def __init__(self, **_kwargs: object) -> None:
+            self.written: list[bytes] = []
+            self.responses = [
+                b"LCR open\n",
+                b"pass\n",
+                b"on\n",
+                b"off\n",
+                b"LCR short\n",
+                b"pass\n",
+                b"on\n",
+                b"on\n",
+            ]
+            self.is_open = True
+            self.timeout = 1.5
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+        def flush(self) -> None:
+            pass
+
+        def readline(self) -> bytes:
+            if self.responses:
+                return self.responses.pop(0)
+            return b""
+
+        def reset_input_buffer(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self.is_open = False
+
+    fake_serial = FakeSerialPort()
+
+    class FakeSerialModule:
+        EIGHTBITS = 8
+        PARITY_NONE = "N"
+        STOPBITS_ONE = 1
+
+        @staticmethod
+        def Serial(**kwargs: object) -> FakeSerialPort:
+            return fake_serial
+
+    monkeypatch.setattr(lcr6000, "serial", FakeSerialModule)
+
+    meter = lcr6000.Lcr6000Serial("COM9")
+    open_result = meter.run_open_lcr_correction(timeout_s=2.0)
+    open_status = meter.correction_status()
+    short_result = meter.run_short_lcr_correction(timeout_s=2.0)
+    short_status = meter.correction_status()
+
+    assert open_result.kind == "open"
+    assert open_result.passed is True
+    assert open_result.responses == ("LCR open", "pass")
+    assert open_status.open_enabled is True
+    assert open_status.short_enabled is False
+    assert short_result.kind == "short"
+    assert short_result.passed is True
+    assert short_status.open_enabled is True
+    assert short_status.short_enabled is True
+    assert b"CORR:OPEN:LCR\n" in fake_serial.written
+    assert b"CORR:SHOR:LCR\n" in fake_serial.written
+    assert b"CORR:OPEN:STAT?\n" in fake_serial.written
+    assert b"CORR:SHOR:STAT?\n" in fake_serial.written
+
+
 def test_lcr_configure_waits_for_measurement_page(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeSerialPort:
         written: list[bytes]
@@ -3115,6 +5042,119 @@ def test_ac_logger_configure_reports_meter_failure() -> None:
     assert window._configure_lcr_for_current_index() is False
     assert window._lcr_last_error == "meter did not accept setting"
     assert window.label_lcr_status.text == "LCR configure failed: meter did not accept setting"
+
+
+def test_ac_logger_lcr_correction_metadata_tracks_status_and_last_result() -> None:
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    window._lcr_correction_status = lcr6000.LcrCorrectionStatus(
+        open_enabled=True,
+        short_enabled=False,
+        checked_utc="2026-06-05T12:00:00+00:00",
+        raw_open_state="on",
+        raw_short_state="off",
+    )
+    window._lcr_correction_last_result = lcr6000.LcrCorrectionResult(
+        kind="open",
+        passed=True,
+        responses=("LCR open", "pass"),
+        timestamp_utc="2026-06-05T12:00:01+00:00",
+    )
+
+    metadata = window._lcr_correction_metadata()
+
+    assert metadata["source"] == "queried_meter"
+    assert metadata["open_enabled"] is True
+    assert metadata["short_enabled"] is False
+    assert metadata["last_result"] == {
+        "kind": "open",
+        "passed": True,
+        "timestamp_utc": "2026-06-05T12:00:01+00:00",
+        "responses": ["LCR open", "pass"],
+    }
+
+
+def test_ac_logger_lcr_correction_progress_uses_busy_progress_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _isolate_ac_qsettings(monkeypatch, "lcr_correction_progress")
+    monkeypatch.setattr(ac_logger, "available_serial_ports", lambda: [])
+    monkeypatch.setattr(sweep, "available_power_supply_ports", lambda: [])
+    monkeypatch.setattr(sweep, "detect_power_supply_candidates", lambda *args, **kwargs: [])
+
+    window = ac_logger.MainWindow()
+    try:
+        window._set_lcr_correction_progress(kind="open", running=True)
+
+        assert window.progress_ac_run.minimum() == 0
+        assert window.progress_ac_run.maximum() == 0
+        assert "LCR open correction: running on meter" in window.progress_ac_run.format()
+        assert window.label_ac_current_task.text() == "Current task: LCR open correction running"
+
+        window._set_lcr_correction_progress(kind="open", running=False)
+
+        assert window.progress_ac_run.minimum() == 0
+        assert window.progress_ac_run.maximum() == 100
+        assert window.progress_ac_run.format() == "AC progress: idle"
+        assert window.label_ac_current_task.text() == "Current task: idle"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_ac_logger_disable_lcr_correction_does_not_touch_psu(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    class FakeMeter:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[bool | None, bool | None]] = []
+
+        def set_correction_state(
+            self,
+            *,
+            open_enabled: bool | None = None,
+            short_enabled: bool | None = None,
+        ) -> lcr6000.LcrCorrectionStatus:
+            self.calls.append((open_enabled, short_enabled))
+            return lcr6000.LcrCorrectionStatus(
+                open_enabled=False,
+                short_enabled=False,
+                checked_utc="2026-06-05T12:00:00+00:00",
+                raw_open_state="off",
+                raw_short_state="off",
+            )
+
+    class FakeLabel:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.text = text
+
+    monkeypatch.setattr(ac_logger.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ac_logger.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    window = ac_logger.MainWindow.__new__(ac_logger.MainWindow)
+    meter = FakeMeter()
+    window.lcr_meter = meter
+    window._ac_sweep_running = False
+    window._ac_worker = None
+    window._lcr_correction_last_result = object()
+    window.label_lcr_status = FakeLabel()
+    window.label_lcr_correction_status = FakeLabel()
+    window.pushButton_lcr_open_correction = QtWidgets.QPushButton()
+    window.pushButton_lcr_short_correction = QtWidgets.QPushButton()
+    window.pushButton_lcr_disable_correction = QtWidgets.QPushButton()
+
+    window.handle_disable_lcr_correction_clicked()
+
+    assert meter.calls == [(False, False)]
+    assert window._lcr_correction_status.open_enabled is False
+    assert window._lcr_correction_status.short_enabled is False
+    assert window._lcr_correction_last_result is None
+    assert "disabled" in window.label_lcr_status.text
+    app.processEvents()
 
 
 def test_ac_logger_formats_baseline_row_without_current_columns() -> None:

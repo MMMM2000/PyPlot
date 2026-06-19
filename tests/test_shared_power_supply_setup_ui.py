@@ -103,6 +103,7 @@ def test_output_enable_requires_selected_confirmed_non_unused_channel(qtbot) -> 
     window = setup_mod.SharedPowerSupplySetupWindow()
     qtbot.addWidget(window)
     window.set_detected_profile("hmp4040", "COM4")
+    assert window._role_combos[4].findData("ac_susceptibility") >= 0
     role_index = window._role_combos[4].findData("current_annealing")
     window._role_combos[4].setCurrentIndex(role_index)
     window.table.selectRow(3)

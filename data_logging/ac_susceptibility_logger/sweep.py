@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
 import time
-from typing import Any, Callable, Protocol, Sequence
+import traceback
+from typing import Any, Callable, NoReturn, Protocol, Sequence
+
+from data_logging.shared_power_supply.broker import ROLE_AC_SUSCEPTIBILITY
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, broker_failure_diagnostic
 
 from .lcr6000 import (
     Lcr6000Reading,
@@ -55,6 +60,7 @@ POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "reset_on_start": True,
         "voltage_first": False,
         "current_resolution_a": 0.001,
+        "max_voltage_v": 32.05,
     },
     "owon_spe6102": {
         "label": "OWON SPE6102",
@@ -63,6 +69,15 @@ POWER_SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "voltage_first": True,
         "current_resolution_a": 0.0001,
         "max_voltage_v": 61.0,
+    },
+    "shared_hmp_broker": {
+        "label": "Shared HMP broker",
+        "channel_select": 1,
+        "reset_on_start": False,
+        "voltage_first": False,
+        "current_resolution_a": 0.001,
+        "max_voltage_v": 32.05,
+        "shared_broker": True,
     },
 }
 
@@ -152,6 +167,19 @@ class AcSweepConfig:
     psu_current_feedback_resistance_ohm: float = 390.0
     psu_measure_attempts: int = 3
     psu_missing_readback_warn: bool = True
+    shared_broker_host: str = "127.0.0.1"
+    shared_broker_port: int = 8765
+    shared_broker_channel: int | None = None
+    lcr_continuous_log_enabled: bool = False
+    lcr_continuous_log_path: str | None = None
+    lcr_continuous_log_cadence_s: float = 1.0
+    lcr_continuous_log_aggregate_s: float = 1.0
+    lcr_continuous_log_max_rows_per_point: int = 120
+    lcr_correction: dict[str, Any] | None = None
+
+    @property
+    def uses_shared_broker(self) -> bool:
+        return self.psu_backend == "shared_hmp_broker"
 
 
 @dataclass(frozen=True)
@@ -160,6 +188,24 @@ class AcResumePlan:
     completed_setting_indices: list[int]
     partial_setting_indices: list[int]
     summary: str
+    run_statuses: list["AcRunStatusSummary"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AcRunStatusSummary:
+    output_path: Path
+    status_path: Path
+    status: str
+    phase: str
+    updated_utc: str
+    stop_reason: str
+    rows_written: int
+    is_unclean: bool
+    stale: bool
+    heartbeat_age_s: float | None
+    lcr_debug_path: Path | None = None
+    lcr_debug_closed: bool | None = None
+    resume_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -335,6 +381,7 @@ def build_resume_plan(config: AcSweepConfig, completed_paths: Sequence[str | Pat
         raise ValueError("resume requires at least one planned current point")
     planned_keys = {_lcr_setting_key(setting) for setting in planned_settings}
     observed_by_setting: dict[tuple[Any, ...], set[tuple[float, str]]] = {}
+    run_statuses = [classify_ac_run_status(path) for path in completed_paths]
     for path in completed_paths:
         snapshot_settings, observed = _read_completed_sweep_observations(Path(path))
         for setting_index, points in observed.items():
@@ -363,11 +410,15 @@ def build_resume_plan(config: AcSweepConfig, completed_paths: Sequence[str | Pat
         f"{len(partial_indices)} partial setting(s) will be redone; "
         f"{len(remaining_settings)} setting(s) remain."
     )
+    unclean = [item for item in run_statuses if item.is_unclean]
+    if unclean:
+        summary += f" {len(unclean)} previous run(s) ended uncleanly; partial settings will not be skipped."
     return AcResumePlan(
         config=replace(config, lcr_settings=remaining_settings),
         completed_setting_indices=completed_indices,
         partial_setting_indices=partial_indices,
         summary=summary,
+        run_statuses=run_statuses,
     )
 
 
@@ -447,6 +498,416 @@ def _current_point_key(point: CurrentLoopPoint) -> tuple[float, str]:
     return (round(float(point.current_a), 9), str(point.direction).strip().lower())
 
 
+RUN_STATUS_SCHEMA = "ac_susceptibility_run_status_v1"
+
+
+class AcOutputPathError(RuntimeError):
+    """Raised when the AC sweep output path cannot be written durably."""
+
+    def __init__(self, path: str | Path, operation: str, exc: BaseException) -> None:
+        self.path = Path(path)
+        self.operation = str(operation)
+        self.original = exc
+        super().__init__(f"AC sweep output {self.operation} failed for {self.path}: {exc}")
+
+
+def ac_run_status_path_for_output(output_path: str | Path) -> Path:
+    path = Path(output_path)
+    return path.with_name(f"{path.stem}_run_status.json")
+
+
+def ac_local_status_fallback_dir() -> Path:
+    return Path.home() / "Downloads" / "ac_susceptibility" / "run_status_fallback"
+
+
+def ac_run_status_fallback_path_for_output(output_path: str | Path) -> Path:
+    path = Path(output_path)
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", path.stem).strip("._") or "ac_sweep"
+    return ac_local_status_fallback_dir() / f"{safe_stem}_run_status.json"
+
+
+def ac_lcr_debug_path_for_output(output_path: str | Path) -> Path:
+    path = Path(output_path)
+    return path.with_name(f"{path.stem}_lcr_debug.jsonl")
+
+
+def classify_ac_run_status(
+    output_path: str | Path,
+    *,
+    stale_after_s: float = 300.0,
+    now_utc: datetime | None = None,
+) -> AcRunStatusSummary:
+    """Classify whether a previous AC sweep ended cleanly enough to resume from.
+
+    The resume policy remains setting-granular. This helper only surfaces the
+    previous run state so the UI/automation can warn when the prior process
+    disappeared before writing a final checkpoint.
+    """
+    output = Path(output_path)
+    status_path = ac_run_status_path_for_output(output)
+    fallback_status_path = ac_run_status_fallback_path_for_output(output)
+    debug_path = ac_lcr_debug_path_for_output(output)
+    payload: dict[str, Any] = {}
+    loaded_status_path = status_path
+    for candidate in (status_path, fallback_status_path):
+        if not _safe_path_exists(candidate):
+            continue
+        try:
+            loaded = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+                loaded_status_path = candidate
+                break
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    updated_utc = str(payload.get("updated_utc") or payload.get("created_utc") or "")
+    heartbeat_age_s = _heartbeat_age_s(updated_utc, now_utc=now_utc)
+    status = str(payload.get("status") or "unknown").strip().lower() or "unknown"
+    stale = status == "running" and heartbeat_age_s is not None and heartbeat_age_s > max(1.0, float(stale_after_s))
+    lcr_debug_exists = _safe_path_exists(debug_path)
+    lcr_closed = _lcr_debug_has_closed_event(debug_path) if lcr_debug_exists else None
+    is_unclean = False
+    resume_note = ""
+    if stale:
+        status = "unclean_stale_heartbeat"
+        is_unclean = True
+        resume_note = "previous run heartbeat is stale; any partial setting will be repeated"
+    elif status in {"failed", "stopped", "completed"}:
+        is_unclean = False
+    elif status == "running":
+        is_unclean = True
+        resume_note = "previous run still appears running; verify before continuing"
+    elif lcr_closed is False:
+        status = "unclean_missing_lcr_closed_marker"
+        is_unclean = True
+        resume_note = "LCR debug stream has no closed marker; any partial setting will be repeated"
+    elif not payload:
+        status = "unknown_no_run_status"
+        is_unclean = lcr_closed is False
+        if is_unclean:
+            resume_note = "no run status file and LCR debug stream has no closed marker"
+    return AcRunStatusSummary(
+        output_path=output,
+        status_path=loaded_status_path,
+        status=status,
+        phase=str(payload.get("phase") or ""),
+        updated_utc=updated_utc,
+        stop_reason=str(payload.get("stop_reason") or ""),
+        rows_written=int(payload.get("rows_written") or 0),
+        is_unclean=is_unclean,
+        stale=stale,
+        heartbeat_age_s=heartbeat_age_s,
+        lcr_debug_path=debug_path if lcr_debug_exists else None,
+        lcr_debug_closed=lcr_closed,
+        resume_note=resume_note,
+    )
+
+
+def record_ac_run_exception(
+    output_path: str | Path,
+    exc: BaseException,
+    *,
+    phase: str = "worker_exception",
+) -> None:
+    """Patch the status sidecar with a late worker/UI exception."""
+    path = ac_run_status_path_for_output(output_path)
+    payload: dict[str, Any] = {}
+    for candidate in (path, ac_run_status_fallback_path_for_output(output_path)):
+        if not _safe_path_exists(candidate):
+            continue
+        try:
+            loaded = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+                break
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    if not payload:
+        payload = {
+            "schema": RUN_STATUS_SCHEMA,
+            "created_utc": _timestamp_utc(),
+            "output_path": str(Path(output_path)),
+            "pid": os.getpid(),
+        }
+    payload.update(
+        {
+            "status": "failed",
+            "phase": phase,
+            "updated_utc": _timestamp_utc(),
+            "stop_reason": str(exc),
+            "exception": _exception_payload(exc),
+        }
+    )
+    _write_json_atomic_best_effort(path, payload, ac_run_status_fallback_path_for_output(output_path))
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _safe_path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _write_json_atomic_best_effort(
+    path: Path,
+    payload: dict[str, Any],
+    fallback_path: Path | None = None,
+) -> None:
+    errors: list[str] = []
+    for target, is_fallback in ((path, False), (fallback_path, True)):
+        if target is None:
+            continue
+        try:
+            target_payload = dict(payload)
+            target_payload["status_path"] = str(target)
+            target_payload["status_path_is_local_fallback"] = bool(is_fallback)
+            if errors:
+                target_payload["status_write_errors"] = list(errors)
+            _write_json_atomic(target, target_payload)
+        except OSError as exc:
+            errors.append(f"{target}: {exc}")
+            continue
+
+
+def _heartbeat_age_s(updated_utc: str, *, now_utc: datetime | None) -> float | None:
+    if not updated_utc:
+        return None
+    try:
+        updated = datetime.fromisoformat(updated_utc.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return max(0.0, (now.astimezone(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds())
+
+
+def _lcr_debug_has_closed_event(path: Path) -> bool:
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and record.get("event") == "closed":
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _lcr_setting_snapshot(setting: Lcr6000Settings) -> dict[str, Any]:
+    return {
+        "function": setting.function,
+        "frequency_hz": float(setting.frequency_hz),
+        "level_mode": setting.level_mode,
+        "level_value": float(setting.level_value),
+        "monitor1": setting.monitor1,
+        "monitor2": setting.monitor2,
+        "aperture": setting.aperture,
+    }
+
+
+def _psu_runtime_snapshot(psu: CurrentSource) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "backend": getattr(psu, "backend_id", ""),
+        "resource": getattr(psu, "resource", ""),
+    }
+    if getattr(psu, "backend_id", "") == "shared_hmp_broker":
+        snapshot["shared_broker"] = {
+            "enabled": True,
+            "host": getattr(psu, "host", ""),
+            "port": getattr(psu, "port", None),
+            "channel": getattr(psu, "channel", None),
+            "lease_id": getattr(psu, "lease_id", None),
+            "owner": getattr(psu, "owner", ""),
+        }
+    return snapshot
+
+
+def _exception_payload(exc: BaseException) -> dict[str, Any]:
+    return {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+    }
+
+
+def _status_for_exception(exc: BaseException | None) -> str:
+    if exc is None:
+        return "completed"
+    if str(exc).strip() == "AC sweep stopped by user":
+        return "stopped"
+    return "failed"
+
+
+class AcRunStatusWriter:
+    """Durable heartbeat/checkpoint sidecar for long AC sweeps."""
+
+    def __init__(
+        self,
+        *,
+        output_path: str | Path,
+        config: AcSweepConfig,
+        continuous_log_path: str | Path | None,
+    ) -> None:
+        self.output_path = Path(output_path)
+        self.path = ac_run_status_path_for_output(self.output_path)
+        self.fallback_path = ac_run_status_fallback_path_for_output(self.output_path)
+        self.config = config
+        self.continuous_log_path = None if continuous_log_path is None else Path(continuous_log_path)
+        self.created_utc = _timestamp_utc()
+        self.rows_written = 0
+        self._payload: dict[str, Any] = self._base_payload(status="running", phase="starting")
+
+    def open(self, *, psu: CurrentSource | None = None) -> None:
+        self.update(phase="starting", psu=psu)
+
+    def update(
+        self,
+        *,
+        phase: str,
+        setting_index: int | None = None,
+        total_settings: int | None = None,
+        setting: Lcr6000Settings | None = None,
+        current_point: CurrentLoopPoint | None = None,
+        current_point_index: int | None = None,
+        total_current_points: int | None = None,
+        psu: CurrentSource | None = None,
+        status: str = "running",
+        stop_reason: str = "",
+    ) -> None:
+        self._payload.update(
+            {
+                "status": status,
+                "phase": phase,
+                "updated_utc": _timestamp_utc(),
+                "rows_written": self.rows_written,
+                "stop_reason": stop_reason,
+            }
+        )
+        if setting_index is not None:
+            self._payload["setting_index"] = int(setting_index)
+        if total_settings is not None:
+            self._payload["setting_count"] = int(total_settings)
+        if current_point_index is not None:
+            self._payload["current_point_index"] = int(current_point_index)
+        if total_current_points is not None:
+            self._payload["current_point_count"] = int(total_current_points)
+        if setting is not None:
+            self._payload["lcr_setting"] = _lcr_setting_snapshot(setting)
+        if current_point is not None:
+            self._payload["current_point"] = {
+                "current_set_a": float(current_point.current_a),
+                "current_set_mA": float(current_point.current_a) * 1000.0,
+                "direction": str(current_point.direction),
+            }
+        if psu is not None:
+            self._payload["psu_runtime"] = _psu_runtime_snapshot(psu)
+        self._write_status()
+
+    def record_row(self, row: AcSweepRow) -> None:
+        self.rows_written += 1
+        self.update(
+            phase="measure",
+            setting_index=row.setting_index,
+            total_settings=row.total_settings,
+            setting=row.setting,
+            current_point=row.current_point,
+            current_point_index=row.current_point_index,
+            total_current_points=row.total_current_points,
+            status="running",
+        )
+        self._payload["last_row_timestamp_utc"] = row.timestamp_utc
+        self._payload["last_row_error"] = row.error or row.psu_measurement.error
+        self._payload["last_completed_point"] = {
+            "setting_index": int(row.setting_index),
+            "setting_count": int(row.total_settings),
+            "current_point_index": int(row.current_point_index),
+            "current_point_count": int(row.total_current_points),
+            "repeat_index": int(row.repeat_index),
+            "timestamp_utc": row.timestamp_utc,
+            "point_elapsed_s": float(row.point_elapsed_s),
+            "current_set_a": float(row.current_point.current_a),
+            "current_set_mA": float(row.current_point.current_a) * 1000.0,
+            "direction": str(row.current_point.direction),
+            "lcr_setting": _lcr_setting_snapshot(row.setting),
+        }
+        self._write_status()
+
+    def record_exception(self, exc: BaseException, *, phase: str = "exception") -> None:
+        self._payload["exception"] = _exception_payload(exc)
+        self.update(phase=phase, status=_status_for_exception(exc), stop_reason=str(exc))
+
+    def close(
+        self,
+        *,
+        status: str,
+        stop_reason: str,
+        psu: CurrentSource | None = None,
+        cleanup_errors: Sequence[str] = (),
+    ) -> None:
+        self._payload["closed_utc"] = _timestamp_utc()
+        if cleanup_errors:
+            self._payload["cleanup_errors"] = list(cleanup_errors)
+        self.update(phase="closed", status=status, stop_reason=stop_reason, psu=psu)
+        self._payload["closed_utc"] = self._payload["updated_utc"]
+        self._write_status()
+
+    def _write_status(self) -> None:
+        self._payload["primary_status_path"] = str(self.path)
+        self._payload["local_fallback_status_path"] = str(self.fallback_path)
+        _write_json_atomic_best_effort(self.path, self._payload, self.fallback_path)
+
+    def _base_payload(self, *, status: str, phase: str) -> dict[str, Any]:
+        return {
+            "schema": RUN_STATUS_SCHEMA,
+            "created_utc": self.created_utc,
+            "updated_utc": self.created_utc,
+            "pid": os.getpid(),
+            "status": status,
+            "phase": phase,
+            "output_path": str(self.output_path),
+            "lcr_continuous_log_path": None if self.continuous_log_path is None else str(self.continuous_log_path),
+            "rows_written": 0,
+            "setting_index": None,
+            "setting_count": len(self.config.lcr_settings),
+            "current_point_index": None,
+            "current_point_count": len(self.config.current_points),
+            "stop_reason": "",
+            "psu": {
+                "backend": self.config.psu_backend,
+                "resource": self.config.psu_resource,
+                "voltage_limit_v": float(self.config.voltage_limit_v),
+                "shared_broker": {
+                    "enabled": self.config.uses_shared_broker,
+                    "host": str(self.config.shared_broker_host or "127.0.0.1"),
+                    "port": int(self.config.shared_broker_port),
+                    "channel": self.config.shared_broker_channel,
+                },
+            },
+            "lcr_continuous_log": {
+                "enabled": bool(self.config.lcr_continuous_log_enabled),
+                "cadence_s": float(self.config.lcr_continuous_log_cadence_s),
+                "aggregate_s": float(self.config.lcr_continuous_log_aggregate_s),
+                "max_rows_per_point": int(self.config.lcr_continuous_log_max_rows_per_point),
+            },
+        }
+
+
 class AcSweepTsvWriter:
     def __init__(self, path: str | Path, config: AcSweepConfig) -> None:
         self.path = Path(path)
@@ -454,8 +915,11 @@ class AcSweepTsvWriter:
         self._fh: Any | None = None
 
     def write_metadata(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.path.open("w", encoding="utf-8", newline="")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = self.path.open("w", encoding="utf-8", newline="")
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "open", exc) from exc
         self._write("# AC susceptibility sweep")
         self._write(f"# config_json={self._settings_snapshot_json()}")
         self._write(
@@ -463,6 +927,8 @@ class AcSweepTsvWriter:
             f"psu_backend={self.config.psu_backend} "
             f"psu_resource={self.config.psu_resource} "
             f"voltage_limit_v={self.config.voltage_limit_v:g} "
+            f"shared_broker_used={self.config.uses_shared_broker} "
+            f"shared_broker_channel={self.config.shared_broker_channel or ''} "
             f"dwell_s={self.config.dwell_s:g} "
             f"point_duration_s={self.config.point_duration_s:g} "
             f"repeats={max(1, int(self.config.repeats))} "
@@ -471,7 +937,9 @@ class AcSweepTsvWriter:
             f"psu_current_feedback_resistance_ohm={self.config.psu_current_feedback_resistance_ohm:g} "
             f"lcr_slow_retry_enabled={self.config.lcr_slow_retry_enabled} "
             f"lcr_slow_retry_min_frequency_hz={self.config.lcr_slow_retry_min_frequency_hz:g} "
-            f"lcr_slow_retry_min_rate_hz={self.config.lcr_slow_retry_min_rate_hz:g}"
+            f"lcr_slow_retry_min_rate_hz={self.config.lcr_slow_retry_min_rate_hz:g} "
+            f"lcr_continuous_log_enabled={self.config.lcr_continuous_log_enabled} "
+            f"lcr_continuous_log_path={self.config.lcr_continuous_log_path or ''}"
         )
         for index, setting in enumerate(self.config.lcr_settings, start=1):
             self._write(
@@ -492,6 +960,12 @@ class AcSweepTsvWriter:
                 "backend": self.config.psu_backend,
                 "resource": self.config.psu_resource,
                 "voltage_limit_v": float(self.config.voltage_limit_v),
+                "shared_broker": {
+                    "enabled": self.config.uses_shared_broker,
+                    "host": str(self.config.shared_broker_host or "127.0.0.1"),
+                    "port": int(self.config.shared_broker_port),
+                    "channel": self.config.shared_broker_channel,
+                },
             },
             "acquisition": {
                 "dwell_s": float(self.config.dwell_s),
@@ -505,6 +979,19 @@ class AcSweepTsvWriter:
                 "psu_current_feedback_enabled": bool(self.config.psu_current_feedback_enabled),
                 "psu_current_feedback_resistance_ohm": float(self.config.psu_current_feedback_resistance_ohm),
                 "psu_missing_readback_warn": bool(self.config.psu_missing_readback_warn),
+            },
+            "lcr_continuous_log": {
+                "enabled": bool(self.config.lcr_continuous_log_enabled),
+                "path": self.config.lcr_continuous_log_path,
+                "cadence_s": float(self.config.lcr_continuous_log_cadence_s),
+                "aggregate_s": float(self.config.lcr_continuous_log_aggregate_s),
+                "max_rows_per_point": int(self.config.lcr_continuous_log_max_rows_per_point),
+            },
+            "lcr_correction": self.config.lcr_correction or {
+                "open_enabled": None,
+                "short_enabled": None,
+                "checked_utc": "",
+                "source": "not_checked",
             },
             "lcr_slow_retry": {
                 "enabled": bool(self.config.lcr_slow_retry_enabled),
@@ -569,13 +1056,200 @@ class AcSweepTsvWriter:
     def _write(self, text: str) -> None:
         if self._fh is None:
             raise RuntimeError("sweep writer is not open")
-        self._fh.write(text + "\n")
-        self._fh.flush()
+        try:
+            self._fh.write(text + "\n")
+            self._fh.flush()
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "write/flush", exc) from exc
 
     def close(self) -> None:
         if self._fh is not None:
-            self._fh.close()
-            self._fh = None
+            try:
+                self._fh.close()
+            except OSError as exc:
+                raise AcOutputPathError(self.path, "close", exc) from exc
+            finally:
+                self._fh = None
+
+
+class LcrContinuousJsonlWriter:
+    """Bounded sidecar stream for transition-oriented LCR diagnostics."""
+
+    def __init__(self, path: str | Path, config: AcSweepConfig) -> None:
+        self.path = Path(path)
+        self.config = config
+        self._fh: Any | None = None
+        self._rows_written = 0
+        self._point_counts: dict[tuple[object, ...], int] = {}
+        self._point_last_elapsed: dict[tuple[object, ...], float] = {}
+
+    def open(self) -> None:
+        if self._fh is not None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = self.path.open("w", encoding="utf-8")
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "open", exc) from exc
+        self._write(
+            {
+                "event": "metadata",
+                "created_utc": _timestamp_utc(),
+                "main_output_path": None,
+                "cadence_s": max(0.1, float(self.config.lcr_continuous_log_cadence_s)),
+                "aggregate_s": max(0.1, float(self.config.lcr_continuous_log_aggregate_s)),
+                "max_rows_per_point": max(1, int(self.config.lcr_continuous_log_max_rows_per_point)),
+                "psu": {
+                    "backend": self.config.psu_backend,
+                    "resource": self.config.psu_resource,
+                    "shared_broker": {
+                        "enabled": self.config.uses_shared_broker,
+                        "host": str(self.config.shared_broker_host or "127.0.0.1"),
+                        "port": int(self.config.shared_broker_port),
+                        "channel": self.config.shared_broker_channel,
+                    },
+                },
+            }
+        )
+
+    def write_sample(
+        self,
+        *,
+        phase: str,
+        started: float,
+        point_started: float,
+        setting_index: int,
+        total_settings: int,
+        setting: Lcr6000Settings,
+        current_point: CurrentLoopPoint,
+        current_point_index: int,
+        total_current_points: int,
+        repeat_index: int,
+        reading: Lcr6000Reading,
+        psu_measurement: PowerSupplyMeasurement | None = None,
+    ) -> None:
+        if self._fh is None:
+            self.open()
+        read_monotonic = time.monotonic()
+        point_key = (
+            phase,
+            setting_index,
+            current_point_index,
+            current_point.direction,
+            round(float(current_point.current_a), 12),
+        )
+        point_elapsed_s = read_monotonic - point_started
+        if not self._sample_allowed(point_key, point_elapsed_s):
+            return
+        payload: dict[str, object] = {
+            "event": "lcr_sample",
+            "timestamp_utc": reading.timestamp_utc or _timestamp_utc(),
+            "elapsed_s": read_monotonic - started,
+            "point_elapsed_s": point_elapsed_s,
+            "phase": phase,
+            "setting_index": setting_index,
+            "total_settings": total_settings,
+            "current_point_index": current_point_index,
+            "total_current_points": total_current_points,
+            "repeat_index": repeat_index,
+            "lcr": {
+                "function": setting.function,
+                "frequency_hz": float(setting.frequency_hz),
+                "level_mode": setting.level_mode,
+                "level_value": float(setting.level_value),
+                "primary": reading.primary,
+                "secondary": reading.secondary,
+                "monitor1": reading.monitor1,
+                "monitor2": reading.monitor2,
+                "comparator": reading.comparator,
+                "raw": reading.raw,
+            },
+            "current_loop": {
+                "current_set_a": float(current_point.current_a),
+                "direction": current_point.direction,
+            },
+            "aggregation": {
+                "mode": "cadence_sample",
+                "window_s": max(0.1, float(self.config.lcr_continuous_log_aggregate_s)),
+                "sample_count": 1,
+            },
+        }
+        if psu_measurement is not None:
+            payload["psu_readback"] = {
+                "current_actual_a": psu_measurement.current_actual_a,
+                "voltage_actual_v": psu_measurement.voltage_actual_v,
+                "resistance_ohm": psu_measurement.resistance_ohm,
+                "power_w": psu_measurement.power_w,
+                "status": psu_measurement.status,
+                "error": psu_measurement.error,
+            }
+        self._write(payload)
+
+    def _sample_allowed(self, point_key: tuple[object, ...], point_elapsed_s: float) -> bool:
+        max_rows = max(1, int(self.config.lcr_continuous_log_max_rows_per_point))
+        count = int(self._point_counts.get(point_key, 0))
+        if count >= max_rows:
+            return False
+        last = self._point_last_elapsed.get(point_key)
+        cadence = max(0.1, float(self.config.lcr_continuous_log_cadence_s))
+        if last is not None and point_elapsed_s - last < cadence:
+            return False
+        self._point_counts[point_key] = count + 1
+        self._point_last_elapsed[point_key] = point_elapsed_s
+        return True
+
+    def _write(self, payload: dict[str, object]) -> None:
+        if self._fh is None:
+            raise RuntimeError("continuous LCR writer is not open")
+        try:
+            self._fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            self._fh.flush()
+        except OSError as exc:
+            raise AcOutputPathError(self.path, "write/flush", exc) from exc
+        if payload.get("event") == "lcr_sample":
+            self._rows_written += 1
+
+    def close(self, *, stop_reason: str = "", status: str = "") -> None:
+        if self._fh is None:
+            return
+        try:
+            self._write(
+                {
+                    "event": "closed",
+                    "timestamp_utc": _timestamp_utc(),
+                    "rows_written": self._rows_written,
+                    "status": status,
+                    "stop_reason": stop_reason,
+                }
+            )
+        finally:
+            try:
+                self._fh.close()
+            except OSError as exc:
+                raise AcOutputPathError(self.path, "close", exc) from exc
+            finally:
+                self._fh = None
+
+
+def _continuous_writer_for_config(config: AcSweepConfig) -> LcrContinuousJsonlWriter | None:
+    if not bool(config.lcr_continuous_log_enabled):
+        return None
+    path_text = str(config.lcr_continuous_log_path or "").strip()
+    if not path_text:
+        return None
+    return LcrContinuousJsonlWriter(path_text, config)
+
+
+def _status_wrapped_progress(
+    status_writer: AcRunStatusWriter,
+    progress: Callable[[AcSweepRow], None] | None,
+) -> Callable[[AcSweepRow], None]:
+    def _wrapped(row: AcSweepRow) -> None:
+        status_writer.record_row(row)
+        if progress is not None:
+            progress(row)
+
+    return _wrapped
 
 
 def run_ac_sweep(
@@ -593,20 +1267,52 @@ def run_ac_sweep(
     if not config.current_points:
         raise ValueError("sweep has no current points")
     writer = AcSweepTsvWriter(output_path, config)
+    continuous_writer = _continuous_writer_for_config(config)
+    status_writer = AcRunStatusWriter(
+        output_path=output_path,
+        config=config,
+        continuous_log_path=None if continuous_writer is None else continuous_writer.path,
+    )
     started = time.monotonic()
+    stop_reason = ""
+    progress_callback = _status_wrapped_progress(status_writer, progress)
     try:
+        status_writer.open(psu=psu)
         writer.write_metadata()
+        status_writer.update(phase="metadata_written", psu=psu)
+        if continuous_writer is not None:
+            continuous_writer.open()
+            status_writer.update(phase="lcr_debug_opened", psu=psu)
         psu.connect()
+        status_writer.update(phase="psu_connected", psu=psu)
         psu.initialize(voltage_limit_v=config.voltage_limit_v)
+        status_writer.update(phase="psu_initialized", psu=psu)
         resistance_estimate_ohm = max(1.0, float(config.psu_current_feedback_resistance_ohm))
         for setting_index, setting in enumerate(config.lcr_settings, start=1):
             if stop_requested is not None and stop_requested():
                 raise RuntimeError("AC sweep stopped by user")
+            status_writer.update(
+                phase="configure_lcr",
+                setting_index=setting_index,
+                total_settings=len(config.lcr_settings),
+                setting=setting,
+                psu=psu,
+            )
             lcr.configure(setting)
             total_current_points = len(config.current_points)
             for current_point_index, current_point in enumerate(config.current_points, start=1):
                 if stop_requested is not None and stop_requested():
                     raise RuntimeError("AC sweep stopped by user")
+                status_writer.update(
+                    phase="set_current",
+                    setting_index=setting_index,
+                    total_settings=len(config.lcr_settings),
+                    setting=setting,
+                    current_point=current_point,
+                    current_point_index=current_point_index,
+                    total_current_points=total_current_points,
+                    psu=psu,
+                )
                 _set_initial_psu_voltage_for_current(
                     config=config,
                     psu=psu,
@@ -635,7 +1341,7 @@ def run_ac_sweep(
                         current_point_index=current_point_index,
                         total_current_points=total_current_points,
                         message=str(exc),
-                        progress=progress,
+                        progress=progress_callback,
                     )
                     raise
                 if ready_measurement.resistance_ohm is not None:
@@ -655,39 +1361,104 @@ def run_ac_sweep(
                         current_point_index=current_point_index,
                         total_current_points=total_current_points,
                         message=ready_measurement.error or ready_measurement.status,
-                        progress=progress,
+                        progress=progress_callback,
                     )
                 dwell = max(0.0, float(config.dwell_s))
                 if dwell:
-                    sleep(dwell)
+                    status_writer.update(
+                        phase="settle",
+                        setting_index=setting_index,
+                        total_settings=len(config.lcr_settings),
+                        setting=setting,
+                        current_point=current_point,
+                        current_point_index=current_point_index,
+                        total_current_points=total_current_points,
+                        psu=psu,
+                    )
+                    _log_lcr_continuous_window(
+                        config=config,
+                        lcr=lcr,
+                        psu=psu,
+                        writer=continuous_writer,
+                        started=started,
+                        setting_index=setting_index,
+                        setting=setting,
+                        current_point=current_point,
+                        current_point_index=current_point_index,
+                        total_current_points=total_current_points,
+                        phase="settle",
+                        duration_s=dwell,
+                        sleep=sleep,
+                        stop_requested=stop_requested,
+                    )
+                status_writer.update(
+                    phase="measure",
+                    setting_index=setting_index,
+                    total_settings=len(config.lcr_settings),
+                    setting=setting,
+                    current_point=current_point,
+                    current_point_index=current_point_index,
+                    total_current_points=total_current_points,
+                    psu=psu,
+                )
                 _measure_sweep_point_with_retries(
                     config=config,
                     lcr=lcr,
                     psu=psu,
                     writer=writer,
+                    continuous_writer=continuous_writer,
                     started=started,
                     setting_index=setting_index,
                     setting=setting,
                     current_point=current_point,
                     current_point_index=current_point_index,
                     total_current_points=total_current_points,
-                    progress=progress,
+                    progress=progress_callback,
                     stop_requested=stop_requested,
                 )
+        stop_reason = "completed"
     finally:
         active_error = sys.exc_info()[1]
-        shutdown_error: Exception | None = None
+        if active_error is not None:
+            stop_reason = str(active_error)
+            status_writer.record_exception(active_error)
+        shutdown_errors: list[Exception] = []
+        cleanup_error_messages: list[str] = []
         try:
+            status_writer.update(phase="cleanup_output_off", psu=psu, status=_status_for_exception(active_error), stop_reason=stop_reason)
             psu.output_off()
         except Exception as exc:
-            shutdown_error = exc
-        finally:
-            try:
-                psu.close()
-            finally:
-                writer.close()
-        if shutdown_error is not None and active_error is None:
-            raise shutdown_error
+            shutdown_errors.append(exc)
+            cleanup_error_messages.append(f"psu.output_off: {exc}")
+        try:
+            status_writer.update(phase="cleanup_psu_close", psu=psu, status=_status_for_exception(active_error), stop_reason=stop_reason)
+            psu.close()
+        except Exception as exc:
+            shutdown_errors.append(exc)
+            cleanup_error_messages.append(f"psu.close: {exc}")
+        final_status = "failed" if shutdown_errors and active_error is None else _status_for_exception(active_error)
+        try:
+            if continuous_writer is not None:
+                continuous_writer.close(stop_reason=stop_reason or final_status, status=final_status)
+        except Exception as exc:
+            shutdown_errors.append(exc)
+            cleanup_error_messages.append(f"lcr_debug.close: {exc}")
+        try:
+            writer.close()
+        except Exception as exc:
+            shutdown_errors.append(exc)
+            cleanup_error_messages.append(f"tsv.close: {exc}")
+        if shutdown_errors and active_error is None:
+            final_status = "failed"
+            stop_reason = str(shutdown_errors[0])
+        status_writer.close(
+            status=final_status,
+            stop_reason=stop_reason or final_status,
+            psu=None,
+            cleanup_errors=cleanup_error_messages,
+        )
+        if shutdown_errors and active_error is None:
+            raise shutdown_errors[0]
 
 
 def _fetch_lcr_reading(lcr: LcrDevice, *, attempts: int) -> Lcr6000Reading:
@@ -704,12 +1475,106 @@ def _fetch_lcr_reading(lcr: LcrDevice, *, attempts: int) -> Lcr6000Reading:
     raise RuntimeError("LCR did not return a measurement")
 
 
+def _write_continuous_sample_if_due(
+    *,
+    config: AcSweepConfig,
+    writer: LcrContinuousJsonlWriter | None,
+    started: float,
+    point_started: float,
+    setting_index: int,
+    total_settings: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
+    repeat_index: int,
+    reading: Lcr6000Reading,
+    psu_measurement: PowerSupplyMeasurement | None,
+    phase: str,
+) -> None:
+    if writer is None or not bool(config.lcr_continuous_log_enabled):
+        return
+    writer.write_sample(
+        phase=phase,
+        started=started,
+        point_started=point_started,
+        setting_index=setting_index,
+        total_settings=total_settings,
+        setting=setting,
+        current_point=current_point,
+        current_point_index=current_point_index,
+        total_current_points=total_current_points,
+        repeat_index=repeat_index,
+        reading=reading,
+        psu_measurement=psu_measurement,
+    )
+
+
+def _log_lcr_continuous_window(
+    *,
+    config: AcSweepConfig,
+    lcr: LcrDevice,
+    psu: CurrentSource,
+    writer: LcrContinuousJsonlWriter | None,
+    started: float,
+    setting_index: int,
+    setting: Lcr6000Settings,
+    current_point: CurrentLoopPoint,
+    current_point_index: int,
+    total_current_points: int,
+    phase: str,
+    duration_s: float,
+    sleep: Callable[[float], None],
+    stop_requested: Callable[[], bool] | None,
+) -> None:
+    duration = max(0.0, float(duration_s))
+    if duration <= 0.0:
+        return
+    if writer is None or not bool(config.lcr_continuous_log_enabled):
+        sleep(duration)
+        return
+    point_started = time.monotonic()
+    deadline = point_started + duration
+    repeat_index = 0
+    cadence_s = max(0.1, float(config.lcr_continuous_log_cadence_s))
+    while True:
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("AC sweep stopped by user")
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        repeat_index += 1
+        reading = _fetch_lcr_reading(lcr, attempts=config.lcr_read_attempts)
+        measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
+        _write_continuous_sample_if_due(
+            config=config,
+            writer=writer,
+            started=started,
+            point_started=point_started,
+            setting_index=setting_index,
+            total_settings=len(config.lcr_settings),
+            setting=setting,
+            current_point=current_point,
+            current_point_index=current_point_index,
+            total_current_points=total_current_points,
+            repeat_index=repeat_index,
+            reading=reading,
+            psu_measurement=measurement,
+            phase=phase,
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        sleep(min(cadence_s, remaining))
+
+
 def _measure_sweep_point_with_retries(
     *,
     config: AcSweepConfig,
     lcr: LcrDevice,
     psu: CurrentSource,
     writer: AcSweepTsvWriter,
+    continuous_writer: LcrContinuousJsonlWriter | None,
     started: float,
     setting_index: int,
     setting: Lcr6000Settings,
@@ -730,6 +1595,7 @@ def _measure_sweep_point_with_retries(
                 lcr=lcr,
                 psu=psu,
                 writer=writer,
+                continuous_writer=continuous_writer,
                 started=started,
                 setting_index=setting_index,
                 setting=setting,
@@ -766,6 +1632,7 @@ def _measure_sweep_point_with_retries(
                     lcr=lcr,
                     psu=psu,
                     writer=writer,
+                    continuous_writer=continuous_writer,
                     started=started,
                     setting_index=setting_index,
                     setting=setting,
@@ -809,6 +1676,7 @@ def _measure_sweep_point_once(
     lcr: LcrDevice,
     psu: CurrentSource,
     writer: AcSweepTsvWriter,
+    continuous_writer: LcrContinuousJsonlWriter | None,
     started: float,
     setting_index: int,
     setting: Lcr6000Settings,
@@ -836,6 +1704,22 @@ def _measure_sweep_point_once(
             first_read_monotonic = read_monotonic
         point_elapsed_s = max(0.0, read_monotonic - point_started)
         psu_measurement = _measure_psu_with_retries(psu, attempts=config.psu_measure_attempts)
+        _write_continuous_sample_if_due(
+            config=config,
+            writer=continuous_writer,
+            started=started,
+            point_started=point_started,
+            setting_index=setting_index,
+            total_settings=len(config.lcr_settings),
+            setting=setting,
+            current_point=current_point,
+            current_point_index=current_point_index,
+            total_current_points=total_current_points,
+            repeat_index=repeat_index,
+            reading=reading,
+            psu_measurement=psu_measurement,
+            phase="measure",
+        )
         error = f"retry_attempt={attempt}" if attempt > 1 else ""
         current_set = max(0.0, float(current_point.current_a))
         if (
@@ -1036,6 +1920,8 @@ def _set_initial_psu_voltage_for_current(
         return
     if not _supports_voltage_control(psu):
         return
+    if _uses_fixed_hmp_voltage_limit(config):
+        return
     current_a = max(0.0, float(current_point.current_a))
     if current_a <= 1e-9:
         _set_psu_voltage_limit(psu, 0.0)
@@ -1130,10 +2016,16 @@ def _can_adjust_psu_voltage(
 ) -> bool:
     if not bool(config.psu_current_feedback_enabled):
         return False
+    if _uses_fixed_hmp_voltage_limit(config):
+        return False
     if not _supports_voltage_control(psu):
         return False
     actual = measurement.current_actual_a
     return actual is not None and math.isfinite(float(actual))
+
+
+def _uses_fixed_hmp_voltage_limit(config: AcSweepConfig) -> bool:
+    return str(config.psu_backend or "").strip().lower() in {"hmp4030", "shared_hmp_broker"}
 
 
 def _adjust_psu_voltage_toward_current(
@@ -1439,6 +2331,134 @@ class SerialScpiCurrentSource:
         if self._serial is None or not bool(getattr(self._serial, "is_open", False)):
             raise RuntimeError("power supply is not connected")
         return self._serial
+
+
+class SharedBrokerCurrentSource:
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        channel: int,
+        voltage_limit_v: float,
+        owner: str = "ac_susceptibility_logger",
+        timeout_s: float = 8.0,
+        client_factory: Any = BrokerJsonClient,
+    ) -> None:
+        self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+        self.port = int(port)
+        self.channel = int(channel)
+        self.voltage_limit_v = float(voltage_limit_v)
+        self.owner = str(owner or "ac_susceptibility_logger")
+        self.timeout_s = float(timeout_s)
+        self.backend_id = "shared_hmp_broker"
+        self.resource = f"{self.host}:{self.port}/CH{self.channel}"
+        self.profile = dict(POWER_SUPPLY_PROFILES[self.backend_id])
+        self._client_factory = client_factory
+        self._client: Any | None = None
+        self._lease_id: str | None = None
+
+    @property
+    def lease_id(self) -> str | None:
+        return self._lease_id
+
+    def connect(self) -> None:
+        if self.channel <= 0:
+            raise RuntimeError("select a shared HMP broker channel")
+        if self._client is None:
+            self._client = self._client_factory(host=self.host, port=self.port, timeout_s=self.timeout_s)
+        try:
+            self._client.request("snapshot")
+        except Exception as exc:
+            self._raise_broker_failure(exc)
+
+    def _require_client(self) -> Any:
+        if self._client is None:
+            raise RuntimeError("shared HMP broker is not connected")
+        return self._client
+
+    def _ensure_lease(self) -> str:
+        if self._lease_id:
+            return self._lease_id
+        try:
+            lease = self._require_client().lease(
+                channel=self.channel,
+                owner=self.owner,
+                role=ROLE_AC_SUSCEPTIBILITY,
+            )
+        except Exception as exc:
+            self._raise_broker_failure(exc)
+        lease_id = str(lease.get("lease_id") or "")
+        if not lease_id:
+            raise RuntimeError("Shared HMP broker did not return a lease id.")
+        self._lease_id = lease_id
+        return lease_id
+
+    def initialize(self, *, voltage_limit_v: float) -> None:
+        self.voltage_limit_v = effective_power_supply_voltage_limit(self.backend_id, voltage_limit_v)
+        self._configure_channel(voltage_v=self.voltage_limit_v, current_a=0.0, output_on=True)
+
+    def set_current(self, current_a: float) -> None:
+        resolution = max(1e-6, float(self.profile.get("current_resolution_a", 0.001)))
+        current = max(0.0, round(float(current_a) / resolution) * resolution)
+        self._configure_channel(voltage_v=self.voltage_limit_v, current_a=current, output_on=True)
+
+    def set_voltage_limit(self, voltage_v: float) -> None:
+        self.voltage_limit_v = effective_power_supply_voltage_limit(self.backend_id, voltage_v)
+        measurement = self.measure()
+        current_a = 0.0 if measurement.current_actual_a is None else max(0.0, float(measurement.current_actual_a))
+        self._configure_channel(voltage_v=self.voltage_limit_v, current_a=current_a, output_on=True)
+
+    def _configure_channel(self, *, voltage_v: float, current_a: float, output_on: bool) -> None:
+        try:
+            self._require_client().configure_channel(
+                channel=self.channel,
+                lease_id=self._ensure_lease(),
+                voltage_v=float(voltage_v),
+                current_a=current_a,
+                output_on=bool(output_on),
+            )
+        except Exception as exc:
+            self._raise_broker_failure(exc)
+
+    def measure(self) -> PowerSupplyMeasurement:
+        try:
+            readback = self._require_client().measure_channel(channel=self.channel)
+        except Exception as exc:
+            self._raise_broker_failure(exc)
+        current_mA = readback.get("current_mA")
+        voltage_v = readback.get("voltage_V")
+        return PowerSupplyMeasurement(
+            current_actual_a=None if current_mA is None else float(current_mA) / 1000.0,
+            voltage_actual_v=None if voltage_v is None else float(voltage_v),
+            status="OK",
+        )
+
+    def output_off(self) -> None:
+        if not self._lease_id:
+            return
+        try:
+            self._require_client().set_output(
+                channel=self.channel,
+                lease_id=self._lease_id,
+                output_on=False,
+            )
+        except Exception as exc:
+            self._raise_broker_failure(exc)
+
+    def _raise_broker_failure(self, exc: Exception) -> NoReturn:
+        raise RuntimeError(broker_failure_diagnostic(exc, context="AC shared HMP broker")) from exc
+
+    def close(self) -> None:
+        client = self._client
+        lease_id = self._lease_id
+        self._lease_id = None
+        self._client = None
+        if client is not None and lease_id:
+            try:
+                client.release(channel=self.channel, lease_id=lease_id)
+            except Exception:
+                pass
 
 
 def available_power_supply_ports() -> list[tuple[str, str]]:

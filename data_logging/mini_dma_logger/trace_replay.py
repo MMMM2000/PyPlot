@@ -68,6 +68,7 @@ class TraceReplaySummary:
     max_old_effective_tolerance: float
     max_motor_step_floor: float
     stop_detail: str
+    warnings: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +83,7 @@ class TraceReplaySummary:
             "max_old_effective_tolerance": self.max_old_effective_tolerance,
             "max_motor_step_floor": self.max_motor_step_floor,
             "stop_detail": self.stop_detail,
+            "warnings": list(self.warnings),
         }
 
 
@@ -99,60 +101,74 @@ def analyze_control_trace(
     run_path = Path(run_dir)
     trace_path = run_path / "control_trace.csv"
     metadata_path = run_path / "metadata.json"
-    if not trace_path.exists():
-        raise FileNotFoundError(f"Missing Mini DMA control trace: {trace_path}")
     metadata: dict[str, Any] = {}
+    warnings: list[str] = []
     if metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            warnings.append(f"invalid:metadata.json:{exc.__class__.__name__}")
+        else:
+            metadata = payload if isinstance(payload, dict) else {}
+            if not isinstance(payload, dict):
+                warnings.append("invalid:metadata.json:not_object")
+    else:
+        warnings.append("missing:metadata.json")
     diameter_mm = _float_or_none(metadata.get("wire_diameter_mm")) or 0.0
     stop = metadata.get("stop") if isinstance(metadata.get("stop"), dict) else {}
     stop_detail = str(stop.get("detail") or "")
 
     replay_rows: list[dict[str, Any]] = []
-    with trace_path.open(newline="", encoding="utf-8-sig") as handle:
-        for row in csv.DictReader(handle):
-            phase = str(row.get("automation_phase") or "")
-            basis = str(row.get("automation_basis") or "")
-            if phase not in CURRENT_SWEEP_PHASES or basis not in LOAD_STRESS_BASES:
-                continue
-            error_value = _float_or_none(row.get("error_value"))
-            old_tolerance = _float_or_none(row.get("tolerance"))
-            sensitivity = _float_or_none(row.get("sensitivity_per_mm"))
-            motor_step = _float_or_none(row.get("motor_step_mm"))
-            requested_tolerance = _requested_acceptance_tolerance(
-                basis,
-                diameter_mm=diameter_mm,
-                load_tolerance_g=load_tolerance_g,
-            )
-            abs_error = None if error_value is None else abs(float(error_value))
-            old_effective = 0.0 if old_tolerance is None else abs(float(old_tolerance))
-            motor_step_floor = 0.0
-            if sensitivity is not None and motor_step is not None:
-                motor_step_floor = abs(float(sensitivity)) * abs(float(motor_step))
-            decision = str(row.get("decision") or "")
-            result = str(row.get("result") or "")
-            old_accept = decision == "accept" and result in ACCEPT_RESULTS
-            split_accept = abs_error is not None and abs_error <= requested_tolerance
-            step_floor_only_accept = (
-                old_accept
-                and abs_error is not None
-                and not split_accept
-                and motor_step_floor > requested_tolerance
-                and abs_error <= max(old_effective, motor_step_floor)
-            )
-            replay_row = dict(row)
-            replay_row.update(
-                {
-                    "abs_error": "" if abs_error is None else f"{abs_error:.12g}",
-                    "old_effective_tolerance": f"{old_effective:.12g}",
-                    "motor_step_floor": f"{motor_step_floor:.12g}",
-                    "replayed_acceptance_tolerance": f"{requested_tolerance:.12g}",
-                    "old_accept": _truthy_text(old_accept),
-                    "would_accept_after_split": _truthy_text(bool(split_accept)),
-                    "step_floor_only_accept": _truthy_text(bool(step_floor_only_accept)),
-                }
-            )
-            replay_rows.append(replay_row)
+    if not trace_path.exists():
+        warnings.append("missing:control_trace.csv")
+    else:
+        with trace_path.open(newline="", encoding="utf-8-sig") as handle:
+            trace_reader = csv.DictReader(handle)
+            if not trace_reader.fieldnames:
+                warnings.append("empty:control_trace.csv")
+            for row in trace_reader:
+                phase = str(row.get("automation_phase") or "")
+                basis = str(row.get("automation_basis") or "")
+                if phase not in CURRENT_SWEEP_PHASES or basis not in LOAD_STRESS_BASES:
+                    continue
+                error_value = _float_or_none(row.get("error_value"))
+                old_tolerance = _float_or_none(row.get("tolerance"))
+                sensitivity = _float_or_none(row.get("sensitivity_per_mm"))
+                motor_step = _float_or_none(row.get("motor_step_mm"))
+                requested_tolerance = _requested_acceptance_tolerance(
+                    basis,
+                    diameter_mm=diameter_mm,
+                    load_tolerance_g=load_tolerance_g,
+                )
+                abs_error = None if error_value is None else abs(float(error_value))
+                old_effective = 0.0 if old_tolerance is None else abs(float(old_tolerance))
+                motor_step_floor = 0.0
+                if sensitivity is not None and motor_step is not None:
+                    motor_step_floor = abs(float(sensitivity)) * abs(float(motor_step))
+                decision = str(row.get("decision") or "")
+                result = str(row.get("result") or "")
+                old_accept = decision == "accept" and result in ACCEPT_RESULTS
+                split_accept = abs_error is not None and abs_error <= requested_tolerance
+                step_floor_only_accept = (
+                    old_accept
+                    and abs_error is not None
+                    and not split_accept
+                    and motor_step_floor > requested_tolerance
+                    and abs_error <= max(old_effective, motor_step_floor)
+                )
+                replay_row = dict(row)
+                replay_row.update(
+                    {
+                        "abs_error": "" if abs_error is None else f"{abs_error:.12g}",
+                        "old_effective_tolerance": f"{old_effective:.12g}",
+                        "motor_step_floor": f"{motor_step_floor:.12g}",
+                        "replayed_acceptance_tolerance": f"{requested_tolerance:.12g}",
+                        "old_accept": _truthy_text(old_accept),
+                        "would_accept_after_split": _truthy_text(bool(split_accept)),
+                        "step_floor_only_accept": _truthy_text(bool(step_floor_only_accept)),
+                    }
+                )
+                replay_rows.append(replay_row)
 
     old_accept_count = sum(row["old_accept"] == "true" for row in replay_rows)
     split_accept_count = sum(row["would_accept_after_split"] == "true" for row in replay_rows)
@@ -181,6 +197,7 @@ def analyze_control_trace(
         max_old_effective_tolerance=max_old_effective_tolerance,
         max_motor_step_floor=max_motor_step_floor,
         stop_detail=stop_detail,
+        warnings=warnings,
     )
     return TraceReplayResult(summary=summary, rows=replay_rows)
 
@@ -251,6 +268,7 @@ Stop detail: {summary.stop_detail or "not recorded"}
 - Largest motor-step-only accepted error: {summary.max_step_floor_only_error:.6g}
 - Maximum old effective tolerance: {summary.max_old_effective_tolerance:.6g}
 - Maximum motor-step floor: {summary.max_motor_step_floor:.6g}
+- Warnings: {", ".join(summary.warnings) if summary.warnings else "none"}
 
 ## First Motor-Step-Only Accepts
 

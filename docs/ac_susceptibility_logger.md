@@ -91,9 +91,27 @@ recorded are skipped. Any partially recorded AC setting is measured again from
 its first current point, then the missing settings continue into a new
 timestamped TSV file.
 
+Use **Open** and **Short** under **Fixture correction** when the LCR fixture,
+clips, coil wiring, or cable routing changes. These actions run the LCR-6000
+series full-range AC open/short correction commands only; they do not lease,
+enable, disable, or otherwise command the PSU or shared HMP broker. Open
+correction is done with the fixture connected but no DUT attached. Short
+correction is done with the measurement terminals shorted at the fixture
+contacts. The LCR-6000 manual describes full open/short correction as measuring
+the meter's preset trimming points and interpolating other frequencies, so the
+correction is separate from the logger's selected frequency chips. Use
+**Disable** to turn the stored LCR open/short correction state off without
+clearing the logger's empty-coil baseline workflow.
+
+During open/short correction, the app shows an indeterminate AC progress bar
+while the LCR meter performs the correction. The meter owns the detailed percent
+display; the app disables baseline/sweep actions until the correction returns.
+
 The AC Susceptibility Logger keeps its output directory and sweep-base setting
 separate from the Current Annealing Logger. By default, AC files go under
 `Downloads/ac_susceptibility` with the sweep base `ac_susc_current_sweep`.
+**Auto-connect hardware** connects or refreshes instrument state without
+changing the selected frequency chips, excitation chips, or model options.
 
 Point acquisition controls are named for the AC experiment:
 
@@ -107,7 +125,7 @@ Point acquisition controls are named for the AC experiment:
   durations, plus the local clock time when each run would finish if started
   now. The estimate uses the selected settle time and a rough LCR-read
   allowance; real serial communication overhead can still add time.
-- During a run, the sticky task line reports the active LCR model, frequency,
+- During a run, the experiment-plan task line reports the active LCR model, frequency,
   excitation level, read number, and microwire current when applicable. The progress
   bar reports elapsed/total measurement time, estimated time remaining, and
   the expected finish clock time/date.
@@ -129,12 +147,30 @@ Point acquisition controls are named for the AC experiment:
 Every reading is saved as its own row. Averaging or baseline normalization can
 be done later from the raw TSV files.
 
+To subtract an empty-coil baseline offline without modifying the measured sweep,
+use:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\ac_lcr_subtract_empty_coil.py `
+  path\to\microwire_sweep.tsv `
+  --baseline path\to\ac_susc_empty_coil_baseline.tsv
+```
+
+The command writes a derived `<sweep>_empty_coil_subtracted.tsv` file. Original
+`LCR primary` and `LCR secondary` columns are preserved, and new columns contain
+the matched empty-coil mean and baseline-subtracted values. Matching is by LCR
+function, frequency, excitation mode, and excitation level. Use a baseline
+measured with the same LCR open/short correction state as the sweep; for an
+overnight uncorrected sweep, pair it with the uncorrected empty-coil baseline
+from that run rather than a newly corrected baseline.
+
 Each generated TSV begins with commented metadata lines. Both empty-coil
 baseline and microwire sweep files include a compact `config_json` snapshot with
 the selected LCR settings, acquisition timing, current-loop points and
-directions, and, for current sweeps, the selected PSU backend/resource/voltage
-limit and retry settings. This makes partial or overnight files self-describing
-for debugging even if UI settings are changed later.
+directions, the last queried LCR open/short correction state, and, for current
+sweeps, the selected PSU backend/resource/voltage limit and retry settings. This
+makes partial or overnight files self-describing for debugging even if UI
+settings are changed later.
 
 Suggested precision-baseline settings for the 1 cm, roughly 1 mm coil around a
 Ni50Fe27Ga23 microwire:
@@ -174,6 +210,11 @@ The official LCR-6000 manual gives these ranges for the lab LCR-6200:
   `500 mV`, `1.00 V`, `1.50 V`, `2.00 V`.
 - Front-panel current increment presets: `100 uA`, `500 uA`, `1.00 mA`,
   `5.00 mA`, `10.00 mA`, `20.00 mA`.
+
+The UI shows the standard frequency and excitation presets as checkable chips
+so common scan matrices can be edited without retyping comma-separated lists.
+Use **Custom lists** when an odd frequency or excitation value is needed; the
+custom text fields remain the source of truth saved into run metadata.
 
 The UI includes one-click preset selectors:
 
@@ -236,8 +277,8 @@ failure unless the raw LCR reply is empty or cannot be parsed.
 
 ## Power Supply Backends
 
-The AC sweep can use either the existing HMP4030-style SCPI path or an OWON
-SPE6102-style backend. The AC logger keeps its own supply profile, serial port,
+The AC sweep can use the existing HMP4030-style SCPI path, an OWON
+SPE6102-style backend, or the opt-in shared HMP broker profile. The AC logger keeps its own supply profile, serial port,
 baud rate, and voltage-limit settings, separate from the Current Annealing
 Logger. It also remembers hardware settings per AC supply profile, so switching
 between OWON and HMP restores that profile's last port, baud rate, and voltage
@@ -269,14 +310,18 @@ the operator explicitly asks for auto-detection.
 The sweep engine treats the supply generically: connect, identify the selected
 SCPI backend, initialize with the selected voltage limit, set current, and wait
 briefly for actual-current readback before starting LCR reads at each current
-point. For supplies that expose voltage control, especially the OWON SPE6102,
-the voltage limit is treated as an automatic compliance value rather than a
-fixed experiment setting. Before each current point the logger estimates a
-reasonable voltage from the last measured wire resistance, then trims the
-voltage from PSU readback until the measured current is close to the requested
-current. If the requested current cannot be reached before the short ready
-timeout, the run logs a `WARN` row and continues with the measured current
-rather than stopping the overnight sweep.
+point. HMP4030/HMP4040-style direct serial and shared-broker runs keep the
+configured voltage limit available for the whole sweep and change only the
+current setpoint at each current point, matching the Current Annealing and Mini
+DMA logger HMP pattern. For supplies that expose voltage control but are not
+HMP-style current sources, especially the OWON SPE6102, the voltage limit is
+treated as an automatic compliance value rather than a fixed experiment
+setting. Before each current point the logger estimates a reasonable voltage
+from the last measured wire resistance, then trims the voltage from PSU readback
+until the measured current is close to the requested current. If the requested
+current cannot be reached before the short ready timeout, the run logs a `WARN`
+row and continues with the measured current rather than stopping the overnight
+sweep.
 
 The logged `current_actual_a`, `voltage_actual_v`, PSU resistance, and PSU power
 columns are the source of truth for later analysis; the requested current is
@@ -297,6 +342,71 @@ zero-current, zero-voltage, output-off sequence. During active microwire current
 sweeps on Windows, the worker also requests that the system stay awake so USB
 serial connections are not suspended mid-run. Baseline measurement does not
 create or command a power-supply backend.
+
+When **Shared HMP broker** is selected, the serial port is replaced by broker
+host, TCP port, and confirmed HMP channel settings. The logger leases that
+channel with the `ac_susceptibility` role, sends voltage/current/output commands
+through the broker, reads back only that channel, and turns off/releases only
+that leased channel when the sweep stops or fails. The detached serial watchdog
+is not armed in broker mode because it cannot safely address a broker lease;
+the worker shutdown path performs the broker channel shutdown/release instead.
+Broker connection, stale lease, wrong-channel, and channel-limit failures use
+the shared broker diagnostic wording used by the other HMP-backed apps, so the
+run log and failure dialog should point to the operator action instead of only
+showing the raw TCP or lease exception.
+The broker channel starts as **Select channel...** on first use, and a sweep will
+not start until the operator explicitly chooses the wired HMP channel. On the
+current shared bench, choose `CH1` for AC susceptibility; Mini DMA uses `CH3`
+for its motor rail and `CH4` for its current-sweep channel. Channels saved by
+older development builds before this confirmation marker are treated as
+unconfirmed and must be selected again.
+
+Shared-broker bench setup still has to be confirmed outside the AC logger with
+the shared HMP setup/guard tools before a live sweep. The AC logger does not
+auto-start hardware or infer channel wiring.
+
+## Bounded LCR Debug Stream
+
+Enable **Write LCR debug stream** only when debugging transitions or LCR cadence
+around a current step. The logger writes a sidecar
+`<sweep>_lcr_debug.jsonl` next to the main sweep TSV. The stream is bounded by
+cadence and a maximum row count per setting/current/phase, and is flushed after
+each row. It records cadence-sampled settle-window and measurement-window rows
+with the LCR setting, current setpoint, PSU readback, broker metadata when used,
+aggregation metadata, and a close record with the stop reason.
+
+Every microwire current sweep also writes a durable
+`<sweep>_run_status.json` sidecar. This file is flushed throughout the run with
+the process ID, heartbeat timestamp, active setting/current point, rows written,
+output paths, shared-HMP channel/lease context when available, and the final
+status on completion, user stop, or handled error. The output section shows the
+primary status sidecar path and the local fallback path before the sweep starts,
+and completion/stop/failure dialogs repeat the run-status summary with rows
+written and the status-file location. If a previous TSV is selected with
+**Continue from previous sweep...** and its heartbeat looks stale or its debug
+stream has no close marker, the continuation prompt reports the unclean status.
+Resume remains setting-granular: complete settings can be skipped, but a partial
+setting is measured again from its first current point.
+
+The same status payload is also mirrored to a local fallback file under
+`Downloads/ac_susceptibility/run_status_fallback`. This fallback does not depend
+on the experiment output drive, so a disconnected network/removable drive should
+still leave a final failed/stopped state and the last completed setting/current
+point/repeat for diagnosis and resume planning.
+
+The default debug cadence is `1 s` and the default cap is `120` rows per
+setting/current/phase. Debug logging is off by default so ordinary overnight
+sweeps keep their existing TSV output and plot behavior.
+
+MED/SLOW aperture and LCR AVG choices should be tuned on live hardware. A safe
+bench comparison plan is:
+
+1. Run the same current transition with FAST, MED, and SLOW at the same
+   frequency/excitation/current loop while the debug stream is enabled.
+2. Repeat the most promising aperture with candidate AVG counts if the front
+   panel/SCPI setup supports averaging without hiding the transition.
+3. Compare debug-stream cadence, point-to-point scatter, and transition shape
+   against the extra measurement time before changing defaults.
 
 ## Live Plots
 

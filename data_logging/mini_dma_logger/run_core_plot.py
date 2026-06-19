@@ -1,0 +1,715 @@
+"""Mini DMA per-run summary image generation.
+
+The generated images are derived caches. Raw CSV/JSON files remain the source of
+truth and summaries can be regenerated when plotting improves.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import io
+import json
+import math
+from pathlib import Path
+from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+import numpy as np
+import pandas as pd
+
+from .run_quality import RunQuality, analyze_and_write_run_quality, analyze_run_quality
+
+MAX_TEMPERATURE_SIDECAR_BYTES = 512 * 1024 * 1024
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _read_csv_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, encoding="utf-8-sig")
+
+
+def _read_temperature_sidecar_frame(run_path: Path, *, max_rows: int = 5000) -> pd.DataFrame:
+    path = run_path / "ir_temperature.csv"
+    if not path.exists() or path.stat().st_size <= 0:
+        return pd.DataFrame()
+    if path.stat().st_size > MAX_TEMPERATURE_SIDECAR_BYTES:
+        return pd.DataFrame()
+    columns = _csv_header(path)
+    wanted = [
+        name
+        for name in (
+            "elapsed_s",
+            "object_c_apparent",
+            "frame_max_c",
+            "ambient_c",
+            "delta_c",
+        )
+        if name in columns
+    ]
+    if "elapsed_s" not in wanted or not any(name in wanted for name in ("object_c_apparent", "frame_max_c")):
+        return pd.DataFrame()
+    if path.stat().st_size <= 128 * 1024 * 1024:
+        try:
+            return pd.read_csv(path, encoding="utf-8-sig", usecols=wanted)
+        except (OSError, ValueError, pd.errors.ParserError):
+            return pd.DataFrame()
+    return _read_sparse_csv_frame(path, wanted, max_rows=max_rows)
+
+
+def _frame_has_temperature(df: pd.DataFrame) -> bool:
+    for name in ("ir_object_c_apparent", "frame_max_c", "object_c_apparent"):
+        if name in df and _series(df, name).notna().any():
+            return True
+    return False
+
+
+def _csv_header(path: Path) -> list[str]:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            return next(reader, [])
+    except (OSError, StopIteration, UnicodeDecodeError):
+        return []
+
+
+def _read_sparse_csv_frame(path: Path, columns: list[str], *, max_rows: int) -> pd.DataFrame:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            header_bytes = handle.readline()
+            header_end = handle.tell()
+            header_text = header_bytes.decode("utf-8-sig", errors="replace")
+            if size <= header_end:
+                return pd.DataFrame()
+            offsets = np.linspace(header_end, max(header_end, size - 2), max_rows, dtype=np.int64)
+            records: list[dict[str, str]] = []
+            seen: set[tuple[str, ...]] = set()
+            for offset in offsets:
+                handle.seek(int(offset))
+                if int(offset) > header_end:
+                    handle.readline()
+                line = handle.readline()
+                if not line:
+                    continue
+                text = line.decode("utf-8", errors="replace")
+                try:
+                    row = next(csv.DictReader(io.StringIO(header_text + text)))
+                except (csv.Error, StopIteration):
+                    continue
+                record = {column: row.get(column, "") for column in columns}
+                key = tuple(record.get(column, "") for column in columns)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(record)
+    except OSError:
+        return pd.DataFrame()
+    frame = pd.DataFrame.from_records(records, columns=columns)
+    for column in frame.columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    if "elapsed_s" in frame:
+        frame = frame.dropna(subset=["elapsed_s"]).sort_values("elapsed_s", kind="stable")
+    return frame.reset_index(drop=True)
+
+
+def _series(df: pd.DataFrame, name: str) -> pd.Series:
+    if name not in df:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(df[name], errors="coerce")
+
+
+def _clean_xy(df: pd.DataFrame, x_name: str, y_name: str) -> tuple[np.ndarray, np.ndarray]:
+    x = _series(df, x_name)
+    y = _series(df, y_name)
+    mask = x.notna() & y.notna()
+    return x[mask].to_numpy(), y[mask].to_numpy()
+
+
+def _decimate(x: np.ndarray, y: np.ndarray, limit: int = 4500) -> tuple[np.ndarray, np.ndarray]:
+    if len(x) <= limit:
+        return x, y
+    index = np.linspace(0, len(x) - 1, limit).astype(int)
+    return x[index], y[index]
+
+
+def _metadata_float(metadata: dict[str, Any], key: str) -> float | None:
+    value = metadata.get(key)
+    number = _float_or_none(value)
+    return number if number is not None and number > 0 else None
+
+
+def _format_compact_number(value: float, *, max_decimals: int = 2) -> str:
+    rounded = round(float(value), max_decimals)
+    if math.isclose(rounded, round(rounded), abs_tol=0.5 * (10**-max_decimals)):
+        return f"{int(round(rounded))}"
+    text = f"{rounded:.{max_decimals}f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _format_metric(value: float | int | None, unit: str = "", digits: int = 1) -> str:
+    number = _float_or_none(value)
+    if number is None:
+        return "n/a"
+    return f"{number:.{digits}f}{unit}"
+
+
+def _format_power_tick(value_mw: float) -> str:
+    if not math.isfinite(value_mw):
+        return ""
+    if abs(value_mw) >= 100:
+        return f"{value_mw:.0f}"
+    if abs(value_mw) >= 10:
+        return f"{value_mw:.1f}".rstrip("0").rstrip(".")
+    if abs(value_mw) >= 1:
+        return f"{value_mw:.2f}".rstrip("0").rstrip(".")
+    return f"{value_mw:.3f}".rstrip("0").rstrip(".")
+
+
+def _format_stress_load_label(metadata: dict[str, Any], stress_mpa: float) -> str:
+    stress_label = f"{int(stress_mpa)} MPa" if float(stress_mpa).is_integer() else f"{stress_mpa:g} MPa"
+    diameter_mm = _metadata_float(metadata, "wire_diameter_mm")
+    if diameter_mm is None:
+        return stress_label
+    area_mm2 = math.pi * diameter_mm * diameter_mm / 4.0
+    load_g = float(stress_mpa) * area_mm2 / 9.80665 * 1000.0
+    return f"{stress_label} / {_format_compact_number(load_g)} g"
+
+
+def _max_or_none(values: pd.Series) -> float | None:
+    values = values.dropna()
+    if values.empty:
+        return None
+    return float(values.max())
+
+
+def _rolling_median(y: pd.Series, window: int) -> pd.Series:
+    if y.empty:
+        return y
+    window = max(3, min(window, max(3, len(y) // 12)))
+    if window % 2 == 0:
+        window += 1
+    return y.rolling(window=window, center=True, min_periods=1).median()
+
+
+def _power_tick_positions_and_labels(
+    current_ma: pd.Series,
+    resistance_ohm: pd.Series,
+    *,
+    tick_positions: np.ndarray,
+) -> tuple[np.ndarray, list[str]] | None:
+    current = pd.to_numeric(current_ma, errors="coerce")
+    resistance = pd.to_numeric(resistance_ohm, errors="coerce")
+    frame = pd.DataFrame({"current_mA": current, "resistance_ohm": resistance}).replace(
+        [np.inf, -np.inf], np.nan
+    )
+    frame = frame.dropna()
+    if frame.empty:
+        return None
+    frame["power_mW"] = frame["current_mA"] * frame["current_mA"] * frame["resistance_ohm"] / 1000.0
+    grouped = (
+        frame.groupby("current_mA", sort=True, as_index=False)["power_mW"]
+        .median()
+        .sort_values("current_mA", kind="stable")
+    )
+    if grouped["current_mA"].nunique() < 2:
+        return None
+    x_values = grouped["current_mA"].to_numpy(dtype=float)
+    p_values = grouped["power_mW"].to_numpy(dtype=float)
+    xmin = float(np.nanmin(x_values))
+    xmax = float(np.nanmax(x_values))
+    ticks: list[float] = []
+    labels: list[str] = []
+    for tick in tick_positions:
+        if not math.isfinite(float(tick)) or tick < xmin or tick > xmax:
+            continue
+        ticks.append(float(tick))
+        labels.append(_format_power_tick(float(np.interp(tick, x_values, p_values))))
+    if len(ticks) < 2:
+        return None
+    return np.asarray(ticks, dtype=float), labels
+
+
+def _plot_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows for result plots, excluding obvious electrical fault tail samples."""
+
+    if df.empty:
+        return df
+    mask = pd.Series(True, index=df.index)
+    current_set = _series(df, "current_set_mA")
+    current_measured = _series(df, "current_measured_mA")
+    voltage = _series(df, "voltage_V")
+    resistance = _series(df, "resistance_ohm")
+    compliance = (
+        current_set.notna()
+        & current_measured.notna()
+        & voltage.notna()
+        & (current_set.abs() >= 2.0)
+        & (current_measured.abs() < current_set.abs() * 0.25)
+        & (voltage >= 25.0)
+    )
+    mask &= ~compliance
+
+    finite_resistance = resistance.replace([np.inf, -np.inf], np.nan).dropna()
+    if len(finite_resistance) >= 20:
+        median = float(finite_resistance.median())
+        q95 = float(finite_resistance.quantile(0.95))
+        robust_limit = max(q95 * 1.75, median * 3.0, median + 100.0)
+        mask &= resistance.isna() | (resistance <= robust_limit)
+    return df[mask].copy()
+
+
+def _stop_color(metadata: dict[str, Any], quality: RunQuality) -> str:
+    stop = metadata.get("stop") if isinstance(metadata.get("stop"), dict) else {}
+    category = str(stop.get("category") or "")
+    reason = str(stop.get("reason") or quality.stop_reason or "")
+    if category == "normal" or reason in {"recipe_completed", "completed"}:
+        return "#16a34a"
+    if category == "fault" or "break" in reason or "fault" in reason:
+        return "#dc2626"
+    return "#d97706"
+
+
+def _add_banner(fig: plt.Figure, run_dir: Path, metadata: dict[str, Any], quality: RunQuality, df: pd.DataFrame) -> None:
+    stop = metadata.get("stop") if isinstance(metadata.get("stop"), dict) else {}
+    elapsed = _max_or_none(_series(df, "elapsed_s"))
+    max_current = _max_or_none(_series(df, "current_measured_mA"))
+    max_stress = _max_or_none(_series(df, "stress_mpa"))
+    max_strain = _max_or_none(_series(df, "strain_pct"))
+    max_temp = _max_or_none(_series(df, "ir_object_c_apparent"))
+    if max_temp is None:
+        max_temp = _max_or_none(_series(df, "frame_max_c"))
+    diameter_mm = _metadata_float(metadata, "wire_diameter_mm")
+    length_mm = _metadata_float(metadata, "initial_length_mm")
+    sample_bits = []
+    if diameter_mm:
+        sample_bits.append(f"d {_format_compact_number(diameter_mm * 1000.0)} um")
+    if length_mm:
+        sample_bits.append(f"l0 {_format_compact_number(length_mm, max_decimals=3)} mm")
+    fig.text(0.015, 0.972, run_dir.name, fontsize=16, fontweight="bold", va="top", ha="left")
+    fig.text(
+        0.015,
+        0.935,
+        f"{stop.get('label') or stop.get('reason') or quality.stop_reason or 'status n/a'}",
+        fontsize=10,
+        color="white",
+        va="top",
+        ha="left",
+        bbox={"boxstyle": "round,pad=0.28", "facecolor": _stop_color(metadata, quality), "edgecolor": "none"},
+    )
+    fig.text(
+        0.26,
+        0.945,
+        " | ".join(
+            sample_bits
+            + [
+                f"duration {_format_metric(elapsed, ' s', 0)}",
+                f"points {len(df)}",
+                f"max stress {_format_metric(max_stress, ' MPa')}",
+                f"max strain {_format_metric(max_strain, '%')}",
+                f"max current {_format_metric(max_current, ' mA')}",
+                f"max temp {_format_metric(max_temp, ' C')}",
+            ]
+        ),
+        fontsize=10,
+        va="top",
+        ha="left",
+    )
+    detail = str(stop.get("detail") or "")
+    if detail:
+        fig.text(0.015, 0.022, detail[:230], fontsize=8.5, color="#374151", ha="left", va="bottom")
+
+
+def _shade_holds(ax: Axes, df: pd.DataFrame) -> None:
+    if "automation_phase" not in df or "elapsed_s" not in df:
+        return
+    elapsed = _series(df, "elapsed_s")
+    is_hold = df["automation_phase"].astype(str).eq("current_hold")
+    start = None
+    previous = None
+    for t_value, is_active in zip(elapsed, is_hold):
+        if pd.isna(t_value):
+            continue
+        if is_active:
+            if start is None:
+                start = float(t_value)
+            previous = float(t_value)
+        elif start is not None:
+            ax.axvspan(start, previous if previous is not None else start, color="#f59e0b", alpha=0.18, lw=0)
+            start = None
+            previous = None
+    if start is not None:
+        ax.axvspan(start, previous if previous is not None else start, color="#f59e0b", alpha=0.18, lw=0)
+
+
+def _style_axis(ax: Axes, title: str, xlabel: str, ylabel: str) -> None:
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, color="#d1d5db", alpha=0.55, linewidth=0.7)
+    ax.tick_params(labelsize=9)
+
+
+def _add_power_per_cm_axis(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any]) -> None:
+    if "resistance_ohm" not in df:
+        return
+    current_name = "current_measured_mA" if "current_measured_mA" in df else "current_set_mA"
+    current = _series(df, current_name)
+    resistance = _series(df, "resistance_ohm")
+    length_mm = _metadata_float(metadata, "initial_length_mm")
+    label = "Power [mW]"
+    if length_mm:
+        resistance = resistance / (length_mm / 10.0)
+        label = "Power [mW/cm]"
+    ticks_and_labels = _power_tick_positions_and_labels(
+        current,
+        resistance,
+        tick_positions=np.asarray(ax.get_xticks(), dtype=float),
+    )
+    if ticks_and_labels is None:
+        return
+    ticks, labels = ticks_and_labels
+    top_ax = ax.twiny()
+    top_ax.set_xticks(ticks)
+    top_ax.set_xticklabels(labels)
+    top_ax.set_xlim(ax.get_xlim())
+    top_ax.set_xlabel(label)
+    top_ax.tick_params(axis="x", labelsize=8)
+
+
+def _plot_stress_time(ax: Axes, df: pd.DataFrame) -> None:
+    x, y = _clean_xy(df, "elapsed_s", "stress_mpa")
+    x, y = _decimate(x, y)
+    ax.plot(x, y, color="#2563eb", lw=1.25, label="stress")
+    _shade_holds(ax, df)
+    mode = ""
+    if "recipe_mode" in df and not df["recipe_mode"].dropna().empty:
+        mode = str(df["recipe_mode"].dropna().mode().iloc[0])
+    if mode in {"current_sweep_stress", "stress_ramp"}:
+        phase = df.get("automation_basis", pd.Series("", index=df.index)).astype(str)
+        target = _series(df, "automation_target_value")
+        elapsed = _series(df, "elapsed_s")
+        mask = phase.eq("stress_mpa") & elapsed.notna() & target.notna()
+        tx, ty = elapsed[mask].to_numpy(), target[mask].to_numpy()
+        tx, ty = _decimate(tx, ty)
+        if len(tx):
+            ax.plot(tx, ty, color="#111827", lw=1.0, ls="--", alpha=0.7, label="target")
+    _style_axis(ax, "Stress vs time", "Time (s)", "Stress (MPa)")
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(fontsize=8, loc="best")
+
+
+def _plateau_legend_label(part: pd.DataFrame, fallback: str, metadata: dict[str, Any]) -> str:
+    if "automation_basis" in part and "automation_target_value" in part:
+        basis = part["automation_basis"].astype(str)
+        target = _series(part, "automation_target_value")
+        stress_targets = target[basis.eq("stress_mpa") & target.notna()]
+        if not stress_targets.empty:
+            return _format_stress_load_label(metadata, float(stress_targets.median()))
+    if "plateau_label" in part:
+        labels = part["plateau_label"].dropna().astype(str)
+        labels = labels[labels.str.len() > 0]
+        if not labels.empty:
+            text = labels.mode().iloc[0]
+            for token in text.replace("(", " ").replace(")", " ").split():
+                value = _float_or_none(token)
+                if value is not None and "MPa" in text:
+                    return _format_stress_load_label(metadata, value)
+            return text
+    target = _series(part, "automation_target_value").dropna()
+    if not target.empty:
+        return _format_stress_load_label(metadata, float(target.median()))
+    return fallback
+
+
+def _plot_strain_current(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any], *, grouped: bool) -> None:
+    df = _plot_rows(df)
+    current_name = "current_measured_mA" if "current_measured_mA" in df else "current_set_mA"
+    if grouped and "plateau_index" in df:
+        grouped_rows: list[tuple[str, np.ndarray, np.ndarray]] = []
+        for label, part in df.groupby("plateau_index", dropna=True):
+            x, y = _clean_xy(part, current_name, "strain_pct")
+            if len(x) < 4:
+                continue
+            grouped_rows.append((_plateau_legend_label(part, str(label), metadata), x, y))
+        color_count = max(1, len(grouped_rows))
+        color_map = plt.get_cmap("viridis", color_count)
+        for index, (label, x, y) in enumerate(grouped_rows):
+            x, y = _decimate(x, y, 1400)
+            ax.plot(x, y, lw=1.15, color=color_map(index), label=label)
+        if 1 < len(grouped_rows) <= 8:
+            ax.legend(fontsize=7.5, loc="best", title="Stress / load", title_fontsize=8)
+    else:
+        x, y = _clean_xy(df, current_name, "strain_pct")
+        x, y = _decimate(x, y)
+        ax.plot(x, y, color="#047857", lw=1.35)
+    _style_axis(ax, "Strain vs current", "Measured current (mA)", "Strain (%)")
+    _add_power_per_cm_axis(ax, df, metadata)
+
+
+def _plot_current_resistance(ax: Axes, df: pd.DataFrame) -> None:
+    df = _plot_rows(df)
+    x, current = _clean_xy(df, "elapsed_s", "current_measured_mA")
+    x, current = _decimate(x, current)
+    ax.plot(x, current, color="#e11d48", lw=1.2, label="current")
+    _style_axis(ax, "Current + resistance vs time", "Time (s)", "Current (mA)")
+    ax2 = ax.twinx()
+    rx, resistance = _clean_xy(df, "elapsed_s", "resistance_ohm")
+    rx, resistance = _decimate(rx, resistance)
+    ax2.plot(rx, resistance, color="#0d9488", lw=1.0, alpha=0.9, label="resistance")
+    ax2.set_ylabel("Resistance (ohm)")
+    ax2.tick_params(labelsize=9)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, fontsize=8, loc="best")
+
+
+def _plot_resistance_current(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any]) -> None:
+    df = _plot_rows(df)
+    current_name = "current_measured_mA" if "current_measured_mA" in df else "current_set_mA"
+    x, y = _clean_xy(df, current_name, "resistance_ohm")
+    x, y = _decimate(x, y)
+    ax.plot(x, y, color="#0d9488", lw=1.15)
+    _style_axis(ax, "Resistance vs current", "Measured current (mA)", "Resistance (ohm)")
+    _add_power_per_cm_axis(ax, df, metadata)
+
+
+def _plot_temperature(ax: Axes, df: pd.DataFrame, sidecar_df: pd.DataFrame | None = None) -> bool:
+    source = df
+    temp_name = "ir_object_c_apparent" if "ir_object_c_apparent" in source else "frame_max_c"
+    if temp_name not in source or not (_series(source, temp_name).notna().any()):
+        source = sidecar_df if sidecar_df is not None else pd.DataFrame()
+        temp_name = "object_c_apparent" if "object_c_apparent" in source else "frame_max_c"
+    if source.empty or temp_name not in source:
+        return False
+    elapsed = _series(source, "elapsed_s")
+    temp = _series(source, temp_name)
+    mask = elapsed.notna() & temp.notna()
+    if not mask.any():
+        return False
+    smooth = _rolling_median(temp[mask], 121)
+    x = elapsed[mask].to_numpy()
+    y = temp[mask].to_numpy()
+    xs, ys = _decimate(x, y)
+    ax.plot(xs, ys, color="#94a3b8", lw=0.8, alpha=0.34, label="raw")
+    xs, ys = _decimate(x, smooth.to_numpy())
+    ax.plot(xs, ys, color="#dc2626", lw=1.8, label="processed")
+    _style_axis(ax, "Temperature max vs time", "Time (s)", "Temperature (C)")
+    ax.legend(fontsize=8, loc="best")
+    return True
+
+
+def _plot_strain_stress(ax: Axes, df: pd.DataFrame) -> None:
+    df = _plot_rows(df)
+    x, y = _clean_xy(df, "strain_pct", "stress_mpa")
+    x, y = _decimate(x, y)
+    ax.plot(x, y, color="#7c3aed", lw=1.2)
+    _style_axis(ax, "Stress vs strain", "Strain (%)", "Stress (MPa)")
+
+
+def _plot_error_trace(ax: Axes, df: pd.DataFrame, trace: pd.DataFrame) -> None:
+    source = trace if not trace.empty and {"elapsed_s", "error_value"}.issubset(trace.columns) else df
+    y_name = "error_value" if "error_value" in source else "stress_mpa"
+    x, y = _clean_xy(source, "elapsed_s", y_name)
+    x, y = _decimate(x, y)
+    ax.axhline(0, color="#111827", lw=0.8, alpha=0.6)
+    ax.plot(x, y, color="#db2777", lw=0.9)
+    _style_axis(ax, "Control error vs time", "Time (s)", "Stress error (MPa)" if y_name == "error_value" else "Stress (MPa)")
+
+
+def _plot_phone_summary(
+    run_dir: Path,
+    df: pd.DataFrame,
+    trace: pd.DataFrame,
+    temperature: pd.DataFrame,
+    metadata: dict[str, Any],
+    quality: RunQuality,
+    out: Path,
+) -> None:
+    fig = plt.figure(figsize=(16, 9))
+    fig.patch.set_facecolor("white")
+    grid = fig.add_gridspec(2, 3, left=0.055, right=0.97, top=0.78, bottom=0.10, wspace=0.32, hspace=0.42)
+    _add_banner(fig, run_dir, metadata, quality, df)
+    ax_main = fig.add_subplot(grid[:, :2])
+    mode = str(df["recipe_mode"].dropna().mode().iloc[0]) if "recipe_mode" in df and not df["recipe_mode"].dropna().empty else ""
+    if "constant_current" in mode:
+        _plot_strain_stress(ax_main, df)
+        ax_main.set_title("Main result: stress-strain loop", fontsize=13, fontweight="bold")
+    else:
+        _plot_strain_current(ax_main, df, metadata, grouped=True)
+        ax_main.set_title("Main result: strain-current curves", fontsize=13, fontweight="bold")
+    _plot_stress_time(fig.add_subplot(grid[0, 2]), df)
+    lower_right = fig.add_subplot(grid[1, 2])
+    if not _plot_temperature(lower_right, df, temperature):
+        _plot_current_resistance(lower_right, df)
+    fig.savefig(out, dpi=160)
+    plt.close(fig)
+
+
+def _plot_detail_summary(
+    run_dir: Path,
+    df: pd.DataFrame,
+    trace: pd.DataFrame,
+    temperature: pd.DataFrame,
+    metadata: dict[str, Any],
+    quality: RunQuality,
+    out: Path,
+) -> None:
+    fig, axes = plt.subplots(3, 2, figsize=(15, 13))
+    fig.subplots_adjust(left=0.07, right=0.96, top=0.82, bottom=0.07, hspace=0.48, wspace=0.30)
+    fig.patch.set_facecolor("white")
+    _add_banner(fig, run_dir, metadata, quality, df)
+    _plot_stress_time(axes[0, 0], df)
+    _plot_strain_current(axes[0, 1], df, metadata, grouped=True)
+    _plot_current_resistance(axes[1, 0], df)
+    if not _plot_temperature(axes[1, 1], df, temperature):
+        _plot_resistance_current(axes[1, 1], df, metadata)
+    _plot_error_trace(axes[2, 0], df, trace)
+    _plot_strain_stress(axes[2, 1], df)
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+
+
+def _hold_spans(rows: list[dict[str, str]]) -> list[tuple[float, float]]:
+    spans: list[tuple[float, float]] = []
+    start: float | None = None
+    previous: float | None = None
+    for row in rows:
+        elapsed = _float_or_none(row.get("elapsed_s"))
+        if elapsed is None:
+            continue
+        if str(row.get("automation_phase") or "") == "current_hold":
+            if start is None:
+                start = elapsed
+            previous = elapsed
+            continue
+        if start is not None:
+            spans.append((start, previous if previous is not None else start))
+            start = None
+            previous = None
+    if start is not None:
+        spans.append((start, previous if previous is not None else start))
+    return spans
+
+
+def generate_core_run_plot(
+    run_dir: Path | str,
+    *,
+    image_path: Path | str | None = None,
+    summary_path: Path | str | None = None,
+    detail_image_path: Path | str | None = None,
+    write_quality: bool = True,
+) -> dict[str, Any]:
+    """Generate phone and detail Mini DMA run-summary images."""
+
+    run_path = Path(run_dir)
+    missing = [name for name in ("measurement.csv",) if not (run_path / name).exists()]
+    if missing:
+        raise FileNotFoundError(f"Mini DMA run folder is missing required file(s): {', '.join(missing)} in {run_path}")
+    rows = _read_csv_rows(run_path / "measurement.csv")
+    df = _read_csv_frame(run_path / "measurement.csv")
+    trace = _read_csv_frame(run_path / "control_trace.csv")
+    temperature = pd.DataFrame() if _frame_has_temperature(df) else _read_temperature_sidecar_frame(run_path)
+    metadata = _read_json(run_path / "metadata.json")
+    quality = analyze_and_write_run_quality(run_path) if write_quality else analyze_run_quality(run_path)
+    if image_path is None:
+        phone_image = run_path / "run_summary.png"
+    else:
+        phone_image = Path(image_path)
+    if detail_image_path is None:
+        detail_image = run_path / "run_summary_detail.png"
+    else:
+        detail_image = Path(detail_image_path)
+    if summary_path is None:
+        summary = run_path / "run_summary.json"
+    else:
+        summary = Path(summary_path)
+    phone_image.parent.mkdir(parents=True, exist_ok=True)
+    detail_image.parent.mkdir(parents=True, exist_ok=True)
+    summary.parent.mkdir(parents=True, exist_ok=True)
+
+    _plot_phone_summary(run_path, df, trace, temperature, metadata, quality, phone_image)
+    _plot_detail_summary(run_path, df, trace, temperature, metadata, quality, detail_image)
+
+    hold_time_spans = [
+        (float(window["start_s"]), float(window["end_s"]))
+        for window in quality.current_hold_windows
+        if window.get("start_s") is not None and window.get("end_s") is not None
+    ]
+    if not hold_time_spans:
+        hold_time_spans = _hold_spans(rows)
+    payload = {
+        "run_dir": str(run_path),
+        "image_path": str(phone_image),
+        "detail_image_path": str(detail_image),
+        "summary_path": str(summary),
+        "run_quality_path": str(run_path / "run_quality.json") if write_quality else None,
+        "hold_span_count": len(hold_time_spans),
+        "hold_spans": [{"start_s": start, "end_s": end, "duration_s": end - start} for start, end in hold_time_spans],
+        "metadata_warnings": list(quality.metadata_warnings),
+        "quality": quality.to_dict(),
+        "hidden_fault_tail_points": int(len(df) - len(_plot_rows(df))),
+        "temperature_sidecar_sample_rows": int(len(temperature)),
+    }
+    summary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return payload
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Generate Mini DMA per-run summary images.")
+    parser.add_argument("run_dir", help="Mini DMA run folder containing measurement.csv and metadata.json.")
+    parser.add_argument("--out", help="Phone summary PNG output path. Defaults to run_summary.png in the run folder.")
+    parser.add_argument("--detail-out", help="Detail summary PNG output path. Defaults to run_summary_detail.png in the run folder.")
+    parser.add_argument("--summary", help="JSON summary output path. Defaults to run_summary.json in the run folder.")
+    parser.add_argument("--no-write-quality", action="store_true", help="Do not update run_quality.json.")
+    parser.add_argument("--json", action="store_true", help="Print the summary JSON.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    summary = generate_core_run_plot(
+        args.run_dir,
+        image_path=args.out,
+        detail_image_path=args.detail_out,
+        summary_path=args.summary,
+        write_quality=not args.no_write_quality,
+    )
+    if args.json:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+    else:
+        print(f"Generated Mini DMA run summaries: {summary['image_path']} and {summary['detail_image_path']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

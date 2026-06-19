@@ -4,8 +4,9 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, BinaryIO, Mapping, Protocol, Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,32 @@ class PopenFactory(Protocol):
 
 def experiment_process_cwd() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def experiment_process_log_dir(
+    *, parent_env: Mapping[str, str] | None = None
+) -> Path:
+    env = os.environ if parent_env is None else parent_env
+    configured = str(env.get("PYPLOT_EXPERIMENT_LOG_DIR", "")).strip()
+    if configured:
+        return Path(configured)
+    return experiment_process_cwd() / "logs" / "experiment_processes"
+
+
+def experiment_process_log_path(
+    spec: ExperimentProcessSpec,
+    *,
+    parent_env: Mapping[str, str] | None = None,
+    timestamp: datetime | None = None,
+    pid: int | None = None,
+) -> Path:
+    stamp = (timestamp or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    tag = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in spec.resource_tag.strip().lower()
+    ).strip("_") or "experiment"
+    process_id = os.getpid() if pid is None else int(pid)
+    return experiment_process_log_dir(parent_env=parent_env) / f"{stamp}-{process_id}-{tag}.log"
 
 
 def gui_python_executable(path: Path) -> Path:
@@ -59,10 +86,29 @@ def build_experiment_process_env(
     for key in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH"):
         env.pop(key, None)
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"
     env["PYPLOT_EXPERIMENT_PROCESS"] = "1"
     env["PYPLOT_EXPERIMENT_NAME"] = spec.display_name
     env["PYPLOT_EXPERIMENT_RESOURCE_TAG"] = spec.resource_tag
     return env
+
+
+def _open_experiment_process_log(
+    spec: ExperimentProcessSpec,
+    env: Mapping[str, str],
+) -> tuple[BinaryIO | None, Path | None]:
+    log_path = experiment_process_log_path(spec, parent_env=env)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = log_path.open("ab", buffering=0)
+    except OSError:
+        return None, None
+    header = (
+        f"\n=== {datetime.now(timezone.utc).isoformat()} "
+        f"launching {spec.display_name} ({spec.resource_tag}) ===\n"
+    )
+    handle.write(header.encode("utf-8", errors="replace"))
+    return handle, log_path
 
 
 def hidden_process_creationflags() -> int:
@@ -79,16 +125,24 @@ def launch_experiment_process(
     *,
     popen_factory: PopenFactory = subprocess.Popen,
 ) -> subprocess.Popen[Any]:
+    env = build_experiment_process_env(spec)
+    log_handle, log_path = _open_experiment_process_log(spec, env)
+    if log_path is not None:
+        env["PYPLOT_EXPERIMENT_LOG_PATH"] = str(log_path)
     kwargs: dict[str, Any] = {
         "cwd": str(experiment_process_cwd()),
-        "env": build_experiment_process_env(spec),
+        "env": env,
         "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL if log_handle is None else log_handle,
+        "stderr": subprocess.DEVNULL if log_handle is None else subprocess.STDOUT,
         "close_fds": True,
     }
     if sys.platform == "win32":
         kwargs["creationflags"] = hidden_process_creationflags()
     else:
         kwargs["start_new_session"] = True
-    return popen_factory(build_experiment_process_command(spec), **kwargs)
+    try:
+        return popen_factory(build_experiment_process_command(spec), **kwargs)
+    finally:
+        if log_handle is not None:
+            log_handle.close()

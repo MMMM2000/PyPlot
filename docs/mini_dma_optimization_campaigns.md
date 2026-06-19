@@ -42,7 +42,7 @@ Keep only reusable tools, templates, schemas, recipes, and report generators in 
 6. After each run, append or regenerate the automation index and produce the standard report:
 
    ```powershell
-   uv run python scripts/mini_dma_run_quality.py <run-folder> --write
+   uv run python scripts/mini_dma_run_quality.py <run-folder> --write --core-plots
    uv run python scripts/mini_dma_report.py G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/<campaign>/campaign.yaml
    ```
 
@@ -118,10 +118,14 @@ Campaign analysis should include normal non-optimization runs as reference evide
 Each run should be analyzed once with:
 
 ```powershell
-uv run python scripts/mini_dma_run_quality.py <run-folder> --write
+uv run python scripts/mini_dma_run_quality.py <run-folder> --write --core-plots
 ```
 
-This writes `run_quality.json` next to `metadata.json`. The raw CSV files remain the source of truth; `run_quality.json` is a derived cache that can be regenerated when the analyzer improves.
+This writes `run_quality.json` next to `metadata.json` and creates the standard per-run PNG/JSON summary under `diagnostics/core_plots/`. The raw CSV files remain the source of truth; these outputs are derived caches that can be regenerated when the analyzer improves.
+When this command is run on a parent folder, setup-only or otherwise incomplete
+run folders still get `run_quality.json`; core-plot failures are reported per
+run as `plot_error=...` and do not prevent plots from being generated for the
+other runs in the batch.
 
 The quality summary records:
 

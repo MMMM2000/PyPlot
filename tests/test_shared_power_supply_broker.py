@@ -5,13 +5,21 @@ import socket
 import pytest
 
 from data_logging.shared_power_supply.broker import (
+    ROLE_AC_SUSCEPTIBILITY,
     ROLE_CURRENT_ANNEALING,
     ROLE_MINI_DMA_CURRENT,
     SharedPowerSupplyBroker,
+    VALID_ROLES,
 )
 from data_logging.shared_power_supply.driver import HmpSerialDriver
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, detect_hmp_profile
-from data_logging.shared_power_supply.protocol import start_broker_server
+from data_logging.shared_power_supply.protocol import (
+    BrokerConnectionError,
+    BrokerJsonClient,
+    BrokerRequestError,
+    broker_failure_diagnostic,
+    start_broker_server,
+)
 
 
 class FakeHmpSerial:
@@ -77,6 +85,10 @@ def test_hmp_idn_detection_maps_supported_models() -> None:
     assert detect_hmp_profile("OWON,SPE6102,serial,fw") is None
 
 
+def test_broker_accepts_ac_susceptibility_role() -> None:
+    assert ROLE_AC_SUSCEPTIBILITY in VALID_ROLES
+
+
 def test_broker_rejects_channel_four_for_hmp4030() -> None:
     broker = SharedPowerSupplyBroker(_driver(HMP4030_PROFILE), HMP4030_PROFILE)
 
@@ -102,6 +114,31 @@ def test_broker_prevents_two_owners_from_leasing_same_channel() -> None:
 
     with pytest.raises(PermissionError, match="already leased"):
         broker.lease(channel=1, owner="annealing-b", role=ROLE_CURRENT_ANNEALING)
+
+
+def test_broker_reuses_same_owner_lease_without_replacing_id() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
+    broker.confirm_profile()
+
+    first = broker.lease(channel=1, owner="annealing", role=ROLE_CURRENT_ANNEALING)
+    second = broker.lease(channel=1, owner="annealing", role=ROLE_CURRENT_ANNEALING)
+
+    assert second.lease_id == first.lease_id
+
+
+def test_broker_blocks_profile_changes_while_channel_is_leased() -> None:
+    broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
+    broker.assign_role(channel=1, role=ROLE_CURRENT_ANNEALING, confirmed=True)
+    saved = broker.confirm_profile()
+    broker.lease(channel=1, owner="annealing", role=ROLE_CURRENT_ANNEALING)
+
+    with pytest.raises(PermissionError, match="leased"):
+        broker.assign_role(channel=1, role=ROLE_MINI_DMA_CURRENT, confirmed=True)
+    with pytest.raises(PermissionError, match="leased"):
+        broker.confirm_profile(name="new name")
+    with pytest.raises(PermissionError, match="leased"):
+        broker.load_profile(saved)
 
 
 def test_broker_requires_confirmed_role_before_control() -> None:
@@ -193,3 +230,75 @@ def test_broker_json_protocol_snapshot_round_trip() -> None:
 
     assert '"ok": true' in raw
     assert '"channel_count": 4' in raw
+
+
+def test_broker_json_client_uses_configurable_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class _Socket:
+        def __enter__(self) -> "_Socket":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            seen["request"] = data
+
+        def recv(self, _size: int) -> bytes:
+            if seen.get("responded"):
+                return b""
+            seen["responded"] = True
+            return b'{"ok": true, "snapshot": {}}\n'
+
+    def _create_connection(address: tuple[str, int], timeout: float) -> _Socket:
+        seen["address"] = address
+        seen["timeout"] = timeout
+        return _Socket()
+
+    monkeypatch.setattr("data_logging.shared_power_supply.protocol.socket.create_connection", _create_connection)
+
+    client = BrokerJsonClient(host="127.0.0.1", port=8765, timeout_s=9.5)
+    assert client.request("snapshot")["snapshot"] == {}
+    assert seen["address"] == ("127.0.0.1", 8765)
+    assert seen["timeout"] == pytest.approx(9.5)
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (
+            BrokerConnectionError(
+                host="127.0.0.1",
+                port=8765,
+                action="snapshot",
+                cause=TimeoutError("timed out"),
+            ),
+            "broker missing or not reachable at 127.0.0.1:8765",
+        ),
+        (
+            PermissionError(13, "Access is denied", "COM3"),
+            "direct HMP serial access was denied",
+        ),
+        (
+            BrokerRequestError(action="lease", message="channel already leased by ac_logger"),
+            "channel lease refused",
+        ),
+        (
+            BrokerRequestError(action="set_current", message="valid lease required for CH4"),
+            "stale channel lease detected",
+        ),
+        (
+            BrokerRequestError(action="configure_channel", message="requested current exceeds CH4 limit"),
+            "channel limit is stale or too low",
+        ),
+    ],
+)
+def test_broker_failure_diagnostic_classifies_common_operator_failures(
+    exc: Exception,
+    expected: str,
+) -> None:
+    diagnostic = broker_failure_diagnostic(exc, context="Test broker")
+
+    assert diagnostic.startswith("Test broker:")
+    assert expected in diagnostic
