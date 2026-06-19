@@ -33643,7 +33643,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._update_project_title()
         self._set_initial_geometry()
         self._retabify_primary_docks()
-        QtCore.QTimer.singleShot(150, self._maybe_auto_open_last_project)
+        self._startup_auto_open_scheduled = False
+
+    def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
+        if getattr(self, "_startup_auto_open_scheduled", False):
+            return
+        self._startup_auto_open_scheduled = True
+        QtCore.QTimer.singleShot(max(int(delay_ms), 0), self._maybe_auto_open_last_project)
 
     def _dock_switcher_supported(self) -> bool:
         override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
@@ -35099,6 +35105,13 @@ def main() -> QtWidgets.QWidget | None:
         except Exception:
             window.show()
         placeholder.close()
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+        scheduler = getattr(window, "schedule_startup_auto_open", None)
+        if callable(scheduler):
+            scheduler()
 
     if owns_app:
         QtCore.QTimer.singleShot(0, _launch)
