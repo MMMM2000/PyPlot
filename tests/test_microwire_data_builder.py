@@ -7253,6 +7253,139 @@ def test_annealing_transition_review_counts_update_after_actions() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_annealing_transition_review_pick_updates_markers_in_place() -> None:
+    _ensure_qapp()
+    record = MeasurementRecord(
+        path=Path("Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt"),
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=60,
+            alt_variant=False,
+            measurement_id="review-in-place",
+            file_name="Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt",
+            relpath="Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt",
+            timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [1.0, 30.0, 60.0], "R_Ohm": [100.0, 112.0, 120.0]}),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    try:
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        original_canvas = dialog._display._canvas  # noqa: SLF001
+        dialog._phase_controls.set_target("Af1")  # noqa: SLF001
+        dialog._handle_plot_pick(24.5)  # noqa: SLF001
+        QtWidgets.QApplication.processEvents()
+
+        assert dialog._display._canvas is original_canvas  # noqa: SLF001
+        assert original_canvas is not None
+        axis = original_canvas.figure.axes[0]
+        gids = {
+            artist.get_gid()
+            for artist in list(axis.lines) + list(axis.texts)
+            if hasattr(artist, "get_gid")
+        }
+        assert "reviewed_transition_marker" in gids
+        assert "reviewed_transition_label" in gids
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_accept_next_redraws_only_next_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+
+    def _record(setpoint: int, name: str) -> MeasurementRecord:
+        return MeasurementRecord(
+            path=Path(name),
+            metadata=MeasurementMetadata(
+                composition_token="Ni44Fe27Ga23Cu3Co3",
+                draw_x=1,
+                piece_y=2,
+                setpoint_mA=setpoint,
+                alt_variant=False,
+                measurement_id=name,
+                file_name=name,
+                relpath=name,
+                timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, float(setpoint)], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+
+    records = [
+        _record(60, "Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt"),
+        _record(70, "Ni44Fe27Ga23Cu3Co3 1_2 70mA 2loops.txt"),
+    ]
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        records,
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    calls = 0
+    original = dialog._display.set_record  # noqa: SLF001
+
+    def _counting_set_record(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dialog._display, "set_record", _counting_set_record)  # noqa: SLF001
+    try:
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        calls = 0
+        dialog._phase_controls.set_target("As1")  # noqa: SLF001
+        dialog._handle_plot_pick(12.5)  # noqa: SLF001
+        dialog._accept_current_and_next()  # noqa: SLF001
+
+        assert calls == 1
+        assert dialog._current_record_id == builder_ui._transition_record_id_for_annealing_record(records[1])  # noqa: SLF001
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_common_actions_are_subsecond() -> None:
+    _ensure_qapp()
+    from scripts.benchmark_current_annealing_review import run_benchmark
+
+    results = run_benchmark(iterations=2, record_count=8)
+
+    for action in (
+        "graph_click_line_placement",
+        "accept_next",
+        "no_transition_next",
+        "exclude_graph_next",
+        "next_unreviewed",
+    ):
+        median_ms = float(results["actions"][action]["median_ms"])
+        assert median_ms < 1000.0, f"{action} median was {median_ms:.1f} ms"
+
+
 def test_annealing_transition_review_no_transition_detail_is_not_excluded() -> None:
     _ensure_qapp()
     record = MeasurementRecord(
