@@ -1,5 +1,1552 @@
 # Changelog
 
+## 2026-06-19 07:20 UTC
+
+- Record a final Mini DMA measurement point when a normally completed very short recipe would otherwise save a header-only measurement file.
+
+## 2026-06-19 00:10 UTC
+
+- Included the AC Susceptibility Logger in the packaged launcher experiment-process hidden imports so frozen colleague builds can start all primary logger apps.
+
+## 2026-06-19 00:00 UTC
+
+- Made PyPlot automation session discovery use an explicit or environment-based registry path so source runs, tests, and child processes can reliably find the same live session.
+
+## 2026-06-18 18:25 UTC
+
+- Hardened the shared HMP broker so active channel leases cannot be overwritten by role or profile changes, and so same-owner reconnects reuse the existing lease instead of replacing it.
+- Added AC susceptibility to the shared-HMP setup role list and capped HMP-backed AC voltage limits to the physical HMP range.
+- Made Mini DMA shared-broker disconnect explicitly switch leased current and motor channels off before releasing them.
+- Kept Iso-stress fatigue recipes on the expected up-and-back current sweep even if a stale hidden one-way optimization setting is present.
+- Preserved the Current Annealing shared-broker port setting when reopening the app and removed duplicate UI signal connections found during release review.
+
+## 2026-06-18 15:00 UTC
+
+- Moved Current Annealing recipe controls into a Recipe tab and advanced broker/HMP controls into a Hardware tab while keeping recipe settings editable before hardware connection.
+- Added a Current Annealing plot configuration dialog for the live dashboard, including bottom/left/top/right axis choices for both plots.
+- Current Annealing Replace now moves the previous output file and metadata sidecar to Trash or a safe replacement backup before writing the new run.
+- Current Annealing now reports hardware auto-connect failures immediately and uses `A/mm²` in visible current-density labels.
+- Moved voltage-limit behavior into the Hardware tab and made current sweeps always reverse to zero after reaching the configured maximum current.
+- Added an Update running recipe control so automatic Current Annealing runs can apply safe mid-run edits to max current, start current, ramp rate, and loop settings.
+
+## 2026-06-18 12:30 UTC
+
+- Current Annealing live/history plots now share the same cycle color logic and ignore one-point current-direction jitter during cooling/heating.
+- Current Annealing measurement history now uses a scrollable stacked view instead of tabs and keeps more recent runs.
+
+## 2026-06-18 12:00 UTC
+
+- Current Annealing now warns/stops on zero measured current in shared-HMP broker mode instead of silently waiting at startup with an open contact.
+- Current Annealing now refreshes shared-broker channel limits before a run and blocks starts where the requested current exceeds the confirmed broker limit, avoiding silent current clamping.
+
+## 2026-06-18 09:55 UTC
+
+- Contain Mini DMA current-hold adaptive recovery to one motor Tic during high-error volatile/unstable stress excursions, while preserving larger adaptive corrections for quiet monotonic recovery.
+
+## 2026-06-18 08:20 UTC
+
+- Added fluctuation-gated delayed-feedback waiting for Mini DMA current-hold recovery so quiet samples keep fast adaptive corrections while bursty stiff-wire responses wait for extra scale samples before compounding another motor move.
+
+## 2026-06-18 00:00 UTC
+
+- Mini DMA now writes post-run summary images for remote review: a phone-friendly `run_summary.png`, a diagnostic `run_summary_detail.png`, and `run_summary.json` in each run folder.
+- The Mini DMA summary plots show stress/load legends, sample diameter and initial length, resistance instead of voltage on electrical diagnostics, temperature when available, and hide obvious wire-break tail points from curve scaling while preserving the stop reason.
+
+## 2026-06-17 15:23 UTC
+
+- Let Mini DMA current-hold recovery cautiously grow above one motor Tic when an unstable hold is still showing persistent same-sign improvement, while keeping one-Tic damping for reversals and worsening responses.
+- Treat same-sign current-hold stress drift away from target as bounded dynamic recovery instead of oscillation, record filtered slope/noise in the control trace, and show active current-sweep progress from the current fraction rather than an exhausted nominal tick count.
+- Add an optional bench-plan current-hold quality watchdog for optimization runs so clearly bad candidates can stop early with explicit stop metadata.
+- Honor the Mini DMA current-sweep `reverse_current` recipe flag so optimization recipes can run a one-way current ramp while keeping the default sweep-back behavior and voltage-limit unwind safety.
+- Add a reusable Mini DMA stiff-sample guard CLI that regenerates offline evidence for stiffness-scaled current-hold drift recovery and historical oscillation clamps before stiff-wire hardware validation.
+
+## 2026-06-17 09:55 UTC
+
+- Added a Mini DMA hardware option to disable the optional IR camera/thermometer so hardware auto-connect skips it and temperature fields stay blank.
+- Collapsed first-overheating child settings when the first-overheating sweep is disabled.
+
+## 2026-06-17 09:15 UTC
+
+- Mini DMA current-sweep corrections no longer stop a recipe just because accumulated closed-loop correction travel exceeds the legacy hidden travel counter; direct load, stress, wire/contact, current, voltage, and per-step correction caps remain active.
+
+## 2026-06-17 00:00 UTC
+
+- Added a Mini DMA `Iso-stress fatigue` recipe for repeated fixed-stress current up/down cycles, with optional first-overheating preheat support, finite cycle count, descriptive recipe filenames, saved JSON/settings support, and cycle-numbered recipe steps for later drift/wire-break analysis.
+- Added an offline `mini_dma_fatigue_learning.py` report tool that groups saved repeated iso-stress runs, excludes non-comparable or too-short data, estimates transformation-current shifts from resistance/strain slopes, and emits review-only JSON/CSV/Markdown priors for future fatigue measurements.
+
+## 2026-06-16 21:35 UTC
+
+- Reorganized the AC susceptibility logger setup panel into clearer output, hardware, LCR, measurement-plan, and run-status sections with passive output-path and shared-broker lease status text.
+- Added clearer shared HMP broker diagnostics for unreachable brokers, refused leases, stale leases, direct-serial access denial, wrong channel/profile, and stale channel-limit failures.
+- Made Mini DMA shared-broker control retry once after stale lease errors and report broker connection failures with operator-facing diagnostics.
+- Added cached Mini DMA Builder project sample suggestions for faster sample naming/autofill refreshes during background project imports.
+- Expanded Mini DMA run-quality and core-plot summaries with stop classification, metadata warnings, current-hold recovery windows, voltage/current compliance events, and richer plot annotations.
+- Made Mini DMA trace replay tolerate missing/invalid metadata or trace files and report warnings instead of failing before analysis.
+- Stopped Mini DMA current-sweep voltage-limit unwinds immediately when the supply indicates open circuit or wire contact loss, before any mechanical recovery seek is attempted.
+- Scoped Mini DMA predictive seek control to active controlled phases while still honoring explicit calibrated or live stiffness for ordinary load/stress seeks.
+- Made Mini DMA IR thread disconnect/close cleanup tolerate naturally finished Qt threads that have already been deleted.
+- Made Mini DMA saved Builder project import cancellation clear pending retry state and tolerate already-deleted Qt thread wrappers.
+- Cleaned up Current Annealing fabrication-folder background-load completion so the UI resets promptly when the worker has already finished.
+- Added Mini DMA elastocaloric recipe JSON round-trip coverage and offscreen UI screenshot evidence for the fast strain-jump workflow.
+- Made AC run failures show run-status sidecar/fallback details in the status label and warning dialog, including rows written and local fallback status path when the primary output path disappears.
+- Made AC completed/stopped sweep messages show run-status sidecar details, including rows written and the status-file path.
+- Made the AC output section show the planned run-status sidecar and local fallback paths before a sweep starts.
+- Routed AC shared-HMP broker current-source failures through the shared operator-facing broker diagnostics.
+- Reused fresh Mini DMA Builder project cache entries for immediate sample/microwire suggestions while background exact-match imports continue.
+- Added a Mini DMA run-quality CLI option to generate the standard core PNG/JSON plot artifacts while writing `run_quality.json`.
+- Made Mini DMA batch core-plot generation continue past incomplete run folders while reporting per-run plot errors.
+- Kept AC sweep-start failures from leaving the UI stuck in a running state when PSU preparation or worker startup fails.
+- Avoided redundant Mini DMA Builder project auto-imports and trusted-diameter flicker for condition-only sample-name edits.
+- Reset AC baseline UI state if empty-coil baseline worker startup fails after the run has been marked active.
+- Added cached power-supply setpoint/readback columns to Mini DMA control traces for easier electrical/mechanical fault forensics.
+- Added an AC susceptibility UI redesign note that separates safe stabilization work from the larger post-bench-test refactor.
+
+## 2026-06-16 14:05 UTC
+
+- Made Mini DMA current-hold recovery scale cautiously above one motor Tic after same-sign corrections measurably improve load/stress error, while immediately damping back to one Tic when recovery worsens or becomes unstable.
+- Added control-trace reasons and control-logic metadata for adaptive current-hold recovery decisions.
+
+## 2026-06-16 13:21 UTC
+
+- Let Mini DMA current-sweep target ramps use their phase-local stiffness estimate once learned, while keeping conservative stiffness damping for current-hold recovery.
+
+## 2026-06-16 12:58 UTC
+
+- Refresh shared HMP broker channel limits even when Mini DMA already owns a confirmed CH4 role.
+
+## 2026-06-16 12:31 UTC
+
+- Include independent Mini DMA first-overheating current maxima when checking the shared HMP CH4 recipe current limit.
+
+## 2026-06-16 12:13 UTC
+
+- Dampen Mini DMA iso-stress current-hold corrections to single motor steps when the load/stress response becomes unstable or repeatedly overshoots the target, and only accept learned current-hold stiffness updates when they shrink future correction steps.
+
+## 2026-06-16 11:58 UTC
+
+- Hide the Mini DMA first-overheating "First max" current row whenever it is using the normal current-sweep max current.
+
+## 2026-06-16 11:44 UTC
+
+- Let Mini DMA recipe and manual hardware preflight auto-start the local shared HMP broker when the shared-broker endpoint is down, including automatic HMP COM-port selection for broker startup.
+
+## 2026-06-16 11:35 UTC
+
+- Improved Mini DMA Sample-tab responsiveness by coalescing settings saves and delaying automatic fabrication workbook reads after sample-name edits.
+- Added an optional independent first-overheating maximum current for iso-load, iso-stress, and iso-strain current-sweep recipes while keeping the current ramp speed shared with the normal sweep.
+
+## 2026-06-16 09:10 UTC
+
+- Hide the legacy Mini DMA open-loop displacement/Hsw recipe types from the recipe dropdown.
+- Add a Mini DMA `Elastocaloric effect` recipe that reuses the iso-current transition, waits for temperature stabilization, then applies and releases a configured strain in single fast steps for thermal-camera transformation measurements.
+
+## 2026-06-16 00:00 UTC
+
+- Hardened AC susceptibility long runs against disappearing output drives by mirroring run status to a local Downloads fallback and surfacing output write failures as stopped/failed runs instead of stale running UI.
+
+## 2026-06-15 15:30 UTC
+
+- Added a Mini DMA `Iso-current stress ramp` recipe that reuses the low-stress current transition flow and ramps stress up/down at a configured `MPa/s` rate for each current.
+- Saved and restored the new stress-ramp settings in recipe files and logger settings.
+
+## 2026-06-15 14:20 UTC
+
+- Improved Mini DMA `Iso-current stress ramp` tracking by allowing larger bounded stress-ramp corrections and adding feed-forward motion while the measured stress lags the moving `MPa/s` target.
+
+## 2026-06-15 13:02 UTC
+
+- Improved Mini DMA MLX90640 Cube raw status reporting when the selected camera port is silent, running thermometer firmware, or streaming bytes that are not valid `MLXE`/`MLXR` camera packets.
+
+## 2026-06-15 10:30 UTC
+
+- Rename the Mini DMA constant-current stress-strain recipe UI to iso-current stress-strain.
+- Add an iso-current current-transition ramp that holds a low stress target while ramping to each current level before the stress-strain scan.
+- Rework the iso-current recipe page into target, mechanical scan, current level, and collapsible current-transition sections with current-density/load equivalents.
+- Always scan iso-current legs up and back to the start target, and default fixed-step motion to 0.2 mm/s while still waiting for fresh scale feedback.
+- Delay fixed-step stress-strain logging until fresh post-move feedback is available, reducing stale-feedback strain jumps.
+
+## 2026-06-15 02:15 UTC
+
+- Added AC susceptibility sweep run-status sidecars with heartbeat/checkpoint metadata, final stop status, shared-HMP lease context, and resume warnings for stale or unclean previous runs.
+
+## 2026-06-13 13:20 UTC
+
+- Polished the AC Susceptibility Logger setup layout so hardware status wraps cleanly, run controls are always visible in the experiment plan, inherited duplicate controls are hidden, and AC progress appears in one predictable place.
+
+## 2026-06-12 18:10 UTC
+
+- Added in-app NUCLEO-H753ZI wiring guidance for the MLX90614 spot thermometer
+  and MLX90640 thermal camera modules in both the Thermal Camera Viewer and
+  Mini DMA Logger.
+- Enabled Mini DMA Logger help and added an explicit IR sensor selector for
+  MLX90614 spot-thermometer firmware or MLX90640 Cube raw camera firmware.
+- Added a Mini DMA IR-panel Live camera button that opens a passive embedded
+  MLX90640 heatmap popup fed by the active Mini DMA IR stream, so it can be used
+  during a measurement without taking over the serial port.
+- Added a Mini DMA IR-panel Flash firmware button that builds and flashes the
+  selected MLX90614 or MLX90640 STM32Cube firmware with STM32CubeProgrammer.
+- Added MLX90640 Cube raw parsing to Mini DMA IR logging, with live max/mean/min,
+  center, hotspot, ambient, age, and rate summaries when calibrated Celsius frames
+  are received.
+
+## 2026-06-12 14:45 UTC
+
+- Fixed Mini DMA MLX90640 Cube camera reconnects so pending camera packets are not discarded before calibration/frame parsing, and prevented duplicate IR reader startup when IR logging is already connected.
+
+## 2026-06-12 14:31 UTC
+
+- Added Current Annealing Logger metadata autocomplete trust handling for exact composition and microwire diameter matches, including red/green diameter indication.
+- Aligned the Current Annealing current-density plot axis with the current-axis tick positions.
+
+## 2026-06-12 12:44 UTC
+
+- Made the Mini DMA thermal-camera popup behave as a normal minimizable window on Windows, with a narrower layout and a 1 fps display option.
+- Added IR camera/thermometer connection to Mini DMA manual hardware auto-connect when an IR port is selected.
+- Simplified dashboard temperature plotting to a single Temperature (C) channel backed by coalesced IR values while preserving full-rate IR sidecar logging.
+- Closed Mini DMA recipe sessions on control-stop recovery paths and snapshot-locked live buffers to prevent post-stop time-plot tails and deque mutation errors during refresh.
+
+## 2026-06-12 11:55 UTC
+
+- Added Mini DMA embedded thermal-camera view pause/resume and display-rate controls.
+- Stopped recipe session temperature, telemetry, and live plot sampling while recipes are paused or stopped.
+- Refreshed the current-sweep supply current limit before recipe current updates to guard stale CH4 limits after runtime changes.
+
+## 2026-06-12 08:33 UTC
+
+- Moved Mini DMA recipe control ticks off the Qt UI timer so long measurements keep controlling even when the dashboard is visually busy.
+- Batched live run-log updates and coalesced worker-triggered progress/label refreshes to reduce UI stutter during active Mini DMA runs.
+- Kept live average-speed sampling independent from recipe timing so the speed display can update without disturbing control-loop timing.
+
+## 2026-06-11 14:42 UTC
+
+- Let Mini DMA passively log MLX90640 text-frame thermal camera streams by recording frame max/min/mean/center and hotspot coordinates in the IR sidecar while using frame max as the plotted apparent temperature.
+
+## 2026-06-11 14:15 UTC
+
+- Mini DMA current-hold recovery now downgrades correction trust after repeated overshoot or worsening stress/load response, shrinking subsequent correction caps until the response stabilizes.
+
+## 2026-06-11 09:15 UTC
+
+- Changed Mini DMA standard motor move log entries to lead with signed commanded micrometers and tension/relax direction, while keeping target position and Tic-unit count for diagnostics.
+
+## 2026-06-11 08:37 UTC
+
+- Mini DMA Logger now opens loaded microwire suggestions when the microwire field receives focus or is clicked, without rebuilding suggestion data.
+- Mini DMA Builder-project diameter imports now retry automatically after sample fields change during an active background import, so valid microwire diameter updates are not dropped until another sample switch.
+
+## 2026-06-10 13:35 UTC
+
+- Mini DMA replacing an existing run now moves the old output to Trash/Recycling Bin when possible, with a timestamped preserved-folder fallback instead of silently overwriting the previous measurement.
+- Mini DMA runtime recipe updates now preserve the active plateau's paired reverse current sweep before moving to the next stress target.
+
+## 2026-06-10 11:23 UTC
+
+- Show missing or stale Mini DMA scale readings explicitly in the dashboard load/stress header instead of displaying misleading zero values.
+
+## 2026-06-10 11:15 UTC
+
+- Allow Mini DMA current-sweep runtime recipe updates to apply hold and ramp settings to the active sweep step when safe.
+
+## 2026-06-10 10:14 UTC
+
+- Refresh the shared-HMP Mini DMA CH4 current limit from the active recipe maximum before preflight and current-channel preparation, preventing long sweeps from stopping when the broker still has an older lower limit.
+
+## 2026-06-10 09:20 UTC
+
+- Added an opt-in Mini DMA wire-break cleanup review that groups sibling runs by metadata-derived sample and recipe mode, then lets operators archive selected older run folders without deleting data.
+
+## 2026-06-10 08:17 UTC
+
+- Mark Mini DMA wire diameter as stale immediately when the sample naming fields change, and show a green imported state only after the current sample's diameter has actually been imported.
+
+## 2026-06-09 15:02 UTC
+
+- Verify Mini DMA current-sweep channel output after recipe current commands and retry output enable once when CH4 readback reports OFF.
+
+## 2026-06-09 14:48 UTC
+
+- Move Mini DMA recipe step dispatch behind a dedicated automation controller boundary so the Qt window no longer owns the active control-loop dispatcher directly.
+
+## 2026-06-09 09:17 UTC
+
+- Fixed Mini DMA sample headers so stale auto-generated sample names from a previous wire are replaced when the Sample tab composition/wire fields identify a new sample.
+- Smoothed Mini DMA current-sweep target acquisition by switching to small probing corrections after a load/stress reversal, while preserving fast stage-speed moves for large monotonic target errors.
+
+## 2026-06-05 15:45 UTC
+
+- Added operator-guided LCR open/short fixture correction controls to the AC Susceptibility Logger.
+- Recorded LCR correction state in AC baseline and sweep metadata so runs show whether open/short correction was enabled.
+- Added an offline AC empty-coil subtraction tool that writes a derived TSV with baseline-subtracted LCR columns while preserving raw measured columns.
+- Kept AC auto-connect from resetting selected LCR frequencies/amplitudes and added an in-app busy progress state while open/short correction runs on the meter.
+
+## 2026-06-05 15:30 UTC
+
+- Current Annealing can now load optional `.pydpj` projects and fabrication spreadsheet folders to suggest composition, microwire, and diameter values.
+- Current Annealing displays current-density equivalents beside current values and on the top axis of the live resistance-vs-current graph when a diameter is known; the logger hides density values when no diameter is available.
+- Fabrication spreadsheet loading now runs in the background so massive folders do not freeze the Current Annealing UI.
+- The Current Annealing Microwire field now displays slash-style labels such as `1/2`; generated filenames still use filesystem-safe separators.
+- Current Annealing process settings now give current-density readouts their own row space and pin the progress/time estimate strip directly above the run buttons.
+
+## 2026-06-05 15:15 UTC
+
+- Hid the inherited Current Annealing progress bar in the AC susceptibility logger so only the AC run progress is shown.
+- Made AC sweep start try the normal hardware auto-connect path before warning that the LCR meter is not connected.
+
+## 2026-06-05 15:08 UTC
+
+- Current Annealing plots now ignore invalid zero-resistance readbacks, including at the configured start current.
+- Current Annealing plot colors keep increasing-current segments on the warm palette and decreasing-current segments on the cool palette.
+- Current Annealing live plots now keep direction-change turning points visible in both adjacent color runs instead of letting the cooling trace steal the final heating point.
+
+## 2026-06-05 14:55 UTC
+
+- Fixed AC susceptibility shared-HMP broker mode so auto-connect and sweep start validate or auto-start the broker on the selected AC channel instead of failing with a refused socket when no broker is already running.
+
+## 2026-06-05 12:17 UTC
+
+- Keep Current Annealing pyqtgraph plots boxed with quiet top/right axes.
+- Let Current Annealing broker connect auto-detect the HMP port while avoiding raw serial-device probe noise and only starting a broker from the detected or selected HMP.
+
+## 2026-06-05 11:35 UTC
+
+- Forward-ported the Current Annealing pyqtgraph dashboard and expanded shared-HMP broker hardware panel into the Mini DMA integration branch.
+- Added HMP current-floor normalization used by shared-broker/current-annealing setpoint handling.
+
+## 2026-06-04 14:55 UTC
+
+- Added a Mini DMA mounted-wire campaign manifest for the Ni50Fe27Ga23 12/2 heat-shield 33.68 mm, 80 mA optimization run, with explicit operator confirmations for mounted sample identity, length, CH3 motor rail, CH4 current path, and broker lease state before live execution.
+- Mini DMA shared-HMP auto-connect now applies the current bench CH3/CH4 defaults when entering Tic motor-power preflight and can confirm unused broker CH3/CH4 roles before leasing them, without taking over conflicting broker roles.
+- Added reusable 0.6, 0.4, and 0.3 mA/s Mini DMA iso-stress comparison recipes and recorded the campaign run folders used for the 0.8 mA/s baseline, rejected fast-recovery experiment, 0.6 mA/s repeat, selected 0.4 mA/s repeats, and rejected 0.3 mA/s boundary probe.
+- Recorded rejected late-stage Mini DMA optimization experiments for adaptive hold gain, current-hold slope lookahead, and 1.0 s hold confirmation; the selected 0.4 mA/s baseline logic remains the best time/precision tradeoff from the campaign evidence.
+
+## 2026-06-04 12:39 UTC
+
+- Added master/worker coordination guidance, reusable worker-ledger and Mini DMA campaign templates, and a campaign manifest checker for pre-hardware validation.
+
+## 2026-06-04 00:00 UTC
+
+- Added opt-in AC Susceptibility Logger support for the shared HMP broker, including channel leases, broker readback, and channel-only shutdown/release on stop or error.
+- Added a bounded continuous LCR debug JSONL sidecar for transition/cadence diagnosis, with persisted cadence and row-cap settings.
+- Kept AC HMP4030/HMP4040 direct and shared-broker current sweeps at the configured voltage limit while changing only current setpoints, matching the other HMP logger integrations.
+- Reasserted shared-broker output-on during each AC current step so an active sweep does not rely on stale HMP output state.
+- Reworked AC frequency/excitation selection into compact checkable preset chips with custom list editing still available, and capped the settings column width so plots keep more room.
+- Documented shared-broker operation, debug-stream metadata, and the live bench plan for MED/SLOW/AVG tuning.
+
+## 2026-06-03 10:35 UTC
+
+- Added `.pydpj` sample-geometry lookup to the AC susceptibility analysis CLI so report runs can use Data Builder microscope diameters instead of hand-entered values.
+- Updated the 12/2 AC susceptibility handoff to use the project-file diameter for `Ni50Fe27Ga23 12/2`.
+
+## 2026-06-03 09:27 UTC
+
+- Improved Mini DMA imports so selected run folders, parent folders containing multiple run folders, and multiple folder selections load without requiring a separate placeholder import file.
+- Changed Mini DMA power top axes to default to length-normalized `Power/cm [mW/cm]` when initial-length metadata is available, with absolute `Power [mW]` still available from the Mini DMA plot settings.
+- Marked Mini DMA first-overheating preheat sweeps as separate dashed diamond traces with compact `1st:` legend labels when run metadata identifies the first-overheating target.
+
+## 2026-06-03 08:30 UTC
+
+- Clarified AC susceptibility relative-change outputs with explicit martensite-window, austenite-window, `chi_A/chi_M`, and percent-drop columns.
+- Exported the raw `(L_wire - L_empty) / L_empty` relative inductance change alongside filling-factor-corrected apparent susceptibility.
+- Added a generated susceptibility equation audit report explaining the filling-factor correction and relative-change denominators.
+
+## 2026-06-02 18:35 UTC
+
+- Added an electrical live shared-HMP validation CLI that coordinates Current Annealing and Mini DMA current-sweep broker clients, records readback artifacts, classifies voltage-limited/open-circuit current paths, checks channel isolation guardrails, and leaves CH1/CH4 safe-off while preserving the Mini DMA motor rail state.
+
+## 2026-06-02 16:15 UTC
+
+- Set the default Mini DMA iso-stress current-sweep ramp rate to 0.8 mA/s based on the 12/2 live optimization results, and treat 0.8 mA/s as the baseline in the optimization campaign template.
+
+## 2026-06-02 15:15 UTC
+
+- Made Mini DMA bench automation reapply explicit plan sample identity immediately before run start, so saved Builder/project autofill cannot overwrite a campaign diameter.
+- Added a reusable Mini DMA per-run core plot command for phone-readable stress-time and strain-current artifacts with current-hold highlighting and stress-error metrics.
+- Cleared child-owned Mini DMA bench locks from the supervisor after finished-metadata recovery, so completed supervised runs do not leave stale lock files.
+
+## 2026-06-02 14:45 UTC
+
+- Stabilized Mini DMA fabrication composition and microwire autofill so completer selections keep the popup/model alive, reuse cached suggestion models, and apply diameters without laggy rebuilds during rapid sample changes.
+
+## 2026-06-02 12:50 UTC
+
+- Avoid drawing duplicate Mini DMA dashboard curves when the secondary Y axis is only an equivalent unit conversion, while keeping the secondary axis labels and scale visible.
+
+## 2026-06-02 12:38 UTC
+
+- Added an all-condition delta chi' current-sweep grid for AC susceptibility report diagnostics.
+
+## 2026-06-02 12:15 UTC
+
+- Mini DMA voltage-limit current unwind now waits for the mechanical target to recover before advancing to the next stress/load ramp, preventing a post-unwind zero-load state from immediately tripping the mechanical load-loss guard.
+
+## 2026-06-02 12:05 UTC
+
+- Added DC wire-resistance-vs-current panels next to AC susceptibility report curves.
+- Included DC wire resistance columns in the Origin-ready chi' export table.
+
+## 2026-06-02 09:15 UTC
+
+- Made PyPlot close teardown avoid recursive menu/dialog child scans that could crash long Windows GUI test runs.
+
+## 2026-06-02 08:30 UTC
+
+- Added a repeatable Mini DMA optimization campaign template, preflight checker, and standard report generator scaffold.
+- Documented the campaign workflow so optimization runs start from an approved control source and produce consistent stress/time plus strain/current reports with current-hold highlighting.
+
+## 2026-06-02 04:40 UTC
+
+- Mini DMA bench supervisor now prints ASCII-safe JSON summaries on Windows consoles while still writing full status files.
+
+## 2026-06-01 21:34 UTC
+
+- Added a supervised Mini DMA bench-plan launcher that records child PID/status/log paths and turns the current-sweep HMP channel off when the child exits.
+
+## 2026-06-01 21:17 UTC
+
+- Mini DMA current-sweep sessions now record `correction_travel_limit` as a specific fault stop reason with travel-limit detail in session metadata.
+
+## 2026-06-01 17:10 UTC
+
+- Made shared HMP broker clients use a longer configurable request timeout so dual logger runs are less likely to abort while queued PSU requests are being served.
+- Made Current Annealing shared-broker measurements retry one transient missing readback before treating the PSU as unresponsive during concurrent broker use.
+
+## 2026-06-01 15:34 UTC
+
+- Mini DMA current-sweep runtime updates now show the Update remaining sweeps button only when visible recipe edits would change the active or remaining current-sweep plan.
+- Edited-but-not-applied current-sweep fields are subtly highlighted until the runtime update is applied.
+
+## 2026-06-01 14:41 UTC
+
+- Mini DMA equivalent-unit labels now preserve significant trailing zeros for integer values such as 800, 750, and 80.
+- Mini DMA project sample import now recognizes `Imax (mA)` rows as current-limit values, and microwire field edits report bad project or fabrication data without crashing.
+- Mini DMA dashboard speed now reports effective average linear motion in `um/s`, with commanded speed retained as secondary context.
+- Mini DMA current-sweep advanced speed/cap controls now live in a Settings menu dialog instead of the inline recipe panel.
+
+## 2026-06-01 14:39 UTC
+
+- Mini DMA experiment child processes now write stdout, stderr, and Python faulthandler output to ignored logs under `logs/experiment_processes/`.
+- Mini DMA saved Builder project auto-import now runs in the background during startup so a large saved `.pydpj` cannot freeze the initial UI.
+- Mini DMA setup plots reserve right-axis space to avoid clipping the load axis in the length setup dialog.
+- Mini DMA task summaries now prefer the active long-running recipe step so stress target ramps do not flicker to the next step.
+- Mini DMA mid-run current-sweep updates now extend the active current ramp when the edited end current is still safely ahead of the live setpoint, while reporting conservative future-only updates when it is not.
+
+## 2026-06-01 12:35 UTC
+
+- Mini DMA current-sweep recipe inputs now use narrower fixed widths so labels and equivalent-unit text stay readable in the normal recipe column.
+- Mini DMA sample-name auto-import now reports project/fabrication lookup failures without crashing while editing composition or microwire fields.
+
+## 2026-06-01 11:35 UTC
+
+- Mini DMA current-sweep recipes can now apply visible current-sweep edits to remaining, not-yet-started sweeps while leaving the active sweep frozen and logging the runtime override.
+- Runtime updates can re-plan future iso-load, iso-stress, or iso-strain target plateaus when target start/end/step changes are made mid-run.
+- Current-sweep fields that cannot safely modify the active recipe are shown in a gray read-only state during a run, while runtime-editable fields remain normal.
+
+## 2026-06-01 10:55 UTC
+
+- Mini DMA length setup now commits the run-specific zero-load scale reference when applying the setup L0 baseline, preventing the recipe from starting with residual stress after setup.
+
+## 2026-06-01 10:30 UTC
+
+- Made Mini DMA Logger startup width adjustments avoid fragile internal Qt child widgets, improving startup stability in long GUI sessions.
+- Guarded PyPlot subwindow state handling against non-state-change Qt events that can arrive during window close in full-suite runs.
+
+## 2026-06-01 10:05 UTC
+
+- Mini DMA current-sweep recipe fields now use stable widths, show current-density ramp rate, use a 0.2 mA/s current-ramp step, and format current-density equivalents with compact precision.
+
+## 2026-06-01 09:45 UTC
+
+- Corrected Mini DMA Builder strain summaries so each stress/load row reports the strain measured at the maximum current point after per-curve l0 recalculation.
+
+## 2026-06-01 09:35 UTC
+
+- Mini DMA length setup plots now draw setup samples in elapsed-time order and keep displacement markers, avoiding backward line segments when setup samples arrive out of order.
+
+## 2026-06-01 09:10 UTC
+
+- Mini DMA voltage-limit current unwind now obeys the current-hold recovery logic, so a transforming wire that loses load during current decrease holds current and pulls back to target instead of continuing to unwind to the start current.
+
+## 2026-06-01 08:30 UTC
+
+- Mini DMA length setup displacement plots now draw the displacement trace without per-sample markers, reducing visual duplicate-dot clutter while retaining the recorded setup samples.
+
+## 2026-05-29 22:16 UTC
+
+- Ensured the Microwire EDA window closes progress dialogs and waits for its worker thread during teardown.
+
+## 2026-05-29 21:50 UTC
+
+- Stopped legacy Data Logger refresh timers when the window closes so headless test runs and repeated logger sessions can exit cleanly.
+- Sanitized legacy Data Logger output filenames as well as subfolder names on Windows.
+
+## 2026-05-29 21:38 UTC
+
+- Skipped no-op Mini DMA displacement recovery when a completed recipe is already at the return target, avoiding unnecessary hardware preflight and keeping headless verification from hanging.
+
+## 2026-05-29 21:15 UTC
+
+- Updated PyPlot automation docs to describe the full Microwire Builder recipe scope, including copy-safe project refreshes, supported graph-backed sections, Assemble rebuilds, and latest-database archiving.
+
+## 2026-05-29 19:31 UTC
+
+- Kept PyPlot legends visible in Microwire Data Builder current-annealing preview thumbnails.
+
+## 2026-05-29 19:14 UTC
+
+- Prevented Microwire Data Builder startup auto-open from re-entering project loading while a project is already being loaded.
+
+## 2026-05-29 18:32 UTC
+
+- Preserved Mini DMA current-density and l0 axis-label context when exporting shared PyPlot graphs to Origin, and covered line+symbol marker export behavior.
+
+## 2026-05-29 18:18 UTC
+
+- Renamed public Builder graph columns for the Manual stress/strain section while keeping legacy Shape memory stress/strain project and Word-report columns readable.
+
+## 2026-05-29 18:04 UTC
+
+- Added headless Microwire Data Builder automation coverage for DMA iso-stress, Manual stress/strain, and FMR section updates.
+- Verified these graph sections can update a copied `.pydpj`, persist embedded record payloads, skip invalid inputs, and rebuild Assemble rows from automation recipes.
+
+## 2026-05-29 17:48 UTC
+
+- Added headless Microwire Data Builder automation coverage for updating VSM hysteresis records and rebuilding Assemble from a copied `.pydpj`.
+- Direct-file Builder imports now use the file stem as the sample label before falling back to the parent folder, so automation recipes that pass individual files do not label rows with temporary working-folder names.
+
+## 2026-05-29 17:32 UTC
+
+- Added headless Microwire Data Builder automation coverage for updating the Current annealing section and rebuilding Assemble from the copied `.pydpj`.
+- Current annealing section automation now skips parsed numeric files that do not contain a recognizable composition/draw/piece identity, so manifests report them as skipped instead of counting them as updated records that later disappear.
+
+## 2026-05-29 17:12 UTC
+
+- Reduced false positive As/Af/Ms/Mf estimates by rejecting tangent-transition fits with too little slope contrast or an unrealistically narrow transition window.
+- Preserved Mini DMA current-sweep return-leg points when they match earlier heating-leg values, so cooling-side transition-current estimates are not lost during duplicate cleanup.
+
+## 2026-05-29 16:48 UTC
+
+- Kept Microwire Data Builder suppressed/headless project loads from creating modal progress dialogs, reducing startup and automation event-loop fragility while preserving the GUI progress dialog for normal manual loads.
+
+## 2026-05-29 15:30 UTC
+
+- Mini DMA bench automation can now take the shared HMP bench lock before execute-mode runs, with optional plan-level owner, purpose, timeout, and lock-path settings.
+
+## 2026-05-29 15:05 UTC
+
+- Added a shared HMP bench guard CLI for Codex/hardware automation threads so they can report lock ownership, probe COM3 availability, and avoid overlapping hardware tests.
+
+## 2026-05-29 14:25 UTC
+
+- Added Mini DMA Builder summaries for per-stress/load maximum strain values using per-curve `l0` baselines, and wire-break stress/current reporting when a voltage-limit current collapse is detected.
+- Added Mini DMA tangent-intersection transition-current summaries for As/Af on the increasing-current leg and Ms/Mf on the decreasing-current leg.
+- Added tangent-intersection transition estimates so Assemble can fill missing As/Af/Ms/Mf temperatures from saved VSM temperature-scan heating/cooling records.
+- Enabled Builder automation `rebuild_assemble` commands so section-update recipes can refresh saved Assemble rows without opening the Builder UI, including graph-only samples that do not yet have current-annealing records.
+
+## 2026-05-29 13:38 UTC
+
+- Improved AC susceptibility analysis report readability by formatting 1 kHz
+  and higher frequencies in kHz.
+- Added report-oriented all-condition overview tables and plots for Origin/DOCX
+  follow-up, including SNR, delta chi prime, and high-percent diagnostics.
+
+## 2026-05-29 13:25 UTC
+
+- Mini DMA current sweeps now keep the nominal reverse-current leg rate-limited when the supply remains near the voltage limit, avoiding an abrupt current drop or premature plateau transition.
+- Mini DMA current-hold recovery now bypasses the persistence wait when filtered stress/load is moving rapidly away from the target, so transformation runaways get an immediate mechanical correction.
+- Mini DMA current-hold recovery now keeps predictive multi-step corrections during rapidly moving-away transformations instead of throttling to motor-step corrections just because the previous feedback worsened.
+- Mini DMA current-hold recovery now treats large off-target stress/load errors as actionable even when the filtered balance window is noisy.
+- Mini DMA current-sweep recipe files now round-trip the disabled "return to start target" setting instead of forcing it back on during save/load.
+- Mini DMA settings persistence no longer silently re-enables "return to start target" while closing or saving app settings.
+- Mini DMA session metadata now preserves an earlier fault stop reason when the app closes afterward.
+- Mini DMA control trace rows can record row-local task text so diagnostic traces do not inherit stale current-sweep task labels.
+
+## 2026-05-29 12:35 UTC
+
+- Mini DMA Logger Sample tab now opens scrollable, vertically stacked current-annealing previews from the connected `.pydpj`, reusing the selected composition/microwire when possible.
+- Replaced the manual `Import sample info` button with `Show annealing` because sample import already runs automatically from the connected Builder project.
+- The Mini DMA wire diameter field now displays micrometers while preserving millimeters internally for recipe and stress calculations.
+
+## 2026-05-29 10:18 UTC
+
+- Prevent voltage-limited Mini DMA current sweeps from jumping back to the nominal maximum current after the unwind leg; the unwind is kept as the shortened return leg and logged explicitly.
+- Let fast moving-away current-sweep stress/load errors enter current hold immediately instead of waiting through the normal confirmation delay.
+- Let clearly large current-hold recovery errors bypass the persistence timer, while keeping persistence gating for smaller filtered errors.
+
+## 2026-05-29 09:55 UTC
+
+- Mini DMA Logger Sample tab can now connect a fabrication-data folder, index it without blocking the UI, suggest compositions and microwires while typing, and use fabrication diameters as a fallback when the connected `.pydpj` project has no diameter for the selected sample.
+- Large fabrication database roots are staged: Mini DMA loads top-level composition folders first, then reads only the selected composition subtree for microwire/diameter suggestions.
+- `.pydpj` sample import remains the preferred diameter source when both project and fabrication data are available.
+
+## 2026-05-29 09:53 UTC
+
+- Log the Mini DMA dashboard task text in both UI telemetry and control-trace CSV files so recipe phase flicker can be diagnosed from saved runs.
+
+## 2026-05-29 09:03 UTC
+
+- Add a repeatable AC susceptibility analysis CLI/module that converts completed logger TSVs and an empty-coil baseline into apparent complex susceptibility tables, rankings, report Markdown, and PNG plots.
+- Add Origin-ready CSV exports and a handoff document for finishing Origin/DOCX reporting on a Windows PC with Origin installed.
+- Record excitation and sensing coil geometry metadata in the analysis workflow.
+
+## 2026-05-28 15:59 UTC
+
+- Prevented Mini DMA current-hold recovery from treating one-sided transformation scatter as target recovery; the noise band now only accepts/restarts the current ramp when the recent load/stress window overlaps the target.
+- Kept current-sweep target acceptance tied to the requested/noise tolerance instead of the motor-step physical floor, so short or stiff wires no longer treat very large stress errors as "reached" while the ramp keeps heating.
+- Added a Mini DMA control-trace replay diagnostic script for identifying current-sweep accept decisions that were only accepted because of the motor-step physical floor.
+- Added automatic control-trace replay diagnostics to unattended Mini DMA bench summaries after each saved run.
+- Added 30 MPa current-ramp speed-ladder recipes, a guarded bench-plan example, and a ramp-speed comparison script for choosing the precision/time tradeoff from saved run folders.
+
+## 2026-05-28 11:39 UTC
+
+- Fixed Current Annealing Logger output so accepted measurements are logged once, leading zero-current readbacks are not plotted as data, run metadata reflects current loop/reverse settings, and repeated cycles use the same color palette as the PyPlot Current Annealing plugin.
+
+## 2026-05-28 11:19 UTC
+
+- Added a Mini DMA automation indexer script for building CSV/JSONL manifests from run metadata folders.
+- Added regression coverage for extracting automation run metadata and writing the manifest files.
+
+## 2026-05-28 10:42 UTC
+
+- Added a bench-automation-only option to continue tensile slack take-up after current-sweep mechanical load loss, while normal operator recipes still stop on the same condition.
+- Added an optional bench guardrail override for the current-sweep correction travel cap so automated slack take-up can pull far enough to re-tension the wire.
+- Discard stale stopped-run resume state when the visible recipe controls have changed, preventing an older 50 MPa current sweep from resuming under a newly edited target start.
+
+## 2026-05-28 10:25 UTC
+
+- Polished the Mini DMA recipe UI by hiding recipe save/load controls behind a Settings toggle, moving uncommon setup/manual-action controls into collapsed detail panels, and adding restore-defaults buttons for setup, current-sweep advanced caps, and manual actions.
+- Changed current-sweep first overheating from repeating the first normal target to running one configurable fixed-stress preheat sweep before the normal target sequence.
+- Separated first-overheating, target, and current-sweep controls into compact recipe sections; first-overheating shows the load equivalent beside its stress target, and return-to-start is implicit instead of a visible checkbox.
+- Displayed Mini DMA sample diameters in micrometers in operator-facing recipe/project labels.
+
+## 2026-05-28 07:47 UTC
+
+- Updated Mini DMA PyPlot current-sweep graphs to show stress/load legend labels, compact whole-mA current-density plus wire-diameter hints in the X axis label, and compact `l₀` context in strain Y-axis labels.
+
+## 2026-05-27 16:58 UTC
+
+- Polished the Mini DMA recipe panel with a collapsed length-setup summary, a recipe-level setup enable switch, and saved/unsaved recipe-file status.
+- Rounded load-equivalent labels to 3 decimal places and rendered current-density units with a superscript 2.
+- Documented that setup is normally enabled but can be disabled in saved recipes for controlled automation or diagnostics.
+
+## 2026-05-27 14:58 UTC
+
+- Mini DMA paused-current recovery no longer stops only because held-current transformation corrections exceed the per-target no-response travel counter.
+- Mini DMA paused-current recovery now uses the configured fast current-sweep stage-speed cap while stress/load is far outside the held-current recovery band, and avoids forcing those large-error transformations down to one motor step after a worsening feedback sample.
+- Mini DMA paused-current recovery no longer waits a full filter window for an unchanged filtered signal while stress/load is still far outside the held-current recovery band.
+- Mini DMA paused-current recovery now keeps the current ramp held after a single accepted recovery seek until either the filtered resume band or repeated accepted recovery seeks confirm stable recovery.
+- Mini DMA current-hold entry now confirms transformation onset faster using an automatic tolerance-scaled sustained-error band, so current ramping pauses closer to the first target departure without a fixed MPa entry floor.
+- Mini DMA large-error held-current recovery keeps the fast recovery trigger tied to the default 30 MPa band even when the per-move held-current correction cap is raised for a specific recipe.
+- Mini DMA current sweeps now throttle the increasing-current ramp clock briefly after held-current recovery so the next thermal step does not immediately outrun stress recovery.
+- Mini DMA current-sweep target ramps now stop as mechanical load loss/slack if the stage travels after l0 while measured load/stress remains near zero; this guard does not infer electrical contact loss because current may still be flowing.
+- Added a 50 MPa iso-stress current-sweep recipe for 1 mA to 50 mA and back.
+
+## 2026-05-27 12:45 UTC
+
+- Fixed packaged launcher builds so Current Annealing Logger and Mini DMA Logger open from their separate child processes instead of starting a second launcher window.
+
+## 2026-05-27 09:50 UTC
+
+- Added a Microwire Data Builder startup setting for opening the configured database folder's current `*_latest.pydpj`.
+- Made recent database working/archive projects resolve back to the database folder's `*_latest.pydpj`.
+
+## 2026-05-27 09:30 UTC
+
+- Skipped Current Density table auto-sizing during Microwire Data Builder project-load batches to reduce copied project load time.
+
+## 2026-05-27 09:28 UTC
+
+- Mini DMA dashboard plots now reserve AC-dashboard-style tile margins, spacing, and minimum plot sizes so lower-row axes are not clipped by the run log area.
+
+## 2026-05-27 09:25 UTC
+
+- Mini DMA now treats native USB Tic control as required for recipes; `ticcmd` stays available for explicit diagnostics instead of silent recipe fallback.
+- Mini DMA hides source-control metadata subprocesses on Windows so recipe startup does not flash transient console windows.
+
+## 2026-05-27 09:21 UTC
+
+- Launch the AC Susceptibility Logger as a separate experiment process from the PyPlot launcher, matching Mini DMA and Current Annealing.
+- Hide the detached AC PSU watchdog console window when starting a hardware sweep on Windows.
+
+## 2026-05-27 08:55 UTC
+
+- Mini DMA recipe preflight now reports Tic status read failures as a busy/unreadable controller instead of mislabeling unknown VIN as motor power off.
+- Mini DMA unit tests now block accidental real Tic USB access unless a test installs an explicit fake backend.
+
+## 2026-05-27 08:53 UTC
+
+- Added AC susceptibility continuation support that loads previous sweep TSV files, skips fully measured AC settings, and redoes partial settings cleanly before continuing.
+
+## 2026-05-27 08:30 UTC
+
+- Added a detached AC susceptibility PSU watchdog so an app update, crash, or parent-process exit can still zero current, zero voltage, and turn output off.
+- Active AC sweeps now refuse ordinary window-close requests until the sweep worker can stop and run its normal PSU shutdown path.
+
+## 2026-05-26 15:41 UTC
+
+- Added a Microwire Data Builder automation database-folder mode that promotes a generated project to `microwire_database_latest.pydpj`, writes `update_manifest_latest.json`, and archives the previous latest files with a timestamp.
+- Added `exclude_dir_names` for Builder section update recipes so archived or diagnostic run folders can be skipped during recursive measurement imports.
+- Added current annealing support to Builder `update_section` automation recipes.
+
+## 2026-05-26 13:46 UTC
+
+- Changed Mini DMA supply setup so current-sweep and motor-supply channels start unselected instead of using profile defaults.
+- Added a shared-broker connection health check before Mini DMA reports the broker supply as connected.
+- Let Mini DMA manual auto-connect start a local shared HMP broker when the broker endpoint is down and the operator has explicitly selected the HMP COM port plus supply channels.
+- Reordered Mini DMA manual auto-connect so the HMP motor-supply rail is enabled before checking Tic VIN.
+- Improved Mini DMA guardrails so current output and motor power cannot be prepared until the operator explicitly selects the wired HMP channels.
+- Added the bundled 64-bit `libusb` wheel and updated the Tic native USB backend loader so Mini DMA can prefer native PyUSB Tic commands before falling back to `ticcmd`.
+- Let Mini DMA native Tic USB accept a single visible Tic when Windows/libusb cannot read USB string descriptors, while still rejecting ambiguous multi-Tic scans.
+- Made preferred-native Tic control fall back to `ticcmd` if an individual native USB status or move command is denied.
+- Tightened Mini DMA Tic status handling so device-list output can no longer be treated as motor status; status must include parseable VIN before motor power is verified.
+- Logged Tic transport use so native USB activation and every `ticcmd` fallback reason are visible in Mini DMA run logs.
+- Serialized native Tic USB status and motion/keepalive commands so status refreshes cannot race motion commands and incorrectly mark motor VIN as unavailable.
+- Hid Windows console windows for rare `ticcmd` fallback commands.
+- Showed the hardware auto-connect progress dialog during Start recipe preflight when required hardware is not already ready.
+- Added `scripts/run_mini_dma_shared_hmp_checks.ps1` for a fast shared-HMP/Mini-DMA/Tic regression slice.
+
+## 2026-05-26 13:37 UTC
+
+- Mini DMA length setup now asks for the mounted wire length once at the beginning, then computes unloaded `l0` from the return-to-zero motion.
+- If setup starts above the configured preload, Mini DMA skips the preload ramp and settle instead of asking for a second length entry.
+
+## 2026-05-26 13:10 UTC
+
+- Expanded Microwire Data Builder automation recipes so copied projects can update graph-backed sections such as Mini DMA, VSM, DMA iso-stress, manual stress/strain, and FMR without opening the Builder UI.
+- Reduced copied-project load stalls by skipping expensive hidden-table autosizing and thumbnail rendering during project import.
+- Renamed the shape-memory stress/strain workflow labels to Manual Stress/Strain while preserving saved project payload keys and column names for compatibility.
+
+## 2026-05-26 12:35 UTC
+
+- Fixed Mini DMA current-sweep voltage-limit recovery so unwind ramps back from the measured supply current if internal setpoint state is missing, preventing an instant jump back to the sweep start current.
+- When a current sweep is already paused for target recovery, voltage-limit detection now keeps the held current instead of overriding the hold with unwind.
+- Moved Mini DMA wire-break stop/recovery prompts onto the UI thread so a wire break cannot freeze the app by opening recovery UI from the control worker.
+
+## 2026-05-26 11:18 UTC
+
+- Fixed shared-HMP Current Annealing runs so broker-mode measurements are written to the log file as well as the live graph.
+- Normalized Mini DMA shared-broker supply readbacks to include resistance and power fields required by logging and live status updates.
+
+## 2026-05-26 09:45 UTC
+
+- Added Mini DMA emergency session recovery when final metadata writes fail because the output folder was moved or temporarily unavailable.
+- Removed the current-sweep "Settle after current" setting and post-sweep settle step; current recovery remains handled by the current-ramp hold controller.
+
+## 2026-05-26 07:52 UTC
+
+- Let non-elapsed AC live plots use a deeper history window while keeping elapsed-time traces capped to recent raw samples.
+- Hide gridlines on AC live plots for a cleaner dense multi-axis view.
+
+## 2026-05-25 16:45 UTC
+
+- PyPlot Launcher now starts Mini DMA Logger and Current Annealing Logger as separate experiment processes.
+- Child experiment processes are tagged with experiment metadata and scrub inherited headless Qt environment variables before launching.
+- Documented the launcher-level process separation for hardware experiment windows.
+
+## 2026-05-25 15:58 UTC
+
+- Added a shared Windows sleep-prevention guard for active experiments.
+- Mini DMA Logger now keeps the PC awake while a session is running and releases the guard when the session stops or the window closes.
+- Current Annealing Logger now keeps the PC awake while an annealing process is running and releases the guard during safe shutdown or window close.
+
+## 2026-05-25 10:42 UTC
+
+- Changed Mini DMA current-sweep plots to use line+symbol curves by default.
+- Changed Mini DMA PyPlot defaults to recalculate strain-current curves against one shared global-minimum baseline and show the top power axis, with a setting for per-target baselines or raw measured strain.
+- Kept PyPlot-style titles, axis labels, and legends in the Microwire Data Builder current annealing graph display.
+- Embedded parsed graph payloads in Microwire Data Builder `.pydpj` project saves so copied projects can restore graph records without depending on the global Builder cache.
+- Added the first copy-safe Microwire Builder automation recipe path for updating VSM temperature scan sections in copied `.pydpj` projects.
+- Suppressed automatic recursive pending-file scans during mini-database section construction to reduce launch-time stalls when saved sections point at large folders.
+
+## 2026-05-25 10:25 UTC
+
+- Added optional Shared HMP broker mode to Mini DMA Logger so it can use channel-scoped broker leases for current-sweep and motor-supply HMP channels while preserving direct serial supply profiles.
+- Added Mini DMA broker host/port settings and preflight behavior that keeps shared-broker mode from silently switching back to serial auto-detect.
+
+## 2026-05-25 10:04 UTC
+
+- Show the active LCR excitation amplitude in the AC sweep status text.
+
+## 2026-05-25 09:52 UTC
+
+- Show per-condition medians on non-elapsed AC live plots so dense long-run data remains readable while raw TSV logging stays complete.
+
+## 2026-05-25 09:35 UTC
+
+- AC Susceptibility Logger now keeps Windows awake during active microwire current sweeps and retries PSU shutdown by reopening the selected serial port if the existing handle fails, so error paths still attempt to zero current, zero voltage, and turn output off.
+- AC Susceptibility live plots now retain and render a smaller recent preview instead of redrawing thousands of old rows, keeping long overnight sweeps responsive while preserving complete TSV output.
+
+## 2026-05-25 09:35 UTC
+
+- Apply explicit LCR setup defaults during AC susceptibility runs: auto range on, auto LCZ off, 30 ohm source resistance, ALC on, DC bias off, and comparator off.
+- Migrate older current-excitation defaults that started at 1 mA to the full LCR current range from 100 uA to 20 mA.
+
+## 2026-05-25 09:19 UTC
+
+- Wait for the LCR meter to finish switching to the measurement page before sending setup commands, avoiding startup SCPI `*E02` errors during AC susceptibility runs.
+
+## 2026-05-23 14:31 UTC
+
+- Added `uv.lock` and made uv the preferred environment sync path for PyPlot development and Codex worktrees.
+- Kept `requirements.txt` and `requirements-win.txt` as pip compatibility exports for machines and packaging scripts that still need them.
+- Pinned the PyQt Qt runtime packages explicitly so uv-created environments keep the tested PyQt6/Qt runtime pairing.
+- Added a Microwire Data Builder storage-root override for tests so automated runs can isolate mini-database state away from user app-data folders.
+- Tightened Windows Codex setup so it checks for Python 3.14 with the `py` launcher before running `uv sync`.
+- Shortened Windows pytest temp paths when needed so deep Google Drive fixture paths do not exceed Windows path limits.
+- Kept Mini DMA recipe-completion tests headless on Windows by stubbing recovery hardware preflight.
+- Sanitized serial logger output filenames as well as subfolder names so Windows-invalid characters do not trigger blocking error dialogs.
+- Waited for the Microwire EDA worker thread cleanup in its progress-dialog test to avoid Windows QThread teardown crashes.
+- Ordered the Windows test collection so the Mini DMA logger tests run before Microwire Builder/EDA GUI tests, avoiding an order-dependent native Qt teardown crash.
+
+## 2026-05-22 13:47 UTC
+
+- Added measured-current feedback for AC susceptibility current sweeps so the PSU voltage limit is adjusted automatically from readback instead of used as one fixed compliance value.
+- Low or unreachable OWON current points now log warnings and continue with the measured current; missing actual-current readback before a point still fails safely.
+- Documented that `current_actual_a`, PSU voltage, resistance, and power are the source of truth for later AC susceptibility analysis.
+
+## 2026-05-22 12:22 UTC
+
+- Default the AC Susceptibility Logger LCR source to current excitation, with front-panel current presets from 0.1 mA to 20 mA and voltage excitation still available as an alternate mode.
+- Interpret bare LCR current-excitation entries as mA while preserving explicit `uA`, `mA`, and `A` suffixes.
+- Add LCR excitation current as a selectable live-plot axis and update AC workflow documentation for current-driven coil measurements.
+
+## 2026-05-22 12:21 UTC
+
+- Added the shared HMP4030/HMP4040 power-supply broker foundation with channel leases, model-aware channel validation, serialized SCPI channel operations, guarded global commands, and a localhost JSON protocol.
+- Added a Shared HMP PSU Setup utility for confirming channel wiring and saving reviewed bench profiles before shared-output control.
+- Added an optional Shared HMP broker supply mode to Current Annealing Logger so it can lease and control only a confirmed current-annealing channel while preserving the existing direct serial mode.
+- Documented the shared HMP broker safety model and the current HMP4040 bench-channel example.
+
+## 2026-05-22 09:38 UTC
+
+- Simplified AC susceptibility hardware setup around a single Auto-connect hardware action, with COM port and baud details moved into a collapsed advanced hardware panel.
+
+## 2026-05-22 09:33 UTC
+
+- Mini DMA adds HMP4040 support with auto-detect, 115200 baud defaults, current-sweep CH4, and motor-supply CH3 while keeping channels user-configurable.
+- Mini DMA dashboard graphs now default to a 500 ms refresh interval and cache older downsampled history so long runs avoid rescanning the full run on each redraw.
+- Mini DMA pyqtgraph tiles now keep the run log compact, leave right-edge breathing room, use less dense/thinner major gridlines, and color Y axes to match their plotted curves.
+- Mini DMA pyqtgraph tiles now keep empty top/right axes visible as plain frame lines without tick marks or labels when no data axis is assigned there.
+- Mini DMA manual setup now shows a modal progress dialog while Auto-connect hardware probes the motor, scale, and optional motor-supply channel.
+- Mini DMA manual Auto-connect hardware now prepares the current-sweep supply channel with the configured voltage limit and starting current while keeping that channel output off, so HMP4040 CH4 does not retain stale front-panel settings.
+- Mini DMA dashboard plot widgets now shrink correctly in the available panel height and keep the run log shorter so the lower-right graph stays inside the visible window.
+- Mini DMA recovery-to-zero now keeps correcting when the measured load is still above the true zero-load tolerance instead of accepting a backlash-limited residual load.
+- Mini DMA pyqtgraph tiles now remove gridlines, disable SI-prefix axis scaling for fixed engineering units, and use thin line+symbol traces.
+- Mini DMA recovery/setup plots now reuse the same per-quantity colors as the dashboard, and current-hold resume no longer expands its resume band from noisy transformation data.
+- Mini DMA dashboard plot tiles now re-cap their maximum height after window resizes so the lower-right graph cannot spill below the visible panel.
+- Mini DMA dashboard plot tiles now use a stricter 240 px height cap so all four plots and the run log fit comfortably in a 1080p maximized window.
+- Mini DMA migrates saved 1000 ms graph refresh settings to the new 500 ms default so older local settings do not silently keep setup/recovery graphs slow.
+- Mini DMA load/stress seeking now waits for the filtered scale-control signal to change after a correction before repeating another load/stress move, reducing chatter from stale median/MAD windows.
+- Mini DMA zero-load plateau recovery now accepts the current stable zero-load position instead of driving back through the plateau before finishing.
+- Mini DMA current-hold stress recovery now requires a same-direction out-of-band filtered error to persist briefly before moving, so noisy one-window excursions do not immediately become motor corrections.
+- Mini DMA metadata now records the app source-control snapshot, including branch, commit, dirty state, short status, and origin URL when git is available.
+- Mini DMA metadata now records a control-logic version/profile and a SHA-256 fingerprint over decision-relevant control constants and settings, so runs can be compared by control semantics independent of branch names.
+- Mini DMA pyqtgraph dashboard tiles now expand with the available panel height again, keep extra right-edge breathing room for colored axes, and draw unused right axes as neutral frame lines.
+- Mini DMA removes the old recipe/session-start zero-load capture checkbox; mandatory setup remains the single source of truth for the zero-load baseline.
+- Mini DMA current-hold entry now requires a sustained filtered load/stress error beyond a transformation-sized band, so ordinary target fluctuations keep the current ramp moving.
+- Mini DMA current-hold adaptive recovery caps are now expressed through strain/recipe limits rather than a fixed millimeter command cap.
+
+## 2026-05-21 09:37 UTC
+
+- Fixed AC susceptibility current sweeps so missing PSU current readback warnings still obey the configured measure time per point instead of extending that point indefinitely.
+
+## 2026-05-21 07:27 UTC
+
+- Restored the stronger Mini DMA colloquium deck as the main revised presentation, removed the redundant iso-stress comparison slide, repaired distorted image aspect ratios, replotted key graphs with PyPlot logic, and replaced the next-step slide image with a thermal-camera frame.
+
+## 2026-05-21 07:04 UTC
+
+- Mini DMA live dashboard, setup, and recovery graphs now use persistent pyqtgraph widgets instead of redrawing Matplotlib figures for each refresh.
+- Mini DMA dashboard plots keep left/right channel axes while updating existing curve data, reducing redraw work during long logged runs.
+
+## 2026-05-20 19:20 UTC
+
+- Added a revised Mini DMA colloquium deck with simpler slide titles, larger text, page numbers, speaker notes, a clearer iso-stress workflow explanation, reduced-clutter result plots, commercial DMA comparison, thermal-camera next steps, and AI-assisted build framing.
+
+## 2026-05-20 17:36 UTC
+
+- Marked the Origin `originext` dependency as Windows-only so macOS Python 3.14 environments can install from the shared requirements file.
+
+## 2026-05-20 14:17 UTC
+
+- Added the Mini DMA colloquium presentation deck for the 2026-05-21 Ni-Fe-Ga meeting.
+
+## 2026-05-20 13:36 UTC
+
+- Moved the AC Susceptibility Logger live dashboard from Matplotlib redraws to
+  persistent PyQtGraph plot items so graph refreshes stay lightweight during
+  long runs.
+- Reduced live-display point density for old parameter-scan data while leaving
+  TSV logging complete and incremental.
+- Documented the PyQtGraph dashboard behavior and updated AC diagnostics notes
+  for displayed-point counts.
+
+## 2026-05-20 09:56 UTC
+
+- Mini DMA setup preload now derives the active ramp rate from the live starting load/stress to the requested preload target, so relaxing from a high preload uses the configured setup duration instead of the nominal zero-to-target ramp.
+- Mini DMA length-setup progress now reports the active setup phase and phase percent instead of unstable global recipe tick counts.
+- Mini DMA setup stable-time holds now reset when the preload or zero-load target is not actually reached, so the measured-length prompt waits for a continuous stable target during current-sweep setup.
+- Mini DMA current-sweep load/stress correction now uses a robust recent scale signal for servo decisions, ignores single-sample balance spikes inside the noise band, and waits for a confirmed filtered reversal before sending the first opposite correction.
+- Mini DMA current-hold resume now uses a separate automatic recovery tolerance band, so the current ramp continues once filtered stress is practically recovered instead of chasing final-tolerance fluctuations.
+- Mini DMA current-hold recovery now retries after a full fresh filter window even when the median signal is unchanged, avoiding indefinite waits during held-current transformations.
+- Mini DMA migrates overlarge saved current-hold correction caps back to the safer default and records the setup linear-unload baseline as the run zero-load scale reference.
+- Mini DMA current-hold recovery now resumes the current ramp when the recovery seek accepts the target, waits instead of moving when filtered stress is already returning quickly toward target, and only learns hold-response stiffness from motor moves whose measured load/stress changes in the commanded direction.
+- Mini DMA setup now keeps length-setup progress monotonic within each phase, lets the dashboard plot grid shrink to the available window, and breaks plotted lines across hidden/downsampled history gaps instead of drawing diagonal bridges.
+- Mini DMA dashboard plots now also break the line between downsampled history and the recent live tail, avoiding misleading diagonal connectors while long measurements are still running.
+- Mini DMA now has an explicitly armed `--mini-dma-bench-plan` automation path for unattended recipe sequences, with dry-run validation, setup-length automation, per-run timeouts, summary JSON, and modal-warning suppression so failed preflights do not block overnight control.
+- Mini DMA session metadata, status text, and run log now record explicit stop outcomes such as normal recipe completion, manual recipe/session stop, emergency stop, wire break/contact loss, app close, or bench automation timeout.
+- Mini DMA now treats changed specimen/condition text as part of the auto-generated output filename identity, so a stale base filename is refreshed before existing-output checks prompt to save as the next run.
+- Mini DMA now restores the default `21.200 g` hanging-weight zero-load reference when the current bench sign convention sees real positive balance grams while a saved `0 g` reference would otherwise clamp applied load to zero and drive setup in the wrong direction.
+- Mini DMA setup slack take-up now exposes a configurable stiffness-prior step cap and defaults it to `50 MPa`, making pre-contact slack removal much faster while keeping feedback-gated moves bounded.
+- Mini DMA mandatory length setup now refreshes the frozen control config after accepted starting length and computed `l0`, so strain logging and subsequent control use the measured setup length instead of a stale recipe-start value.
+- Mini DMA setup progress now tracks live preload target error instead of elapsed ramp time, and setup no longer performs a timed zero-load settle after the return-to-zero target is accepted.
+- Mini DMA dashboard plots now bridge cached downsampled history into the recent live tail instead of leaving an empty middle gap during long measurements.
+- Mini DMA dashboard plots now add view-box data-edge padding so right-edge points are not clipped, and the current-sweep task label stays on the active current/hold phase instead of flickering through short settle steps.
+- Mini DMA bench automation plans now support high-stress and wire-break guardrails for unattended current-sweep testing, including current shutdown, stress-target recovery, summary guard events, and stopping later trials after contact loss.
+- Mini DMA setup return-to-zero now applies a small strain-based speed floor for tiny residual loads, avoiding very slow one-step unloads near baseline.
+- Mini DMA length-setup plotting now snapshots setup samples before drawing, preventing live plot refresh crashes from concurrent sample updates.
+- Mini DMA paused-current recovery can now use a local hold-only response stiffness after several confirmed correction samples, allowing faster load/stress recovery during transformations while keeping the frozen current-sweep stiffness and displacement/strain safety rails intact.
+
+## 2026-05-20 08:49 UTC
+
+- Made AC microwire sweeps tolerate transient missing PSU actual-current readbacks after current has already been confirmed, logging WARN rows instead of aborting overnight runs.
+- Kept the hard safe-shutdown path for non-zero current points where the PSU reports actual current far below the requested value, and documented the readback/wire-break behavior.
+
+## 2026-05-19 16:15 UTC
+
+- Added graph-only batch filtering for Microwire Word report CLI exports; the filter now requires generated Origin graph descriptors so source-only Assemble labels do not create placeholder-only reports.
+- Added DOCX export manifest JSON/CSV files that record exported microwires, graph sections, source paths, source mtimes/sizes, and the copied project used for the run.
+- Extended project-backed Word report discovery to include Mini DMA run folders under the Praha measurement root.
+- Improved VSM temperature scan Origin export with separate low/high-field Y-axis scaling and cycle-specific colors/labels.
+
+## 2026-05-19 16:10 UTC
+
+- Add configurable repeated-X spread to AC susceptibility dashboard plots so dense current, frequency, and amplitude clusters remain readable.
+- Show wire resistance as median values per LCR/current setting while keeping `Rs` and `Ls` as scatter-only traces.
+
+## 2026-05-19 15:07 UTC
+
+- Show expected local finish times for AC susceptibility baseline and microwire sweep estimates, and include finish time in live progress ETA.
+- Document the always-on PSU actual-current guard used to stop overnight microwire sweeps when the wire/current path appears open.
+
+## 2026-05-19 13:04 UTC
+
+- Added self-describing AC run metadata snapshots to baseline and microwire TSV files, including LCR settings, acquisition timing, current-loop points, and PSU configuration.
+- Added an optional 0 mA reference point before the microwire current loop for OWON setups that cannot regulate below about 10 mA.
+- Kept AC PSU profile refresh from overwriting the saved OWON COM port with unrelated serial devices.
+- Simplified AC dashboard identification with colored Y-axis labels, primary-axis-only grids, and no in-plot legends.
+
+## 2026-05-19 09:26 UTC
+
+- Improved the AC susceptibility live dashboard with measured-current plotting, optional wire-resistance and PSU-power channels, and an optional far-right Y axis.
+- Switched the default AC plot layout to four AC-specific tiles: elapsed time, measured current, frequency, and amplitude.
+- Made `Rs` and `Ls` plot as scatter-only by default, while wire resistance uses line plus symbols.
+- Added display-space horizontal spreading for repeated current, frequency, and amplitude points so dense scans do not collapse into vertical stripes.
+- Added optional UI timer telemetry to AC diagnostics so plot/UI responsiveness can be reviewed separately from acquisition logging.
+
+## 2026-05-19 07:40 UTC
+
+- Remember AC susceptibility PSU port, baud rate, and voltage-limit settings separately for each supply profile so OWON and HMP selections no longer overwrite each other.
+- Verified the bench LCR-6200 on COM9 and OWON SPE6102 on COM11 with a short live readback check that shut the PSU output back off.
+
+## 2026-05-18 16:25 UTC
+
+- Add PSU resistance and power readback columns to AC susceptibility microwire sweep logs so current-path behavior is visible alongside LCR values.
+- Base microwire sweep progress on the planned setting/current/time position instead of raw elapsed time so communication overhead does not make the progress bar show 100% and ETA 0s while the sweep is still running.
+
+## 2026-05-18 15:58 UTC
+
+- Clamp AC susceptibility OWON SPE6102 voltage setpoints to the bench-tested SCPI maximum of 61 V so the supply does not silently keep a zero-volt setpoint when a 62 V limit is requested.
+- Migrate older saved OWON AC voltage limits of 5 V, 60 V, or 62 V to the safe 61 V default while preserving intentional lower user limits.
+
+## 2026-05-18 15:45 UTC
+
+- Changed AC microwire current sweeps to wait briefly for PSU actual-current readback after setting each current point before starting LCR reads.
+- Kept zero-current/dropout readback as an abort condition after the current has been accepted, so open-circuit or broken-wire failures still stop the run.
+- Made AC PSU shutdown set current and voltage to zero before turning output off.
+
+## 2026-05-18 14:55 UTC
+
+- Added a PSU identity preflight for AC current sweeps so non-SCPI serial devices, such as a scale accidentally selected as the current supply, fail before voltage/current/output commands are sent.
+
+## 2026-05-18 14:50 UTC
+
+- Reset AC susceptibility live plots whenever a new empty-coil baseline or microwire current sweep starts, so stopped/partial runs do not remain mixed into the next run.
+
+## 2026-05-18 13:55 UTC
+
+- Made AC microwire current sweeps fail fast when PSU readback does not confirm actual current flow.
+- Logged a failure row before aborting so misleading requested-current data is not mistaken for delivered-current data.
+
+## 2026-05-18 13:35 UTC
+
+- Fixed AC microwire current sweeps failing to start when the selected PSU COM port was already open by the logger's inherited connection controls.
+- Normalized Windows serial resource strings so malformed COM path variants are passed to pyserial as plain COM port names.
+
+## 2026-05-18 12:17 UTC
+
+- Separated AC susceptibility current-supply settings from Current Annealing
+  Logger supply settings so HMP/OWON choices no longer leak between the tools.
+- Switched AC susceptibility live plots to small scatter markers and added
+  display-only per-condition thinning for dense frequency/amplitude plots.
+- Fixed time-based AC progress completion text and kept slow-LCR retry fallback
+  measuring the full requested point duration after bounded retries are
+  exhausted.
+
+## 2026-05-15 13:23 UTC
+
+- Move Mini DMA recipe/control ticks onto a worker scheduler with frozen run-start settings so Qt repaint lag and Matplotlib redraws do not pace hardware control or CSV/control-trace logging.
+- Serialize Mini DMA PSU serial access between worker current commands and UI readbacks, correctly parse scientific-notation current replies, add a current-sweep channel selector, and reset the current channel to output off at `1 V` / `1 mA` whenever automation stops.
+- Tighten the Mini DMA dashboard header so the current task uses a fixed single-line row, remove the redundant scale-rate cell, lighten live-plot markers/lines, keep older downsampled plot points visually stable, and remember current-sweep target ranges separately for iso-load, iso-stress, and iso-strain modes.
+- Include the current-sweep recipe type in auto-generated Mini DMA output base filenames, for example `iso-stress` or `iso-strain`.
+- Let Mini DMA setup finish from a stable near-zero plateau during linear-unload fallback instead of waiting indefinitely for an unreachable fitted zero-stress position.
+- Stabilize Mini DMA current-sweep task text during worker ticks and keep scheduled CSV rows flowing while iso-strain current sweeps are already inside target tolerance.
+- Close/delete Mini DMA setup and recovery child dialogs cleanly and suppress recovery prompts during window shutdown so a completed run cannot leave the main window trapped behind stale dialog ownership.
+- Add a constant-current stress-strain recipe that seeks a chosen load/stress/strain start target, then applies fixed open-loop displacement or strain steps up to a target and optionally back down at each configured current, holding/logging after every step without correcting load fluctuations away.
+- Remember Mini DMA dashboard plot channel choices separately per recipe type, using the existing global dashboard layout as the fallback for recipes that have not been customized yet.
+- Name constant-current Mini DMA output folders with an `iso-current` token, clamp the fixed step-back leg at its remembered mechanical start position, and avoid hidden post-completion origin recovery for that recipe.
+- Remove the constant-current stress-strain max-step cap setting and clamp active recipe current commands to at least `1 mA` so continuity/wire-break diagnostics remain powered even when recipe fields are set to `0 mA`.
+- Re-zero the constant-current stress-strain scan after each current change, log current-specific zero position, `l0`, and current-relative displacement/strain columns, and use that zero as the step-back origin for the current leg.
+- Start setup-preload ramps from the live load/stress value instead of forcing the target clock through zero when the sample is already partly loaded.
+- Marshal recipe-completion cleanup and session stop back to the Qt thread so worker-thread completion cannot directly manipulate widgets, timers, or Matplotlib state.
+- Add UI telemetry documentation for event-loop heartbeat, live-label cadence, and dashboard graph redraw timing.
+
+## 2026-05-15 13:11 UTC
+
+- Added automatic AC susceptibility LCR cadence recovery for overnight runs:
+  high-frequency FAST settings now log a warning, reconfigure the LCR meter,
+  discard a short recovery window, and retry instead of waiting for operator
+  confirmation when valid readings arrive suspiciously slowly.
+- Applied the same recovery behavior to empty-coil baselines and microwire
+  current sweeps.
+
+## 2026-05-15 11:37 UTC
+
+- Split Mini DMA live label/telemetry cadence from dashboard graph redraw cadence, defaulting dashboard Matplotlib refresh to 1000 ms while keeping live samples and hardware acquisition independent.
+- Added Mini DMA UI heartbeat and graph-refresh fields to `ui_telemetry.csv` so event-loop responsiveness can be inspected separately from plot redraw timing.
+- Mini DMA dashboard plots now downsample older displayed points during long runs, preserving recent samples and all logged CSV data while reducing Matplotlib redraw cost.
+
+## 2026-05-15 11:33 UTC
+
+- Moved AC susceptibility baseline and current-sweep acquisition into worker
+  threads so Matplotlib redraws cannot slow instrument logging.
+- Throttled AC live-plot redraws to a one-second dashboard cadence while still
+  flushing every measurement row to disk immediately.
+
+## 2026-05-15 09:52 UTC
+
+- Refined AC susceptibility live plots so frequency X axes are logarithmic,
+  frequency/amplitude sweeps use scatter points, and combined Rs/Ls plots show
+  legends.
+
+## 2026-05-15 09:27 UTC
+
+- Changed AC susceptibility acquisition from a fixed number of LCR readings per point to a fixed measurement time per point, defaulting to 10 seconds.
+- Updated baseline and microwire sweep estimates/progress to use elapsed measurement time so frequency-dependent LCR response rates do not bias stability checks.
+- Documented that the logger records every successful `FETC:IMP?` reply during the time window, not necessarily every internal LCR conversion.
+
+## 2026-05-15 08:58 UTC
+
+- Improved AC susceptibility Stop handling so settle waits process UI events and microwire sweep waits shut down safely when stopped.
+- Made empty-coil baseline files flush each row while measuring, leaving usable partial TSV files after Stop or interruption.
+- Let auto-detect reuse an already connected shared PSU selection instead of probing the same open COM port again.
+- Updated LCR monitor-off command normalization and documented LCR comparator/status values seen during live empty-coil checks.
+
+## 2026-05-14 11:49 UTC
+
+- Refined the AC Susceptibility Logger UI so the sticky actions, point-acquisition labels, filenames, and live plots are specific to empty-coil baseline and microwire current-sweep workflows.
+- Updated OWON SPE6102 AC sweep defaults to a 62 V voltage limit and migrated older 5 V/60 V OWON defaults when OWON is selected.
+- Replaced the quick AC plot selectors with a Mini-DMA-style configurable plot dashboard, with `Rs vs DC current` and `Ls vs DC current` as the default live views.
+- Removed startup PSU auto-detection from normal launch so safe serial `*IDN?` probing only runs when Auto-detect instruments is requested.
+- Unified empty-coil baseline and microwire sweep acquisition around one `LCR readings/point` setting, defaulting to 10 reads, and added a sticky AC progress bar above the run buttons.
+- Updated the baseline and microwire time estimates so the shared repeated-read count affects both displayed durations.
+- Split AC susceptibility output directory and sweep-base persistence from the Current Annealing Logger settings.
+- Added live ETA text to the AC progress bar and plot empty-coil baseline reads as 0 mA live points so baseline runs show visible graph activity.
+- Added an AC task/status line, interruptible empty-coil baseline stops with partial TSV saving, all-frequency defaults, manual-PSU fallback during auto setup, throttled plot redraws, and optional AC diagnostics mirroring from the Developer menu.
+
+## 2026-05-14 10:48 UTC
+
+- Simplified the AC Susceptibility Logger around the empty-coil baseline and microwire current-sweep workflow.
+- Removed duplicate normal-workflow LCR model and PSU controls, reusing the shared PSU selector for AC sweeps.
+- Added practical all-frequency/all-amplitude preset actions and defaulted OWON AC sweeps to a 60 V voltage limit.
+
+## 2026-05-14 08:12 UTC
+
+- Added centered ROI streaming for the STM32Cube MLX90640 raw protocol so narrow wire views can run cleanly at 64 Hz while preserving EEPROM-based Celsius conversion in the PyPlot viewer.
+- Updated the Cube raw packet parser and capture tool to accept compact ROI packet widths inferred from packet word counts.
+- Added STM32 I2C bus recovery before MLX90640 startup to recover from reset-mid-transaction bus stalls.
+
+## 2026-05-14 08:05 UTC
+
+- Prevented mouse-wheel scrolling over AC susceptibility combo boxes and spin boxes from accidentally changing settings.
+- Added LCR-6200 range validation and default scan values based on the manual's frequency and excitation limits.
+- Added AC setup auto-detection for HMP4030/OWON SPE6102-style SCPI power supplies using a safe `*IDN?` probe.
+
+## 2026-05-13 14:38 UTC
+
+- Added an overnight AC susceptibility sweep mode that measures selected LCR models, frequencies, and excitation levels across configurable current loops.
+- Added OWON SPE6102-compatible current-source support alongside the HMP4030-style SCPI path, with safe output-off handling on stop or error.
+- Switched the AC susceptibility default toward `Ls-Rs` while keeping optional `Lp-Rp` measurements and LCR-only baseline capture.
+
+## 2026-05-13 13:15 UTC
+
+- Added optional top power axes for current annealing and Mini DMA resistance-current plots, calculated from plotted current and resistance values as `P = I^2R` in mW.
+
+## 2026-05-13 13:00 UTC
+
+- Add Mini DMA measurements to Microwire Data Builder sections and Word report graph exports.
+- Pack the Word report Microwire data table top-to-bottom across compact columns.
+- Keep VSM temperature scan Word/Origin exports on native dual Y axes with black tick labels on both sides.
+
+## 2026-05-12 16:11 UTC
+
+- Improved Mini DMA current-sweep ETA estimates by adding a conservative hold-time allowance before start and projecting learned hold/correction overhead from completed current-sweep legs during the run.
+
+## 2026-05-12 15:48 UTC
+
+- Added an experimental STM32Cube/HAL MLX90640 raw-stream firmware for the NUCLEO-H753ZI, targeting 16 Hz and 32 Hz sensor refresh with direct I2C Fast Mode Plus subpage reads.
+- Added a host capture probe for the raw `MLXR` stream and documented the validated 15.79 packets/s and 31.52 packets/s bench results.
+- Updated the thermal camera viewer with a Cube raw protocol mode at 2 Mbaud so the new firmware displays a live diagnostic raw-count heatmap instead of appearing blank.
+- Added `MLXE` EEPROM calibration packets and a host-side Melexis temperature-conversion path; the viewer now falls back to raw counts when live calibration sanity checks detect impossible Celsius values.
+- Switched the STM32Cube firmware default from 1 MHz I2C to 400 kHz I2C after live bench testing showed the slower bus still sustains about 15.77 fps and restores valid Celsius calibration.
+- Added a Cube raw refresh-rate selector in the viewer and serial firmware commands for switching between 16, 32, and 64 Hz without rebuilding; the firmware now uses interleaved subpage reads, minimal auxiliary reads, and interrupt-driven UART packets, making 32 Hz clean while 64 Hz remains overrun-limited at about 51 fps on the valid 400 kHz I2C path.
+- Forced the MLX90640 out of chess mode when applying Cube raw refresh settings so the compact interleaved read path no longer displays alternating vertical stripes.
+- Added repeatable I2C filter CMake knobs and documented that 1 MHz I2C can reach about 62.7 packets/s at 64 Hz but still corrupts ambient/calibration data on the current bench setup.
+
+## 2026-05-12 10:43 UTC
+
+- Mini DMA adds recipe JSON save/load with descriptive generated filenames for current-sweep recipes.
+- Mini DMA adds bench provisioning for copied setups, including HMP motor-supply setup, Tic current-limit application, and pass/fail hardware status reporting.
+- Mini DMA updates the HMP4030 current-sweep voltage limit to 32.05 V and defaults the copied-bench motor supply to CH2 at 12 V / 0.5 A while keeping current annealing on CH3.
+- Mini DMA keeps the copied-bench Tic motor current limit at the cooler bench-proven 343 mA default and makes emergency stop disable the motor-supply channel as well as the current-sweep output.
+
+## 2026-05-12 00:00 UTC
+
+- Added a Mini DMA PyPlot option to recalculate each strain-current trace with its shortest measured length as `l0`, so its minimum point is displayed as physically zero strain for DMA-style visual comparison.
+
+## 2026-05-11 13:35 UTC
+
+- Added a native `Mini DMA` PyPlot plugin for logger run folders and `measurement.csv` files, plotting strain-current and resistance-current sweeps with one curve per target MPa plateau.
+- Mini DMA graph tabs now use shared PyPlot save/popout/formatting behavior and shared Origin export routing.
+
+## 2026-05-11 10:46 UTC
+
+- Added a Thermal Camera Viewer experiment that connects to the Nucleo MLX90640 text-frame stream, reconstructs the 32x24 heatmap live, displays frame statistics, and exports the current frame to Downloads.
+- Added a fast 921600-baud binary MLX90640 stream firmware and binary parser path for higher live-view throughput while keeping the text frame-dump mode as a fallback.
+
+## 2026-04-30 11:56 UTC
+
+- Added an AC Susceptibility Logger that reuses current annealing ramp/hold/reverse behavior while logging GW Instek LCR-6200/LCR-6000 impedance readings.
+- Added LCR-6000 protocol helpers, a hardware probe script, and documentation for driver setup plus first-pass frequency/amplitude sweep settings.
+- Prevented connected LCR configuration failures from silently starting an annealing run, and covered AC log formatting/header behavior with focused tests.
+- Added an LCR-only baseline workflow that records repeated empty-fixture or wire/no-current readings without starting the current annealing power-supply path.
+
+## 2026-04-30 11:32 UTC
+
+- Updated Codex worktree setup, README setup, and agent instructions so new worktrees create `.venv` with Python 3.14 instead of Python 3.13.
+- Documented the Windows `py -0p` check for missing Python 3.14 registrations before installing PyPlot.
+
+## 2026-04-29 11:53 UTC
+
+- Added Assemble Word sample reports that write one `.docx` per sample and embed generated Origin graph objects as editable Word OLE objects when Microsoft Word automation is available.
+- Word reports now appear as an Assemble export format and automatically request Origin plot generation so available graph objects can be embedded.
+- Added a non-GUI `launcher.py --microwire-word-report` path for exporting sample Word reports directly from a Builder project, assembled workbook, or R vs T CSV.
+- Expanded the sample-report template with Assemble sample/fabrication/functional fields, microscope dimensions/images, and fixed graph sections for current annealing, R vs T, VSM, DMA, shape-memory, and FMR measurements.
+- Project-based Word report exports now merge saved Builder section rows directly and discover sibling `RvsT` CSVs, so sample reports can include project measurements even when the saved Assemble table is stale.
+- Project-based Word report exports now reuse PyPlot/Origin graph generation for available graph families and keep live Origin sessions attached long enough for Word to paste editable Origin OLE objects.
+- Assemble Word exports now also route available VSM, DMA, shape-memory, and FMR records through the reusable PyPlot/Origin graph export path before embedding Word OLE objects.
+- Word reports now use outline-friendly heading styles, fit embedded Origin objects inside the page, suppress graph/book/sheet captions and Origin descriptor filenames, preserve PyPlot line/symbol styling, and export VSM temperature scans through the normal PyPlot/Origin TScan graph instead of persisted derivative/smoothed/overlay workbooks.
+- Word reports now label the opening table as Microwire data, keep empty Assemble-style values in the requested data-column order, route R vs T through the PyPlot Origin export path, and adjust Origin title/legend/secondary-axis placement so R vs T, VSM temperature scan, and dual-axis graph previews are not cropped or overlapped.
+
+## 2026-04-29 09:44 UTC
+
+- Split Mini DMA recipe scheduling into global control, data-log, and UI-refresh intervals instead of per-recipe frequencies.
+- Updated displacement, hold, calibration, Hsw, and current-sweep recipes to use timed steps and the global log cadence while keeping hardware polling/readback timers separate.
+- Moved global timing controls into `Settings -> Timing...` and let target-ramp seeking advance planned motion between scale updates for smoother setup preload/current target ramps.
+- Defaulted G&G request-mode scale acquisition to a 250 ms interval with a longer read timeout so the measured roughly 5 Hz balance response is treated as the hardware limit instead of a fast timeout.
+- Documented the verified G&G balance cadence in the Mini DMA hardware profile and refreshed stale scale-communication bring-up notes.
+- Added explicit timing settings for Tic status, Tic command-timeout keepalive, and power-supply readbacks as the first Phase 3 hardware-cadence step.
+
+## 2026-04-29 09:34 UTC
+
+- Mini DMA review/test windows can now opt out of saving settings, preventing temporary screenshot or diagnostic values from overwriting the user's saved sample, project, output, and dashboard plot selections.
+- Mini DMA load/stress target ramps now wait for fresh scale feedback after each motor correction instead of stacking planned motion between balance samples, and setup preload completion now honors the displayed setup tolerance.
+- Mini DMA Phase 3 control keeps Tic command state separate from slower status polling, so calibration micro-moves chain from the last commanded target and data logging no longer blocks on a Tic status subprocess for every row.
+- Mini DMA Tic move, halt, zero-position, and keepalive commands now run through a persistent in-app command dispatcher that coalesces stale target-position commands, while retaining `ticcmd` as the command transport.
+- Mini DMA now depends on `pyusb` and `libusb-package`, prefers native USB control transfers for Tic commands/status when available, and falls back to `ticcmd`; Developer -> Benchmark Tic Transports can compare both paths without moving the motor.
+- Mini DMA load/stress seeking now continues from the last commanded motor target after fresh scale feedback even when Tic status has not refreshed yet, avoiding repeated `Move skipped` loops during setup preload corrections.
+- Mini DMA treats backlash-limited near-target reversals as a practical target hold for non-current seeks instead of looping forever on repeated skipped reverse corrections at the end of a recipe step.
+- Mini DMA calibration now waits for a fresh post-move scale sample before recording forward/reverse points and writes an `insufficient_data` calibration report when a calibration session is stopped before a full report can be computed.
+- Mini DMA completed calibrations now seed backlash, stiffness, and noise for closed-loop load/stress seeking; stiffness is rescaled for the current gauge length, target corrections use the estimated load-path sensitivity, and too-small tolerances are raised to the motor/noise resolution floor.
+- Mini DMA backlash take-up is tracked separately from specimen displacement, so raw motor travel remains in `raw_position_mm` while logged tensile displacement and strain exclude reversal take-up.
+- Mini DMA load/stress seek speed limits now use the scale feedback interval instead of the faster control-timer interval, and setup preload slack take-up can use the configured slack `%/s` speed instead of being capped by the fine preload correction step.
+- Mini DMA setup preload ramps now convert the derived `MPa/s` rate through the stiffness estimate after force starts responding, while slack take-up before force response can use the configured slack `%/s` speed.
+- Mini DMA setup zero-load tolerance is now automatic from the `0.005 g` load floor plus motor-step/noise limits, and the old manual zero-load tolerance row is hidden.
+- Mini DMA length setup now detects a stable near-zero raw-balance plateau during the post-preload return, uses it as the run's corrected zero-load reference, and returns to the first plateau position before computing unloaded `l0`.
+- Mini DMA final current-sweep zero return and manual load-zero recovery now use the same stable near-zero plateau fallback, updating the run zero-load reference and returning to the first plateau position instead of relaxing indefinitely when the balance stops changing.
+- Mini DMA scheduled CSV logging now defers while load/stress control is waiting for fresh post-move scale feedback instead of stopping a current-sweep recipe on a delayed log row.
+- Mini DMA current-sweep settle steps now keep correcting until the requested load/stress/strain target is reached before advancing to the next plateau.
+- Mini DMA load/stress target-ramp and hold corrections in current-sweep recipes now use the target-ramp stage speed as the dynamic ceiling, with actual speed chosen from target error, measured trend, stiffness, backlash state, and scale-feedback cadence.
+- Mini DMA current sweeps now detect open-circuit wire breaks when measured current collapses near zero while voltage is at the configured limit, then disable current, stop/save the measurement, and offer displacement recovery instead of continuing the voltage-limit unwind.
+- Mini DMA sample/project/output and dashboard plot selections are saved when they change or when a session starts, and restored custom sample/base filenames are no longer overwritten by auto-naming during startup.
+- Mini DMA manual move buttons now use true press-and-hold jog control instead of Qt auto-repeat clicks, so held motion follows the configured manual `mm/s` speed more closely even when a jog tick is delayed.
+- Mini DMA Manual Actions now include an auto-connect hardware button for setup moves before starting a recipe.
+- Mini DMA pytest coverage now isolates the app's `QSettings` backend from the user's real saved Mini DMA settings, and constructor-supplied test output folders no longer replace the saved output folder on a normal close.
+- Mini DMA current-sweep balancing now uses the target ramp stage speed as the dynamic `mm/s` ceiling and hides the old correction step/speed controls as legacy settings, so annealing corrections are not artificially capped by stale fine-correction fields.
+- Mini DMA length setup now prompts for an approximate starting wire length before preload, uses it to scale the stiffness prior, and writes setup-only `setup.txt` / `setup.csv` logs alongside the normal measurement data.
+- Mini DMA now writes every run into a dedicated output folder with stable file names: `measurement.txt`, `measurement.csv`, `metadata.json`, `scale_raw.csv`, `setup.txt`, and `setup.csv`; repeated runs use `_run02`, `_run03`, and later folders without chaining existing run suffixes.
+- Mini DMA now cleans repeated `_runNN` suffix chains from restored/typed base filenames, adds an `Open` button next to the output-folder `Browse` button, and treats small load/stress target crossings inside the physical reversal band as a practical hold instead of immediately reversing into backlash-driven hunting.
+- Added a detailed Mini DMA speed-control reference with diagrams covering ramp units, sample-driven force feedback, live stiffness scaling, predictive correction distance, dynamic servo hold, and backlash/reversal handling.
+- Mini DMA load/stress seeking now waits for expected motor completion before accepting post-move scale feedback, keeps a run-level live stiffness estimate during ramps, uses a wider automatic motor-step tolerance floor, slows to the minimum motor speed near target, and displays live speed equivalents in `mm/s`, `g/s`, `MPa/s`, and `%/s`.
+- Mini DMA load/stress tolerances are now automatic from a `0.005 g` starting floor plus motor-step/noise limits, and the old left-panel Overview is replaced by fixed-width dashboard cells for live speed and hardware state.
+- Mini DMA live speed/hardware cells now live inside the dashboard header, setup preload slack take-up treats tiny near-zero residual loads as slack so it can use the configured slack `%/s` speed, and zero-load plateau fallback uses the center of the stable raw-balance band before returning to the first plateau position.
+- Mini DMA current-sweep servo corrections now cap predicted move distance by specimen strain percentage, defaulting to `5%`, and cap correction speed by both `%/s` and a hard `mm/s` motor ceiling so long and short wires scale more consistently.
+- Mini DMA current sweeps keep the requested current ramp static during ordinary servo error; operators should lower the fixed current-ramp rate when thermal-history control matters instead of relying on automatic current pauses or stress-triggered unwind.
+- Mini DMA setup/final zero-load return no longer accepts a high residual load as zero just because the ordinary stiffness/backlash tolerance band is wide; the stable near-zero plateau fallback remains the baseline update path.
+- Mini DMA load/stress seeking now uses a hybrid far/near controller: far from target it can keep the motor moving and revise the prediction on each fresh scale sample, while near target or suspicious feedback still uses conservative post-move scale gating.
+- Mini DMA speed-control docs now distinguish the 4-5 Hz scale reply rate from the slower near-target correction frequency and include diagrams for hybrid far/near servo behavior.
+- Mini DMA gated load/stress corrections now treat recipe/dynamic speed as desired average speed over the full correction cycle and raise the instantaneous motor command speed to compensate for settle plus scale-response dead time, while still respecting the hard `mm/s` and `%/s` caps.
+- Mini DMA motor displacement calibration now uses a provisional `800 steps/mm` default for the expected 1/8-microstep configuration, migrates only old saved `100 steps/mm` defaults, and adds an external-gauge motor step calibration workflow that moves by raw Tic units, writes CSV/JSON logs, reports fit quality, and does not apply the result by default.
+- Mini DMA motor step calibration now keeps a progress window visible for the whole calibration, including slow move waits and accepted external-gauge readings.
+- Mini DMA motor step calibration now keeps the Tic command-timeout keepalive active during slow raw-step calibration moves, preventing the controller from stopping after only a few steps.
+- Mini DMA motor settings and docs now distinguish mechanical full steps/mm from Tic controller units/mm, documenting the verified `100 full steps/mm * 8 microsteps = 800 Tic units/mm` relationship.
+- Mini DMA advanced motor settings now expose mechanical full steps/mm, Tic step mode, and derived Tic units/mm; applying a new Tic step mode updates the controller through `ticcmd` and rewrites the current-position register so physical mm values stay continuous.
+- Mini DMA now has a continuity-current monitor for automated measurements, logs raw scale samples during mandatory setup, applies directional load-limit checks during setup preload, and makes setup preload wait for post-move force feedback before issuing the next correction.
+- Mini DMA output-collision and setup windows now show the active sample/output identity, and calibration ignores the saved backlash compensation while measuring new stiffness/backlash.
+- Mini DMA now replaces stale output base filenames when the current sample identity changes, and setup preload starts by relaxing toward the final preload target if the wire is already above it.
+- Mini DMA setup zero-load plateau fallback now uses a run-level corrected zero reference without changing the configured/default `21.200 g` baseline unless the operator explicitly edits or captures a new zero-load value.
+- Mini DMA setup preload no longer treats an already-over-target sample as an immediate overload stop when the next control action can relax toward the requested preload.
+- Mini DMA setup preload relaxation from above target now stays under the setup-time preload ramp cap instead of using cruise feedback or the global motion-speed ceiling.
+- Mini DMA calibration now caps the load-equivalent plateau acceptance band so an inflated live stiffness estimate cannot mark a preload target reached while the measured load is still far away.
+- Mini DMA setup now derives the engaged-wire preload ramp from setup time, uses a separate `%/s` slack take-up speed before force response, relies on the global motion speed as the hard stage-speed ceiling, and quantizes applied calibration backlash to achievable Tic units.
+- Mini DMA setup return-to-zero and automatic post-calibration return-to-start now use a setup return-time-derived speed instead of the global motion speed directly.
+- Mini DMA now exposes the shared return-time setting in Manual Actions, uses it for manual displacement recovery and post-recipe return-to-start, keeps setup/recovery popups plotting fresh UI-refresh samples during waits, shows a throttled ETA in recipe progress, and keeps raw-scale elapsed time continuous across setup and recipe logging.
+- Mini DMA now uses live Tic acceleration/deceleration settings in move-duration and correction-travel estimates, keeping target-position commands unchanged while making post-move feedback waits and cruise/near decisions less optimistic for short moves.
+- Mini DMA recovery now restarts the live UI-refresh timer after a stopped session, and setup zero-load fallback now uses a hybrid stable-plateau gate based on elapsed time plus strain-scaled return travel.
+- Mini DMA setup preload now leaves slack `%/s` take-up permanently after the first real load response for that preload target, then uses conservative one-move-at-a-time ramp-capped corrections in both tensioning and relaxation directions.
+- Mini DMA setup preload now interprets setup time as the live current-to-target preload span, setup return-to-zero holds its initial time-based unload speed instead of shrinking every near-zero sample, and current-sweep load/stress target ramps start in gated feedback.
+- Mini DMA setup preload now treats the first slack-to-taut load jump as engagement rather than trusted stiffness and caps setup preload acceptance so backlash/reversal logic cannot accept a multi-MPa overshoot as the preload target.
+- Mini DMA current-sweep load/stress corrections now use the stiffest safe stiffness estimate and cap each planned correction to `10 MPa` as well as the strain limit, reducing aggressive first-approach jumps after setup.
+- Mini DMA now treats the applied-load limit as a directional control boundary that blocks or halts only tension-increasing motion, and treats the raw scale display limit, defaulting to `30 g`, as a hard balance-protection interlock that halts automation and blocks ordinary moves until the live display is back below the limit.
+- Mini DMA current sweeps can optionally pause the current ramp when load/stress/strain error exceeds a configured band, keep displacement correction active, and resume without a wall-clock current jump once the target recovers.
+- Mini DMA current sweeps now freeze mechanical stiffness after setup/calibration, treat backlash as reversal take-up instead of large-error target acceptance, and ramp setup-preload overshoots down from the live overshot load/stress over the configured setup time.
+- Mini DMA current-sweep dynamic speed control now controls correction distance as the primary average-speed mechanism: load/stress corrections shrink from coarse target-space caps toward `1 MPa` equivalent and then single motor steps near target while keeping the Tic command speed practical for short moves.
+- Mini DMA runs now include `control_trace.csv`, a per-decision seek trace with target, feedback, error, stiffness, correction distance, backlash take-up, command speed, wait reason, and move result for diagnosing closed-loop behavior.
+- Mini DMA current-sweep load/stress holds now use conservative gated force feedback with `1 MPa`-equivalent correction caps, avoiding stale cruise corrections that could stack around the target.
+- Mini DMA setup slack take-up now caps each pre-contact move by a `5 MPa` stiffness-prior equivalent step, the zero-load plateau fallback accepts a stable baseline sooner, and live plots hide zero-current current/resistance points.
+- Mini DMA setup preload and current-sweep load/stress fine correction now shrink to single motor-step moves near target, avoid predictive backlash injection in that fine band, and require extra fresh balance confirmation before repeating very-near-target corrections; `control_trace.csv` now includes motor-step and post-move sample-count diagnostics.
+- Mini DMA length setup now computes unloaded `l0` from a fitted linear unload intercept during the post-preload 20 MPa -> 0 MPa return when the taut elastic segment is available, using slack/plateau detection as confirmation instead of the baseline source.
+- Mini DMA setup return-to-zero now treats collapse of the linear unload slope as slack onset, commits the fitted zero-stress intercept for `l0`, and returns there instead of continuing to drive the wire farther into slack.
+- Mini DMA current-sweep load/stress reversals no longer perform predictive full-backlash take-up, so dynamic correction steps around targets are not dominated by the saved backlash distance.
+- Mini DMA zero-load plateau fallback now accepts a stable flat balance after `0.05%` of `l0` or `4` motor units of return travel, and the recovery load-to-zero graph now labels load and displacement with a legend.
+- Mini DMA recovery graphs now use more distinct load/displacement colors and keep the x-axis label readable in dark mode.
+- Mini DMA setup now keeps the continuity current active before current-sweep recipes, and length setup reuses the committed slack-onset zero position when applying `l0` instead of refitting the baseline after additional low-slope samples.
+- Mini DMA current-ramp hold now uses a filtered, noise-adaptive high-side load/stress error so annealing fluctuations do not hold current indefinitely, and large current-sweep stress errors can use faster `10 MPa`/`5 MPa` correction caps before shrinking near target.
+- Mini DMA current-sweep settle after each current ramp is now time-bounded instead of waiting forever for noisy annealing feedback, current hold uses the same absolute load/stress error on current-up and current-down ramps, and paused-current recovery can use a larger `20 MPa` equivalent correction cap while the current ramp is held.
+- Mini DMA current-sweep recipes now expose the stress correction caps and current-hold filter/noise bands in the UI, show a concise current-task summary, and use a more compact dashboard header with native-font live values.
+- Mini DMA current hold no longer has a maximum pause-time stop, and the dashboard header now uses a tighter 3-column live-value grid so the plot area fits better on narrower screens.
+- Mini DMA current-sweep recipes now include a `First overheating` option that repeats the first target's current sweep once before continuing to later targets.
+- Mini DMA current-sweep load/stress corrections now use a smooth dynamic error-fraction cap with visible sweep/hold hard rails, and current sweeps always include the return-to-start-current leg at each target.
+- Mini DMA now exposes an occasional-use `Tare scale` button in the normal Hardware scale controls for balances whose front-panel tare is unavailable while connected.
+- Mini DMA current-sweep advanced caps, hold bands, and filter settings are now collapsed behind an expander by default, the hold hard cap default migrates from `20 MPa` to `30 MPa`, and manual jog presses resync from the live motor position when no move is pending so stale targets cannot flip a down jog upward.
+- Mini DMA dashboard graphs now append live UI-refresh samples between logged CSV rows, using already-known scale/motor/supply state so plots update smoothly without adding hardware reads.
+
+## 2026-04-28 13:11 UTC
+
+- Updated Codex environment setup, the run helper, and README quick-start instructions to use Python 3.14.
+- Documented Python 3.14.4 as the current setup reference build and noted the Windows per-user install fallback.
+
+## 2026-04-28 11:45 UTC
+
+- Made Mini DMA recipe startup run the length setup as a mandatory unlogged preparation step before normal recipe CSV/graph logging begins.
+- Streamlined the specimen panel into a `Sample` tab by removing manual gauge-length, preload-zero, Tic-zero, manual session, and optional naming controls; sample naming now always updates from the naming fields.
+- Added recipe-side stress/load equivalents, including ramp-rate equivalents, using the current wire diameter, and made those equivalent labels readable in the dark UI.
+- Remembered sample naming fields and the last `.pydpj` project, auto-imported matching Builder diameter data on restore/name changes, and marked manual/unimported diameter values in red while still allowing manual edits.
+- Added a live length-setup popup graph for load, stress, and displacement with its own pause, stop, and progress controls.
+- Changed setup preload/return correction moves to use the setup stage speed and control interval as the net correction-distance cap, so setup preload ramps are no longer throttled by the calibration micro-move correction step.
+- Added a Developer-menu run-log file mirror for debugging and changed return-to-start after recipe completion to run as an unlogged recovery popup instead of normal recipe rows.
+
+## 2026-04-28 11:32 UTC
+
+- Fixed the Windows Codex `Run` action so it returns to PowerShell after PyPlot exits instead of leaving the terminal parked inside `cmd.exe`.
+- Hardened the tracked `run-pyplot.cmd` wrapper so already-cached `cmd /k` Run commands also skip the pause and close cleanly.
+
+## 2026-04-28 11:06 UTC
+
+- Removed the Mini DMA hardware-tab separate heating program; current is now recipe-owned.
+- Changed Mini DMA voltage-limit handling during current sweeps to ramp recipe current back to the sweep start current and continue instead of stopping the whole recipe.
+- Made the zero-load hanging-weight reference the default max applied-load ceiling, with the custom max-load setting acting only as an optional lower limit.
+
+## 2026-04-28 11:01 UTC
+
+- Added a Recipe-tab sample reminder so Mini DMA shows the currently selected sample before a recipe starts.
+- Changed existing-output handling so repeated Mini DMA measurements can be saved as the next `_run02`, `_run03`, and later filename instead of replacing earlier files.
+
+## 2026-04-28 10:44 UTC
+
+- Added an automatic Mini DMA Calibration recipe that records baseline scale noise, preload targets, forward/reverse micro-move phases, and a JSON calibration report with stiffness, backlash, and stress-strain estimates when geometry is available.
+- Split calibration preload seeking from micro-move characterization so bent/stiff calibration wires can be straightened with faster, coarser corrections before fine stiffness/backlash measurements.
+- Shared the mandatory preload/return length setup workflow with the Calibration recipe and kept old `calibration_copper` saved settings compatible with the new generic recipe name.
+- Made the recipe panel size itself to the visible recipe page so calibration controls no longer leave a large blank area before the start button.
+
+## 2026-04-28 09:46 UTC
+
+- Added a Mini DMA hardware profile documenting the current G&G balance, StepperOnline captive linear actuator, and Pololu Tic T500 controller, including product links, derived motion/load/stress implications, and backlash characterization guidance.
+
+## 2026-04-28 09:26 UTC
+
+- Mini DMA now separates high-rate scale acquisition from slower session logging, writes a raw `<run>.scale_raw.csv` sidecar during active sessions, and adds interval load summary columns to the main CSV.
+- Current-sweep recipes now expose separate control and log intervals so closed-loop corrections can run faster than recorded session rows.
+
+## 2026-04-27 14:13 UTC
+
+- Shape Memory Stress/Strain shared Origin export now exports only the plugin's current graph tabs, preventing stale separate load/displacement and stress/strain tabs from being sent when the active layout is the dual-axis overlay.
+
+## 2026-04-24 12:08 UTC
+
+- Require Python 3.14 for the project environment.
+- Refresh runtime, plotting, scientific analysis, PDF, Origin, packaging, and test dependency pins.
+
+## 2026-04-24 11:05 UTC
+
+- PyPlot live automation sessions now carry long command timeouts through the session bridge, so slow Origin exports can return a clean success response instead of timing out at the controller.
+- Automation-triggered shared Origin exports now suppress blocking success dialogs while still logging the export result, preventing offscreen/live-session runs from hanging after graphs are created.
+
+## 2026-04-23 14:05 UTC
+
+- Fixed shared dual-axis Origin export spacing so Shape Memory Stress/Strain overlays keep the graph title above the top-axis tick labels and center the mirrored top `Strain [%]` axis caption instead of placing it in the legend area.
+
+## 2026-04-23 13:41 UTC
+
+- Mini DMA Logger now keeps the last confirmed stage position separate from the commanded target so strain, stress, and recorded points do not jump ahead of real motion after a move command.
+- Hsw distribution seeking now refuses to act on stale or missing balance readings for load- and stress-based control instead of nudging the stage on old force data.
+- Mini DMA session metadata now preserves the original creation timestamp across JSON sidecar rewrites during a run.
+- Mini DMA now supports active hardware auto-detection for the G&G scale, the serial supply, and the Pololu Tic controller, plus a normal zero-load scale reference workflow that leaves the balance showing real grams while keeping physical/software tare actions as advanced diagnostics only.
+- Mini DMA naming now mirrors the other microwire loggers more closely by keeping human-readable microwire tokens like `156/2` in the sample name while using file-safe tokens like `156_2` in the output filename.
+- Mini DMA's settings panel now prevents mouse-wheel scrolling from silently changing spin-box and drop-down values, removes horizontal scrolling, and exposes tare actions in the manual setup controls.
+- Mini DMA now hides low-level scale and motor driver settings behind a collapsed advanced hardware panel so routine bench controls are easier to understand.
+- Mini DMA recipe start now performs a hardware preflight that auto-detects/connects required scale and supply devices, reports missing hardware together, and avoids creating run files until preflight succeeds.
+- Mini DMA recipe estimates now switch to minutes/hours for longer runs and include a live progress bar, while the duplicate status-bar log echo is hidden.
+- Mini DMA hides the separate heating program for controlled current-sweep recipes because those recipes control current directly.
+- Mini DMA now restores stale saved `ticcmd` paths to a discovered local install, clamps tiny saved jog values to a usable minimum, and refuses motor moves that round to the current step.
+- Mini DMA now exposes per-recipe displacement or correction move speed for Tic moves, applies it through `ticcmd --max-speed`, and labels manual motion as stacked arrow `Move up` / `Move down` controls that repeat while held and chain from the last commanded target.
+- Mini DMA held manual movement now advances the commanded linear position by elapsed time times the configured `Manual move speed`, so a held `1 mm/s` move no longer crawls at the button repeat rate.
+- Mini DMA now warns when the Tic VIN motor-supply voltage is missing/too low and keeps resetting the Tic command timeout during active slow moves.
+- Mini DMA now shows optional zero-load reference capture inside the current-sweep recipe settings, and closed-loop recipe corrections chain from the last commanded target while using conservative recipe-specific correction step/speed values.
+- Mini DMA current-sweep seeking now detects target overshoot, switches to fine reverse correction steps, and can apply measured backlash take-up when reversing direction.
+- Mini DMA current-sweep seeking now records feedback samples while correcting load/stress/strain, uses smaller/slower correction moves near the target, and no longer stops merely because load is flat during displacement, which is expected during shape-memory transformation plateaus.
+- Mini DMA current-sweep defaults now use the faster copper bring-up recipe of `0` to `9 g` in `3 g` steps and a `1` to `3 mA` current ramp.
+- Mini DMA now has pause/resume recipe controls; pause/stop turn the current-annealing output off, stopped recipes can be resumed from the saved step or restarted, and any recipe stop/fault can offer displacement/load recovery.
+- Mini DMA can optionally power the motor from HMP4030 CH1 or CH2 during recipe preflight while keeping current annealing on the configured annealing channel.
+- Mini DMA recovery now opens a temporary dual-axis load/displacement vs time plot while returning displacement or load toward zero/start, without changing the normal run dashboard; the same recovery actions are also available as manual buttons.
+- Mini DMA motion spin boxes now clamp manual edits to the physical motor resolution instead of reverting mysteriously, and load/stress seeking stops on truly stale scale feedback while still waiting for a fresh reading after each commanded move.
+- Mini DMA max-load safety now blocks only tension-increasing moves when the live load is already over the limit, so relaxing/downward manual moves remain available to recover the rig.
+- Mini DMA now puts `Recipe` first, merges scale/motor/power setup into a lower-priority `Hardware` tab, and splits current-sweep recipes into explicit DMA-style entries for iso-load, iso-stress, and iso-strain.
+- Mini DMA recipe summaries and spin boxes now trim zero-only decimals, for example `20 g` instead of `20.0000 g`.
+- Mini DMA now includes current-sweep recipes for holding load, stress, or strain while ramping current at a configurable mA/s rate; the app updates current in smaller increments at the recipe interval, leaves zero-current resistance blank, and keeps sampling resistance/mechanics during seeking and settling.
+- Mini DMA now displays/logs applied tensile load as a positive magnitude even when the scale reports negative values, keeps raw scale/Tic diagnostics, and separates tensile displacement direction from scale sign so target seeking does not stop because of a sign mismatch.
+- Mini DMA now defaults this rig's motion convention to negative raw Tic travel as positive tensile displacement, keeps correcting toward a tighter near-target band inside the broad hold tolerance, stops the session log when a recipe completes, and keeps recovery-to-zero samples out of the recipe CSV.
+- Mini DMA load/stress correction now bases each correction on the latest confirmed Tic position and limits target distance by correction speed times recipe interval, preventing slow moves from stacking ahead of the real stage and causing overshoot/undershoot loops.
+- Mini DMA current sweeps now advance current from elapsed time, use HMP4030-style 0.2 mA setpoint resolution below 1 A, keep sub-mA precision on the first output-enable command, and throttle supply readbacks during fast automation so current commands do not fight voltage/current queries on the same serial link.
+- Mini DMA current-sweep recipes now ramp load/stress/strain targets at configurable g/s, MPa/s, or %/s rates, with a separate target-ramp stage speed so automatic return-to-target moves do not crawl at the fine correction speed.
+- Mini DMA recipe progress now counts timed target-ramp and current-ramp ticks, so long elapsed-time sweeps do not appear as a short handful of recipe rows or reach 100% before completion.
+- Mini DMA load/stress control now defaults to a `21.200 g` zero-load scale reference for the hanging-weight rig and computes applied wire load from the live real balance reading instead of remotely taring the scale.
+- Mini DMA current-sweep recipes can now run an optional zero/preload length setup before annealing: actively seek `0 g` applied load, ramp to a configurable preload stress, prompt for the measured gauge length, return to `0 g`, compute `l0`, and then start the recipe without using a slack/free-transformation mode.
+- Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
+- Added a Mini DMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
+- Microwire Data Builder video overrides now tolerate minimal video tables that are missing derived video-length columns.
+- Added dedicated Mini DMA regression tests for confirmed-position tracking, stale-scale safety, session metadata stability, hardware auto-detection, zero-load reference wiring, and naming behavior, and expanded import coverage to include the Mini DMA module.
+- Added `scipy==1.17.1` as a runtime dependency so `microwire_eda` imports and the related launcher test path work in a fresh project environment.
+
+## 2026-04-23 13:22 UTC
+
+- Added a persistent PyPlot automation session mode in `launcher.py` with `--pyplot-session-start`, `--pyplot-session-state`, `--pyplot-session-send`, `--pyplot-session-close`, and `--pyplot-session-list`, so Codex can keep driving one live PyPlot window across multiple follow-up commands instead of reopening PyPlot for every batch job.
+- Added a public `PyPlotWorkbench` automation API for plugin selection, imports, plotting, tab activation, shared exports, project save/load, figure-building, and screenshot capture; the batch automation path now uses the same API instead of private widget pokes.
+- Added launcher coverage for the live-session control flow, including a cross-process test that starts a real session, imports data, generates a graph, captures a plot image, and closes the session cleanly.
+
+## 2026-04-23 12:30 UTC
+
+- Shape Memory Stress/Strain now defaults new sessions to the dual-axis overlay layout instead of separate tabs.
+- Shared `Open in Origin...` now preserves the active Shape Memory layout, so dual-axis overlays export as dual-axis Origin graphs instead of being regenerated as separate load/stress tabs first.
+
+## 2026-04-23 08:45 UTC
+
+- VSM Hysteresis Loops now keeps the shared PyPlot file/folder/manual-path import handlers instead of rebinding its legacy import UI, so folder import behaves like other plugins.
+- The VSM Hysteresis loader now accepts selected directories as sources and expands them through the existing recursive VSM file scan before loading measurements.
+
+## 2026-04-23 08:38 UTC
+
+- VSM Temperature Scan Origin export now keeps a single graph title instead of duplicating the same text on the top X axis title, preventing overlapping titles in Origin graphs.
+
+## 2026-04-23 07:33 UTC
+
+- Current Annealing now gives repeated increasing/decreasing cycles their own color shades and per-cycle legend labels in both Matplotlib and the standalone Origin export path.
+- Shared `Open in Origin` export now preserves the actual Matplotlib series colors for exported plots instead of repainting them with the generic Origin palette.
+- Removed the redundant Current Annealing plugin-specific `Origin export` settings section so PyPlot uses the shared top-toolbar Origin actions for this workflow.
+- Current Annealing import now distinguishes amp-vs-milliamp source data more safely and rejects files that would exceed the expected 1000 mA annealing ceiling after unit detection.
+
+## 2026-04-21 15:30 UTC
+
+- Added a Microwire Data Builder VSM hysteresis preview angle mode that can limit displayed loops to 0° and 90° for better readability.
+- Tightened the VSM hysteresis angle filter so `180°` no longer appears in the `0° and 90° only` preview mode.
+- Added a Microwire Data Builder VSM temperature preview mode that can show raw or smoothed traces, and improved wide multi-graph preview layout/scrolling.
+- Removed unnecessary VSM temp-scan preview PNG copies from the synced Praha Google Drive sample drop.
+
+## 2026-04-20 10:25 UTC
+
+- Add a new PyPlot `R vs T` plugin for temperature-resistance CSV files, plotting measured temperature against resistance with heating and cooling separated in one graph.
+- Import RvsT data into shared PyPlot workbooks so the graphs can reuse shared save/export/Origin flows.
+- Make the shared `Check outliers...` workflow use local-neighbourhood detection and add a preview graph with flagged points highlighted before removal.
+- Speed up the shared `Check outliers...` workflow on large datasets by switching to rolling/vectorized detection and loading preview tabs lazily.
+- Replace the multiple graph-export shortcut buttons with a single shared `Save graph...` flow that opens export options before the file picker.
+- Add a shared `Remove bad data points...` graph-edit mode with rectangle selection, click-to-toggle point picks, and an always-on-top selection window that confirms point removal without an extra toolbar button.
+- Tighten shared `Check outliers...` previewing so plotted columns can be reviewed as row-number scatter plots instead of worksheet cross-plots when axis-role metadata is available.
+- Show `R vs T` multi-cycle ramps as separate legend entries (`Heating 1`, `Cooling 1`, `Heating 2`, ...) instead of collapsing all ramps into one heating/cooling pair.
+- Apply shared legend defaults when new graph tabs are registered so saved legend orientation settings affect freshly plotted `R vs T` graphs.
+- Give repeated `R vs T` heating cycles distinct warm shades and cooling cycles distinct cool shades instead of reusing one red/blue pair.
+- Retrigger graph display scaling after programmatic MDI subwindow resizes so cascaded/tiled graph windows keep text and markers proportional to the current window size.
+- Make tight-layout `Apply plugin override` store only explicit plugin font recommendations instead of copying full graph geometry into a plugin override.
+- Stop tight-layout warnings from silently auto-reapplying saved plugin overrides, preventing plugin overrides from appearing to enable themselves.
+- Refresh `R vs T` graph tabs in place after bad-data deletion instead of destroying and recreating the MDI subwindow, and ensure the bad-data confirmation prompt stays above the always-on-top selection window.
+- Suppress recursive primary-dock resize/visibility callbacks during startup normalization and retabifying so the side panels stop repeatedly resizing themselves after the session opens.
+- Stop ordinary non-maximize subwindow state changes from reapplying the global MDI layout, so manually moved graph windows keep their positions when you activate another graph.
+- Remove extra dock-switcher visibility refresh hooks and legacy dock-visibility normalization hooks that could make the Project Explorer/Object Manager widths keep shifting after resize.
+- Make hidden/restored graph tabs honor the active fullscreen lock as well as `_global_maximized`, so switching graphs while fullscreen is active no longer opens a small window.
+- Keep the current dock width when a side panel is narrowed and hidden, so the next PyPlot session reopens Project Explorer/Object Manager at the last width instead of a larger stale width.
+- Reduce startup dock churn by restoring primary dock visibility/width once instead of replaying multiple initial retabify/resize passes on first show.
+- Add `R vs T` residual plotting mode so users can plot per-cycle linear-fit residuals alongside the raw resistance-vs-temperature view.
+- Move `R vs T` residual plotting to the top plugin toolbar (`Plot residuals`) instead of an in-panel button, matching the rest of the plotting workflow.
+- Keep the right-side dock switcher on the outer edge of Object Manager during both initial dock creation and retabify, preventing the Object Manager and its switcher from falling into a stray mini window at the top-left of the app.
+- Remove the stale `R vs T` plug-in settings section so fresh sessions only expose the shared `Graph formatting` controls instead of a dead `Origin export` graph-settings button.
+
+## 2026-04-17 09:45 UTC
+
+- Fixed the microscope refresh flow so saved manual `d`/`D` values persist instead of disappearing after a refresh.
+- Changed microscope refresh to merge in newly discovered rows and image references without rebuilding or backfilling existing manual values.
+- Removed OCR-driven microscope and video extraction paths; those workflows are now manual review and entry only.
+- Removed the PaddleOCR/PaddleX/PaddlePaddle dependency chain from the project requirements.
+
+## 2026-04-16 16:07 UTC
+
+- Added a new `Mini DMA Logger` launcher app for early hardware-driven stress/strain work with a serial scale and Pololu Tic-controlled stepper stage.
+- The logger now supports scale polling, Tic status and jog commands, software tare and position zeroing, displacement-controlled ramp/cycle/hold recipes, richer session metadata, and TXT/CSV/JSON session export.
+- Added G&G scale diagnostics: a probe action, automatic no-data warnings, and UI guidance that G&G RS232 balances need a DB9 null modem crossover rather than a straight-through serial link.
+- Reworked the `Mini DMA Logger` UI into a dashboard layout with hardware/specimen/recipe tabs, status cards, naming helpers, safety limits, and a cleaner plot/log split.
+- Added integrated current-annealing control with reusable supply profiles, manual output control, live current/voltage/resistance/power logging, and mechanical-plus-heating recipe support in the same session.
+- Added preload-aware strain zeroing with explicit `l0` gauge length handling so strain can stay pending until the sample is actually under load instead of during wire straightening.
+- Added configurable four-tile plotting with dark-theme-aware Matplotlib styling, selectable channels per axis, DMA/heating/mechanical presets, and a dedicated popup plot editor so the live dashboard keeps more space for graphs.
+- Added `.pydpj` specimen import so composition/sample naming and sample diameter can be pulled in from Microwire Data Builder projects for stress calculation.
+- Added an initial `Hsw distribution` recipe mode that can step through load, stress, or strain plateaus with configurable tolerance, seek nudge, point count per plateau, and optional reverse sweep.
+- Made the left-hand `Overview` section collapsible so the main working layout can prioritize controls and plots while still keeping the status cards available on demand.
+- TXT output now follows the existing manual stress/strain column convention so the saved files can be opened directly in the Shape Memory Stress/Strain plotting workflow.
+
+## 2026-04-14 15:05 UTC
+
+- Microwire Data Builder VSM hysteresis previews now default to a `±1000 Oe` X-range so loop differences are easier to compare at a glance.
+- Added a saved `Preview range` control in the VSM hysteresis section so previews can switch between zoomed field windows and the full measured range.
+
+## 2026-04-14 08:35 UTC
+
+- Microwire Data Builder microscope refreshes now merge newly scanned microscope files into the existing section state instead of replacing earlier rows when only a subset of images is refreshed.
+- Saved microscope review flags, overrides, OCR cache entries, and previously known microscope rows are preserved across partial refreshes.
+- Saved reviewed microscope diameters are reapplied immediately after refresh/apply operations, preventing previously reviewed `d`, `D`, and `d/D` values from appearing blank while new microscope files are merged.
+- Partial microscope refreshes no longer let empty placeholder entries overwrite previously saved detections for untouched wires, so old OCR/image provenance is preserved when only new microscope files are processed.
+- Microscope-only Builder/export rows once again keep `Microscope only` provenance instead of falling back to fabrication-only labels when no fabrication records exist.
+- Assemble preview/export now falls back to stored annealing and microscope payloads even when a section's in-memory payload marker is missing, keeping hidden-end filtering and saved measurement data available.
+
+## 2026-04-13 14:35 UTC
+
+- Microwire Data Builder VSM hysteresis and VSM temperature scan table previews now reserve full multi-graph width per row so grouped thumbnails stay full-height and render side by side.
+- VSM temperature scan previews no longer stack multiple scans vertically inside one compressed graph slot.
+
+## 2026-04-10 09:28 UTC
+
+- Microwire EDA now prefers copied .pydpj project files, supports raw/per-wire-median/per-wire-best repeated-measurement analysis modes, and writes those choices into report artifacts.
+- EDA now derives geometry helper metrics, parses elemental composition columns, and adds dedicated current- and composition-side correlation sections to the report.
+- Auto-findings now prefer controllable fabrication signals when summarizing process-to-outcome trends.
+- Aggregated EDA modes now preserve rows missing a complete `Composition + Microwire` key, and legacy mojibake diameter headers still map into the canonical geometry columns.
+- Fabrication source relabeling now preserves annealing provenance for dual-source wires and no longer fails when older payloads omit the `Data source` column.
+
+## 2026-04-09 09:45 UTC
+
+- Microwire Data Builder now labels promoted sibling rows in Fabrication as fabrication-only provenance instead of implying that every same-draw piece was directly measured.
+- Fabrication project reload now preserves saved source paths from `_source_paths` rather than falling back to the human-readable `Data source` label.
+
+## 2026-04-01 12:00 UTC
+
+- Added a dedicated `Universal Video Builder` launcher entry for manual fabrication-video review outside the full Microwire Data Builder.
+- Added a single-window fabrication/video workflow that scans connected fabrication roots, keeps fabrication data and linked videos in one table, and supports searchable composition selection plus multi-draw row adding.
+- Refined the Universal Video Builder layout so the controls and guidance text stay compact and readable, while keeping missing-video rows red and using a softer review state for manual gaps.
+- Made source-video launching more robust by falling back to the native OS file opener when Qt refuses to open a valid local video file.
+- Added dedicated `.pydpj` save/load support for the new workflow under the `MicrowireVideoBuilder` project kind.
+- Added project docs for the new manual-only workflow and documented that it does not use OCR.
+- Fixed the Universal Video Builder so broad fabrication roots are scanned independently of annealing or microscope relevance filters from other builder sections, and ignore temporary `~$` Excel lock files during cataloging.
+- Improved the Universal Video Builder add-microwire workflow with a scrollable multi-select draw picker that stays open while selecting several draws, a dedicated fabrication-spreadsheet open action, visible `d`/`D`/`d/D` fabrication columns, and filtering for empty placeholder tail pieces.
+- Added `Remove selected row(s)` to the Universal Video Builder so mistakenly added microwire rows can be dropped from the current table without rescanning the fabrication root.
+
+## 2026-03-25 08:30 UTC
+
+- Microwire Data Builder Current annealing now keeps the "other annealing" preview column wide enough for multiple measurements instead of shrinking the individual graphs.
+- Microwire Data Builder Shape memory stress/strain now treats saved fracture values and fracture current as one linked bundle, preventing orphan fracture-current values and restoring saved per-file picks after refresh/reprocess.
+- Microwire Data Builder Shape memory stress/strain now defaults the graph preview panel closed on first open, removes legacy duplicate current columns, hides internal source bookkeeping columns, avoids rebuilding every preview tab when you only switch between graphs, shows one color-banded row per graph instead of cramming multiple graphs into one row, lets you hide the in-table graph column while keeping the preview panel, shrinks row height back to normal when that graph column is hidden, and keeps placeholder rows blank instead of showing inferred current values without linked saved data.
+- Microwire Data Builder Shape memory stress/strain now rebuilds saved-project rows from their stored source paths when live graph payloads are missing, syncs microscope-derived current density immediately after project load, ignores stale cached record payloads that do not belong to the currently loaded section data, drops duplicate blank placeholder rows when reopening saved projects, and includes a `Clear selected values` action so individual graph rows can be reset before re-entering manual picks.
+- Microwire Data Builder Assemble now restores shape-memory values from the per-graph source rows and drops empty shape-memory rows after orphan-current cleanup, so current/current-density values do not appear without the matching stress/strain or fracture values and manually picked graph values carry over reliably. Sample-level fallback values can still carry through, but current metadata now stays blank unless the saved values are tied to an explicit graph source.
+- Microwire Data Builder Assemble now preserves multiple shape-memory graph rows even when they share the same current, fills fracture current/current-density from the saved graph source when fracture values exist, hides `oe` samples by default behind a `Show oe samples` toggle, and uses microwire-aware tie-breakers when sorting equal strain values.
+- Microwire Data Builder Assemble sort now treats numeric-looking text values as numbers, preventing rows like `6.61` from sorting ahead of larger strain values such as `7.68` when the preview is sorted numerically.
+- Microwire Data Builder now preserves saved Fabrication and Videos table rows when reopening `.pydpj` projects instead of rebuilding those sections from stale local payload caches, so saved fabrication fields like mass/length/production datetime survive reloads, saved video rows keep their source paths instead of turning fully red, and Assemble/Excel-export row sorting keeps same-sample rows grouped while ordering each sample block by the best matching row for the active sort.
+- Microwire Data Builder startup now delays auto-opening the last project slightly so the main window can paint before any project-load work begins, reducing the "Not Responding" feel during launch.
+- Microwire Data Builder Assemble now always carries Fabrication metadata as the baseline row data and lets Videos overwrite shared production metrics like core temperature, winding speed, glass feeding, and underpressure when newer OCR-derived values exist, even if Fabrication/Videos are not among the explicitly selected export sections.
+- Microwire Data Builder Assemble preview/export no longer creates a `microscope_crops` folder next to Excel output unless microscope crops were explicitly requested from the standalone builder export path, and the preview model now caches grouped row background work so scrolling large Assemble tables is noticeably lighter.
+- Microwire Data Builder Fabrication now treats a measured draw as relevant at the draw level, but only promotes sibling pieces up to the last meaningful positive row in that draw workbook. That keeps placeholder tails hidden for draws like `5/4` while still surfacing real sibling rows such as `6/1` through `6/6`. Videos follows the same draw-level relevance filter, and Assemble/Excel export now includes those sibling draw rows as grouped sample blocks instead of only the exact measured piece.
+
+## 2026-03-24 22:06 UTC
+
+- Refactored Microwire EDA into a single canonical analysis pipeline with explicit `run_analysis`, `write_analysis_artifacts`, and compatibility `generate_report` entry points.
+- Added copy-safe `.pydpj` analysis for CLI and agent workflows, including findings JSON/Markdown outputs, manifest tracking of the disposable project copy used for the run, and transient Assemble rebuilds from Builder project sections when needed.
+- Reframed Microwire EDA around modern measured strain and fracture endpoints, with legacy broke/OK analysis retained only as optional auxiliary context.
+- Added composition-split signal tables so cross-composition trends can be compared against per-composition endpoint behavior.
+- Added `docs/microwire_eda.md` and updated Builder docs to describe the autonomous workflow, RF_EDA alignment, and copy-before-analysis rule.
+
+## 2026-03-24 18:47 UTC
+
+- Fixed Microwire EDA canonicalization so duplicate alias columns are merged before downstream analysis, preventing suffixed duplicate fields from being ignored.
+- Fixed Microwire EDA report generation to honor `export_png_bundle=False` while still producing HTML and optional PDF figure output.
+- Fixed video review override tracking so propagated draw-length edits record sibling history, show overwrite highlighting/tooltips, and support restoring prior values.
+- Fixed video review completion flow so blank `Notes` no longer blocks completion or keyboard advance.
+- Fixed annealing graph migration to preserve both legacy non-1000 graph columns when upgrading saved data.
+- Fixed annealing export handling so single follow-up graph assets are stored/exported as scalars and single-item legacy lists still embed in Excel.
+
+## 2026-03-23 15:17 UTC
+
+- Added a separate Microwire EDA workflow that reads only Microwire Data Builder Assemble data from `.pydpj` projects or assembled spreadsheet exports and generates an HTML report, summary workbook, canonical CSV, manifest JSON, and optional figure bundles.
+- Added Builder and launcher entry points for Microwire EDA, including `Analysis -> Analyze assemble data...` in the builder and direct CLI report generation from `launcher.py`.
+- Added report sections for coverage, strain/stress endpoint summaries, fabrication/geometry relationships, interaction plots, sweet-spot binning, time drift, and gated baseline regression models, plus a visible progress dialog while analysis runs.
+- Current annealing now surfaces the simplified `1000 mA + other annealing` graph model in the Builder table, Assemble no longer blocks export just because annealing columns are not selected, and the duplicate Assemble `Export worksheet...` shortcut was removed in favor of the main `Export...` flow.
+
+## 2026-03-23 12:48 UTC
+
+- Simplified Microwire Data Builder current annealing rows to use one `1000 mA` anchor slot plus one aggregated `Other annealing` bucket.
+- Current annealing previews, worksheet export, assemble/compare graph previews, and HTML export now show `Other annealing` instead of separate low/other mA buckets.
+- The Current annealing table now preserves a horizontally scrollable graph layout instead of forcing the final graph column to stretch into view.
+- Builder exports now keep all non-anchor annealing files and figures together, while preserving deterministic exact-`1000 mA` anchor selection and warning when the anchor is missing.
+
+## 2026-03-23 12:48 UTC
+
+- Microwire Data Builder video review now distinguishes overwritten cells from first-time fills, showing edited-overwrite cells in amber while keeping newly completed required cells green.
+- Video review cells with overwritten values now expose the previous value on hover and offer a restore action from the review dialog.
+- The video review `Notes` column no longer shows missing-value warning colours.
+
+## 2026-03-17 14:33 UTC
+
+- Fixed Microwire Data Builder video matching so fabrication videos under Google Drive shortcut folders resolve to the correct draw/piece rows and `Open video(s)` works from the Videos table.
+- Updated the Videos workflow to be manual-first, including microscope-style red/green completion highlighting for fabrication fields filled in from video review.
+- Fixed fabrication row rebuilding so microscope-only wires can inherit matching fabrication data instead of staying as empty placeholders.
+- Stopped the Fabrication tab from borrowing `d`, `D`, and `d/D` from microscope rows; those values now come only from fabrication spreadsheets and remain blank otherwise.
+- Scoped Videos refreshes to measured wires only and added a dedicated Fabrication missing-data dialog so long missing-wire lists are readable instead of being truncated in the status text.
+- Added possible-source-mismatch suggestions for fabrication rows that still have no matched source files, and highlighted those rows red in the fabrication table.
+- Optimized large project loads by batching section imports in memory, suppressing per-section pending scans during restore, and fixed the proxy sort `numpy.bool` error.
+- Fixed Videos row actions after sorting/filtering and highlighted entire video rows red when no video source files are available.
+- Reworked the Videos review popup into a compact single-row editor with always-on-top behavior, inline total/video-piece length columns, and Enter-to-advance editing flow.
+
 ## 2026-03-14 01:20 UTC
 
 - Expanded the figure-layout workflow with panel-label placement/size controls, style presets, minor-tick/tick-direction/scientific-notation controls, manual tick lists, decimal formatting, and reusable figure-template save/load support.
@@ -31,6 +1578,16 @@
 - Added a canonical `launcher.py --automation-recipe <job.json>` entrypoint for PyPlot machine-facing automation, including recipe validation, hidden/offscreen execution, `.pypj` load/save support, and machine-readable manifest output.
 - Added deterministic batch plot-image export support for automation runs so visible PyPlot tabs can be saved as numbered PNGs for replayable testing and agent workflows.
 - Reserved recipe `kind: "builder"` for future `.pydpj` automation without implementing that mode yet.
+
+## 2026-03-11 08:43 UTC
+
+- Added a Shape Memory Stress/Strain section to Microwire Data Builder with static dual-axis graph previews, visibility controls, and PyPlot/Origin handoff actions.
+- Included shape-memory graph columns in Assemble, Compare, and HTML export previews so selected microwires can carry the new measurement set alongside DMA, VSM, and FMR graphs.
+- Added interactive shape-memory point picking in the builder preview so double-clicked displacement/load/strain/stress values are stored in dedicated columns and can be included in Assemble exports.
+- Added fracture-target picking for shape-memory previews so fracture load/strain/stress can be stored separately from the standard picked values and exported through Assemble.
+- Renamed the picked shape-memory value columns to plain `Displacement/Load/Strain/Stress` labels, and renamed the older Strain-section outputs to `Legacy strain` / `Legacy stress (MPa)` to distinguish the workflows.
+- Added table search across the Microwire Data Builder sections, including the base data/graph tabs and the custom Current density, Transition temps, and Compare views.
+- Microscope `oe` filenames are now treated as separate samples, with a Microscope-tab toggle to show or hide those other-end rows.
 
 ## 2026-03-10 17:58 UTC
 
@@ -137,7 +1694,7 @@
 - Current Annealing plugin plotting now updates the shared status-bar task progress (`_begin_task_progress` / `_update_task_progress` / `_end_task_progress`) during graph generation.
 - macOS UI polish: toolbar/tab control buttons now use more native behavior/icons (platform default disabled styling, native titlebar glyphs for tab hide/close controls, and mac-friendly toolbutton raise behavior).
 
-## ﻿2026-02-27 08:20 UTC
+## 2026-02-27 08:20 UTC
 
 - VSM Hysteresis Loops now groups plotted/exported data by sample plus temperature, fixing cross-sample temperature merges in graphs and Origin export selection.
 - Added shared PyPlot status-bar task progress for long-running operations, and wired it into shared data import and shared workbook-to-Origin export flows.
@@ -199,16 +1756,6 @@
 - Shared Origin export: template resolution now avoids querying `origin.path('e')` during graph creation, preventing side-effect popups on unstable automation sessions.
 - Shared Origin export: removed `layer -aa 1` in dual-axis export; on Origin 2026 this command can force both-side axes/labels (`showAxes=3`), producing duplicated/interleaved tick labels.
 - Shape Memory parser: drop leading zero-load rows until the first non-zero load point so pre-load baseline zeros are excluded from segmented plotting/export.
-
-## 2026-03-11 08:43 UTC
-
-- Added a Shape Memory Stress/Strain section to Microwire Data Builder with static dual-axis graph previews, visibility controls, and PyPlot/Origin handoff actions.
-- Included shape-memory graph columns in Assemble, Compare, and HTML export previews so selected microwires can carry the new measurement set alongside DMA, VSM, and FMR graphs.
-- Added interactive shape-memory point picking in the builder preview so double-clicked displacement/load/strain/stress values are stored in dedicated columns and can be included in Assemble exports.
-- Added fracture-target picking for shape-memory previews so fracture load/strain/stress can be stored separately from the standard picked values and exported through Assemble.
-- Renamed the picked shape-memory value columns to plain `Displacement/Load/Strain/Stress` labels, and renamed the older Strain-section outputs to `Legacy strain` / `Legacy stress (MPa)` to distinguish the workflows.
-- Added table search across the Microwire Data Builder sections, including the base data/graph tabs and the custom Current density, Transition temps, and Compare views.
-- Microscope `oe` filenames are now treated as separate samples, with a Microscope-tab toggle to show or hide those other-end rows.
 
 ## 2026-02-19 11:59 UTC
 
@@ -317,6 +1864,11 @@
 - VSM Isotherms Derived metrics now accepts user-defined entropy field levels (`ΔH` in Oe) for both plotted entropy curves and entropy workbooks.
 - Primary side docks (Project Explorer/Object Manager) now clamp oversized persisted widths to avoid reopening in overly wide states.
 
+## 2026-02-11 16:23 UTC
+
+- Microwire Data Builder `Assemble` tab now includes a quick row search filter (case-insensitive across currently visible columns), with matching-count status text and search state persisted in `.pydpj` projects.
+- HTML exports from `Assemble` now include a row search box with live row-count updates while preserving compare/preview behavior.
+
 ## 2026-02-10 16:30 UTC
 
 - Added a new Manual Stress/Strain Logger with manual displacement/load input, live load-displacement plotting, and live stress-strain plotting.
@@ -347,18 +1899,6 @@
 - Manual logger update: added a configurable start-displacement mode (`Start from 0 points` / `Start from 10 points`), with dynamic `Reset d=...` and `Micrometer at d=...` labels tied to the selected start point.
 - Manual logger update: when start mode is `10 points`, logging the first point auto-inserts a prior anchor point at `d=0, load=0` for strain alignment while keeping a single visible curve workflow.
 - Manual logger update: dual-axis overlay now draws only one segmented load-displacement curve and uses top/right axes only as transformed strain/stress scales.
-
-## 2026-02-08 16:07 UTC
-
-- Added headless GUI smoke tests using `pytest-qt` for launcher/workbench startup and blank-graph creation paths.
-- Added deterministic parser fixtures under `tests/fixtures/` for DMA Iso-Stress and VSM temperature scan inputs with expected outputs.
-- Updated test configuration to default Qt to offscreen mode in automated/headless runs (`PYTEST_GUI_HEADLESS=0` disables this).
-- Dependency update: added `pytest-qt==4.5.0` to the `test` optional dependency set in `pyproject.toml`.
-
-## 2026-02-11 16:23 UTC
-
-- Microwire Data Builder `Assemble` tab now includes a quick row search filter (case-insensitive across currently visible columns), with matching-count status text and search state persisted in `.pydpj` projects.
-- HTML exports from `Assemble` now include a row search box with live row-count updates while preserving compare/preview behavior.
 
 ## 2026-02-09 12:17 UTC
 
@@ -401,6 +1941,13 @@
 
 - DMA Iso-Stress `Graph formatting` now includes explicit tick placement controls for both axes (`Auto`, `By increment`, `By count`) so major tick spacing/count can be set from the plugin panel.
 - PyPlot project save/load now persists active-plugin state; DMA Iso-Stress restores plotted graph tabs (not just imported data) along with legend-entry overrides and per-graph formatting when reopening `.pypj` projects.
+
+## 2026-02-08 16:07 UTC
+
+- Added headless GUI smoke tests using `pytest-qt` for launcher/workbench startup and blank-graph creation paths.
+- Added deterministic parser fixtures under `tests/fixtures/` for DMA Iso-Stress and VSM temperature scan inputs with expected outputs.
+- Updated test configuration to default Qt to offscreen mode in automated/headless runs (`PYTEST_GUI_HEADLESS=0` disables this).
+- Dependency update: added `pytest-qt==4.5.0` to the `test` optional dependency set in `pyproject.toml`.
 
 ## 2026-02-06 15:05 UTC
 
@@ -555,6 +2102,14 @@
 - Fixed VSM Temperature Scan Origin exports so all selected datasets plot and section ordering stays consistent.
 - Object Manager now lists line items even when legends are present so plots can be toggled.
 
+## 2026-01-14 13:41
+
+- Updated video handling to compute cumulative baseline lengths per draw, and split the temperature column into `Core temperature (°C)` and `Glass temperature (°C)` across builder outputs.
+
+## 2026-01-14 13:05
+
+- Made the Videos section editable with the same fabrication-style fields, added `Video end length (mm)` + derived `Video microwire length (mm)` columns, and applied video overrides to assemble/preview/export outputs.
+
 ## 2026-01-14 11:42 UTC
 
 - Fixed Fabrication imported-row separation wiring to avoid load errors.
@@ -611,10 +2166,35 @@
 - Restored VSM/DMA/FMR previews by falling back to microwire keys when sample columns are hidden.
 - Refreshed section column hiding now resets stale hidden indices so graph columns stay visible after refresh.
 
+## 2026-01-09 18:30 UTC
+
+- Ensured Assemble column selection lists every section column (including duplicates), syncs duplicate selections, and fills current-density columns from phase points when needed.
+- Normalized Sample-column hiding and improved compare matrix row heights so stacked graph previews stay full size.
+- Merged stray single-angle VSM temperature buckets and downgraded empty VSM file parse failures to warnings to reduce log noise.
+- Documented updated builder behaviors in `docs/database_builder.md`.
+
+## 2026-01-08 18:20 UTC
+
+- Enabled the Current Annealing plot button to allow plotting and data import without a preselected file list.
+- Updated FMR plotting labels to match the Field/X axes convention and carry units when available.
+- Improved VSM folder export visibility and default recursion in the GUI so nested folders are preserved.
+
 ## 2026-01-08 17:24 UTC
 
 - Added an FMR PyPlot plugin plus a Data Builder FMR section with Field vs X/Y plots and Origin export support.
 - VSM Folder Export now keeps the original @@Columns header structure when writing formatted TXT files.
+
+## 2026-01-08 15:33 UTC
+
+- VSM Folder Export now preserves the input folder structure and file names, only swapping the extension to `.txt`.
+
+## 2026-01-08 12:21 UTC
+
+- Current Annealing auto-loads on import so Plot is enabled after data import, and the directional Origin export now writes both directions into a single worksheet with units/comments populated.
+
+## 2026-01-08 12:03 UTC
+
+- VSM Folder Export experiment now shows its dialog when launched from the launcher.
 
 ## 2026-01-08 11:43 UTC
 
@@ -623,27 +2203,15 @@
 - Current density snapshots now refresh before Assemble builds to keep As/Af/Ms/Mf columns in sync.
 - DMA previews now fall back to microwire key grouping and legacy Sample/sample columns are cleaned up on load.
 
-## 2026-01-08 12:03 UTC
+## 2026-01-08 10:13 UTC
 
-- VSM Folder Export experiment now shows its dialog when launched from the launcher.
-
-## 2026-01-08 12:21 UTC
-
-- Current Annealing auto-loads on import so Plot is enabled after data import, and the directional Origin export now writes both directions into a single worksheet with units/comments populated.
-
-## 2026-01-08 15:33 UTC
-
-- VSM Folder Export now preserves the input folder structure and file names, only swapping the extension to `.txt`.
+- Added `experiments/vsm_folder_export.py` to batch-convert VSM hysteresis and temperature scan files into plain TXT tables grouped by sample folder.
 
 ## 2026-01-08 09:27 UTC
 
 - Compare now defaults to a “samples as columns” matrix view with selectable field rows and inline graph previews for side-by-side comparisons.
 - Current density snapshots now feed Assemble previews/exports so As/Af/Ms/Mf columns appear reliably.
 - VSM/DMA sections strip legacy Sample columns on project load, and DMA uses hidden sample keys by default.
-
-## 2026-01-08 10:13 UTC
-
-- Added `experiments/vsm_folder_export.py` to batch-convert VSM hysteresis and temperature scan files into plain TXT tables grouped by sample folder.
 
 ## 2026-01-08 08:08 UTC
 
@@ -820,13 +2388,13 @@
 
 - Microscope tab now debounces preview scaling to avoid the zoom-in effect, hides the unused preview panel completely (no leftover space when on `d`/`D`), advances selection on Enter (`d`→`D`, `D`→next row `d`), and reloads per-cell review state correctly when opening saved projects.
 
-## 2025-12-12 08:56 UTC
-
-- Microscope tab removes the missing‑wires list and row‑level Reviewed column, supports per‑cell review (Enter only greens the active `d` or `D` cell), and lowers splitter/preview minimums so fullscreen keeps bottom buttons visible.
-
 ## 2025-12-12 09:34 UTC
 
 - Ensured legacy Reviewed columns are always stripped on load and allowed the microscope preview scroll area to shrink further so bottom controls stay visible when the window is maximized.
+
+## 2025-12-12 08:56 UTC
+
+- Microscope tab removes the missing‑wires list and row‑level Reviewed column, supports per‑cell review (Enter only greens the active `d` or `D` cell), and lowers splitter/preview minimums so fullscreen keeps bottom buttons visible.
 
 ## 2025-12-12 08:07 UTC
 
@@ -872,6 +2440,13 @@
 - Fixed current annealing Origin exports by wiring in the title formatter used for Matplotlib, restoring Origin export across PyPlot plug-ins.
 - Kept fullscreen graphs pinned to the viewport when switching windows, preventing occasional tiny subwindows while fullscreen mode is active.
 
+## 2025-12-04 15:20 UTC
+
+- Reduced current annealing plot text/marker sizes, tightened layout, and suppressed the Matplotlib “figure.max_open_warning” so large batches render without cropped titles or noisy warnings.
+- Added a progress dialog while plotting current annealing batches and kept the Project Explorer “Plots” branch expanded by default so new graphs are immediately visible.
+- Fixed current annealing Origin exports by wiring in the title formatter used for Matplotlib, restoring Origin export across PyPlot plug-ins.
+- Kept fullscreen graphs pinned to the viewport when switching windows, preventing occasional tiny subwindows while fullscreen mode is active.
+
 ## 2025-12-03 10:43 UTC
 - Forced VSM Temperature Scan Origin plots to keep symbol size at 1 and auto-stack 10 kOe + 50 Oe runs of the same sample onto one graph (10 kOe on the left Y axis, 50 Oe on the right), sharing the same PyPlot tab.
 - Synced PyPlot subwindows so toggling any graph/workbook to fullscreen locks every window into fullscreen until one is restored to windowed mode.
@@ -889,6 +2464,14 @@
 - Cleaned VSM Temperature Scan Origin exports by rescaling layers, disabling speed mode, and mirroring the graph title onto the top X axis (tick labels hidden) to keep titles consistent.
 - Filled Stress Sensitivity workbooks with units/comments metadata for every column so Origin exports retain the annotated headers.
 
+## 2025-11-26 09:25 UTC
+
+- Stabilized stress sensitivity plotting: enforced larger embedded canvas sizes to stop cropping, kept legend text following line colours through dark-graph toggles, and guarded temperature dependence workbook registration against missing keys.
+- Reworked stress sensitivity Origin exports to mirror the PyPlot view (title on the top axis, manual sample labels with tick labels hidden, preserved delta markers), and populated workbook long names/units/comments for all processed columns.
+- Documented the Origin export checklist and per-plug-in folder memory defaults so imports/exports remember paths independently.
+
+# Changelog
+
 ## 2025-11-25 12:13 UTC
 - Scoped import pickers, TXT exports, and graph saves to remember their last-used folders per plug-in, persisting the history separately instead of sharing one global path.
 - Guarded PyPlot subwindow creation so Temperature Sensitivity plots no longer crash on Qt6 when QMdiSubWindow lacks `setWidgetResizable`.
@@ -896,20 +2479,20 @@
 - Restored temperature dependence workbook registration and added stress dependence workbook creation so plots and Origin/TXT exports surface in Project Explorer.
 - Defaulted legend text colour to follow plot colours for all plug-ins and persisted legend preferences per plug-in between sessions.
 
-## 2025-11-21 15:30 UTC
-- Split VSM Temperature Scan smoothing controls into signal and derivative sections, applying the derivative-smoothing toggle to both Matplotlib and Origin d/dT plots/exports with separate window settings.
-- Kept VSM Temperature Scan colors consistent across raw/smoothed/derivative Origin graphs (including 50 Oe traces) and drive legends from the workbook comments so arrows/sections appear in the Origin legends.
-- Preserved workbook comments for every VSM Temperature Scan sheet and aligned the PyPlot plug-in with the new smoothing controls so plot/export buttons rebuild workbooks with the latest smoothing preferences.
+## 2025-11-24 09:28 UTC
+- Removed the PyPlot tab bar entirely (MDI subwindows only), locking graph/worksheet aspect ratios with default width at half the viewport, auto-fit on resize, and synchronized maximize/restore across all windows; documented the rules in `docs/pyplot.md` and `AGENTS.md`.
+- Added separate “Plot derivatives” and “Plot smoothed derivatives” toggles for VSM Temperature Scan so smoothed d/dT plots/exports can be shown independently of raw derivatives, and ensured 50 Oe traces remain in legends.
+- Added VSM Temperature Scan overlay plots (raw + smoothed + smoothed d/dT per segment with legends) and hardened initial dock sizing to reduce the squashed Project Explorer/Object Manager layout.
 
 ## 2025-11-24 08:41 UTC
 - Hid the PyPlot tab bar while the VSM Temperature Scan plug-in is active (and auto-restored on deactivate), bumping worksheet tabs to a 960×640 minimum so opened workbooks aren’t tiny.
 - Added smoothed d/dT plotting/Origin+TXT exports with dedicated workbooks/graphs, and auto-enable derivatives when “Smooth derivatives” is toggled.
 - Fixed VSM Temperature Scan legends to include 50 Oe traces, brightened dark-graph labels/legends, and differentiated left/right Y axes (10 kOe vs 50 Oe) with color-coded labels and comments mirrored into Origin.
 
-## 2025-11-24 09:28 UTC
-- Removed the PyPlot tab bar entirely (MDI subwindows only), locking graph/worksheet aspect ratios with default width at half the viewport, auto-fit on resize, and synchronized maximize/restore across all windows; documented the rules in `docs/pyplot.md` and `AGENTS.md`.
-- Added separate “Plot derivatives” and “Plot smoothed derivatives” toggles for VSM Temperature Scan so smoothed d/dT plots/exports can be shown independently of raw derivatives, and ensured 50 Oe traces remain in legends.
-- Added VSM Temperature Scan overlay plots (raw + smoothed + smoothed d/dT per segment with legends) and hardened initial dock sizing to reduce the squashed Project Explorer/Object Manager layout.
+## 2025-11-21 15:30 UTC
+- Split VSM Temperature Scan smoothing controls into signal and derivative sections, applying the derivative-smoothing toggle to both Matplotlib and Origin d/dT plots/exports with separate window settings.
+- Kept VSM Temperature Scan colors consistent across raw/smoothed/derivative Origin graphs (including 50 Oe traces) and drive legends from the workbook comments so arrows/sections appear in the Origin legends.
+- Preserved workbook comments for every VSM Temperature Scan sheet and aligned the PyPlot plug-in with the new smoothing controls so plot/export buttons rebuild workbooks with the latest smoothing preferences.
 
 ## 2025-11-20 14:08 UTC
 
@@ -924,8 +2507,6 @@
 - Averaged duplicate temperatures before smoothing/derivative for VSM temperature scans, kept plugin plot tabs registered internally, and ensured dock toggles remain visible while refreshing after show for responsiveness.
 - Allowed VSM Temperature Scan imports to succeed even when Tk isn’t available (so the PyPlot plug-in can load outside the Tk UI environment).
 
-## 2025-11-20 08:38 UTC
-## 2025-11-20 09:39 UTC
 ## 2025-11-20 10:15 UTC
 - Applied 5-point median + 20-point moving-average smoothing before derivative calculations, added an optional smoothed-view plot, ensured derivative legends render (and carry through to Origin graphs/comments), and aligned TXT exports to match Origin/TScan data/derivative workbooks with long names, units, and comments consistent across both.
 
@@ -941,6 +2522,8 @@
 - Clarified VSM Temperature Scan legends (no “#” suffixes), added derivative legends, marked secondary Y axes, and exported section-aware comments plus derivative workbooks to Origin when enabled.
 - Applied 5-point median + 20-point moving-average smoothing before derivative calculations, added an optional smoothed-view plot, and ensured derivative legends render (and carry through to Origin graphs/comments).
 
+## 2025-11-20 09:39 UTC
+## 2025-11-20 08:38 UTC
 ## 2025-11-19 10:15 UTC
 
 - Project Explorer now keeps uniform row heights and suspends repaints while new workbooks are added, eliminating the sluggish scrolling/expanding behavior when large data batches load.
@@ -1222,16 +2805,29 @@
   recorded wire lengths stay intact instead of being overwritten by missing
   values, and added regression coverage for the merge behaviour.
  
-## 2025-10-30 10:51 UTC
+## 2025-10-30 12:45 UTC
 
-- Kept fabrication piece metadata from being overwritten by blank imports so length values persist in the fabrication grid.
-- Allowed As/Ms phase markers to be edited directly in the annealing table and surfaced live cursor readouts on the preview graphs for manual picking.
-- Retired the legacy PyPlot data-sources row in favour of the shared Data menu and removed the Origin Clone prototype from the experiments launcher.
+- Tightened the PyPlot loader so "Load data" only proceeds when real files are
+  available, prompting the Data menu when nothing is imported instead of
+  passing empty directory selections to plotting scripts.
+
+# Changelog
 
 ## 2025-10-30 12:35 UTC
 
 - Fixed the builder worker and CLI code paths so manually selected As/Ms transition points persist into assembled worksheets and exports instead of being dropped.
 - Narrowed the microscope diameter fallback so the D column only populates once a glass detection is present, keeping interim core values out of the highlights.
+
+## 2025-10-30 12:30 UTC
+
+- Integrated the stress sensitivity workflow into the PyPlot workbench so the
+  host toolbar drives Matplotlib generation, Origin export, and new TXT data
+  exports without launching the legacy dialog.
+- Added reusable TXT export helpers for stress dependence, stress sensitivity,
+  and temperature sensitivity datasets and wired them into the PyPlot export
+  buttons.
+- Documented the PyPlot stress and temperature plotters in the README to call
+  out their Matplotlib, Origin, and TXT export capabilities.
 
 ## 2025-10-30 12:05 UTC
 
@@ -1243,6 +2839,12 @@
 - Added As (mA) and Ms (mA) columns with an interactive plot picker so phase transitions can be annotated and exported alongside the graphs.
 - Microscope D values stay blank until a glass measurement is parsed, preventing temporary core values from leaking into the table.
 - The launcher now opens an instant "Loading Microwire Data Builder..." shell while the full UI initialises so users get immediate feedback instead of waiting on a blank screen.
+
+## 2025-10-30 10:51 UTC
+
+- Kept fabrication piece metadata from being overwritten by blank imports so length values persist in the fabrication grid.
+- Allowed As/Ms phase markers to be edited directly in the annealing table and surfaced live cursor readouts on the preview graphs for manual picking.
+- Retired the legacy PyPlot data-sources row in favour of the shared Data menu and removed the Origin Clone prototype from the experiments launcher.
 
 ## 2025-10-30 10:00 UTC
 
@@ -1268,6 +2870,30 @@
 ## 2025-10-28 09:25 UTC
 
 - Updated the README extras install command to `pip install '.[test]'` so shells like zsh do not glob away the bracketed extra specifier.
+
+## 2025-10-27 20:30 UTC
+
+- Broadened fabrication diameter parsing to recognise additional core/glass
+  headings, normalise string fallbacks, and keep d/D ratios capped at three
+  decimals so every measurement from the spreadsheets appears without ellipses.
+- Reworked microscope OCR token handling to capture bracketed annotations like
+  "[1]6.7µm", attach detections to core/glass markers, and reuse the measured
+  values even when PaddleOCR splits number/unit tokens.
+- Returned the Project Explorer and Message Log to docked side panes by default
+  while retaining hover-driven toggling, so they no longer pop out as separate
+  windows unless the user chooses to float them.
+
+## 2025-10-27 19:45 UTC
+
+- Capture every fabrication diameter variant by recognising additional header
+  patterns, aggregating duplicate readings, and rounding d/D ratios to three
+  decimals so the worksheet reflects the full source data.
+- Wire the builder logger into the in-app message log and have microscope OCR
+  report both successful detections and missing annotations, giving immediate
+  feedback when PaddleOCR is unavailable or yields no results.
+- Start the Project Explorer and Message Log as hover overlays that list full
+  source paths and processed files, keeping the workspace maximised until the
+  panels are explicitly pinned.
 
 ## 2025-10-27 15:40 UTC
 
@@ -1326,6 +2952,12 @@
   `%USERPROFILE%` paths and successfully download PaddleOCR/PaddleX models into
   the ASCII-only cache.
 
+## 2025-10-27 09:45 UTC
+
+- Forced PaddleOCR caches to use ASCII-only home directories (overriding HOME/
+  USERPROFILE when necessary) so Windows accounts with diacritics no longer
+  trigger repeated `inference.json` load failures during model downloads.
+
 ## 2025-10-27 09:30 UTC
 
 - Forced PaddleOCR and PaddleX to download models into an ASCII-only cache
@@ -1336,6 +2968,17 @@
   `pip install -r requirements.txt` runtime setup and the follow-up
   `pip install .[test]` extras command so no manual dependency steps are needed
   outside experiments.
+
+## 2025-10-27 07:58 UTC
+
+- Redirected PaddleOCR’s cache into an ASCII-safe temp directory and purge/retry
+  when corrupted downloads are detected so Windows accounts with accented names
+  no longer break model initialisation.
+- Added `pytesseract` to the core dependency set and synced `requirements.txt`
+  so non-experiment tools install without extra manual steps.
+- Documented the two-step installation flow (`pip install -r requirements.txt`
+  then optional `pip install .[test]`) in the README to clarify how to enable
+  experiments and the test suite.
 
 ## 2025-10-26 23:15 UTC
 
@@ -1352,6 +2995,16 @@
 - Surfaced PaddleOCR’s raw detection strings per preprocessing variant inside
   the Microscope OCR Debug tool so you can inspect exactly what the engine
   returns before heuristics filter the values.
+
+## 2025-10-26 17:30 UTC
+
+- Fixed PaddleOCR initialisation on macOS/Windows by avoiding the deprecated
+  ``show_log`` flag and reporting setup failures through the in-app message log.
+- Treated current annealing inputs as milliamperes end-to-end, widened the
+  inline worksheet graphs with smaller typography, and removed redundant
+  setpoint/sample columns from the export workbook.
+- Surfaced every d, D, and d/D value captured in fabrication spreadsheets and
+  simplified the Connect Folder control into a single confirmable toggle.
 
 ## 2025-10-26 17:28 UTC
 
@@ -1376,6 +3029,14 @@
   run PaddleOCR on the untouched image before processing variants, emitting a
   debug trace when no text is returned so bracketed micrometer annotations are
   less likely to be missed.
+
+## 2025-10-26 14:45 UTC
+
+- Tuned the microscope fallback OCR to upsample annotations, scan multiple
+  cropped regions, and try several Tesseract configurations so `[1]` markers
+  reliably produce core and glass diameters when PaddleOCR misses the text.
+- Defaulted the Microscope OCR Debug tool to the `base` preprocessing variant
+  to simplify one-click experiments while keeping other filters opt-in.
 
 ## 2025-10-26 13:48 UTC
 
@@ -1474,71 +3135,6 @@
 - Widen inline annealing graph columns by using the pixmap size for icon layout
   and stretching the cells, ensuring the embedded plots are fully visible in the
   worksheet tables.
-
-## 2025-10-27 20:30 UTC
-
-- Broadened fabrication diameter parsing to recognise additional core/glass
-  headings, normalise string fallbacks, and keep d/D ratios capped at three
-  decimals so every measurement from the spreadsheets appears without ellipses.
-- Reworked microscope OCR token handling to capture bracketed annotations like
-  "[1]6.7µm", attach detections to core/glass markers, and reuse the measured
-  values even when PaddleOCR splits number/unit tokens.
-- Returned the Project Explorer and Message Log to docked side panes by default
-  while retaining hover-driven toggling, so they no longer pop out as separate
-  windows unless the user chooses to float them.
-
-## 2025-10-27 19:45 UTC
-
-- Capture every fabrication diameter variant by recognising additional header
-  patterns, aggregating duplicate readings, and rounding d/D ratios to three
-  decimals so the worksheet reflects the full source data.
-- Wire the builder logger into the in-app message log and have microscope OCR
-  report both successful detections and missing annotations, giving immediate
-  feedback when PaddleOCR is unavailable or yields no results.
-- Start the Project Explorer and Message Log as hover overlays that list full
-  source paths and processed files, keeping the workspace maximised until the
-  panels are explicitly pinned.
-
-## 2025-10-26 17:30 UTC
-
-- Fixed PaddleOCR initialisation on macOS/Windows by avoiding the deprecated
-  ``show_log`` flag and reporting setup failures through the in-app message log.
-- Treated current annealing inputs as milliamperes end-to-end, widened the
-  inline worksheet graphs with smaller typography, and removed redundant
-  setpoint/sample columns from the export workbook.
-- Surfaced every d, D, and d/D value captured in fabrication spreadsheets and
-  simplified the Connect Folder control into a single confirmable toggle.
-
-## 2025-10-27
-
-- Simplified the annealing worksheet layout by leading with the composition/
-  microwire identifiers, widening the graph columns to the full inline plot,
-  and slimming the plot typography so the data area fills each cell without
-  oversized labels.
-- Removed redundant 1000 mA setpoint/sample columns, kept low-current details,
-  and stopped re-scaling currents that already arrive in milliamps to keep the
-  worksheet aligned with the raw measurements.
-- Collected every available d, D, and d/D value (falling back to draw-level
-  records when necessary) while trimming the obsolete bistable column so the
-  fabrication sheet shows only the context still used downstream.
-- Retried PaddleOCR initialisation without the deprecated `show_log` keyword to
-  unblock microscope/video OCR on macOS/Windows builds that ship without it.
-
-## 2025-10-26
-
-- Auto-fit every microwire worksheet to its contents, expand the annealing
-  previews so each graph column matches the rendered plot width, and shrink the
-  inline chart typography (with legends removed) so the visual data dominates
-  the row instead of oversized labels.
-- Highlight the Message Log dock in red until unread errors are viewed and route
-  all section issues through the log handler, making failures impossible to miss
-  outside the VS Code terminal.
-- Allow PaddleOCR to initialise on builds without the `show_log` flag, warn when
-  OCR or Pillow is unavailable, and surface setup guidance directly in the log
-  so microscope/video OCR explains what the environment still needs.
-- Surface the full fabrication metadata—including winding speed, glass feed,
-  underpressure, bistable status, piece turns and combined notes—directly in the
-  fabrication worksheet so no spreadsheet context is lost when reviewing rows.
 
 ## 2025-10-25 02:45 UTC
 
@@ -1688,21 +3284,6 @@
 - Fixed the microwire data builder launch error by instantiating `MiniDatabaseSection` before its subclasses so imports no longer raise a `NameError`.
 - Replaced the strain section with a persistent in-app worksheet that suggests compositions and microwires from processed annealing data, auto-fills diameters, derives mass/strain values, tracks used samples, and exports the curated table to Excel.
 
-## 2025-10-24
-
-- Taught the current annealing plugin to build PyPlot worksheets during load,
-  label increasing/decreasing traces, and show legends so the Object Manager
-  lists meaningful series names.
-- Ensured the Load data action summons the shared Data menu even when triggered
-  from Generate so current annealing runs can grab imported files without
-  re-selecting paths.
-- Added visibility checkboxes to the Object Manager for Matplotlib lines and
-  legends so plots can be toggled directly from the tree.
-- Reworked the Microwire Data Builder into a sectioned workflow that stores
-  mini-databases per data source, highlights pending files, lets microscope
-  measurements be reviewed and overridden, and assembles the final spreadsheet
-  from the cached results without rerunning heavy analysis.
-
 ## 2025-10-23 16:40 UTC
 
 - Converted the shared Load/Generate/Export buttons into a global PyPlot action
@@ -1752,6 +3333,15 @@
 - Expanded PyPlot’s Object Manager tree to list every axis, legend, and line so
   all plotted objects are visible for future editing.
 
+## 2025-10-22 16:45 UTC
+
+- Improved microscope OCR sensitivity by adding red-channel preprocessing for
+  PaddleOCR/Tesseract variants and loosening marker/unit heuristics so
+  bracketed annotations like `[1]6.7µm` register even when the unit glyph is
+  partially missed.
+- Updated the Microscope OCR Debug experiment to preview the new red-focused
+  variants, keeping its gallery in sync with the runtime pipeline.
+
 ## 2025-10-22 13:27 UTC
 
 - Highlight the live voltage readout in red once it exceeds 25 V, fix the
@@ -1760,6 +3350,74 @@
 - Rebuilt the current annealing progress tracking to account for partial loops
   and 30 V reversals, ensuring the progress bar and time remaining estimates
   stay accurate through multi-loop runs.
+
+## 2025-10-22 12:45 UTC
+
+- Fixed the PyPlot temperature dependence TXT exporter to use the dedicated
+  workflow, preventing KeyErrors when exporting temperature dependence runs.
+
+## 2025-10-22 11:00 UTC
+
+- Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
+  between raw strings and `[1]`-tagged d/D values, with previews and summaries
+  filtered to the selected preprocessing variants.
+- Disabled the automatic Tesseract fallback during debug runs and exposed the
+  new `allow_tesseract_fallback` flag on `_extract_microscope_diameters` to keep
+  PaddleOCR-only experiments focused on the chosen engine.
+
+## 2025-10-21 15:30 UTC
+
+- Added a Tesseract-backed microscope OCR fallback so bracketed micrometer
+  annotations (e.g. `[1]6.7 µm`) populate the builder even when PaddleOCR returns
+  no text, and surfaced the captured strings in debug logs.
+- Added regression coverage that stubs pytesseract to ensure the fallback keeps
+  recording both core and glass diameters in the database worksheet.
+
+## 2025-10-27
+
+- Simplified the annealing worksheet layout by leading with the composition/
+  microwire identifiers, widening the graph columns to the full inline plot,
+  and slimming the plot typography so the data area fills each cell without
+  oversized labels.
+- Removed redundant 1000 mA setpoint/sample columns, kept low-current details,
+  and stopped re-scaling currents that already arrive in milliamps to keep the
+  worksheet aligned with the raw measurements.
+- Collected every available d, D, and d/D value (falling back to draw-level
+  records when necessary) while trimming the obsolete bistable column so the
+  fabrication sheet shows only the context still used downstream.
+- Retried PaddleOCR initialisation without the deprecated `show_log` keyword to
+  unblock microscope/video OCR on macOS/Windows builds that ship without it.
+
+## 2025-10-26
+
+- Auto-fit every microwire worksheet to its contents, expand the annealing
+  previews so each graph column matches the rendered plot width, and shrink the
+  inline chart typography (with legends removed) so the visual data dominates
+  the row instead of oversized labels.
+- Highlight the Message Log dock in red until unread errors are viewed and route
+  all section issues through the log handler, making failures impossible to miss
+  outside the VS Code terminal.
+- Allow PaddleOCR to initialise on builds without the `show_log` flag, warn when
+  OCR or Pillow is unavailable, and surface setup guidance directly in the log
+  so microscope/video OCR explains what the environment still needs.
+- Surface the full fabrication metadata—including winding speed, glass feed,
+  underpressure, bistable status, piece turns and combined notes—directly in the
+  fabrication worksheet so no spreadsheet context is lost when reviewing rows.
+
+## 2025-10-24
+
+- Taught the current annealing plugin to build PyPlot worksheets during load,
+  label increasing/decreasing traces, and show legends so the Object Manager
+  lists meaningful series names.
+- Ensured the Load data action summons the shared Data menu even when triggered
+  from Generate so current annealing runs can grab imported files without
+  re-selecting paths.
+- Added visibility checkboxes to the Object Manager for Matplotlib lines and
+  legends so plots can be toggled directly from the tree.
+- Reworked the Microwire Data Builder into a sectioned workflow that stores
+  mini-databases per data source, highlights pending files, lets microscope
+  measurements be reviewed and overridden, and assembles the final spreadsheet
+  from the cached results without rerunning heavy analysis.
 
 ## 2025-10-20
 
@@ -1785,117 +3443,6 @@
 - Warn the stress/temperature data logger and current annealing logger when
   composition percentages do not add up to 100 %, while still allowing
   measurements to proceed.
-
-## 2025-10-22 16:45 UTC
-
-- Improved microscope OCR sensitivity by adding red-channel preprocessing for
-  PaddleOCR/Tesseract variants and loosening marker/unit heuristics so
-  bracketed annotations like `[1]6.7µm` register even when the unit glyph is
-  partially missed.
-- Updated the Microscope OCR Debug experiment to preview the new red-focused
-  variants, keeping its gallery in sync with the runtime pipeline.
-
-## 2025-10-26 14:45 UTC
-
-- Tuned the microscope fallback OCR to upsample annotations, scan multiple
-  cropped regions, and try several Tesseract configurations so `[1]` markers
-  reliably produce core and glass diameters when PaddleOCR misses the text.
-- Defaulted the Microscope OCR Debug tool to the `base` preprocessing variant
-  to simplify one-click experiments while keeping other filters opt-in.
-
-## 2025-10-27 07:58 UTC
-
-- Redirected PaddleOCR’s cache into an ASCII-safe temp directory and purge/retry
-  when corrupted downloads are detected so Windows accounts with accented names
-  no longer break model initialisation.
-- Added `pytesseract` to the core dependency set and synced `requirements.txt`
-  so non-experiment tools install without extra manual steps.
-- Documented the two-step installation flow (`pip install -r requirements.txt`
-  then optional `pip install .[test]`) in the README to clarify how to enable
-  experiments and the test suite.
-
-## 2025-10-30 12:30 UTC
-
-- Integrated the stress sensitivity workflow into the PyPlot workbench so the
-  host toolbar drives Matplotlib generation, Origin export, and new TXT data
-  exports without launching the legacy dialog.
-- Added reusable TXT export helpers for stress dependence, stress sensitivity,
-  and temperature sensitivity datasets and wired them into the PyPlot export
-  buttons.
-- Documented the PyPlot stress and temperature plotters in the README to call
-  out their Matplotlib, Origin, and TXT export capabilities.
-
-## 2025-10-27 09:45 UTC
-
-- Forced PaddleOCR caches to use ASCII-only home directories (overriding HOME/
-  USERPROFILE when necessary) so Windows accounts with diacritics no longer
-  trigger repeated `inference.json` load failures during model downloads.
-
-## 2025-10-22 12:45 UTC
-
-- Fixed the PyPlot temperature dependence TXT exporter to use the dedicated
-  workflow, preventing KeyErrors when exporting temperature dependence runs.
-
-## 2025-10-30 12:45 UTC
-
-- Tightened the PyPlot loader so "Load data" only proceeds when real files are
-  available, prompting the Data menu when nothing is imported instead of
-  passing empty directory selections to plotting scripts.
-
-# Changelog
-
-## 2025-11-26 09:25 UTC
-
-- Stabilized stress sensitivity plotting: enforced larger embedded canvas sizes to stop cropping, kept legend text following line colours through dark-graph toggles, and guarded temperature dependence workbook registration against missing keys.
-- Reworked stress sensitivity Origin exports to mirror the PyPlot view (title on the top axis, manual sample labels with tick labels hidden, preserved delta markers), and populated workbook long names/units/comments for all processed columns.
-- Documented the Origin export checklist and per-plug-in folder memory defaults so imports/exports remember paths independently.
-
-# Changelog
-
-## 2025-12-04 15:20 UTC
-
-- Reduced current annealing plot text/marker sizes, tightened layout, and suppressed the Matplotlib “figure.max_open_warning” so large batches render without cropped titles or noisy warnings.
-- Added a progress dialog while plotting current annealing batches and kept the Project Explorer “Plots” branch expanded by default so new graphs are immediately visible.
-- Fixed current annealing Origin exports by wiring in the title formatter used for Matplotlib, restoring Origin export across PyPlot plug-ins.
-- Kept fullscreen graphs pinned to the viewport when switching windows, preventing occasional tiny subwindows while fullscreen mode is active.
-
-## 2025-10-22 11:00 UTC
-
-- Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
-  between raw strings and `[1]`-tagged d/D values, with previews and summaries
-  filtered to the selected preprocessing variants.
-- Disabled the automatic Tesseract fallback during debug runs and exposed the
-  new `allow_tesseract_fallback` flag on `_extract_microscope_diameters` to keep
-  PaddleOCR-only experiments focused on the chosen engine.
-
-## 2025-10-21 15:30 UTC
-
-- Added a Tesseract-backed microscope OCR fallback so bracketed micrometer
-  annotations (e.g. `[1]6.7 µm`) populate the builder even when PaddleOCR returns
-  no text, and surfaced the captured strings in debug logs.
-- Added regression coverage that stubs pytesseract to ensure the fallback keeps
-  recording both core and glass diameters in the database worksheet.
-
-## 2026-01-08 18:20 UTC
-
-- Enabled the Current Annealing plot button to allow plotting and data import without a preselected file list.
-- Updated FMR plotting labels to match the Field/X axes convention and carry units when available.
-- Improved VSM folder export visibility and default recursion in the GUI so nested folders are preserved.
-
-## 2026-01-09 18:30 UTC
-
-- Ensured Assemble column selection lists every section column (including duplicates), syncs duplicate selections, and fills current-density columns from phase points when needed.
-- Normalized Sample-column hiding and improved compare matrix row heights so stacked graph previews stay full size.
-- Merged stray single-angle VSM temperature buckets and downgraded empty VSM file parse failures to warnings to reduce log noise.
-- Documented updated builder behaviors in `docs/database_builder.md`.
-
-## 2026-01-14 13:41
-
-- Updated video handling to compute cumulative baseline lengths per draw, and split the temperature column into `Core temperature (°C)` and `Glass temperature (°C)` across builder outputs.
-
-## 2026-01-14 13:05
-
-- Made the Videos section editable with the same fabrication-style fields, added `Video end length (mm)` + derived `Video microwire length (mm)` columns, and applied video overrides to assemble/preview/export outputs.
 
 ## 2025-10-19
 
