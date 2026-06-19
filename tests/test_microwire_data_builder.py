@@ -2165,6 +2165,7 @@ def test_mini_dma_section_opens_transition_review_for_all_records_without_select
             records: list[MiniDmaRecord],
             _logger: logging.Logger,
             _parent: QtWidgets.QWidget | None = None,
+            **_kwargs: object,
         ) -> None:
             opened.extend(records)
 
