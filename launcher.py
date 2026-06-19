@@ -1012,6 +1012,12 @@ def _run_builder_rebuild_assemble_command_lightweight(
     dataframe = result.dataframe if hasattr(result, "dataframe") else pd.DataFrame()
     if not isinstance(dataframe, pd.DataFrame):
         dataframe = pd.DataFrame()
+    if "annealing" in selected:
+        dataframe = _overlay_builder_current_density_snapshot(
+            builder_ui=builder_ui,
+            sections=sections,
+            dataframe=dataframe,
+        )
     rows = [
         {str(column): builder_ui._json_safe(row.get(column)) for column in dataframe.columns}
         for row in dataframe.to_dict(orient="records")
@@ -1030,6 +1036,77 @@ def _run_builder_rebuild_assemble_command_lightweight(
         "row_count": int(len(dataframe.index)),
         "column_count": int(len(dataframe.columns)),
     }
+
+
+def _overlay_builder_current_density_snapshot(
+    *,
+    builder_ui: Any,
+    sections: Mapping[str, Any],
+    dataframe: pd.DataFrame,
+) -> pd.DataFrame:
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return dataframe
+    annealing_payload = sections.get("annealing")
+    if not isinstance(annealing_payload, Mapping):
+        return dataframe
+    microscope_payload = sections.get("microscope")
+    if not isinstance(microscope_payload, Mapping):
+        microscope_payload = {}
+    annealing_section = builder_ui.AnnealingSection(LOGGER, lambda *_args: None)
+    microscope_section = builder_ui.MicroscopeSection(LOGGER, lambda *_args: None)
+    current_density_section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        LOGGER,
+        lambda *_args: None,
+    )
+    try:
+        annealing_section.import_project_payload(annealing_payload)
+        microscope_section.import_project_payload(microscope_payload)
+        current_density_section.refresh_data()
+        snapshot_provider = getattr(current_density_section, "current_density_snapshot", None)
+        if not callable(snapshot_provider):
+            return dataframe
+        snapshot = snapshot_provider()
+        if not isinstance(snapshot, Mapping) or not snapshot:
+            return dataframe
+        output = dataframe.copy()
+        for column in getattr(builder_ui, "CURRENT_DENSITY_COLUMNS", ()):
+            if column not in output.columns:
+                output[column] = None
+
+        def _row_key(row: Mapping[str, Any]) -> str:
+            key = str(row.get("_key") or row.get("_group_key") or "").strip()
+            if key:
+                return key
+            composition = str(row.get("Composition") or "").strip()
+            microwire = str(row.get("Microwire") or "").strip()
+            if composition and microwire:
+                return f"{composition}|{microwire.replace('/', '|')}"
+            return ""
+
+        for index, row in output.iterrows():
+            key = _row_key(row)
+            values = snapshot.get(key)
+            if not isinstance(values, Mapping):
+                continue
+            for column, value in values.items():
+                if column == "_group_key":
+                    continue
+                if column not in output.columns:
+                    output[column] = None
+                output.at[index, column] = value
+        return output
+    finally:
+        for widget in (current_density_section, annealing_section, microscope_section):
+            try:
+                widget.close()
+            except Exception:
+                pass
+            try:
+                widget.deleteLater()
+            except Exception:
+                pass
 
 
 _ASSEMBLE_PUBLIC_DROP_EXACT = {

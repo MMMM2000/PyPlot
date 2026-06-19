@@ -18,6 +18,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 import launcher as launcher_module
+from microwire_data_builder import ui as builder_ui
+from microwire_data_builder.core import MeasurementMetadata, MeasurementRecord
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import TabDescriptor
 from plotting.shared.toolkit import theme_manager
@@ -1523,6 +1525,128 @@ def test_builder_automation_recipe_updates_annealing_copy(
     assemble_row = assemble_rows[0]
     assert assemble_row["Composition"] == "Ni50Fe27Ga23"
     assert assemble_row["Microwire"] == "12/2"
+
+
+def test_builder_rebuild_assemble_overlays_saved_transition_reviews(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=10,
+        piece_y=4,
+        setpoint_mA=80,
+        alt_variant=False,
+        measurement_id="reviewed-transition",
+        file_name="Ni50Fe27Ga23 10_4 80mA.txt",
+        relpath="Ni50Fe27Ga23 10_4 80mA.txt",
+        timestamp_mtime_utc="2026-06-19T09:00:00+00:00",
+    )
+    record = MeasurementRecord(
+        path=tmp_path / metadata.file_name,
+        metadata=metadata,
+        dataframe=launcher_module.pd.DataFrame(
+            {"I_mA": [1.0, 20.0, 40.0, 80.0], "R_Ohm": [100.0, 98.0, 110.0, 120.0]}
+        ),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-06-19 09:30",
+                "sections": {
+                    "annealing": {
+                        "section": "annealing",
+                        "columns": ["Composition", "Microwire"],
+                        "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "10/4"}],
+                        "extra": {
+                            builder_ui.TRANSITION_REVIEW_EXTRA_KEY: {
+                                "schema_version": builder_ui.TRANSITION_REVIEW_SCHEMA_VERSION,
+                                "records": {
+                                    record_id: {
+                                        "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                                        "included": True,
+                                        "auto_values_mA": {"As1": 12.0, "Af1": 22.0},
+                                        "manual_values_mA": {"As1": 14.0},
+                                        "final_values_mA": {"As1": 14.0, "Af1": 22.0},
+                                    }
+                                },
+                            }
+                        },
+                        "payloads": {
+                            "annealing_records": builder_ui._encode_project_payload([record]),  # noqa: SLF001
+                        },
+                    },
+                    "microscope": {
+                        "section": "microscope",
+                        "columns": [
+                            "Composition",
+                            "Microwire",
+                            builder_ui.MICROSCOPE_D_COLUMN,
+                            "_key",
+                        ],
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "10/4",
+                                builder_ui.MICROSCOPE_D_COLUMN: 20.0,
+                                "_key": "Ni50Fe27Ga23|10|4",
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_project = tmp_path / "out" / "updated.pydpj"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["annealing", "microscope"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "10/4"
+    assert assemble_row["As1 (mA)"] == pytest.approx(14.0)
+    assert assemble_row["Af1 (mA)"] == pytest.approx(22.0)
+    assert assemble_row["J_As1 (A/mm^2)"] == pytest.approx(
+        (14.0 / 1000.0) / (np.pi * 0.01 * 0.01)
+    )
+    assert assemble_row["J_Af1 (A/mm^2)"] == pytest.approx(
+        (22.0 / 1000.0) / (np.pi * 0.01 * 0.01)
+    )
 
 
 def test_builder_automation_recipe_updates_microscope_copy(
