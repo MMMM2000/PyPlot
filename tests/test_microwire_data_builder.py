@@ -7079,6 +7079,71 @@ def test_annealing_transition_review_actions_update_visible_statuses() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_annealing_transition_review_counts_update_after_actions() -> None:
+    _ensure_qapp()
+
+    def _record(setpoint: int, name: str) -> MeasurementRecord:
+        return MeasurementRecord(
+            path=Path(name),
+            metadata=MeasurementMetadata(
+                composition_token="Ni44Fe27Ga23Cu3Co3",
+                draw_x=1,
+                piece_y=2,
+                setpoint_mA=setpoint,
+                alt_variant=False,
+                measurement_id=name,
+                file_name=name,
+                relpath=name,
+                timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, float(setpoint)], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+
+    records = [
+        _record(60, "Ni44Fe27Ga23Cu3Co3 1_2 60mA 2loops.txt"),
+        _record(70, "Ni44Fe27Ga23Cu3Co3 1_2 70mA 2loops.txt"),
+        _record(80, "Ni44Fe27Ga23Cu3Co3 1_2 80mA 2loops.txt"),
+    ]
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        records,
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    try:
+        assert "Total 3" in dialog._counts_label.text()  # noqa: SLF001
+        assert "Open 3" in dialog._counts_label.text()  # noqa: SLF001
+
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        dialog._phase_controls.set_target("As1")  # noqa: SLF001
+        dialog._handle_plot_pick(12.5)  # noqa: SLF001
+        assert "Done 1" in dialog._counts_label.text()  # noqa: SLF001
+        assert "Manual 1" in dialog._counts_label.text()  # noqa: SLF001
+        assert "Open 2" in dialog._counts_label.text()  # noqa: SLF001
+
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(1))  # noqa: SLF001
+        dialog._mark_current_no_transition()  # noqa: SLF001
+        assert "Done 2" in dialog._counts_label.text()  # noqa: SLF001
+        assert "No transition 1" in dialog._counts_label.text()  # noqa: SLF001
+
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(2))  # noqa: SLF001
+        dialog._exclude_current_graph()  # noqa: SLF001
+        assert "Done 3" in dialog._counts_label.text()  # noqa: SLF001
+        assert "Open 0" in dialog._counts_label.text()  # noqa: SLF001
+        assert "Excluded 1" in dialog._counts_label.text()  # noqa: SLF001
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_annealing_transition_review_no_transition_detail_is_not_excluded() -> None:
     _ensure_qapp()
     record = MeasurementRecord(

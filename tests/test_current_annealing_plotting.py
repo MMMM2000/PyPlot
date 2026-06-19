@@ -192,6 +192,36 @@ def test_summarize_transition_loops_detects_clear_sparse_first_cooling_loop() ->
     assert second.mf_current_mA == pytest.approx(8.0, abs=1.0)
 
 
+def test_summarize_transition_loops_detects_clear_sparse_second_cooling_loop() -> None:
+    frames = [
+        *_synthetic_annealing_loop(
+            up_center=42.5,
+            up_half_width=7.5,
+            down_edge=13.0,
+            down_span=4.0,
+            base_resistance=100.0,
+        ),
+        *_synthetic_annealing_loop(
+            up_center=58.0,
+            up_half_width=8.0,
+            down_edge=13.0,
+            down_span=4.0,
+            base_resistance=110.0,
+            down_points=30,
+        ),
+    ]
+    df = pd.concat(frames, ignore_index=True)
+
+    summaries = anneal_core.summarize_transition_loops(df)
+
+    assert len(summaries) == 2
+    first, second = summaries
+    assert first.ms_current_mA == pytest.approx(11.0, abs=3.0)
+    assert first.mf_current_mA == pytest.approx(8.0, abs=2.0)
+    assert second.ms_current_mA == pytest.approx(13.0, abs=3.0)
+    assert second.mf_current_mA == pytest.approx(8.0, abs=2.0)
+
+
 def test_summarize_transition_loops_keeps_partial_missing_cooling_loop() -> None:
     frames = [
         *_synthetic_annealing_loop(
