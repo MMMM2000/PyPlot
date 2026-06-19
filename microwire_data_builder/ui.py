@@ -5413,6 +5413,145 @@ class _AnnealingTransitionReviewEntry:
     summary_lines: Tuple[str, ...]
 
 
+def _phase_point_key_for_annealing_record(record: MeasurementRecord) -> Optional[str]:
+    metadata = getattr(record, "metadata", None)
+    if metadata is None:
+        return None
+    composition = getattr(metadata, "composition_token", None)
+    draw = getattr(metadata, "draw_x", None)
+    piece = getattr(metadata, "piece_y", None)
+    if composition is None or draw is None or piece is None:
+        return None
+    suffix = None
+    path_value = getattr(record, "path", None)
+    if isinstance(path_value, Path):
+        parsed_key = _microscope_key(path_value)
+        if parsed_key is not None:
+            _, _, _, suffix = parsed_key
+    try:
+        return _microwire_key_to_str((str(composition), int(draw), int(piece), suffix))
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_phase_current_value(value: float) -> str:
+    return f"{float(value):.3f}".rstrip("0").rstrip(".")
+
+
+class _PhasePointEditorControls(QtWidgets.QWidget):
+    valuesEdited = QtCore.pyqtSignal(dict)
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        title: str = "Transition currents",
+    ) -> None:
+        super().__init__(parent)
+        self._updating = False
+        self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
+        self._edits: Dict[str, QtWidgets.QLineEdit] = {}
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        header = QtWidgets.QLabel(title, self)
+        header.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(header)
+
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(3)
+        validator = QtGui.QDoubleValidator(0.0, 10000.0, 3, self)
+        validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
+        for index, label in enumerate(PHASE_POINT_LABELS):
+            row = index // 4
+            col = (index % 4) * 2
+            radio = QtWidgets.QRadioButton(label, self)
+            if index == 0:
+                radio.setChecked(True)
+            edit = QtWidgets.QLineEdit(self)
+            edit.setValidator(validator)
+            edit.setMaximumWidth(72)
+            edit.setPlaceholderText("mA")
+            edit.returnPressed.connect(self._emit_values)
+            self._target_buttons[label] = radio
+            self._edits[label] = edit
+            grid.addWidget(radio, row, col)
+            grid.addWidget(edit, row, col + 1)
+        layout.addLayout(grid)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(6)
+        apply_button = QtWidgets.QPushButton("Apply values", self)
+        apply_button.clicked.connect(self._emit_values)
+        clear_button = QtWidgets.QPushButton("Clear selected", self)
+        clear_button.clicked.connect(self._clear_selected)
+        buttons.addWidget(apply_button)
+        buttons.addWidget(clear_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+    def selected_label(self) -> str:
+        for label, button in self._target_buttons.items():
+            if button.isChecked():
+                return label
+        return PHASE_POINT_LABELS[0]
+
+    def set_target(self, label: str) -> None:
+        button = self._target_buttons.get(label)
+        if button is not None:
+            button.setChecked(True)
+
+    def set_values(self, values: Mapping[str, Any]) -> None:
+        self._updating = True
+        try:
+            for label in PHASE_POINT_LABELS:
+                edit = self._edits.get(label)
+                if edit is None:
+                    continue
+                value = values.get(label)
+                if value is None and label == "As1":
+                    value = values.get("As")
+                if value is None and label == "Ms1":
+                    value = values.get("Ms")
+                numeric = CurrentDensitySection._coerce_phase_value(value)
+                edit.setText(_format_phase_current_value(numeric) if numeric is not None else "")
+        finally:
+            self._updating = False
+
+    def values(self) -> Dict[str, Optional[float]]:
+        result: Dict[str, Optional[float]] = {}
+        for label, edit in self._edits.items():
+            result[label] = CurrentDensitySection._coerce_phase_value(edit.text())
+        return result
+
+    def apply_picked_value(self, value: float) -> None:
+        label = self.selected_label()
+        edit = self._edits.get(label)
+        if edit is None:
+            return
+        edit.setText(_format_phase_current_value(float(value)))
+        self._emit_values()
+
+    def _clear_selected(self) -> None:
+        edit = self._edits.get(self.selected_label())
+        if edit is not None:
+            edit.clear()
+        self._emit_values()
+
+    def _emit_values(self) -> None:
+        if self._updating:
+            return
+        try:
+            self.valuesEdited.emit(self.values())
+        except Exception:
+            pass
+
+
 def _annealing_transition_review_entries(
     records: Sequence[MeasurementRecord],
     logger: logging.Logger | None = None,
@@ -5475,11 +5614,20 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         records: Sequence[MeasurementRecord],
         logger: logging.Logger,
         parent: QtWidgets.QWidget | None = None,
+        *,
+        phase_points_provider: Optional[Callable[[], Dict[str, Dict[str, float]]]] = None,
+        phase_points_setter: Optional[
+            Callable[[str, Dict[str, Optional[float]]], None]
+        ] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Current annealing transition review")
         self.resize(1280, 780)
         self._entries = _annealing_transition_review_entries(records, logger)
+        self._phase_points_provider = phase_points_provider
+        self._phase_points_setter = phase_points_setter
+        self._current_key: Optional[str] = None
+        self._current_item: Optional[QtWidgets.QTreeWidgetItem] = None
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -5511,7 +5659,14 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             right,
             show_transition_markers=True,
         )
+        self._display.valuePicked.connect(self._handle_plot_pick)
         right_layout.addWidget(self._display, 1)
+        self._phase_controls = _PhasePointEditorControls(
+            right,
+            title="Manual transition currents (mA)",
+        )
+        self._phase_controls.valuesEdited.connect(self._handle_phase_values_edited)
+        right_layout.addWidget(self._phase_controls)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -5535,12 +5690,65 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
     def _populate(self) -> None:
         self._tree.clear()
         for index, entry in enumerate(self._entries):
-            item = QtWidgets.QTreeWidgetItem([entry.title, entry.status])
+            key = _phase_point_key_for_annealing_record(entry.record)
+            values = self._phase_points_for_key(key)
+            item = QtWidgets.QTreeWidgetItem([entry.title, self._status_for_entry(entry, values)])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, index)
             if entry.summary_lines:
                 item.setToolTip(0, "\n".join(entry.summary_lines))
             self._tree.addTopLevelItem(item)
         self._tree.resizeColumnToContents(0)
+
+    def _phase_points_for_key(self, key: Optional[str]) -> Dict[str, float]:
+        if not key or not callable(self._phase_points_provider):
+            return {}
+        try:
+            snapshot = self._phase_points_provider()
+        except Exception:
+            return {}
+        payload = snapshot.get(key, {}) if isinstance(snapshot, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        result: Dict[str, float] = {}
+        for label in PHASE_POINT_LABELS + ("As", "Ms"):
+            value = CurrentDensitySection._coerce_phase_value(payload.get(label))
+            if value is not None:
+                result[label] = value
+        return result
+
+    @staticmethod
+    def _status_for_entry(
+        entry: _AnnealingTransitionReviewEntry,
+        values: Mapping[str, Any],
+    ) -> str:
+        has_manual = any(CurrentDensitySection._coerce_phase_value(values.get(label)) is not None for label in PHASE_POINT_LABELS)
+        if entry.summary_lines and has_manual:
+            return "auto + manual"
+        if has_manual:
+            return "manual"
+        return entry.status
+
+    @staticmethod
+    def _manual_summary(values: Mapping[str, Any]) -> str:
+        parts: List[str] = []
+        for label in PHASE_POINT_LABELS:
+            value = CurrentDensitySection._coerce_phase_value(values.get(label))
+            if value is not None:
+                parts.append(f"{label} {_format_phase_current_value(value)} mA")
+        return ", ".join(parts)
+
+    def _summary_text(
+        self,
+        entry: _AnnealingTransitionReviewEntry,
+        values: Mapping[str, Any],
+    ) -> str:
+        lines = list(entry.summary_lines)
+        manual = self._manual_summary(values)
+        if manual:
+            lines.append(f"Manual: {manual}")
+        if lines:
+            return "\n".join(lines)
+        return "No automatic transition candidates were detected."
 
     def _handle_current_item_changed(
         self,
@@ -5550,6 +5758,10 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         if current is None:
             self._display.clear("Select an annealing run to review.")
             self._summary_label.setText("")
+            self._phase_controls.setEnabled(False)
+            self._phase_controls.set_values({})
+            self._current_key = None
+            self._current_item = None
             return
         index = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
         try:
@@ -5557,16 +5769,51 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         except Exception:
             self._display.clear("Select an annealing run to review.")
             self._summary_label.setText("")
+            self._phase_controls.setEnabled(False)
+            self._phase_controls.set_values({})
+            self._current_key = None
+            self._current_item = None
             return
-        if entry.summary_lines:
-            self._summary_label.setText("\n".join(entry.summary_lines))
-        else:
-            self._summary_label.setText("No automatic transition candidates were detected.")
+        self._current_key = _phase_point_key_for_annealing_record(entry.record)
+        self._current_item = current
+        values = self._phase_points_for_key(self._current_key)
+        self._phase_controls.setEnabled(bool(self._current_key and callable(self._phase_points_setter)))
+        self._phase_controls.set_values(values)
+        self._summary_label.setText(self._summary_text(entry, values))
+        current.setText(1, self._status_for_entry(entry, values))
         self._display.set_record(
             entry.record,
             setpoint=_extract_setpoint(entry.record),
             description="Select an annealing run to review.",
         )
+
+    def _current_entry(self) -> Optional[_AnnealingTransitionReviewEntry]:
+        item = self._current_item
+        if item is None:
+            return None
+        index = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        try:
+            return self._entries[int(index)]
+        except Exception:
+            return None
+
+    def _handle_plot_pick(self, value: float) -> None:
+        self._phase_controls.apply_picked_value(value)
+
+    def _handle_phase_values_edited(self, values: Dict[str, Optional[float]]) -> None:
+        key = self._current_key
+        if not key or not callable(self._phase_points_setter):
+            return
+        try:
+            self._phase_points_setter(key, values)
+        except Exception:
+            return
+        entry = self._current_entry()
+        if entry is not None:
+            stored_values = self._phase_points_for_key(key)
+            self._summary_label.setText(self._summary_text(entry, stored_values))
+            if self._current_item is not None:
+                self._current_item.setText(1, self._status_for_entry(entry, stored_values))
 
 
 @dataclass
@@ -11465,7 +11712,16 @@ class AnnealingSection(MiniDatabaseSection):
                 "No current annealing graphs are available yet.",
             )
             return
-        dialog = _AnnealingTransitionReviewDialog(records, self.logger, self)
+        dialog = _AnnealingTransitionReviewDialog(
+            records,
+            self.logger,
+            self,
+            phase_points_provider=self.phase_points_snapshot,
+            phase_points_setter=lambda key, values: self.set_phase_points_for_key(
+                key,
+                phase_values=values,
+            ),
+        )
         dialog.exec()
 
     def _clean_phase_points_payload(self, payload: Dict[str, Any]) -> Dict[str, float]:
@@ -14493,7 +14749,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
 
 class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
-    valuePicked = QtCore.pyqtSignal(str, float)
+    phaseValuesEdited = QtCore.pyqtSignal(dict)
     def __init__(self, logger: logging.Logger, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._logger = logger
@@ -14507,25 +14763,35 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         )
         layout.addWidget(self.header_label)
 
+        self._phase_controls = _PhasePointEditorControls(
+            self,
+            title="Manual transition currents (mA)",
+        )
+        self._phase_controls.valuesEdited.connect(self.phaseValuesEdited.emit)
+        layout.addWidget(self._phase_controls)
+
         self._high_display = _AnnealingPlotDisplay(ANNEALING_HIGH_GRAPH_COLUMN, logger, self)
         self._other_display = _AnnealingPlotGallery(ANNEALING_OTHER_GRAPH_COLUMN, logger, self)
         layout.addWidget(self._high_display, 1)
         layout.addWidget(self._other_display, 1)
-        layout.setStretch(1, 1)
         layout.setStretch(2, 1)
-        self._high_display.valuePicked.connect(lambda value: self.valuePicked.emit("As", value))
-        self._other_display.valuePicked.connect(lambda value: self.valuePicked.emit("Ms", value))
+        layout.setStretch(3, 1)
+        self._high_display.valuePicked.connect(self._phase_controls.apply_picked_value)
+        self._other_display.valuePicked.connect(self._phase_controls.apply_picked_value)
 
     def update_selection(
         self,
         key: Optional[MicrowireKey],
         high: Optional[MeasurementRecord],
         other_records: Sequence[MeasurementRecord],
+        phase_values: Mapping[str, Any],
     ) -> None:
         if key is None:
             self.header_label.setText("Select a row to preview annealing plots.")
             self._high_display.clear("Select a row to view the 1000 mA measurement.")
             self._other_display.clear("Select a row to view the other annealing measurements.")
+            self._phase_controls.setEnabled(False)
+            self._phase_controls.set_values({})
             return
         composition, draw, piece, suffix = key
         try:
@@ -14533,6 +14799,8 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         except Exception:
             microwire = f"{draw}/{piece}"
         self.header_label.setText(f"{composition} — {microwire}")
+        self._phase_controls.setEnabled(True)
+        self._phase_controls.set_values(phase_values)
 
         self._high_display.set_record(
             high,
@@ -14651,7 +14919,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         preview_panel = _CurrentDensityPreviewPanel(logger, splitter)
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
-        preview_panel.valuePicked.connect(self._apply_picked_value)
+        preview_panel.phaseValuesEdited.connect(self._apply_phase_values)
 
         if hasattr(self._annealing_section, "data_updated"):
             try:
@@ -14827,10 +15095,10 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return
         key = self._current_selection_key()
         if key is None:
-            panel.update_selection(None, None, [])
+            panel.update_selection(None, None, [], {})
             return
         high, other_records = self._fetch_records_for_key(key)
-        panel.update_selection(key, high, other_records)
+        panel.update_selection(key, high, other_records, self._selected_phase_values())
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
@@ -14902,8 +15170,10 @@ class CurrentDensitySection(QtWidgets.QWidget):
         if updated and not setter_used:
             QtCore.QTimer.singleShot(0, self.refresh_data)
 
-    def _column_index_for_kind(self, kind: str) -> Optional[int]:
-        target_column = ANNEALING_AS_COLUMN if kind == "As" else ANNEALING_MS_COLUMN
+    def _column_index_for_label(self, label: str) -> Optional[int]:
+        target_column = PHASE_POINT_COLUMN_MAP.get(label)
+        if not target_column:
+            return None
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame):
             return None
@@ -14912,48 +15182,54 @@ class CurrentDensitySection(QtWidgets.QWidget):
         except Exception:
             return None
 
-    def _apply_picked_value(self, kind: str, value: float) -> None:
+    def _selected_source_row(self) -> Optional[int]:
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
-            return
+            return None
         selection_model = table.selectionModel()
         if selection_model is None:
-            return
+            return None
+        current_index = selection_model.currentIndex()
+        if current_index.isValid():
+            row = self._source_row(current_index.row())
+            if row is not None:
+                return row
+        rows = selection_model.selectedRows()
+        if rows:
+            return self._source_row(rows[0].row())
+        return None
+
+    def _selected_phase_values(self) -> Dict[str, Optional[float]]:
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
-            return
-        current_index = selection_model.currentIndex()
-        column_index = None
-        if current_index.isValid():
-            source_row = self._source_row(current_index.row())
-            try:
-                current_label = str(frame.columns[current_index.column()])
-            except Exception:
-                current_label = ""
-            if current_label in PHASE_POINT_COLUMN_MAP.values():
-                column_index = current_index.column()
-        if column_index is None:
-            column_index = self._column_index_for_kind(kind)
-        if column_index is None:
-            return
-        row = source_row if current_index.isValid() else None
-        if row is None:
-            rows = selection_model.selectedRows()
-            if rows:
-                row = self._source_row(rows[0].row())
+            return {}
+        row = self._selected_source_row()
         if row is None or row < 0 or row >= len(frame.index):
+            return {}
+        series = frame.iloc[row]
+        return {
+            label: self._coerce_phase_value(series.get(column))
+            for label, column in PHASE_POINT_COLUMN_MAP.items()
+        }
+
+    def _apply_phase_values(self, values: Dict[str, Optional[float]]) -> None:
+        key = self._current_selection_key()
+        if key is None:
             return
-        target_index = current_index if (current_index.isValid() and current_index.column() == column_index) else self.model.index(row, column_index)
-        if not target_index.isValid():
+        key_text = _microwire_key_to_str(key)
+        setter = getattr(self._annealing_section, "set_phase_points_for_key", None)
+        if not callable(setter):
             return
-        if not self.model.setData(target_index, float(value)):
-            return
+        cleaned = {
+            label: self._coerce_phase_value(values.get(label))
+            for label in PHASE_POINT_LABELS
+        }
         try:
-            table.setCurrentIndex(target_index)
-            table.scrollTo(target_index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
+            setter(key_text, phase_values=cleaned)
         except Exception:
-            pass
-        self._update_preview()
+            self.logger.exception("Failed to persist phase transition points for %s", key_text)
+            return
+        self.refresh_data()
 
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
@@ -15170,7 +15446,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                         str(composition),
                         int(draw),
                         int(piece),
-                        str(suffix).strip() or None,
+                        str(suffix).strip() if suffix is not None and str(suffix).strip() else None,
                     )
                     setpoint_value = float(setpoint)
                 except (TypeError, ValueError):
