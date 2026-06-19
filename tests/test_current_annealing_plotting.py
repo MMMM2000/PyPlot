@@ -107,9 +107,10 @@ def _synthetic_annealing_loop(
     down_span: float,
     base_resistance: float,
     include_cooling_transition: bool = True,
+    down_points: int = 160,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     up_current = np.linspace(1.0, 100.0, 160)
-    down_current = np.linspace(100.0, 1.0, 160)
+    down_current = np.linspace(100.0, 1.0, down_points)
     up_drop = np.clip(1.0 - np.abs(up_current - up_center) / up_half_width, 0.0, 1.0)
     up_resistance = base_resistance + (0.12 * up_current) - (12.0 * up_drop)
     if include_cooling_transition:
@@ -159,6 +160,36 @@ def test_summarize_transition_loops_detects_two_current_annealing_loops() -> Non
         "run loop 1: As 35 mA, Af 43 mA, Ms 7 mA, Mf 3 mA",
         "run loop 2: As 50 mA, Af 58 mA, Ms 11 mA, Mf 8 mA",
     )
+
+
+def test_summarize_transition_loops_detects_clear_sparse_first_cooling_loop() -> None:
+    frames = [
+        *_synthetic_annealing_loop(
+            up_center=42.5,
+            up_half_width=7.5,
+            down_edge=13.0,
+            down_span=4.0,
+            base_resistance=100.0,
+            down_points=30,
+        ),
+        *_synthetic_annealing_loop(
+            up_center=58.0,
+            up_half_width=8.0,
+            down_edge=13.0,
+            down_span=4.0,
+            base_resistance=110.0,
+        ),
+    ]
+    df = pd.concat(frames, ignore_index=True)
+
+    summaries = anneal_core.summarize_transition_loops(df)
+
+    assert len(summaries) == 2
+    first, second = summaries
+    assert first.ms_current_mA == pytest.approx(13.0, abs=2.0)
+    assert first.mf_current_mA == pytest.approx(8.0, abs=2.0)
+    assert second.ms_current_mA == pytest.approx(11.0, abs=1.0)
+    assert second.mf_current_mA == pytest.approx(8.0, abs=1.0)
 
 
 def test_summarize_transition_loops_keeps_partial_missing_cooling_loop() -> None:
