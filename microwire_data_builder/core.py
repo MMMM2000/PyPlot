@@ -7094,7 +7094,7 @@ def build_database(
     shape_memory_entries: Optional[Dict[str, Dict[str, object]]] = None,
     fmr_records: Optional[Iterable[FmrRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
-    transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
+    transition_temps: Optional[Dict[str, Dict[str, object]]] = None,
     current_density_entries: Optional[Dict[str, Dict[str, object]]] = None,
     video_overrides: Optional[Dict[str, Dict[str, object]]] = None,
     include_fabrication_draw_siblings: bool = False,
@@ -7436,6 +7436,7 @@ def build_database(
     phase_points_map = dict(phase_points_map)
 
     transition_temps_map: Dict[str, Dict[str, float]] = {}
+    transition_temps_blocked_keys: Set[str] = set()
     if transition_temps:
         for key, payload in transition_temps.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
@@ -7443,17 +7444,31 @@ def build_database(
             key_parts = _microwire_key_from_string(key)
             if key_parts is None:
                 continue
+            key_str = _microwire_key_to_str(key_parts)
+            status = str(
+                payload.get("__review_status__")
+                or payload.get("status")
+                or ""
+            ).strip()
+            included = payload.get("__included__", payload.get("included", None))
+            blocked = status in {"no_transition", "excluded"} or included is False
             cleaned = {
                 label: float(value)
                 for label, value in payload.items()
-                if isinstance(value, (int, float))
+                if label in ("As", "Af", "Ms", "Mf")
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
             }
             if cleaned:
-                transition_temps_map[_microwire_key_to_str(key_parts)] = cleaned
+                transition_temps_map[key_str] = cleaned
+            elif blocked:
+                transition_temps_blocked_keys.add(key_str)
     transition_temps_map = dict(transition_temps_map)
     if vsm_temperature_groups:
         for key, records in vsm_temperature_groups.items():
             key_str = _microwire_key_to_str(key)
+            if key_str in transition_temps_blocked_keys and key_str not in transition_temps_map:
+                continue
             entry = transition_temps_map.setdefault(key_str, {})
             for record in records:
                 data = getattr(record, "data", None)

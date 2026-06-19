@@ -2495,7 +2495,11 @@ def test_transition_temps_preview_click_persists_manual_temperature(
         snapshot = section.transition_points_snapshot()
         frame = section.model.frame()
         assert snapshot[key]["Af"] == pytest.approx(37.5)
+        review = next(iter(section.transition_reviews_snapshot().values()))
+        assert review["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
+        assert review["manual_values_C"] == {"Af": pytest.approx(37.5)}
         assert frame.iloc[0][builder_ui.TRANSITION_TEMP_AF_COLUMN] == pytest.approx(37.5)
+        assert frame.iloc[0]["Review status"] == "Manual adjusted"
         assert section._preview_panel._auto_value_labels["As"].text() == "Auto: 12"  # noqa: SLF001
         assert section._preview_panel._value_labels["Af"].text() == "37.5"  # noqa: SLF001
         page = section._preview_panel._tab_widget.currentWidget()  # noqa: SLF001
@@ -2503,6 +2507,73 @@ def test_transition_temps_preview_click_persists_manual_temperature(
         text_labels = {text.get_text() for text in canvas.figure.axes[0].texts}
         assert "auto As" in text_labels
         assert "Af" in text_labels
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_temps_queue_marks_no_transition_and_shows_scan_counts(
+    tmp_path: Path,
+) -> None:
+    _ensure_qapp()
+    scan1 = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 scan-a.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(
+            {
+                "temperature": [0.0, 20.0, 40.0],
+                "field": [10000.0, 10000.0, 10000.0],
+                "signal": [0.0, 1.0, 0.5],
+                "section_index": [0, 0, 0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="scan-a",
+    )
+    scan2 = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 scan-b.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=scan1.data.copy(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="scan-b",
+    )
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[scan1, scan2],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        section._auto_values_for_record = lambda _record: {"As": 12.0, "Af": 32.0}  # type: ignore[method-assign]  # noqa: SLF001
+        section.refresh_data()
+        source_index = section.model.index(0, 0)
+        proxy_index = section._search_proxy.mapFromSource(source_index)  # noqa: SLF001
+        section.table_view.setCurrentIndex(proxy_index)
+        section.table_view.selectRow(proxy_index.row())
+
+        frame = section.model.frame()
+        assert len(frame.index) == 1
+        assert frame.iloc[0]["Scans"] == 2
+        assert frame.iloc[0]["Review status"] == "Auto candidates"
+        assert "Total 2" in section._preview_panel.review_counts_label.text()  # noqa: SLF001
+
+        section._mark_current_scan_no_transition()  # noqa: SLF001
+
+        reviews = section.transition_reviews_snapshot()
+        assert len(reviews) == 1
+        review = next(iter(reviews.values()))
+        assert review["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert review["included"] is False
+        frame = section.model.frame()
+        assert frame.iloc[0]["No transition"] == 1
+        assert frame.iloc[0]["Unreviewed"] == 1
+        assert frame.iloc[0]["Review status"] == "Partly reviewed"
     finally:
         section.close()
         section.deleteLater()
@@ -6527,6 +6598,68 @@ def test_build_database_estimates_transition_temps_from_vsm_scan_records(tmp_pat
     assert row["Af (°C)"] == pytest.approx(70.0, abs=1.0)
     assert row["Ms (°C)"] == pytest.approx(65.0, abs=1.0)
     assert row["Mf (°C)"] == pytest.approx(25.0, abs=1.0)
+
+
+def test_build_database_respects_blocked_vsm_transition_review(tmp_path: Path) -> None:
+    heating_x = np.linspace(0.0, 100.0, 101)
+    cooling_x = heating_x[::-1]
+    heating_y = np.piecewise(
+        heating_x,
+        [heating_x <= 30.0, (heating_x > 30.0) & (heating_x < 70.0), heating_x >= 70.0],
+        [
+            lambda value: 0.01 * value,
+            lambda value: 0.3 + 0.09 * (value - 30.0),
+            lambda value: 3.9 + 0.012 * (value - 70.0),
+        ],
+    )
+    cooling_y = np.piecewise(
+        cooling_x,
+        [cooling_x <= 25.0, (cooling_x > 25.0) & (cooling_x < 65.0), cooling_x >= 65.0],
+        [
+            lambda value: 0.01 * value,
+            lambda value: 0.25 + 0.09 * (value - 25.0),
+            lambda value: 3.85 + 0.012 * (value - 65.0),
+        ],
+    )
+    scan = VsmTemperatureScanRecord(
+        path=tmp_path / "scan.txt",
+        sample="Ni55Fe18Ga27 1_1",
+        data=pd.DataFrame(
+            {
+                "temperature": np.concatenate([heating_x, cooling_x]),
+                "field": [10000.0] * 202,
+                "signal": np.concatenate([heating_y, cooling_y]),
+                "section_index": [0] * 101 + [1] * 101,
+            }
+        ),
+        key=("Ni55Fe18Ga27", 1, 1, None),
+        label="scan",
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        vsm_temperature_scan_records=[scan],
+        transition_temps={
+            "Ni55Fe18Ga27|1|1": {
+                "__review_status__": "no_transition",
+                "__included__": False,
+            }
+        },
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert pd.isna(row[core.TRANSITION_TEMP_AS_COLUMN])
+    assert pd.isna(row[core.TRANSITION_TEMP_AF_COLUMN])
+    assert pd.isna(row[core.TRANSITION_TEMP_MS_COLUMN])
+    assert pd.isna(row[core.TRANSITION_TEMP_MF_COLUMN])
 
 
 def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
