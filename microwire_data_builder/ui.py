@@ -5660,6 +5660,20 @@ MINI_DMA_REVIEW_STATUS_NO_TRANSITION = "no_transition"
 MINI_DMA_REVIEW_STATUS_EXCLUDED = "excluded"
 MINI_DMA_TRANSITION_LABELS = ("As", "Af", "Ms", "Mf")
 
+VSM_TRANSITION_REVIEW_SCHEMA_VERSION = 1
+VSM_TRANSITION_REVIEW_EXTRA_KEY = "transition_reviews"
+VSM_TRANSITION_VALUES_KEY = "transition_temps"
+VSM_TRANSITION_STATUS_KEY = "__review_status__"
+VSM_TRANSITION_INCLUDED_KEY = "__included__"
+VSM_TRANSITION_REVIEW_COLUMNS = [
+    "Review status",
+    "Scans",
+    "Accepted",
+    "No transition",
+    "Excluded",
+    "Unreviewed",
+]
+
 
 def _coerce_finite_float(value: Any) -> Optional[float]:
     if value is None:
@@ -5695,6 +5709,17 @@ def _clean_mini_dma_transition_values(values: Mapping[str, Any] | None) -> Dict[
         return {}
     cleaned: Dict[str, float] = {}
     for label in MINI_DMA_TRANSITION_LABELS:
+        value = _coerce_finite_float(values.get(label))
+        if value is not None:
+            cleaned[label] = value
+    return cleaned
+
+
+def _clean_vsm_transition_values(values: Mapping[str, Any] | None) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in TRANSITION_TEMP_LABELS:
         value = _coerce_finite_float(values.get(label))
         if value is not None:
             cleaned[label] = value
@@ -7155,7 +7180,7 @@ def _mini_dma_transition_values_from_summary(target_summary: object) -> Dict[str
 
 def _mini_dma_review_status_label(status: str) -> str:
     if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
-        return "Reviewed"
+        return "Accepted"
     if status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
         return "No transition"
     if status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
@@ -7173,10 +7198,10 @@ def _mini_dma_display_status(entry: _MiniDmaTransitionReviewEntry, review: Mappi
     if label != "Unreviewed":
         return label
     if entry.status == "accepted":
-        return "Auto accepted"
+        return "Auto candidates"
     if entry.status == "partial":
-        return "Auto partial"
-    return "Auto rejected"
+        return "Needs attention"
+    return "Unreviewed"
 
 
 @dataclass
@@ -7319,8 +7344,8 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.show_fit_lines_check.setChecked(True)
         self.show_markers_check = QtWidgets.QCheckBox("Markers")
         self.show_markers_check.setChecked(True)
-        self.next_rejected_button = QtWidgets.QPushButton("Next rejected")
-        self.next_questionable_button = QtWidgets.QPushButton("Next partial")
+        self.next_rejected_button = QtWidgets.QPushButton("Next auto rejected")
+        self.next_questionable_button = QtWidgets.QPushButton("Next auto partial")
         self.accept_button = QtWidgets.QPushButton("Accept && next")
         self.no_transition_button = QtWidgets.QPushButton("No transition")
         self.exclude_button = QtWidgets.QPushButton("Exclude target")
@@ -7564,32 +7589,64 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             for index, entry in enumerate(entries):
                 yield key, index, entry
 
-    def _review_counts(self) -> Tuple[int, int, int, int, int]:
+    def _review_counts(self) -> Dict[str, int]:
         loaded = 0
-        reviewed = 0
+        accepted = 0
+        manual = 0
         no_transition = 0
         excluded = 0
+        auto_candidates = 0
+        needs_attention = 0
         snapshot = self._review_snapshot()
         for _key, _index, entry in self._iter_loaded_entries():
             loaded += 1
             review = snapshot.get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
             status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
             if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
-                reviewed += 1
+                if _clean_mini_dma_transition_values(
+                    review.get("manual_values_mA") if isinstance(review, Mapping) else None
+                ):
+                    manual += 1
+                else:
+                    accepted += 1
             elif status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
                 no_transition += 1
             elif status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
                 excluded += 1
-        return loaded, reviewed, no_transition, excluded, max(loaded - reviewed - no_transition - excluded, 0)
+            elif entry.status == "accepted":
+                auto_candidates += 1
+            elif entry.status == "partial":
+                needs_attention += 1
+        reviewed = accepted + manual + no_transition + excluded
+        return {
+            "total": loaded,
+            "accepted": accepted,
+            "manual": manual,
+            "no_transition": no_transition,
+            "excluded": excluded,
+            "needs_attention": needs_attention,
+            "auto_candidates": auto_candidates,
+            "reviewed": reviewed,
+            "unreviewed": max(loaded - reviewed, 0),
+        }
 
     def _update_review_counts(self) -> None:
-        loaded, reviewed, no_transition, excluded, unreviewed = self._review_counts()
-        if loaded <= 0:
+        counts = self._review_counts()
+        if counts["total"] <= 0:
             return
-        self.status_label.setText(
-            f"Loaded {loaded} target(s): {reviewed} reviewed, "
-            f"{no_transition} no transition, {excluded} excluded, {unreviewed} unreviewed."
-        )
+        parts = [
+            f"Total {counts['total']}",
+            f"Done {counts['reviewed']}",
+            f"Open {counts['unreviewed']}",
+            f"Auto {counts['auto_candidates']}",
+            f"Accepted {counts['accepted']}",
+            f"Manual {counts['manual']}",
+            f"No transition {counts['no_transition']}",
+            f"Excluded {counts['excluded']}",
+        ]
+        if counts["needs_attention"]:
+            parts.append(f"Needs attention {counts['needs_attention']}")
+        self.status_label.setText(" | ".join(parts))
 
     def _select_initial_run(self) -> None:
         if self._closing:
@@ -17219,8 +17276,53 @@ class CurrentDensitySection(QtWidgets.QWidget):
         )
 
 
+def _vsm_transition_review_record_id(record: VsmTemperatureScanRecord) -> str:
+    path = getattr(record, "path", None)
+    if isinstance(path, Path):
+        try:
+            path_text = str(path.resolve())
+        except Exception:
+            path_text = str(path)
+    else:
+        path_text = ""
+    parts = [
+        "vsm_temperature_scan",
+        path_text,
+        str(getattr(record, "sample", "") or ""),
+        str(getattr(record, "label", "") or ""),
+        repr(getattr(record, "key", None)),
+    ]
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"vsm-ts:{digest}"
+
+
+def _vsm_transition_review_is_final(status: str | None) -> bool:
+    return str(status or "").strip() in {
+        TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+        TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+        TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+        TRANSITION_REVIEW_STATUS_EXCLUDED,
+    }
+
+
+def _vsm_transition_review_blocks_values(payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    status = str(payload.get("status") or "").strip()
+    return status in {
+        TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+        TRANSITION_REVIEW_STATUS_EXCLUDED,
+    }
+
+
 class _TransitionTempPreviewPanel(QtWidgets.QWidget):
     valuePicked = QtCore.pyqtSignal(str, float)
+    acceptNextRequested = QtCore.pyqtSignal()
+    noTransitionRequested = QtCore.pyqtSignal()
+    excludeRequested = QtCore.pyqtSignal()
+    previousRequested = QtCore.pyqtSignal()
+    nextUnreviewedRequested = QtCore.pyqtSignal()
+    scanChanged = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -17235,6 +17337,11 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
         self._value_labels: Dict[str, QtWidgets.QLabel] = {}
         self._auto_value_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._tab_record_ids: List[str] = []
+        self._tab_auto_values: Dict[str, Dict[str, float]] = {}
+        self._tab_reviewed_values: Dict[str, Dict[str, float]] = {}
+        self._tab_status_texts: Dict[str, str] = {}
+        self._updating_tabs = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -17246,6 +17353,44 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         )
         layout.addWidget(self.header_label)
 
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(6)
+        self.accept_next_button = QtWidgets.QPushButton("Accept && next", self)
+        self.accept_next_button.clicked.connect(self.acceptNextRequested.emit)
+        self.no_transition_button = QtWidgets.QPushButton("No transition", self)
+        self.no_transition_button.clicked.connect(self.noTransitionRequested.emit)
+        self.exclude_button = QtWidgets.QPushButton("Exclude scan", self)
+        self.exclude_button.clicked.connect(self.excludeRequested.emit)
+        self.previous_button = QtWidgets.QPushButton("Previous", self)
+        self.previous_button.clicked.connect(self.previousRequested.emit)
+        self.next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed", self)
+        self.next_unreviewed_button.clicked.connect(self.nextUnreviewedRequested.emit)
+        for button in (
+            self.accept_next_button,
+            self.no_transition_button,
+            self.exclude_button,
+            self.previous_button,
+            self.next_unreviewed_button,
+        ):
+            action_row.addWidget(button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        self.review_status_label = QtWidgets.QLabel("Review state: Unreviewed", self)
+        self.review_status_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.review_status_label.setStyleSheet("font-size: 10px;")
+        layout.addWidget(self.review_status_label)
+
+        self.review_counts_label = QtWidgets.QLabel("", self)
+        self.review_counts_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.review_counts_label.setStyleSheet("font-size: 10px;")
+        layout.addWidget(self.review_counts_label)
+
         self._stack = QtWidgets.QStackedLayout()
         self._placeholder = QtWidgets.QLabel(
             "Select a row to preview VSM temperature scans."
@@ -17253,6 +17398,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._tab_widget = QtWidgets.QTabWidget(self)
+        self._tab_widget.currentChanged.connect(self._handle_tab_changed)
         self._stack.addWidget(self._placeholder)
         self._stack.addWidget(self._tab_widget)
         layout.addLayout(self._stack, 1)
@@ -17299,12 +17445,32 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         records: Sequence[VsmTemperatureScanRecord],
         values: Mapping[str, float],
         auto_values: Mapping[str, float] | None = None,
+        *,
+        auto_values_by_record: Mapping[str, Mapping[str, float]] | None = None,
+        reviewed_values_by_record: Mapping[str, Mapping[str, float]] | None = None,
+        status_by_record: Mapping[str, str] | None = None,
+        counts_text: str = "",
+        selected_record_id: Optional[str] = None,
     ) -> None:
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
         self.header_label.setText(title or "Transition temps")
         self._update_value_labels(values)
         self._update_auto_value_labels(auto_values or {})
+        self.review_counts_label.setText(counts_text)
+        self.review_status_label.setText("Review state: Unreviewed")
         self._clear_tabs()
+        self._tab_auto_values = {
+            str(record_id): _clean_vsm_transition_values(payload)
+            for record_id, payload in (auto_values_by_record or {}).items()
+        }
+        self._tab_reviewed_values = {
+            str(record_id): _clean_vsm_transition_values(payload)
+            for record_id, payload in (reviewed_values_by_record or {}).items()
+        }
+        self._tab_status_texts = {
+            str(record_id): str(status)
+            for record_id, status in (status_by_record or {}).items()
+        }
 
         if self._processor is None:
             self._placeholder.setText("VSM temperature scan parser is unavailable.")
@@ -17315,6 +17481,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             self._stack.setCurrentWidget(self._placeholder)
             return
         for record in records:
+            record_id = _vsm_transition_review_record_id(record)
             figure = _plot_vsm_temperature_scan_figure(
                 record,
                 self._processor,
@@ -17323,7 +17490,11 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             )
             if figure is None:
                 continue
-            self._draw_transition_markers(figure, auto_values or {}, values)
+            self._draw_transition_markers(
+                figure,
+                self._tab_auto_values.get(record_id, auto_values or {}),
+                self._tab_reviewed_values.get(record_id, values),
+            )
             canvas = FigureCanvasQTAgg(figure)
             try:
                 canvas.setMouseTracking(True)
@@ -17340,6 +17511,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             except Exception:
                 motion_cid = None
             self._canvas_connections.append((canvas, motion_cid, click_cid))
+            self._tab_record_ids.append(record_id)
             label = _record_label_for_display(record) or record.sample or "Scan"
             page = QtWidgets.QWidget(self._tab_widget)
             page_layout = QtWidgets.QVBoxLayout(page)
@@ -17350,17 +17522,44 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             self._placeholder.setText("No VSM temperature scans available for this microwire.")
             self._stack.setCurrentWidget(self._placeholder)
         else:
-            if current_index >= 0:
-                self._tab_widget.setCurrentIndex(
-                    min(current_index, self._tab_widget.count() - 1)
-                )
+            selected_index = current_index
+            if selected_record_id and selected_record_id in self._tab_record_ids:
+                selected_index = self._tab_record_ids.index(selected_record_id)
+            if selected_index >= 0:
+                self._updating_tabs = True
+                try:
+                    self._tab_widget.setCurrentIndex(
+                        min(selected_index, self._tab_widget.count() - 1)
+                    )
+                finally:
+                    self._updating_tabs = False
             self._stack.setCurrentWidget(self._tab_widget)
+            self._sync_current_tab_labels()
+            self._emit_scan_changed()
 
     def _current_target(self) -> str:
         for label, button in self._target_buttons.items():
             if button.isChecked():
                 return label
         return "As"
+
+    def current_record_id(self) -> Optional[str]:
+        index = self._tab_widget.currentIndex()
+        if index < 0 or index >= len(self._tab_record_ids):
+            return None
+        return self._tab_record_ids[index]
+
+    def set_counts_text(self, text: str) -> None:
+        self.review_counts_label.setText(str(text or ""))
+
+    def set_status_text(self, text: str) -> None:
+        self.review_status_label.setText(str(text or "Review state: Unreviewed"))
+
+    def select_record_id(self, record_id: str) -> bool:
+        if not record_id or record_id not in self._tab_record_ids:
+            return False
+        self._tab_widget.setCurrentIndex(self._tab_record_ids.index(record_id))
+        return True
 
     def _clear_tabs(self) -> None:
         for canvas, motion_cid, click_cid in self._canvas_connections:
@@ -17382,6 +17581,30 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self._update_cursor_label(None)
+        self._tab_record_ids.clear()
+        self._tab_auto_values.clear()
+        self._tab_reviewed_values.clear()
+        self._tab_status_texts.clear()
+
+    def _handle_tab_changed(self, _index: int) -> None:
+        self._sync_current_tab_labels()
+        self._emit_scan_changed()
+
+    def _sync_current_tab_labels(self) -> None:
+        record_id = self.current_record_id()
+        if not record_id:
+            return
+        self._update_auto_value_labels(self._tab_auto_values.get(record_id, {}))
+        self._update_value_labels(self._tab_reviewed_values.get(record_id, {}))
+        self.set_status_text(self._tab_status_texts.get(record_id, "Review state: Unreviewed"))
+
+    def _emit_scan_changed(self) -> None:
+        if self._updating_tabs:
+            return
+        try:
+            self.scanChanged.emit()
+        except Exception:
+            pass
 
     def _handle_motion(self, event: Any) -> None:
         if event is None or event.inaxes is None or event.xdata is None:
@@ -17549,9 +17772,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self.store = MiniDatabaseStore(self.section_key)
         self.data = self.store.load()
         self._transition_points = self._load_transition_points()
+        self._transition_reviews = self._load_transition_reviews()
         self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._last_sources: List[str] = []
-        self._current_frame = pd.DataFrame(columns=TRANSITION_TEMP_COLUMNS + ["_group_key"])
+        self._pending_preview_record_id: Optional[str] = None
+        self._current_frame = pd.DataFrame(
+            columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+        )
         self.model = DataFrameModel(self._current_frame)
         self.model.set_editable_columns(set(TRANSITION_TEMP_COLUMN_MAP.values()))
         self.model.dataChanged.connect(self._handle_model_data_changed)
@@ -17631,6 +17858,12 @@ class TransitionTempsSection(QtWidgets.QWidget):
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
         preview_panel.valuePicked.connect(self._apply_picked_value)
+        preview_panel.acceptNextRequested.connect(self._accept_current_scan_and_next)
+        preview_panel.noTransitionRequested.connect(self._mark_current_scan_no_transition)
+        preview_panel.excludeRequested.connect(self._exclude_current_scan)
+        preview_panel.previousRequested.connect(self._select_previous_scan)
+        preview_panel.nextUnreviewedRequested.connect(self._select_next_unreviewed_scan)
+        preview_panel.scanChanged.connect(self._sync_preview_status)
 
         if hasattr(self._vsm_temperature_section, "data_updated"):
             try:
@@ -17646,7 +17879,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
             self.logger.log(level, message)
 
     def _load_transition_points(self) -> Dict[str, Dict[str, float]]:
-        stored = self.data.extra.get("transition_temps")
+        stored = self.data.extra.get(VSM_TRANSITION_VALUES_KEY)
         if not isinstance(stored, dict):
             return {}
         cleaned: Dict[str, Dict[str, float]] = {}
@@ -17662,6 +17895,80 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 cleaned[key] = entry
         return cleaned
 
+    def _load_transition_reviews(self) -> Dict[str, Dict[str, Any]]:
+        stored = self.data.extra.get(VSM_TRANSITION_REVIEW_EXTRA_KEY)
+        if isinstance(stored, dict) and isinstance(stored.get("records"), dict):
+            stored = stored.get("records")
+        if not isinstance(stored, dict):
+            return {}
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in stored.items():
+            if not isinstance(record_id, str) or not isinstance(payload, dict):
+                continue
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                cleaned[record_id] = entry
+        return cleaned
+
+    def _clean_transition_review_payload(
+        self,
+        record_id: str,
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        status = str(payload.get("status") or TRANSITION_REVIEW_STATUS_UNREVIEWED).strip()
+        if status not in {
+            TRANSITION_REVIEW_STATUS_UNREVIEWED,
+            TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+            TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION,
+        }:
+            status = TRANSITION_REVIEW_STATUS_UNREVIEWED
+        auto_values = _clean_vsm_transition_values(payload.get("auto_values_C"))
+        if not auto_values:
+            auto_values = _clean_vsm_transition_values(payload.get("auto_values"))
+        manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+        if not manual_values:
+            manual_values = _clean_vsm_transition_values(payload.get("manual_values"))
+        final_values = _clean_vsm_transition_values(payload.get("final_values_C"))
+        if not final_values:
+            final_values = _clean_vsm_transition_values(payload.get("values"))
+        if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED and manual_values:
+            final_values = dict(manual_values)
+        elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO and not final_values:
+            final_values = dict(auto_values)
+        elif status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            final_values = {}
+            manual_values = {}
+        included = payload.get("included")
+        if status in TRANSITION_REVIEW_INCLUDED_STATUSES:
+            included = bool(final_values)
+        elif status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            included = False
+        else:
+            included = bool(included)
+        cleaned: Dict[str, Any] = {
+            "status": status,
+            "included": bool(included),
+            "auto_values_C": auto_values,
+            "manual_values_C": manual_values,
+            "final_values_C": final_values,
+        }
+        for key in ("sample", "group_key", "record_label", "record_path"):
+            value = payload.get(key)
+            if value not in (None, ""):
+                cleaned[key] = str(value)
+        if record_id:
+            cleaned["record_id"] = str(record_id)
+        return cleaned
+
     def _store_transition_points(self) -> None:
         snapshot: Dict[str, Dict[str, float]] = {}
         for key, payload in self._transition_points.items():
@@ -17674,15 +17981,40 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     entry[label] = float(value)
             if entry:
                 snapshot[key] = entry
-        self.data.extra["transition_temps"] = snapshot
+        self.data.extra[VSM_TRANSITION_VALUES_KEY] = snapshot
+        self._store_transition_reviews(update_table=False)
         self.data.table = self.model.frame()
         try:
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist transition temps")
 
-    def transition_points_snapshot(self) -> Dict[str, Dict[str, float]]:
-        snapshot: Dict[str, Dict[str, float]] = {}
+    def _store_transition_reviews(self, *, update_table: bool = True) -> None:
+        records: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            if not isinstance(record_id, str) or not isinstance(payload, dict):
+                continue
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                records[record_id] = entry
+        self._transition_reviews = records
+        self.data.extra[VSM_TRANSITION_REVIEW_EXTRA_KEY] = {
+            "schema_version": VSM_TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": records,
+        }
+        if update_table:
+            self.data.table = self.model.frame()
+
+    def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in self._transition_reviews.items():
+            entry = self._clean_transition_review_payload(record_id, payload)
+            if entry:
+                snapshot[record_id] = entry
+        return snapshot
+
+    def transition_points_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
         for key, payload in self._transition_points.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
@@ -17693,6 +18025,16 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     cleaned[label] = float(value)
             if cleaned:
                 snapshot[key] = cleaned
+        for key, records in self._record_groups.items():
+            values = self._values_for_group(key, records, include_auto=True)
+            if values:
+                snapshot[key] = values
+                continue
+            if self._group_blocks_auto(records):
+                snapshot[key] = {
+                    VSM_TRANSITION_STATUS_KEY: TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    VSM_TRANSITION_INCLUDED_KEY: False,
+                }
         return snapshot
 
     def refresh_data(self) -> None:
@@ -17700,7 +18042,9 @@ class TransitionTempsSection(QtWidgets.QWidget):
         selected_key = self._current_selection_key()
         self._refresh_record_groups()
         valid_keys = set(self._record_groups.keys())
-        if self._prune_transition_points(valid_keys):
+        pruned_points = self._prune_transition_points(valid_keys)
+        pruned_reviews = self._prune_transition_reviews()
+        if pruned_points or pruned_reviews:
             self._store_transition_points()
         frame = self._build_frame()
         self._current_frame = frame
@@ -17736,9 +18080,14 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     frame,
                     manually_annotated=stacked.notna().any(axis=1),
                 )
+        scan_counts = self._review_counts_for_records(
+            [record for records in self._record_groups.values() for record in records]
+        )
         status_text = (
-            f"{annotated} of {total} sample(s) have manual transition temps; "
-            f"{auto_estimated} additional sample(s) have automatic estimates."
+            f"{annotated} of {total} sample row(s) have accepted/reviewed transition temps; "
+            f"{auto_estimated} additional sample row(s) have automatic estimates; "
+            f"{scan_counts['reviewed']} of {scan_counts['total']} scan(s) reviewed "
+            f"({scan_counts['no_transition']} no transition, {scan_counts['excluded']} excluded)."
             if total
             else "No VSM temperature scan data yet."
         )
@@ -17825,26 +18174,219 @@ class TransitionTempsSection(QtWidgets.QWidget):
             unique.setdefault(key, record)
         return list(unique.values())
 
+    def _review_payload_for_record(self, record: VsmTemperatureScanRecord) -> Dict[str, Any]:
+        record_id = _vsm_transition_review_record_id(record)
+        try:
+            reviews = object.__getattribute__(self, "__dict__").get("_transition_reviews", {})
+        except Exception:
+            reviews = {}
+        payload = reviews.get(record_id, {}) if isinstance(reviews, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+        return self._clean_transition_review_payload(record_id, payload)
+
+    def _auto_values_for_record(self, record: VsmTemperatureScanRecord) -> Dict[str, float]:
+        processor = _get_vsm_temp_processor(self.logger)
+        if processor is None:
+            return {}
+        data = getattr(record, "data", None)
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            return {}
+        try:
+            estimated = processor.estimate_transition_points(data)
+        except Exception:
+            return {}
+        return _clean_vsm_transition_values(estimated)
+
+    def _values_for_record(
+        self,
+        record: VsmTemperatureScanRecord,
+        payload: Mapping[str, Any] | None = None,
+    ) -> Dict[str, float]:
+        review = payload if isinstance(payload, Mapping) else self._review_payload_for_record(record)
+        status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+        if status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            return {}
+        manual = _clean_vsm_transition_values(
+            review.get("manual_values_C") if isinstance(review, Mapping) else None
+        )
+        final = _clean_vsm_transition_values(
+            review.get("final_values_C") if isinstance(review, Mapping) else None
+        )
+        if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED and manual:
+            return manual
+        if status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            return final or self._auto_values_for_record(record)
+        if final and bool(review.get("included")):
+            return final
+        return {}
+
+    def _status_for_record(
+        self,
+        record: VsmTemperatureScanRecord,
+        payload: Mapping[str, Any] | None = None,
+    ) -> str:
+        review = payload if isinstance(payload, Mapping) else self._review_payload_for_record(record)
+        values = self._values_for_record(record, review)
+        auto_values = self._auto_values_for_record(record)
+        status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+        return _transition_review_status_label(
+            status,
+            has_values=bool(values),
+            has_auto_values=bool(auto_values),
+        )
+
+    def _review_counts_for_records(
+        self,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> Dict[str, int]:
+        counts = {
+            "total": len(records),
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "needs_attention": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+        }
+        for record in records:
+            payload = self._review_payload_for_record(record)
+            status_label = self._status_for_record(record, payload)
+            if self._auto_values_for_record(record):
+                counts["auto_candidates"] += 1
+            if status_label == "Accepted":
+                counts["accepted"] += 1
+            elif status_label == "Manual adjusted":
+                counts["manual"] += 1
+            elif status_label == "No transition":
+                counts["no_transition"] += 1
+            elif status_label == "Excluded":
+                counts["excluded"] += 1
+            elif status_label == "Needs attention":
+                counts["needs_attention"] += 1
+            else:
+                counts["unreviewed"] += 1
+        counts["reviewed"] = (
+            counts["accepted"]
+            + counts["manual"]
+            + counts["no_transition"]
+            + counts["excluded"]
+        )
+        return counts
+
+    @staticmethod
+    def _review_counts_text(counts: Mapping[str, int]) -> str:
+        parts = [
+            f"Total {int(counts.get('total', 0))}",
+            f"Done {int(counts.get('reviewed', 0))}",
+            f"Open {int(counts.get('unreviewed', 0))}",
+            f"Auto {int(counts.get('auto_candidates', 0))}",
+            f"Accepted {int(counts.get('accepted', 0))}",
+            f"Manual {int(counts.get('manual', 0))}",
+            f"No transition {int(counts.get('no_transition', 0))}",
+            f"Excluded {int(counts.get('excluded', 0))}",
+        ]
+        if int(counts.get("needs_attention", 0)):
+            parts.append(f"Needs attention {int(counts.get('needs_attention', 0))}")
+        return " | ".join(parts)
+
+    @staticmethod
+    def _group_status_from_counts(counts: Mapping[str, int]) -> str:
+        total = int(counts.get("total", 0))
+        if total <= 0:
+            return "No scans"
+        if int(counts.get("manual", 0)):
+            return "Manual adjusted"
+        if int(counts.get("accepted", 0)):
+            return "Accepted"
+        negative = int(counts.get("no_transition", 0)) + int(counts.get("excluded", 0))
+        if negative >= total:
+            if int(counts.get("no_transition", 0)):
+                return "No transition"
+            return "Excluded"
+        if int(counts.get("reviewed", 0)):
+            return "Partly reviewed"
+        if int(counts.get("auto_candidates", 0)):
+            return "Auto candidates"
+        return "Unreviewed"
+
+    def _group_has_review_records(self, records: Sequence[VsmTemperatureScanRecord]) -> bool:
+        try:
+            reviews = object.__getattribute__(self, "__dict__").get("_transition_reviews", {})
+        except Exception:
+            reviews = {}
+        if not isinstance(reviews, dict):
+            return False
+        for record in records:
+            if _vsm_transition_review_record_id(record) in reviews:
+                return True
+        return False
+
+    def _group_blocks_auto(self, records: Sequence[VsmTemperatureScanRecord]) -> bool:
+        if not records:
+            return False
+        saw_review = False
+        for record in records:
+            payload = self._review_payload_for_record(record)
+            status = str(payload.get("status") or "").strip()
+            if not status or status == TRANSITION_REVIEW_STATUS_UNREVIEWED:
+                return False
+            saw_review = True
+            if status in TRANSITION_REVIEW_INCLUDED_STATUSES and self._values_for_record(record, payload):
+                return False
+            if status not in {
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+            }:
+                return False
+        return saw_review
+
+    def _values_for_group(
+        self,
+        group_key: str,
+        records: Sequence[VsmTemperatureScanRecord],
+        *,
+        include_auto: bool = False,
+    ) -> Dict[str, float]:
+        values: Dict[str, float] = {}
+        has_review_records = self._group_has_review_records(records)
+        for record in records:
+            payload = self._review_payload_for_record(record)
+            record_values = self._values_for_record(record, payload)
+            for label in TRANSITION_TEMP_LABELS:
+                if label not in values and label in record_values:
+                    values[label] = record_values[label]
+        if values:
+            return values
+        if not has_review_records:
+            legacy = _clean_vsm_transition_values(self._transition_points.get(group_key))
+            if legacy:
+                return legacy
+        if include_auto and not self._group_blocks_auto(records):
+            for record in records:
+                payload = self._review_payload_for_record(record)
+                if _vsm_transition_review_blocks_values(payload):
+                    continue
+                auto_values = self._auto_values_for_record(record)
+                for label in TRANSITION_TEMP_LABELS:
+                    if label not in values and label in auto_values:
+                        values[label] = auto_values[label]
+                if values:
+                    break
+        return values
+
     def _auto_values_for_records(
         self,
         records: Sequence[VsmTemperatureScanRecord],
     ) -> Dict[str, float]:
-        processor = _get_vsm_temp_processor(self.logger)
-        if processor is None:
-            return {}
         for record in records:
-            data = getattr(record, "data", None)
-            if not isinstance(data, pd.DataFrame) or data.empty:
+            if _vsm_transition_review_blocks_values(self._review_payload_for_record(record)):
                 continue
-            try:
-                estimated = processor.estimate_transition_points(data)
-            except Exception:
-                continue
-            cleaned: Dict[str, float] = {}
-            for label in TRANSITION_TEMP_LABELS:
-                value = _coerce_finite_float(estimated.get(label))
-                if value is not None:
-                    cleaned[label] = value
+            cleaned = self._auto_values_for_record(record)
             if cleaned:
                 return cleaned
         return {}
@@ -17869,21 +18411,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if not isinstance(key, str) or not key.strip():
                 continue
             records = self._record_groups.get(key, [])
-            for record in records:
-                data = getattr(record, "data", None)
-                if not isinstance(data, pd.DataFrame) or data.empty:
-                    continue
-                try:
-                    estimated = processor.estimate_transition_points(data)
-                except Exception:
-                    continue
-                if any(
-                    isinstance(estimated.get(label), (int, float))
-                    and math.isfinite(float(estimated.get(label)))
-                    for label in TRANSITION_TEMP_LABELS
-                ):
-                    count += 1
-                    break
+            if self._auto_values_for_records(records):
+                count += 1
         return count
 
     def _build_frame(self) -> pd.DataFrame:
@@ -17893,7 +18422,9 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if key_tuple is None:
                 continue
             composition, microwire = _microwire_info_from_key(key_tuple)
-            values = self._transition_points.get(key, {})
+            records = self._record_groups.get(key, [])
+            values = self._values_for_group(key, records, include_auto=False)
+            counts = self._review_counts_for_records(records)
             rows.append(
                 {
                     "Composition": composition,
@@ -17902,13 +18433,25 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
                     TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
                     TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
+                    "Review status": self._group_status_from_counts(counts),
+                    "Scans": counts["total"],
+                    "Accepted": counts["accepted"] + counts["manual"],
+                    "No transition": counts["no_transition"],
+                    "Excluded": counts["excluded"],
+                    "Unreviewed": counts["unreviewed"],
                     "_group_key": key,
                 }
             )
         if not rows:
-            return pd.DataFrame(columns=TRANSITION_TEMP_COLUMNS + ["_group_key"])
+            return pd.DataFrame(
+                columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+            )
         frame = pd.DataFrame(rows)
-        desired = [col for col in TRANSITION_TEMP_COLUMNS + ["_group_key"] if col in frame.columns]
+        desired = [
+            col
+            for col in TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+            if col in frame.columns
+        ]
         return frame.loc[:, desired]
 
     def _hide_internal_columns(self) -> None:
@@ -17995,8 +18538,33 @@ class TransitionTempsSection(QtWidgets.QWidget):
         composition, microwire = _microwire_info_from_key(key_tuple)
         title = f"{composition} — {microwire}" if composition and microwire else "Transition temps"
         records = self._record_groups.get(key, [])
-        values = self._transition_points.get(key, {})
-        panel.update_selection(title, records, values, self._auto_values_for_records(records))
+        values = self._values_for_group(key, records, include_auto=False)
+        group_auto_values = self._auto_values_for_records(records)
+        auto_by_record: Dict[str, Dict[str, float]] = {}
+        reviewed_by_record: Dict[str, Dict[str, float]] = {}
+        status_by_record: Dict[str, str] = {}
+        for record in records:
+            record_id = _vsm_transition_review_record_id(record)
+            payload = self._review_payload_for_record(record)
+            auto_by_record[record_id] = self._auto_values_for_record(record)
+            if not auto_by_record[record_id] and len(records) == 1:
+                auto_by_record[record_id] = dict(group_auto_values)
+            reviewed_by_record[record_id] = self._values_for_record(record, payload)
+            status_by_record[record_id] = f"Review state: {self._status_for_record(record, payload)}"
+        selected_record_id = self._pending_preview_record_id
+        self._pending_preview_record_id = None
+        panel.update_selection(
+            title,
+            records,
+            values,
+            group_auto_values,
+            auto_values_by_record=auto_by_record,
+            reviewed_values_by_record=reviewed_by_record,
+            status_by_record=status_by_record,
+            counts_text=self._review_counts_text(self._review_counts_for_records(records)),
+            selected_record_id=selected_record_id,
+        )
+        self._sync_preview_status()
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
@@ -18088,43 +18656,221 @@ class TransitionTempsSection(QtWidgets.QWidget):
         return None
 
     def _apply_picked_value(self, label: str, value: float) -> None:
-        table = self.table_view
-        if not isinstance(table, QtWidgets.QTableView):
+        current = self._current_preview_record()
+        if current is None:
             return
-        selection_model = table.selectionModel()
-        if selection_model is None:
+        group_key, record = current
+        payload = self._review_payload_for_record(record)
+        manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+        manual_values[str(label)] = float(value)
+        self._store_review_for_record(
+            group_key,
+            record,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            values=manual_values,
+            included=True,
+        )
+
+    def _current_preview_record(self) -> Optional[Tuple[str, VsmTemperatureScanRecord]]:
+        panel = self._preview_panel
+        if panel is None:
+            return None
+        record_id = panel.current_record_id()
+        if not record_id:
+            return None
+        group_key = self._current_selection_key()
+        if not group_key:
+            return None
+        for record in self._record_groups.get(group_key, []):
+            if _vsm_transition_review_record_id(record) == record_id:
+                return group_key, record
+        return None
+
+    @staticmethod
+    def _record_review_metadata(
+        group_key: str,
+        record: VsmTemperatureScanRecord,
+    ) -> Dict[str, str]:
+        metadata: Dict[str, str] = {
+            "group_key": group_key,
+            "sample": str(getattr(record, "sample", "") or ""),
+            "record_label": _record_label_for_display(record) or str(getattr(record, "label", "") or ""),
+        }
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            metadata["record_path"] = str(path)
+        return metadata
+
+    def _store_review_for_record(
+        self,
+        group_key: str,
+        record: VsmTemperatureScanRecord,
+        status: str,
+        *,
+        values: Optional[Mapping[str, Any]] = None,
+        included: bool,
+    ) -> None:
+        record_id = _vsm_transition_review_record_id(record)
+        auto_values = self._auto_values_for_record(record)
+        cleaned = _clean_vsm_transition_values(values or {})
+        payload: Dict[str, Any] = {
+            "status": status,
+            "included": bool(included),
+            "auto_values_C": auto_values,
+            "manual_values_C": {},
+            "final_values_C": {},
+            **self._record_review_metadata(group_key, record),
+        }
+        if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+            payload["manual_values_C"] = cleaned
+            payload["final_values_C"] = cleaned
+            payload["included"] = bool(cleaned)
+        elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+            payload["final_values_C"] = cleaned or dict(auto_values)
+            payload["included"] = bool(payload["final_values_C"])
+            if not payload["included"]:
+                payload["status"] = TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        elif status in {
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+        }:
+            payload["included"] = False
+        self._transition_reviews[record_id] = self._clean_transition_review_payload(record_id, payload)
+        self._pending_preview_record_id = record_id
+        self._store_transition_reviews(update_table=False)
+        self.refresh_data()
+        self._store_transition_points()
+
+    def _accept_current_scan_and_next(self) -> None:
+        current = self._current_preview_record()
+        if current is None:
             return
-        frame = self.model.frame()
-        if not isinstance(frame, pd.DataFrame) or frame.empty:
+        group_key, record = current
+        payload = self._review_payload_for_record(record)
+        manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+        if manual_values:
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                values=manual_values,
+                included=True,
+            )
+        else:
+            auto_values = self._auto_values_for_record(record)
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO if auto_values else TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                values=auto_values,
+                included=bool(auto_values),
+            )
+        self._select_next_unreviewed_scan(fallback_next=True)
+
+    def _mark_current_scan_no_transition(self) -> None:
+        current = self._current_preview_record()
+        if current is None:
             return
-        column_label = TRANSITION_TEMP_COLUMN_MAP.get(label)
-        if not column_label:
+        group_key, record = current
+        self._store_review_for_record(
+            group_key,
+            record,
+            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            included=False,
+        )
+        self._select_next_unreviewed_scan(fallback_next=True)
+
+    def _exclude_current_scan(self) -> None:
+        current = self._current_preview_record()
+        if current is None:
             return
-        try:
-            column_index = int(frame.columns.get_loc(column_label))
-        except Exception:
-            return
-        current_index = selection_model.currentIndex()
-        row = self._source_row(current_index.row()) if current_index.isValid() else None
-        if row is None:
-            rows = selection_model.selectedRows()
-            if rows:
-                row = self._source_row(rows[0].row())
-        if row is None or row < 0 or row >= len(frame.index):
-            return
-        source_index = self.model.index(row, column_index)
-        if not source_index.isValid():
-            return
-        if not self.model.setData(source_index, float(value)):
-            return
-        try:
-            proxy_index = self._search_proxy.mapFromSource(source_index)
-            if proxy_index.isValid():
-                table.setCurrentIndex(proxy_index)
-                table.scrollTo(proxy_index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
-        except Exception:
-            pass
+        group_key, record = current
+        self._store_review_for_record(
+            group_key,
+            record,
+            TRANSITION_REVIEW_STATUS_EXCLUDED,
+            included=False,
+        )
+        self._select_next_unreviewed_scan(fallback_next=True)
+
+    def _review_refs(self) -> List[Tuple[str, str]]:
+        refs: List[Tuple[str, str]] = []
+        for group_key in sorted(self._record_groups.keys()):
+            records = sorted(self._record_groups.get(group_key, []), key=_record_label_for_display)
+            for record in records:
+                refs.append((group_key, _vsm_transition_review_record_id(record)))
+        return refs
+
+    def _select_scan_ref(self, group_key: str, record_id: str) -> None:
+        self._pending_preview_record_id = record_id
+        self._restore_selection(group_key)
         self._update_preview()
+
+    def _select_previous_scan(self) -> None:
+        current = self._current_preview_record()
+        refs = self._review_refs()
+        if not refs:
+            return
+        current_ref = (
+            (current[0], _vsm_transition_review_record_id(current[1]))
+            if current is not None
+            else refs[0]
+        )
+        try:
+            index = refs.index(current_ref)
+        except ValueError:
+            index = 0
+        group_key, record_id = refs[(index - 1) % len(refs)]
+        self._select_scan_ref(group_key, record_id)
+
+    def _select_next_unreviewed_scan(self, *, fallback_next: bool = False) -> None:
+        refs = self._review_refs()
+        if not refs:
+            return
+        current = self._current_preview_record()
+        current_ref = (
+            (current[0], _vsm_transition_review_record_id(current[1]))
+            if current is not None
+            else refs[0]
+        )
+        try:
+            start = refs.index(current_ref) + 1
+        except ValueError:
+            start = 0
+        ordered = refs[start:] + refs[:start]
+        for group_key, record_id in ordered:
+            record = next(
+                (
+                    candidate
+                    for candidate in self._record_groups.get(group_key, [])
+                    if _vsm_transition_review_record_id(candidate) == record_id
+                ),
+                None,
+            )
+            if record is None:
+                continue
+            payload = self._review_payload_for_record(record)
+            if not _vsm_transition_review_is_final(payload.get("status")):
+                self._select_scan_ref(group_key, record_id)
+                return
+        if fallback_next and refs:
+            try:
+                index = refs.index(current_ref)
+            except ValueError:
+                index = -1
+            group_key, record_id = refs[(index + 1) % len(refs)]
+            self._select_scan_ref(group_key, record_id)
+
+    def _sync_preview_status(self) -> None:
+        panel = self._preview_panel
+        current = self._current_preview_record()
+        if panel is None or current is None:
+            return
+        group_key, record = current
+        records = self._record_groups.get(group_key, [])
+        payload = self._review_payload_for_record(record)
+        panel.set_status_text(f"Review state: {self._status_for_record(record, payload)}")
+        panel.set_counts_text(self._review_counts_text(self._review_counts_for_records(records)))
 
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
@@ -18149,6 +18895,19 @@ class TransitionTempsSection(QtWidgets.QWidget):
         for key in list(self._transition_points.keys()):
             if key not in valid_set:
                 self._transition_points.pop(key, None)
+                removed = True
+        return removed
+
+    def _prune_transition_reviews(self) -> bool:
+        valid_ids = {
+            _vsm_transition_review_record_id(record)
+            for records in self._record_groups.values()
+            for record in records
+        }
+        removed = False
+        for record_id in list(self._transition_reviews.keys()):
+            if record_id not in valid_ids:
+                self._transition_reviews.pop(record_id, None)
                 removed = True
         return removed
 
@@ -28772,7 +29531,7 @@ class AssemblySection(QtWidgets.QWidget):
                         _microwire_key_to_str(key): values
                         for key, values in current_section._collect_phase_points().items()
                     }
-        transition_points: Dict[str, Dict[str, float]] = {}
+        transition_points: Dict[str, Dict[str, Any]] = {}
         if "transition_temps" in selected:
             transition_section = self.sections.get("transition_temps")
             if isinstance(transition_section, TransitionTempsSection):
