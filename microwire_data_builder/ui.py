@@ -5658,6 +5658,7 @@ MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY = "mini_dma_transition_reviews"
 MINI_DMA_REVIEW_STATUS_ACCEPTED = "accepted"
 MINI_DMA_REVIEW_STATUS_NO_TRANSITION = "no_transition"
 MINI_DMA_REVIEW_STATUS_EXCLUDED = "excluded"
+MINI_DMA_TRANSITION_LABELS = ("As", "Af", "Ms", "Mf")
 
 
 def _coerce_finite_float(value: Any) -> Optional[float]:
@@ -5687,6 +5688,159 @@ def _clean_transition_values(values: Mapping[str, Any] | None) -> Dict[str, floa
         if value is not None:
             cleaned["Ms1"] = value
     return cleaned
+
+
+def _clean_mini_dma_transition_values(values: Mapping[str, Any] | None) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in MINI_DMA_TRANSITION_LABELS:
+        value = _coerce_finite_float(values.get(label))
+        if value is not None:
+            cleaned[label] = value
+    return cleaned
+
+
+def _format_mini_dma_transition_value(value: float) -> str:
+    return f"{float(value):.3f}".rstrip("0").rstrip(".")
+
+
+def _mini_dma_current_label(label: str) -> str:
+    return f"I_{label}"
+
+
+def _format_mini_dma_transition_review_line(
+    target_label: str,
+    values: Mapping[str, Any],
+) -> str:
+    cleaned = _clean_mini_dma_transition_values(values)
+    parts = [
+        f"{label} {_format_mini_dma_transition_value(value)} mA"
+        for label, value in cleaned.items()
+    ]
+    if not parts:
+        return ""
+    return f"{target_label}: {', '.join(parts)}"
+
+
+class _MiniDmaTransitionEditorControls(QtWidgets.QWidget):
+    valuesEdited = QtCore.pyqtSignal(dict)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._updating = False
+        self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
+        self._auto_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._edits: Dict[str, QtWidgets.QLineEdit] = {}
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(QtWidgets.QLabel("Reviewed transition currents I_As/I_Af/I_Ms/I_Mf (mA)", self))
+        hint = QtWidgets.QLabel(
+            "Select a transition current, then click the graph to add or move its vertical line.",
+            self,
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(mid); font-size: 10px;")
+        layout.addWidget(hint)
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(3)
+        validator = QtGui.QDoubleValidator(0.0, 10000.0, 3, self)
+        validator.setNotation(QtGui.QDoubleValidator.Notation.StandardNotation)
+        for index, label in enumerate(MINI_DMA_TRANSITION_LABELS):
+            col = index * 3
+            radio = QtWidgets.QRadioButton(_mini_dma_current_label(label), self)
+            if index == 0:
+                radio.setChecked(True)
+            auto_label = QtWidgets.QLabel("Auto: --", self)
+            auto_label.setMinimumWidth(64)
+            auto_label.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            edit = QtWidgets.QLineEdit(self)
+            edit.setValidator(validator)
+            edit.setMaximumWidth(78)
+            edit.setPlaceholderText("mA")
+            edit.returnPressed.connect(self._emit_values)
+            self._target_buttons[label] = radio
+            self._auto_labels[label] = auto_label
+            self._edits[label] = edit
+            grid.addWidget(radio, 0, col)
+            grid.addWidget(auto_label, 0, col + 1)
+            grid.addWidget(edit, 0, col + 2)
+        layout.addLayout(grid)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(6)
+        apply_button = QtWidgets.QPushButton("Apply values", self)
+        apply_button.clicked.connect(self._emit_values)
+        clear_button = QtWidgets.QPushButton("Clear selected", self)
+        clear_button.clicked.connect(self._clear_selected)
+        buttons.addWidget(apply_button)
+        buttons.addWidget(clear_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+    def selected_label(self) -> str:
+        for label, button in self._target_buttons.items():
+            if button.isChecked():
+                return label
+        return MINI_DMA_TRANSITION_LABELS[0]
+
+    def set_target(self, label: str) -> None:
+        button = self._target_buttons.get(str(label))
+        if button is not None:
+            button.setChecked(True)
+
+    def set_auto_values(self, values: Mapping[str, Any]) -> None:
+        for label in MINI_DMA_TRANSITION_LABELS:
+            widget = self._auto_labels.get(label)
+            if widget is None:
+                continue
+            value = _coerce_finite_float(values.get(label))
+            if value is None:
+                widget.setText("Auto: --")
+                widget.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            else:
+                widget.setText(f"Auto: {_format_mini_dma_transition_value(value)}")
+                widget.setStyleSheet("color: #fbbf24; font-size: 10px; font-weight: 600;")
+
+    def set_values(self, values: Mapping[str, Any]) -> None:
+        self._updating = True
+        try:
+            for label in MINI_DMA_TRANSITION_LABELS:
+                edit = self._edits.get(label)
+                if edit is None:
+                    continue
+                value = _coerce_finite_float(values.get(label))
+                edit.setText(_format_mini_dma_transition_value(value) if value is not None else "")
+                edit.setStyleSheet("color: #22c55e; font-weight: 600;" if value is not None else "")
+        finally:
+            self._updating = False
+
+    def values(self) -> Dict[str, Optional[float]]:
+        return {label: _coerce_finite_float(edit.text()) for label, edit in self._edits.items()}
+
+    def apply_picked_value(self, value: float) -> None:
+        edit = self._edits.get(self.selected_label())
+        if edit is None:
+            return
+        edit.setText(_format_mini_dma_transition_value(float(value)))
+        self._emit_values()
+
+    def _clear_selected(self) -> None:
+        edit = self._edits.get(self.selected_label())
+        if edit is not None:
+            edit.clear()
+        self._emit_values()
+
+    def _emit_values(self) -> None:
+        if self._updating:
+            return
+        try:
+            self.valuesEdited.emit(self.values())
+        except Exception:
+            pass
 
 
 def _transition_record_id_for_annealing_record(record: MeasurementRecord) -> str:
@@ -7011,6 +7165,10 @@ def _mini_dma_review_status_label(status: str) -> str:
 
 def _mini_dma_display_status(entry: _MiniDmaTransitionReviewEntry, review: Mapping[str, Any] | None) -> str:
     status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+    if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and _clean_mini_dma_transition_values(
+        review.get("manual_values_mA") if isinstance(review, Mapping) else None
+    ):
+        return "Manual adjusted"
     label = _mini_dma_review_status_label(status)
     if label != "Unreviewed":
         return label
@@ -7163,7 +7321,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.show_markers_check.setChecked(True)
         self.next_rejected_button = QtWidgets.QPushButton("Next rejected")
         self.next_questionable_button = QtWidgets.QPushButton("Next partial")
-        self.accept_button = QtWidgets.QPushButton("Accept & next")
+        self.accept_button = QtWidgets.QPushButton("Accept && next")
         self.no_transition_button = QtWidgets.QPushButton("No transition")
         self.exclude_button = QtWidgets.QPushButton("Exclude target")
         self.next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed")
@@ -7195,10 +7353,12 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.figure = Figure(figsize=(8, 6))
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        self.transition_controls = _MiniDmaTransitionEditorControls(plot_panel)
         self.empty_label = QtWidgets.QLabel("No Mini DMA transition review targets are available.", plot_panel)
         self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         plot_layout.addWidget(self.toolbar)
         plot_layout.addWidget(self.canvas, 1)
+        plot_layout.addWidget(self.transition_controls)
         plot_layout.addWidget(self.empty_label, 1)
         splitter.addWidget(self.tree)
         splitter.addWidget(plot_panel)
@@ -7225,6 +7385,11 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.exclude_button.clicked.connect(lambda: self._set_current_review(MINI_DMA_REVIEW_STATUS_EXCLUDED, move_next=True))
         self.next_unreviewed_button.clicked.connect(self._select_next_unreviewed)
         self.tree.currentItemChanged.connect(self._handle_tree_selection)
+        self.transition_controls.valuesEdited.connect(self._handle_transition_values_edited)
+        try:
+            self.canvas.mpl_connect("button_press_event", self._handle_canvas_click)
+        except Exception:
+            pass
         self._refresh_tree()
         QtCore.QTimer.singleShot(0, self._select_initial_run)
 
@@ -7297,6 +7462,33 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
 
     def _review_for_entry(self, entry: _MiniDmaTransitionReviewEntry) -> Dict[str, Any]:
         return self._review_snapshot().get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
+
+    @staticmethod
+    def _auto_values_for_entry(entry: _MiniDmaTransitionReviewEntry) -> Dict[str, float]:
+        return _mini_dma_transition_values_from_summary(entry.target_summary)
+
+    @staticmethod
+    def _manual_values_from_review(review: Mapping[str, Any]) -> Dict[str, float]:
+        return _clean_mini_dma_transition_values(review.get("manual_values_mA"))
+
+    @classmethod
+    def _values_for_entry(
+        cls,
+        entry: _MiniDmaTransitionReviewEntry,
+        review: Mapping[str, Any],
+    ) -> Dict[str, float]:
+        status = str(review.get("status") or "").strip()
+        if status in {MINI_DMA_REVIEW_STATUS_NO_TRANSITION, MINI_DMA_REVIEW_STATUS_EXCLUDED}:
+            return {}
+        final = _clean_mini_dma_transition_values(review.get("values"))
+        if final:
+            return final
+        manual = cls._manual_values_from_review(review)
+        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+            values = cls._auto_values_for_entry(entry)
+            values.update(manual)
+            return values
+        return manual
 
     def _entry_allowed(self, entry: _MiniDmaTransitionReviewEntry) -> bool:
         if self.accepted_only_check.isChecked() and entry.status != "accepted":
@@ -7524,9 +7716,19 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             "target_label": entry.target_label,
             "auto_status": entry.status,
         }
-        values = _mini_dma_transition_values_from_summary(entry.target_summary)
+        auto_values = self._auto_values_for_entry(entry)
+        review = self._review_for_entry(entry)
+        manual_values = self._manual_values_from_review(review)
+        values = dict(auto_values)
+        values.update(manual_values)
+        if auto_values:
+            payload["auto_values_mA"] = auto_values
+        if manual_values:
+            payload["manual_values_mA"] = manual_values
         if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and values:
             payload["values"] = values
+        elif status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+            payload["status"] = MINI_DMA_REVIEW_STATUS_NO_TRANSITION
         try:
             self._review_setter(record_id, payload)
         except Exception:
@@ -7535,6 +7737,61 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self._refresh_tree()
         if move_next:
             self._select_next_unreviewed()
+        else:
+            self._redraw_current()
+
+    def _handle_canvas_click(self, event: Any) -> None:
+        if event is None:
+            return
+        button = getattr(event, "button", None)
+        if button not in (None, 1):
+            return
+        if getattr(event, "xdata", None) is None:
+            return
+        try:
+            value = float(event.xdata)
+        except Exception:
+            return
+        if not math.isfinite(value):
+            return
+        self.transition_controls.apply_picked_value(value)
+
+    def _handle_transition_values_edited(self, values: Dict[str, Optional[float]]) -> None:
+        if self._current_ref is None or not callable(self._review_setter):
+            return
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        entry = entries[index]
+        manual_values = _clean_mini_dma_transition_values(values)
+        auto_values = self._auto_values_for_entry(entry)
+        final_values = dict(auto_values)
+        final_values.update(manual_values)
+        record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+        payload: Dict[str, Any] = {
+            "status": MINI_DMA_REVIEW_STATUS_ACCEPTED if final_values else MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            "sample": entry.sample,
+            "run_label": entry.run_label,
+            "target_label": entry.target_label,
+            "auto_status": entry.status,
+            "auto_values_mA": auto_values,
+            "manual_values_mA": manual_values,
+            "values": final_values,
+        }
+        try:
+            self._review_setter(record_id, payload)
+        except Exception:
+            self._logger.exception("Failed to store Mini DMA transition review values")
+            return
+        review = self._review_for_entry(entry)
+        self.transition_controls.set_auto_values(auto_values)
+        self.transition_controls.set_values(self._manual_values_from_review(review))
+        item = self._tree_items.get((key, index))
+        if item is not None:
+            item.setText(1, _mini_dma_display_status(entry, review))
+        self._update_review_counts()
+        self._redraw_current()
 
     def _ensure_run_loaded(self, key: str, *, select_first: bool = False) -> None:
         if key in self._entries_by_run:
@@ -7603,6 +7860,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.figure.clear()
         self.canvas.hide()
         self.toolbar.hide()
+        self.transition_controls.hide()
         self.empty_label.setText(message)
         self.empty_label.show()
 
@@ -7610,6 +7868,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.empty_label.hide()
         self.canvas.show()
         self.toolbar.show()
+        self.transition_controls.show()
         self.figure.clear()
         if self.show_resistance_check.isChecked():
             strain_ax, resistance_ax = self.figure.subplots(2, 1, sharex=True)
@@ -7620,6 +7879,10 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         if resistance_ax is not None:
             self._plot_resistance(entry, resistance_ax)
         self.figure.tight_layout()
+        review = self._review_for_entry(entry)
+        self.transition_controls.setEnabled(callable(self._review_setter))
+        self.transition_controls.set_auto_values(self._auto_values_for_entry(entry))
+        self.transition_controls.set_values(self._manual_values_from_review(review))
         self.canvas.draw_idle()
 
     def _plot_strain(
@@ -7642,6 +7905,10 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         )
         if self.show_markers_check.isChecked():
             self._draw_transition_markers(ax, entry.target_summary)
+            self._draw_reviewed_transition_markers(
+                ax,
+                self._values_for_entry(entry, self._review_for_entry(entry)),
+            )
         if self.show_fit_lines_check.isChecked():
             self._draw_transition_fit_lines(ax, entry, strain)
         ax.set_title(
@@ -7669,6 +7936,11 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         )
         if self.show_markers_check.isChecked():
             self._draw_transition_markers(ax, entry.target_summary, labels=False, alpha=0.45)
+            self._draw_reviewed_transition_markers(
+                ax,
+                self._values_for_entry(entry, self._review_for_entry(entry)),
+                labels=False,
+            )
         ax.set_ylabel("Resistance [ohm]")
         ax.set_xlabel("Current [mA]")
         ax.grid(True, alpha=0.25)
@@ -7704,6 +7976,58 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                     fontsize=8,
                     color=color,
                 )
+
+    def _draw_reviewed_transition_markers(
+        self,
+        ax: Any,
+        values: Mapping[str, Any],
+        *,
+        labels: bool = True,
+    ) -> None:
+        cleaned = _clean_mini_dma_transition_values(values)
+        if not cleaned:
+            return
+        specs = {
+            "As": ("#16a34a", "-"),
+            "Af": ("#16a34a", "-."),
+            "Ms": ("#7c3aed", "-"),
+            "Mf": ("#7c3aed", "-."),
+        }
+        for name in MINI_DMA_TRANSITION_LABELS:
+            value = cleaned.get(name)
+            if value is None:
+                continue
+            color, linestyle = specs.get(name, ("#111827", "-"))
+            numeric = float(value)
+            ax.axvline(
+                numeric,
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.8,
+                alpha=0.95,
+                label="_nolegend_",
+                zorder=7,
+            )
+            if not labels:
+                continue
+            ax.text(
+                numeric,
+                0.98,
+                f"{_mini_dma_current_label(name)} {numeric:.0f} mA",
+                transform=ax.get_xaxis_transform(),
+                rotation=90,
+                va="top",
+                ha="left",
+                fontsize=8,
+                color=color,
+                bbox={
+                    "boxstyle": "round,pad=0.16",
+                    "facecolor": "white",
+                    "edgecolor": color,
+                    "alpha": 0.86,
+                    "linewidth": 0.6,
+                },
+            )
 
     def _draw_transition_fit_lines(
         self,
@@ -16910,6 +17234,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self._cursor_units = "°C"
         self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
         self._value_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._auto_value_labels: Dict[str, QtWidgets.QLabel] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -16949,9 +17274,14 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         controls.addSpacing(20)
 
         for label in TRANSITION_TEMP_LABELS:
+            auto_label = QtWidgets.QLabel("Auto: --")
+            auto_label.setStyleSheet("color: #fbbf24; font-size: 10px;")
             value_label = QtWidgets.QLabel("unset")
+            value_label.setStyleSheet("color: #22c55e; font-weight: 600;")
+            self._auto_value_labels[label] = auto_label
             self._value_labels[label] = value_label
             controls.addWidget(QtWidgets.QLabel(f"{label}:"))
+            controls.addWidget(auto_label)
             controls.addWidget(value_label)
         controls.addStretch(1)
         layout.addLayout(controls)
@@ -16968,10 +17298,12 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         title: str,
         records: Sequence[VsmTemperatureScanRecord],
         values: Mapping[str, float],
+        auto_values: Mapping[str, float] | None = None,
     ) -> None:
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
         self.header_label.setText(title or "Transition temps")
         self._update_value_labels(values)
+        self._update_auto_value_labels(auto_values or {})
         self._clear_tabs()
 
         if self._processor is None:
@@ -16991,6 +17323,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             )
             if figure is None:
                 continue
+            self._draw_transition_markers(figure, auto_values or {}, values)
             canvas = FigureCanvasQTAgg(figure)
             try:
                 canvas.setMouseTracking(True)
@@ -17062,7 +17395,10 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self._update_cursor_label(value)
 
     def _handle_click(self, event: Any) -> None:
-        if event is None or not getattr(event, "dblclick", False):
+        if event is None:
+            return
+        button = getattr(event, "button", None)
+        if button not in (None, 1):
             return
         if event.xdata is None:
             return
@@ -17095,6 +17431,100 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
     def _update_value_labels(self, values: Mapping[str, float]) -> None:
         for label, widget in self._value_labels.items():
             widget.setText(self._format_value(values.get(label)))
+
+    def _update_auto_value_labels(self, values: Mapping[str, float]) -> None:
+        for label, widget in self._auto_value_labels.items():
+            text = self._format_value(values.get(label))
+            if text == "unset":
+                widget.setText("Auto: --")
+                widget.setStyleSheet("color: #9ca3af; font-size: 10px;")
+            else:
+                widget.setText(f"Auto: {text}")
+                widget.setStyleSheet("color: #fbbf24; font-size: 10px; font-weight: 600;")
+
+    def _draw_transition_markers(
+        self,
+        figure: Figure,
+        auto_values: Mapping[str, float],
+        reviewed_values: Mapping[str, float],
+    ) -> None:
+        axes = list(getattr(figure, "axes", []) or [])
+        if not axes:
+            return
+        primary = axes[0]
+
+        def _draw(
+            label: str,
+            value: object,
+            *,
+            color: str,
+            linestyle: str,
+            linewidth: float,
+            alpha: float,
+            prefix: str,
+            y: float,
+        ) -> None:
+            numeric = _coerce_finite_float(value)
+            if numeric is None:
+                return
+            for axis in axes:
+                try:
+                    axis.axvline(
+                        numeric,
+                        color=color,
+                        linestyle=linestyle,
+                        linewidth=linewidth,
+                        alpha=alpha,
+                        label="_nolegend_",
+                        zorder=6,
+                    )
+                except Exception:
+                    continue
+            try:
+                primary.text(
+                    numeric,
+                    y,
+                    f"{prefix}{label}",
+                    transform=primary.get_xaxis_transform(),
+                    rotation=90,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    color=color,
+                    bbox={
+                        "boxstyle": "round,pad=0.14",
+                        "facecolor": "white",
+                        "edgecolor": color,
+                        "alpha": 0.84,
+                        "linewidth": 0.55,
+                    },
+                    gid="transition_temp_marker_label",
+                )
+            except Exception:
+                pass
+
+        for label in TRANSITION_TEMP_LABELS:
+            _draw(
+                label,
+                auto_values.get(label),
+                color="#d97706",
+                linestyle=":",
+                linewidth=1.1,
+                alpha=0.65,
+                prefix="auto ",
+                y=0.98,
+            )
+        for label in TRANSITION_TEMP_LABELS:
+            _draw(
+                label,
+                reviewed_values.get(label),
+                color="#16a34a",
+                linestyle="-",
+                linewidth=1.8,
+                alpha=0.95,
+                prefix="",
+                y=0.90,
+            )
 
 
 class TransitionTempsSection(QtWidgets.QWidget):
@@ -17330,6 +17760,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
     def _refresh_record_groups(self) -> None:
         grouped: Dict[str, List[VsmTemperatureScanRecord]] = {}
         payload = None
+        visible_records: List[VsmTemperatureScanRecord] = []
         try:
             payload = self._vsm_temperature_section.store.load_payload(
                 "vsm_temperature_scan_records"
@@ -17338,11 +17769,21 @@ class TransitionTempsSection(QtWidgets.QWidget):
             payload = None
         if isinstance(payload, list):
             hidden = _hidden_paths_from_section(self._vsm_temperature_section)
-            visible_records = [
+            visible_records.extend(
                 record
                 for record in payload
                 if _record_path_key(record) not in hidden
-            ]
+            )
+        fallback_records = self._fallback_vsm_temperature_records()
+        if fallback_records:
+            seen = {_record_path_key(record) or repr(record) for record in visible_records}
+            for record in fallback_records:
+                marker = _record_path_key(record) or repr(record)
+                if marker in seen:
+                    continue
+                visible_records.append(record)
+                seen.add(marker)
+        if visible_records:
             grouped = _group_graph_records_by_key(visible_records)
             for records in grouped.values():
                 records.sort(key=_record_label_for_display)
@@ -17354,6 +17795,59 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 if isinstance(path, Path):
                     sources.append(str(path))
         self._last_sources = list(dict.fromkeys(sources))
+
+    def _fallback_vsm_temperature_records(self) -> List[VsmTemperatureScanRecord]:
+        section = self._vsm_temperature_section
+        hidden = _hidden_paths_from_section(section)
+        records: List[VsmTemperatureScanRecord] = []
+        raw_records = getattr(section, "_all_records", None)
+        if isinstance(raw_records, list):
+            records.extend(
+                record
+                for record in raw_records
+                if isinstance(record, VsmTemperatureScanRecord)
+            )
+        if not records:
+            grouped = getattr(section, "_record_groups_by_key", None)
+            if isinstance(grouped, dict):
+                for values in grouped.values():
+                    if isinstance(values, list):
+                        records.extend(
+                            record
+                            for record in values
+                            if isinstance(record, VsmTemperatureScanRecord)
+                        )
+        unique: Dict[str, VsmTemperatureScanRecord] = {}
+        for record in records:
+            key = _record_path_key(record) or repr(record)
+            if key in hidden:
+                continue
+            unique.setdefault(key, record)
+        return list(unique.values())
+
+    def _auto_values_for_records(
+        self,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> Dict[str, float]:
+        processor = _get_vsm_temp_processor(self.logger)
+        if processor is None:
+            return {}
+        for record in records:
+            data = getattr(record, "data", None)
+            if not isinstance(data, pd.DataFrame) or data.empty:
+                continue
+            try:
+                estimated = processor.estimate_transition_points(data)
+            except Exception:
+                continue
+            cleaned: Dict[str, float] = {}
+            for label in TRANSITION_TEMP_LABELS:
+                value = _coerce_finite_float(estimated.get(label))
+                if value is not None:
+                    cleaned[label] = value
+            if cleaned:
+                return cleaned
+        return {}
 
     def _auto_estimated_transition_count(
         self,
@@ -17502,7 +17996,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         title = f"{composition} — {microwire}" if composition and microwire else "Transition temps"
         records = self._record_groups.get(key, [])
         values = self._transition_points.get(key, {})
-        panel.update_selection(title, records, values)
+        panel.update_selection(title, records, values, self._auto_values_for_records(records))
 
     def _handle_selection_changed(self, *_args: Any) -> None:
         self._update_preview()
@@ -17618,18 +18112,16 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 row = self._source_row(rows[0].row())
         if row is None or row < 0 or row >= len(frame.index):
             return
-        target_index = (
-            current_index
-            if current_index.isValid() and current_index.column() == column_index
-            else self.model.index(row, column_index)
-        )
-        if not target_index.isValid():
+        source_index = self.model.index(row, column_index)
+        if not source_index.isValid():
             return
-        if not self.model.setData(target_index, float(value)):
+        if not self.model.setData(source_index, float(value)):
             return
         try:
-            table.setCurrentIndex(target_index)
-            table.scrollTo(target_index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
+            proxy_index = self._search_proxy.mapFromSource(source_index)
+            if proxy_index.isValid():
+                table.setCurrentIndex(proxy_index)
+                table.scrollTo(proxy_index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
         except Exception:
             pass
         self._update_preview()
@@ -21303,14 +21795,15 @@ class MiniDmaSection(MiniDatabaseSection):
             if isinstance(value, str) and value.strip():
                 entry[field] = value.strip()
         values = payload.get("values")
-        if isinstance(values, dict):
-            cleaned_values: Dict[str, float] = {}
-            for label in ("As", "Af", "Ms", "Mf"):
-                value = values.get(label)
-                if isinstance(value, (int, float)) and math.isfinite(float(value)):
-                    cleaned_values[label] = float(value)
-            if cleaned_values:
-                entry["values"] = cleaned_values
+        cleaned_values = _clean_mini_dma_transition_values(values)
+        if cleaned_values:
+            entry["values"] = cleaned_values
+        auto_values = _clean_mini_dma_transition_values(payload.get("auto_values_mA"))
+        if auto_values:
+            entry["auto_values_mA"] = auto_values
+        manual_values = _clean_mini_dma_transition_values(payload.get("manual_values_mA"))
+        if manual_values:
+            entry["manual_values_mA"] = manual_values
         return entry
 
     def _store_transition_reviews(self) -> None:
@@ -21331,6 +21824,78 @@ class MiniDmaSection(MiniDatabaseSection):
                 snapshot[str(record_id)] = entry
         return snapshot
 
+    def records_with_reviewed_transitions(
+        self,
+        records: Sequence[MiniDmaRecord] | None = None,
+    ) -> List[MiniDmaRecord]:
+        source_records = list(records) if records is not None else list(self._all_mini_dma_records)
+        reviews = self.transition_reviews_snapshot()
+        if not source_records or not reviews:
+            return source_records
+        result: List[MiniDmaRecord] = []
+        for record in source_records:
+            existing_lines = [
+                str(line)
+                for line in (getattr(record, "transition_summary", ()) or ())
+                if str(line).strip()
+            ]
+            target_labels: List[str] = []
+            for line in existing_lines:
+                target_label = line.split(":", 1)[0].strip()
+                if target_label and target_label not in target_labels:
+                    target_labels.append(target_label)
+            for payload in reviews.values():
+                target_label = str(payload.get("target_label") or "").strip()
+                if target_label and target_label not in target_labels:
+                    target_labels.append(target_label)
+            reviewed_lines: List[str] = []
+            for line in existing_lines:
+                target_label = line.split(":", 1)[0].strip()
+                review = reviews.get(_mini_dma_review_record_id(record, target_label), {})
+                status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+                if status in {MINI_DMA_REVIEW_STATUS_NO_TRANSITION, MINI_DMA_REVIEW_STATUS_EXCLUDED}:
+                    continue
+                if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                    formatted = _format_mini_dma_transition_review_line(
+                        target_label,
+                        _clean_mini_dma_transition_values(review.get("values")),
+                    )
+                    if formatted and formatted not in reviewed_lines:
+                        reviewed_lines.append(formatted)
+                    continue
+                if line not in reviewed_lines:
+                    reviewed_lines.append(line)
+            for target_label in target_labels:
+                if any(line.split(":", 1)[0].strip() == target_label for line in reviewed_lines):
+                    continue
+                review = reviews.get(_mini_dma_review_record_id(record, target_label), {})
+                if not isinstance(review, Mapping):
+                    continue
+                if str(review.get("status") or "").strip() != MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                    continue
+                formatted = _format_mini_dma_transition_review_line(
+                    target_label,
+                    _clean_mini_dma_transition_values(review.get("values")),
+                )
+                if formatted and formatted not in reviewed_lines:
+                    reviewed_lines.append(formatted)
+            if tuple(reviewed_lines) == tuple(existing_lines):
+                result.append(record)
+                continue
+            result.append(
+                MiniDmaRecord(
+                    path=record.path,
+                    sample=record.sample,
+                    data=record.data,
+                    key=record.key,
+                    label=record.label,
+                    strain_summary=record.strain_summary,
+                    transition_summary=tuple(reviewed_lines),
+                    break_summary=record.break_summary,
+                )
+            )
+        return result
+
     def set_transition_review_for_target(self, record_id: str, payload: Dict[str, Any]) -> None:
         entry = self._clean_transition_review_payload(record_id, payload)
         if entry:
@@ -21338,6 +21903,19 @@ class MiniDmaSection(MiniDatabaseSection):
         else:
             self._transition_reviews.pop(str(record_id), None)
         self._store_transition_reviews()
+        self._apply_transition_reviews_to_table()
+
+    def _apply_transition_reviews_to_table(self) -> None:
+        records = self.records_with_reviewed_transitions(self._all_mini_dma_records)
+        if not records:
+            return
+        frame = _mini_dma_records_to_frame(records)
+        self.data.table = frame
+        try:
+            self.model.set_frame(frame)
+        except Exception:
+            pass
+        self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _open_selected(self, *, open_origin: bool) -> None:
         records = self._selected_records()
@@ -28105,6 +28683,9 @@ class AssemblySection(QtWidgets.QWidget):
             payload = self._load_payload("mini_dma", "mini_dma_records")
             if isinstance(payload, list):
                 mini_dma_records = list(payload)
+                section = self.sections.get("mini_dma")
+                if isinstance(section, MiniDmaSection):
+                    mini_dma_records = section.records_with_reviewed_transitions(mini_dma_records)
             else:
                 _mark_missing("Mini DMA")
         self._cached_mini_dma_records = list(mini_dma_records)

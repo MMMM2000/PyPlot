@@ -2069,6 +2069,116 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_mini_dma_transition_review_click_places_manual_target_values() -> None:
+    _ensure_qapp()
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_review(record_id: str, payload: dict[str, object]) -> None:
+        stored[record_id] = dict(payload)
+
+    record = _sample_mini_dma_record()
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+    )
+    assert len(entries) >= 2
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        review_provider=lambda: stored,
+        review_setter=_set_review,
+    )
+    try:
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, entries)  # noqa: SLF001
+        )
+        first_ref = dialog._visible_refs[0]  # noqa: SLF001
+        second_ref = dialog._visible_refs[1]  # noqa: SLF001
+        first_entry = dialog._entries_by_run[first_ref[0]][first_ref[1]]  # noqa: SLF001
+        second_entry = dialog._entries_by_run[second_ref[0]][second_ref[1]]  # noqa: SLF001
+        dialog.tree.setCurrentItem(dialog._tree_items[first_ref])  # noqa: SLF001
+        dialog.transition_controls.set_target("Af")  # noqa: SLF001
+        dialog._handle_canvas_click(SimpleNamespace(button=1, xdata=42.5))  # noqa: SLF001
+
+        first_id = builder_ui._mini_dma_review_record_id(  # noqa: SLF001
+            first_entry.record,
+            first_entry.target_label,
+        )
+        second_id = builder_ui._mini_dma_review_record_id(  # noqa: SLF001
+            second_entry.record,
+            second_entry.target_label,
+        )
+        assert first_id in stored
+        assert second_id not in stored
+        payload = stored[first_id]
+        assert payload["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED
+        assert payload["manual_values_mA"] == {"Af": pytest.approx(42.5)}
+        assert payload["values"]["Af"] == pytest.approx(42.5)
+        assert dialog._tree_items[first_ref].text(1) == "Manual adjusted"  # noqa: SLF001
+
+        dialog.tree.setCurrentItem(dialog._tree_items[second_ref])  # noqa: SLF001
+        assert dialog.transition_controls.values()["Af"] is None  # noqa: SLF001
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_transition_review_manual_override_keeps_auto_values() -> None:
+    _ensure_qapp()
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_review(record_id: str, payload: dict[str, object]) -> None:
+        stored[record_id] = dict(payload)
+
+    record = _sample_mini_dma_record()
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+    )
+    entry_index, entry = next(
+        (
+            (index, candidate)
+            for index, candidate in enumerate(entries)
+            if builder_ui._mini_dma_transition_values_from_summary(candidate.target_summary)  # noqa: SLF001
+        ),
+        (None, None),
+    )
+    assert entry is not None
+    auto_values = builder_ui._mini_dma_transition_values_from_summary(entry.target_summary)  # noqa: SLF001
+    assert auto_values
+
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        review_provider=lambda: stored,
+        review_setter=_set_review,
+    )
+    try:
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, entries)  # noqa: SLF001
+        )
+        ref = (run_key, int(entry_index))
+        dialog.tree.setCurrentItem(dialog._tree_items[ref])  # noqa: SLF001
+        dialog.transition_controls.set_target("As")  # noqa: SLF001
+        dialog._handle_canvas_click(SimpleNamespace(button=1, xdata=31.25))  # noqa: SLF001
+
+        record_id = builder_ui._mini_dma_review_record_id(entry.record, entry.target_label)  # noqa: SLF001
+        payload = stored[record_id]
+        assert payload["manual_values_mA"] == {"As": pytest.approx(31.25)}
+        assert payload["values"]["As"] == pytest.approx(31.25)
+        for label, value in auto_values.items():
+            if label == "As":
+                continue
+            assert payload["values"][label] == pytest.approx(value)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) -> None:
     iso_current = MiniDmaRecord(
         path=_write_iso_current_mini_dma_run(tmp_path),
@@ -2210,6 +2320,47 @@ def test_mini_dma_section_cleans_and_snapshots_transition_reviews() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_mini_dma_section_applies_reviewed_transition_values_to_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        record = MiniDmaRecord(
+            path=tmp_path / "Ni50Fe27Ga23 12_2 iso-stress_run01",
+            sample="Ni50Fe27Ga23 12_2",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 12, 2),
+            label="iso-stress_run01",
+            transition_summary=("50 MPa / 1.46 g: As 30 mA, Af 70 mA",),
+        )
+        section._all_mini_dma_records = [record]  # noqa: SLF001
+        record_id = builder_ui._mini_dma_review_record_id(record, "50 MPa / 1.46 g")  # noqa: SLF001
+        section.set_transition_review_for_target(
+            record_id,
+            {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                "sample": record.sample,
+                "run_label": record.label or "",
+                "target_label": "50 MPa / 1.46 g",
+                "auto_values_mA": {"As": 30.0, "Af": 70.0},
+                "manual_values_mA": {"Af": 64.0},
+                "values": {"As": 30.0, "Af": 64.0},
+            },
+        )
+
+        reviewed = section.records_with_reviewed_transitions([record])
+
+        assert reviewed[0].transition_summary == ("50 MPa / 1.46 g: As 30 mA, Af 64 mA",)
+        assert "Af 64 mA" in str(section.model.frame().iloc[0][MINI_DMA_TRANSITION_COLUMN])
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_transition_temps_counts_auto_estimated_unannotated_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2251,6 +2402,111 @@ def test_transition_temps_counts_auto_estimated_unannotated_rows(
         frame,
         manually_annotated=manual,
     ) == 1
+
+
+def test_transition_temps_populates_from_vsm_scan_memory_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    scan = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 temp_scan.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(
+            {
+                "temperature": [0.0, 20.0, 40.0],
+                "field": [10000.0, 10000.0, 10000.0],
+                "signal": [0.0, 1.0, 2.0],
+                "section_index": [0, 0, 0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="temp scan",
+    )
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[scan],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        section.refresh_data()
+        frame = section.model.frame()
+
+        assert len(frame.index) == 1
+        assert frame.iloc[0]["Composition"] == "Ni50Fe27Ga23"
+        assert frame.iloc[0]["Microwire"] == "12/2"
+        assert frame.iloc[0]["_group_key"] == "Ni50Fe27Ga23|12|2"
+        assert section.status_label.text().startswith("0 of 1 sample")
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_temps_preview_click_persists_manual_temperature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    scan = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 temp_scan.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(
+            {
+                "temperature": [0.0, 20.0, 40.0],
+                "field": [10000.0, 10000.0, 10000.0],
+                "signal": [0.0, 1.0, 0.5],
+                "section_index": [0, 0, 0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="temp scan",
+    )
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[scan],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        section._auto_values_for_records = lambda _records: {"As": 12.0, "Af": 32.0}  # type: ignore[method-assign]  # noqa: SLF001
+        section.refresh_data()
+        source_index = section.model.index(0, 0)
+        proxy_index = section._search_proxy.mapFromSource(source_index)  # noqa: SLF001
+        section.table_view.setCurrentIndex(proxy_index)
+        section.table_view.selectRow(proxy_index.row())
+        section._preview_panel.set_target("Af")  # noqa: SLF001
+        section._preview_panel._handle_click(SimpleNamespace(button=1, xdata=37.5))  # noqa: SLF001
+
+        key = "Ni50Fe27Ga23|12|2"
+        snapshot = section.transition_points_snapshot()
+        frame = section.model.frame()
+        assert snapshot[key]["Af"] == pytest.approx(37.5)
+        assert frame.iloc[0][builder_ui.TRANSITION_TEMP_AF_COLUMN] == pytest.approx(37.5)
+        assert section._preview_panel._auto_value_labels["As"].text() == "Auto: 12"  # noqa: SLF001
+        assert section._preview_panel._value_labels["Af"].text() == "37.5"  # noqa: SLF001
+        page = section._preview_panel._tab_widget.currentWidget()  # noqa: SLF001
+        canvas = page.layout().itemAt(0).widget()
+        text_labels = {text.get_text() for text in canvas.figure.axes[0].texts}
+        assert "auto As" in text_labels
+        assert "Af" in text_labels
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_mini_dma_preview_items_render_real_thumbnail() -> None:
