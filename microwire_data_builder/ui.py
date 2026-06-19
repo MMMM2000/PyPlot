@@ -6059,6 +6059,13 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         action_row.addStretch(1)
         right_layout.addLayout(action_row)
 
+        self._counts_label = QtWidgets.QLabel("", right)
+        self._counts_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._counts_label.setStyleSheet("font-size: 10px;")
+        right_layout.addWidget(self._counts_label)
+
         self._summary_label = QtWidgets.QLabel("")
         self._summary_label.setWordWrap(True)
         self._summary_label.setTextInteractionFlags(
@@ -6098,6 +6105,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         else:
             self._display.clear("No current annealing runs are available.")
             self._summary_label.setText("No current annealing runs are available.")
+        self._refresh_counts()
 
     def _populate(self) -> None:
         self._tree.clear()
@@ -6112,6 +6120,62 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._tree.addTopLevelItem(item)
         self._tree.setColumnWidth(0, 240)
         self._tree.setColumnWidth(1, 120)
+        self._refresh_counts()
+
+    def _review_counts(self) -> Dict[str, int]:
+        counts = {
+            "total": len(self._entries),
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "needs_attention": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+        }
+        for entry in self._entries:
+            payload = self._review_payload_for_id(entry.record_id)
+            values = self._values_for_entry(entry, payload)
+            status_label = self._status_for_entry(entry, payload, values)
+            if entry.auto_values:
+                counts["auto_candidates"] += 1
+            if status_label == "Accepted":
+                counts["accepted"] += 1
+            elif status_label == "Manual adjusted":
+                counts["manual"] += 1
+            elif status_label == "No transition":
+                counts["no_transition"] += 1
+            elif status_label == "Excluded":
+                counts["excluded"] += 1
+            elif status_label == "Needs attention":
+                counts["needs_attention"] += 1
+            else:
+                counts["unreviewed"] += 1
+        counts["reviewed"] = (
+            counts["accepted"]
+            + counts["manual"]
+            + counts["no_transition"]
+            + counts["excluded"]
+        )
+        return counts
+
+    def _refresh_counts(self) -> None:
+        if not hasattr(self, "_counts_label"):
+            return
+        counts = self._review_counts()
+        parts = [
+            f"Total {counts['total']}",
+            f"Done {counts['reviewed']}",
+            f"Open {counts['unreviewed']}",
+            f"Auto {counts['auto_candidates']}",
+            f"Accepted {counts['accepted']}",
+            f"Manual {counts['manual']}",
+            f"No transition {counts['no_transition']}",
+            f"Excluded {counts['excluded']}",
+        ]
+        if counts["needs_attention"]:
+            parts.append(f"Needs attention {counts['needs_attention']}")
+        self._counts_label.setText(" | ".join(parts))
 
     def _review_payload_for_id(self, record_id: Optional[str]) -> Dict[str, Any]:
         if not record_id or not callable(self._transition_reviews_provider):
@@ -6301,6 +6365,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             )
             if self._current_item is not None:
                 self._apply_status_to_item(self._current_item, entry, stored_payload, stored_values)
+            self._refresh_counts()
 
     def _store_current_review(self, status: str, *, included: bool, values: Optional[Mapping[str, Any]] = None) -> None:
         record_id = self._current_record_id
@@ -6338,6 +6403,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         )
         if self._current_item is not None:
             self._apply_status_to_item(self._current_item, entry, refreshed, refreshed_values)
+        self._refresh_counts()
 
     def _accept_current_and_next(self) -> None:
         entry = self._current_entry()
