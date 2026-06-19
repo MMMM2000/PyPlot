@@ -5867,6 +5867,16 @@ class MasterLauncher(QtWidgets.QWidget):
             result = func()
             if isinstance(result, QtWidgets.QWidget):
                 self._register_window(result)
+            elif category == "builders" and item_text == "Microwire Data Builder":
+                self.run_button.setText("Starting...")
+                self.run_button.setEnabled(False)
+                QtCore.QTimer.singleShot(
+                    3500,
+                    lambda: (
+                        self.run_button.setText("Run"),
+                        self.run_button.setEnabled(True),
+                    ),
+                )
         except SystemExit as exc:
             code = exc.code
             if code not in (None, 0):

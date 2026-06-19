@@ -226,6 +226,7 @@ OPTIONAL_BUILDER_SECTIONS: Tuple[Tuple[str, str], ...] = (
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
 MAX_PLOT_POINTS = 2000
+VSM_TRANSITION_REVIEW_MAX_PLOT_POINTS = 500
 VSM_HYSTERESIS_PREVIEW_RANGE_SETTING = "vsm_hysteresis_preview_range_oe"
 VSM_HYSTERESIS_DEFAULT_PREVIEW_RANGE_OE = 1000.0
 VSM_HYSTERESIS_PREVIEW_RANGE_OPTIONS: tuple[tuple[str, str], ...] = (
@@ -4894,6 +4895,7 @@ def _plot_vsm_temperature_scan_figure(
     width_px: int,
     height_px: int,
     preview_mode: str = VSM_TEMPERATURE_DEFAULT_PREVIEW_MODE,
+    max_plot_points: int = MAX_PLOT_POINTS,
 ) -> Optional["plt.Figure"]:
     frame = record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame()
     if frame.empty:
@@ -4920,8 +4922,8 @@ def _plot_vsm_temperature_scan_figure(
             plot_frame = processor._smooth_frame(plot_frame)
         temps = plot_frame["temperature"]
         signal = plot_frame["signal"]
-        if len(temps) > MAX_PLOT_POINTS:
-            temps = _downsample_series(temps, MAX_PLOT_POINTS)
+        if len(temps) > max_plot_points:
+            temps = _downsample_series(temps, max_plot_points)
             signal = signal.loc[temps.index]
         color = prepared_series.color
         label = prepared_series.legend
@@ -17487,6 +17489,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 self._processor,
                 width_px=GRAPH_PREVIEW_WIDTH,
                 height_px=GRAPH_PREVIEW_HEIGHT,
+                max_plot_points=VSM_TRANSITION_REVIEW_MAX_PLOT_POINTS,
             )
             if figure is None:
                 continue
@@ -17692,7 +17695,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 return
             for axis in axes:
                 try:
-                    axis.axvline(
+                    line = axis.axvline(
                         numeric,
                         color=color,
                         linestyle=linestyle,
@@ -17701,10 +17704,15 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                         label="_nolegend_",
                         zorder=6,
                     )
+                    line.set_gid(
+                        "transition_temp_reviewed_marker"
+                        if not prefix
+                        else "transition_temp_auto_marker"
+                    )
                 except Exception:
                     continue
             try:
-                primary.text(
+                text = primary.text(
                     numeric,
                     y,
                     f"{prefix}{label}",
@@ -17721,7 +17729,11 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                         "alpha": 0.84,
                         "linewidth": 0.55,
                     },
-                    gid="transition_temp_marker_label",
+                )
+                text.set_gid(
+                    "transition_temp_reviewed_label"
+                    if not prefix
+                    else "transition_temp_auto_label"
                 )
             except Exception:
                 pass
@@ -17749,6 +17761,41 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 y=0.90,
             )
 
+    def update_current_reviewed_markers(self) -> None:
+        record_id = self.current_record_id()
+        if not record_id:
+            return
+        page = self._tab_widget.currentWidget()
+        if page is None or page.layout() is None or page.layout().count() < 1:
+            return
+        canvas = page.layout().itemAt(0).widget()
+        figure = getattr(canvas, "figure", None)
+        axes = list(getattr(figure, "axes", []) or [])
+        if not axes:
+            return
+        for axis in axes:
+            for artist in list(getattr(axis, "lines", []) or []):
+                try:
+                    if artist.get_gid() == "transition_temp_reviewed_marker":
+                        artist.remove()
+                except Exception:
+                    pass
+            for artist in list(getattr(axis, "texts", []) or []):
+                try:
+                    if artist.get_gid() == "transition_temp_reviewed_label":
+                        artist.remove()
+                except Exception:
+                    pass
+        self._draw_transition_markers(
+            figure,
+            {},
+            self._tab_reviewed_values.get(record_id, {}),
+        )
+        try:
+            canvas.draw_idle()
+        except Exception:
+            pass
+
 
 class TransitionTempsSection(QtWidgets.QWidget):
     section_key = "transition_temps"
@@ -17773,6 +17820,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self.data = self.store.load()
         self._transition_points = self._load_transition_points()
         self._transition_reviews = self._load_transition_reviews()
+        self._auto_values_cache: Dict[str, Dict[str, float]] = {}
         self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._last_sources: List[str] = []
         self._pending_preview_record_id: Optional[str] = None
@@ -18107,6 +18155,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
             pass
 
     def _refresh_record_groups(self) -> None:
+        self._auto_values_cache.clear()
         grouped: Dict[str, List[VsmTemperatureScanRecord]] = {}
         payload = None
         visible_records: List[VsmTemperatureScanRecord] = []
@@ -18186,6 +18235,20 @@ class TransitionTempsSection(QtWidgets.QWidget):
         return self._clean_transition_review_payload(record_id, payload)
 
     def _auto_values_for_record(self, record: VsmTemperatureScanRecord) -> Dict[str, float]:
+        record_id = _vsm_transition_review_record_id(record)
+        try:
+            cache = object.__getattribute__(self, "_auto_values_cache")
+        except Exception:
+            cache = None
+        if not isinstance(cache, dict):
+            cache = {}
+            try:
+                object.__setattr__(self, "_auto_values_cache", cache)
+            except Exception:
+                pass
+        cached = cache.get(record_id)
+        if cached is not None:
+            return dict(cached)
         processor = _get_vsm_temp_processor(self.logger)
         if processor is None:
             return {}
@@ -18196,7 +18259,57 @@ class TransitionTempsSection(QtWidgets.QWidget):
             estimated = processor.estimate_transition_points(data)
         except Exception:
             return {}
-        return _clean_vsm_transition_values(estimated)
+        cleaned = _clean_vsm_transition_values(estimated)
+        cache[record_id] = dict(cleaned)
+        return cleaned
+
+    def _refresh_group_table_row(self, group_key: str) -> None:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty or "_group_key" not in frame.columns:
+            return
+        try:
+            matches = frame.index[frame["_group_key"] == group_key].tolist()
+        except Exception:
+            matches = []
+        if not matches:
+            return
+        row = int(matches[0])
+        records = self._record_groups.get(group_key, [])
+        values = self._values_for_group(group_key, records, include_auto=False)
+        counts = self._review_counts_for_records(records)
+        updates = {
+            TRANSITION_TEMP_AS_COLUMN: values.get("As"),
+            TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
+            TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
+            TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
+            "Review status": self._group_status_from_counts(counts),
+            "Scans": counts["total"],
+            "Accepted": counts["accepted"] + counts["manual"],
+            "No transition": counts["no_transition"],
+            "Excluded": counts["excluded"],
+            "Unreviewed": counts["unreviewed"],
+        }
+        changed_columns: List[int] = []
+        for column, value in updates.items():
+            if column not in frame.columns:
+                continue
+            col = int(frame.columns.get_loc(column))
+            try:
+                frame.iat[row, col] = value
+                changed_columns.append(col)
+            except Exception:
+                continue
+        try:
+            self.model._invalidate_frame_caches()
+        except Exception:
+            pass
+        if changed_columns:
+            left = self.model.index(row, min(changed_columns))
+            right = self.model.index(row, max(changed_columns))
+            try:
+                self.model.dataChanged.emit(left, right, [QtCore.Qt.ItemDataRole.DisplayRole])
+            except Exception:
+                pass
 
     def _values_for_record(
         self,
@@ -18738,8 +18851,18 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self._transition_reviews[record_id] = self._clean_transition_review_payload(record_id, payload)
         self._pending_preview_record_id = record_id
         self._store_transition_reviews(update_table=False)
-        self.refresh_data()
         self._store_transition_points()
+        self._refresh_group_table_row(group_key)
+        panel = self._preview_panel
+        if panel is not None and panel.current_record_id() == record_id:
+            try:
+                panel._tab_reviewed_values[record_id] = dict(payload.get("manual_values_C") or payload.get("final_values_C") or {})
+                panel._tab_status_texts[record_id] = f"Review state: {self._status_for_record(record, payload)}"
+                panel._sync_current_tab_labels()
+                panel.update_current_reviewed_markers()
+            except Exception:
+                pass
+        self._sync_preview_status()
 
     def _accept_current_scan_and_next(self) -> None:
         current = self._current_preview_record()
