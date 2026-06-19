@@ -101,6 +101,8 @@ CURRENT_DENSITY_EXTRA_COLUMNS = [
     "Mf2-Af2 (mA)",
     "Setpoints (mA)",
     "Sources",
+    "Current annealing transition status",
+    "Current annealing transition review counts",
 ]
 
 SHAPE_MEMORY_VALUE_COLUMNS = [
@@ -196,6 +198,12 @@ GLASS_PULL_COLUMN = "Glass pull-off"
 VIDEO_END_LENGTH_COLUMN = "Video end length (m)"
 VIDEO_MW_LENGTH_COLUMN = "Video wire range (m)"
 ANNEALING_TRANSITION_COLUMN = "Current annealing transition currents"
+CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN = "Current annealing transition status"
+CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN = "Current annealing transition review counts"
+VSM_TRANSITION_TEMP_STATUS_COLUMN = "VSM transition temp status"
+VSM_TRANSITION_TEMP_COUNTS_COLUMN = "VSM transition temp review counts"
+MINI_DMA_TRANSITION_STATUS_COLUMN = "Mini DMA transition status"
+MINI_DMA_TRANSITION_COUNTS_COLUMN = "Mini DMA transition review counts"
 
 OUTPUT_COLUMNS = [
     "Composition",
@@ -306,6 +314,162 @@ TRANSITION_TEMP_COLUMNS = (
 
 STRAIN_COLUMN = "Legacy strain"
 
+_REVIEW_COUNT_KEYS = (
+    "total",
+    "accepted",
+    "manual",
+    "no_transition",
+    "excluded",
+    "needs_attention",
+    "unreviewed",
+    "auto_candidates",
+)
+
+
+def _empty_transition_review_counts() -> Dict[str, int]:
+    return {key: 0 for key in _REVIEW_COUNT_KEYS}
+
+
+def _coerce_review_count(value: object) -> int:
+    try:
+        numeric = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return max(numeric, 0)
+
+
+def _normalise_transition_status(raw_status: object) -> str:
+    text = str(raw_status or "").strip()
+    folded = text.casefold().replace("-", "_").replace(" ", "_")
+    mapping = {
+        "accepted": "Accepted auto",
+        "accepted_auto": "Accepted auto",
+        "auto_accepted": "Accepted auto",
+        "manual": "Manual adjusted",
+        "manual_adjusted": "Manual adjusted",
+        "no_transition": "No transition",
+        "excluded": "Excluded",
+        "needs_attention": "Needs attention",
+        "partly_reviewed": "Partly reviewed",
+        "partial": "Partly reviewed",
+        "auto_candidate": "Auto candidate",
+        "auto_candidates": "Auto candidate",
+        "unreviewed": "Unreviewed",
+        "not_measured": "Not measured",
+        "no_scans": "Not measured",
+    }
+    return mapping.get(folded, text or "Unreviewed")
+
+
+def _review_counts_from_payload(payload: object) -> Dict[str, int]:
+    counts = _empty_transition_review_counts()
+    if not isinstance(payload, Mapping):
+        return counts
+    aliases = {
+        "accepted_auto": "accepted",
+        "accepted": "accepted",
+        "manual_adjusted": "manual",
+        "manual": "manual",
+        "no-transition": "no_transition",
+        "no transition": "no_transition",
+        "excluded": "excluded",
+        "needs attention": "needs_attention",
+        "needs_attention": "needs_attention",
+        "unreviewed": "unreviewed",
+        "auto": "auto_candidates",
+        "auto_candidates": "auto_candidates",
+        "total": "total",
+    }
+    for raw_key, value in payload.items():
+        key = aliases.get(str(raw_key).strip().casefold())
+        if key in counts:
+            counts[key] += _coerce_review_count(value)
+    if counts["total"] <= 0:
+        counts["total"] = (
+            counts["accepted"]
+            + counts["manual"]
+            + counts["no_transition"]
+            + counts["excluded"]
+            + counts["needs_attention"]
+            + counts["unreviewed"]
+        )
+    return counts
+
+
+def _format_transition_review_counts(counts: Mapping[str, int]) -> str:
+    total = int(counts.get("total", 0) or 0)
+    if total <= 0:
+        return ""
+    return "; ".join(
+        f"{key}={int(counts.get(key, 0) or 0)}"
+        for key in _REVIEW_COUNT_KEYS
+    )
+
+
+def _aggregate_transition_review_status(counts: Mapping[str, int]) -> str:
+    total = int(counts.get("total", 0) or 0)
+    if total <= 0:
+        return "Not measured"
+    manual = int(counts.get("manual", 0) or 0)
+    accepted = int(counts.get("accepted", 0) or 0)
+    no_transition = int(counts.get("no_transition", 0) or 0)
+    excluded = int(counts.get("excluded", 0) or 0)
+    needs_attention = int(counts.get("needs_attention", 0) or 0)
+    unreviewed = int(counts.get("unreviewed", 0) or 0)
+    negative = no_transition + excluded
+    reviewed = manual + accepted + negative
+    if needs_attention and needs_attention == total:
+        return "Needs attention"
+    if manual == total:
+        return "Manual adjusted"
+    if accepted == total:
+        return "Accepted auto"
+    if negative == total:
+        return "No transition" if no_transition else "Excluded"
+    if reviewed or needs_attention:
+        return "Partly reviewed"
+    if int(counts.get("auto_candidates", 0) or 0):
+        return "Auto candidate"
+    if unreviewed or total:
+        return "Unreviewed"
+    return "Not measured"
+
+
+def _increment_review_count_for_status(
+    counts: Dict[str, int],
+    status: object,
+    *,
+    has_manual_values: bool = False,
+    has_auto_values: bool = False,
+) -> None:
+    normalised = _normalise_transition_status(status)
+    counts["total"] += 1
+    if normalised == "Manual adjusted" or has_manual_values:
+        counts["manual"] += 1
+    elif normalised == "Accepted auto":
+        counts["accepted"] += 1
+    elif normalised == "No transition":
+        counts["no_transition"] += 1
+    elif normalised == "Excluded":
+        counts["excluded"] += 1
+    elif normalised == "Needs attention":
+        counts["needs_attention"] += 1
+    else:
+        counts["unreviewed"] += 1
+        if has_auto_values:
+            counts["auto_candidates"] += 1
+
+
+def _clean_review_values(values: object) -> Dict[str, float]:
+    if not isinstance(values, Mapping):
+        return {}
+    cleaned: Dict[str, float] = {}
+    for label in ("As", "Af", "Ms", "Mf", "As1", "Af1", "Ms1", "Mf1", "As2", "Af2", "Ms2", "Mf2"):
+        value = values.get(label)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            cleaned[label] = float(value)
+    return cleaned
+
 for _graph_column, _origin_column in (
     (VSM_HYSTERESIS_COLUMN, VSM_HYSTERESIS_ORIGIN_COLUMN),
     (VSM_TEMPERATURE_SCAN_COLUMN, VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN),
@@ -318,10 +482,25 @@ for _graph_column, _origin_column in (
         OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(_graph_column) + 1, _origin_column)
 
 for _mini_dma_extra_column in reversed(
-    (MINI_DMA_STRAIN_COLUMN, MINI_DMA_TRANSITION_COLUMN, MINI_DMA_BREAK_COLUMN)
+    (
+        MINI_DMA_STRAIN_COLUMN,
+        MINI_DMA_TRANSITION_COLUMN,
+        MINI_DMA_TRANSITION_STATUS_COLUMN,
+        MINI_DMA_TRANSITION_COUNTS_COLUMN,
+        MINI_DMA_BREAK_COLUMN,
+    )
 ):
     if _mini_dma_extra_column not in OUTPUT_COLUMNS:
         OUTPUT_COLUMNS.insert(OUTPUT_COLUMNS.index(MINI_DMA_ORIGIN_COLUMN) + 1, _mini_dma_extra_column)
+
+for _transition_temp_status_column in reversed(
+    (VSM_TRANSITION_TEMP_STATUS_COLUMN, VSM_TRANSITION_TEMP_COUNTS_COLUMN)
+):
+    if _transition_temp_status_column not in OUTPUT_COLUMNS:
+        OUTPUT_COLUMNS.insert(
+            OUTPUT_COLUMNS.index(TRANSITION_TEMP_MF_COLUMN) + 1,
+            _transition_temp_status_column,
+        )
 
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
@@ -7096,6 +7275,7 @@ def build_database(
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
     transition_temps: Optional[Dict[str, Dict[str, object]]] = None,
     current_density_entries: Optional[Dict[str, Dict[str, object]]] = None,
+    mini_dma_transition_reviews: Optional[Dict[str, Dict[str, object]]] = None,
     video_overrides: Optional[Dict[str, Dict[str, object]]] = None,
     include_fabrication_draw_siblings: bool = False,
 ) -> BuildResult:
@@ -7437,6 +7617,8 @@ def build_database(
 
     transition_temps_map: Dict[str, Dict[str, float]] = {}
     transition_temps_blocked_keys: Set[str] = set()
+    transition_temps_status_map: Dict[str, str] = {}
+    transition_temps_counts_map: Dict[str, Dict[str, int]] = {}
     if transition_temps:
         for key, payload in transition_temps.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
@@ -7447,11 +7629,23 @@ def build_database(
             key_str = _microwire_key_to_str(key_parts)
             status = str(
                 payload.get("__review_status__")
+                or payload.get("__status__")
+                or payload.get("Review status")
                 or payload.get("status")
                 or ""
             ).strip()
+            counts = _review_counts_from_payload(
+                payload.get("__review_counts__")
+                or payload.get("__counts__")
+                or payload.get("Review counts")
+            )
+            status_label = _normalise_transition_status(status)
+            if status:
+                transition_temps_status_map[key_str] = status_label
+            if counts.get("total", 0):
+                transition_temps_counts_map[key_str] = counts
             included = payload.get("__included__", payload.get("included", None))
-            blocked = status in {"no_transition", "excluded"} or included is False
+            blocked = status_label in {"No transition", "Excluded"} or included is False
             cleaned = {
                 label: float(value)
                 for label, value in payload.items()
@@ -7461,8 +7655,21 @@ def build_database(
             }
             if cleaned:
                 transition_temps_map[key_str] = cleaned
+                transition_temps_status_map.setdefault(key_str, "Manual adjusted")
             elif blocked:
                 transition_temps_blocked_keys.add(key_str)
+                transition_temps_status_map.setdefault(
+                    key_str,
+                    "Excluded" if status_label == "Excluded" else "No transition",
+                )
+                if key_str not in transition_temps_counts_map:
+                    counts = _empty_transition_review_counts()
+                    counts["total"] = 1
+                    if transition_temps_status_map[key_str] == "Excluded":
+                        counts["excluded"] = 1
+                    else:
+                        counts["no_transition"] = 1
+                    transition_temps_counts_map[key_str] = counts
     transition_temps_map = dict(transition_temps_map)
     if vsm_temperature_groups:
         for key, records in vsm_temperature_groups.items():
@@ -7515,6 +7722,68 @@ def build_database(
         "Ms2 (mA)": "J_Ms2 (A/mm^2)",
         "Mf2 (mA)": "J_Mf2 (A/mm^2)",
     }
+
+    mini_dma_review_map: Dict[str, Dict[str, object]] = {}
+    if mini_dma_transition_reviews:
+        for record_id, payload in mini_dma_transition_reviews.items():
+            if isinstance(record_id, str) and record_id.strip() and isinstance(payload, dict):
+                mini_dma_review_map[record_id] = dict(payload)
+
+    def _mini_dma_review_record_prefix(record: MiniDmaRecord) -> str:
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            try:
+                path_text = str(path.resolve())
+            except Exception:
+                path_text = str(path)
+        else:
+            path_text = repr(record)
+        return f"{path_text}::"
+
+    def _mini_dma_transition_status_for_records(
+        records: Sequence[MiniDmaRecord],
+    ) -> Tuple[str, str]:
+        if not records:
+            return "Not measured", ""
+        counts = _empty_transition_review_counts()
+        saw_targets = False
+        for record in records:
+            prefix = _mini_dma_review_record_prefix(record)
+            target_labels: List[str] = []
+            for line in getattr(record, "transition_summary", ()) or ():
+                target = str(line).split(":", 1)[0].strip()
+                if target and target not in target_labels:
+                    target_labels.append(target)
+            matching_reviews: Dict[str, Mapping[str, object]] = {}
+            for record_id, payload in mini_dma_review_map.items():
+                if not record_id.startswith(prefix):
+                    continue
+                target = str(payload.get("target_label") or record_id[len(prefix) :]).strip()
+                if not target:
+                    continue
+                if target not in target_labels:
+                    target_labels.append(target)
+                matching_reviews[target] = payload
+            for target in target_labels:
+                saw_targets = True
+                review = matching_reviews.get(target)
+                if review is None:
+                    counts["total"] += 1
+                    counts["unreviewed"] += 1
+                    counts["auto_candidates"] += 1
+                    continue
+                status = review.get("status")
+                manual = _clean_review_values(review.get("manual_values_mA"))
+                auto = _clean_review_values(review.get("auto_values_mA"))
+                _increment_review_count_for_status(
+                    counts,
+                    status,
+                    has_manual_values=bool(manual),
+                    has_auto_values=bool(auto),
+                )
+        if not saw_targets:
+            return "Not measured", ""
+        return _aggregate_transition_review_status(counts), _format_transition_review_counts(counts)
 
     def _backfill_current_densities(row: Dict[str, object]) -> None:
         diameter_um = _parse_numeric(row.get(d_column))
@@ -7960,6 +8229,25 @@ def build_database(
                     row["Ms (mA)"] = float(ms1_value)
             if (not row.get("Notes")) and current_density_entry.get("Notes"):
                 row["Notes"] = current_density_entry.get("Notes")
+        current_status_value = row.get(CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN)
+        if current_status_value in (None, ""):
+            current_counts = _empty_transition_review_counts()
+            if records:
+                current_counts["total"] = len(records)
+                if current_density_entry:
+                    current_counts["manual"] = len(records)
+                    row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Manual adjusted"
+                elif phase_entry:
+                    current_counts["auto_candidates"] = len(records)
+                    current_counts["unreviewed"] = len(records)
+                    row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Auto candidate"
+                else:
+                    current_counts["unreviewed"] = len(records)
+                    row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Unreviewed"
+                if row.get(CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN) in (None, ""):
+                    row[CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN] = _format_transition_review_counts(current_counts)
+            else:
+                row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Not measured"
         row_highlights: Set[str] = set()
         d_detection: Optional[MicroscopeDetection] = None
         D_detection: Optional[MicroscopeDetection] = None
@@ -8151,6 +8439,31 @@ def build_database(
                 display_prefix="VSM temperature scan Origin graph",
                 section_token="vsm_temperature_scan",
             )
+        vsm_status = transition_temps_status_map.get(key_str)
+        vsm_counts = transition_temps_counts_map.get(key_str)
+        if vsm_counts is None:
+            vsm_counts = _empty_transition_review_counts()
+            if vsm_scan_records:
+                vsm_counts["total"] = len(vsm_scan_records)
+                if transition_entry:
+                    vsm_counts["accepted"] = len(vsm_scan_records)
+                else:
+                    vsm_counts["unreviewed"] = len(vsm_scan_records)
+                    if vsm_status == "Auto candidate":
+                        vsm_counts["auto_candidates"] = len(vsm_scan_records)
+        if vsm_status is None:
+            if not vsm_scan_records:
+                vsm_status = "Not measured"
+            elif transition_entry:
+                vsm_status = "Auto candidate"
+                if vsm_counts.get("total", 0):
+                    vsm_counts["accepted"] = 0
+                    vsm_counts["unreviewed"] = int(vsm_counts.get("total", 0))
+                    vsm_counts["auto_candidates"] = int(vsm_counts.get("total", 0))
+            else:
+                vsm_status = "Unreviewed"
+        row[VSM_TRANSITION_TEMP_STATUS_COLUMN] = vsm_status
+        row[VSM_TRANSITION_TEMP_COUNTS_COLUMN] = _format_transition_review_counts(vsm_counts)
         dma_records = dma_isostress_groups.get(key, [])
         if not dma_records:
             dma_records = dma_isostress_groups.get((composition, draw_x, piece_y, None), [])
@@ -8194,6 +8507,10 @@ def build_database(
                 row[MINI_DMA_STRAIN_COLUMN] = strain_lines
             if transition_lines:
                 row[MINI_DMA_TRANSITION_COLUMN] = transition_lines
+            (
+                row[MINI_DMA_TRANSITION_STATUS_COLUMN],
+                row[MINI_DMA_TRANSITION_COUNTS_COLUMN],
+            ) = _mini_dma_transition_status_for_records(mini_dma_entries)
             if break_lines:
                 row[MINI_DMA_BREAK_COLUMN] = list(dict.fromkeys(break_lines))
             _assign_pyplot_origin_artifacts(
@@ -8204,6 +8521,8 @@ def build_database(
                 display_prefix="Mini DMA Origin graph",
                 section_token="mini_dma",
             )
+        else:
+            row[MINI_DMA_TRANSITION_STATUS_COLUMN] = "Not measured"
         shape_memory_records = shape_memory_stress_strain_groups.get(key, [])
         if not shape_memory_records:
             shape_memory_records = shape_memory_stress_strain_groups.get(
@@ -8292,6 +8611,13 @@ def build_database(
                     transition_lines.append(str(line))
         if transition_lines:
             row[ANNEALING_TRANSITION_COLUMN] = transition_lines
+            if row.get(CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN) == "Unreviewed":
+                row[CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] = "Auto candidate"
+                current_counts = _empty_transition_review_counts()
+                current_counts["total"] = len([record for record in [high_record, *other_records] if record is not None])
+                current_counts["unreviewed"] = current_counts["total"]
+                current_counts["auto_candidates"] = current_counts["total"]
+                row[CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN] = _format_transition_review_counts(current_counts)
         if wants_matplotlib:
             if high_record:
                 high_cache_key = _measurement_cache_key(high_record)

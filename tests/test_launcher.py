@@ -88,6 +88,9 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                     "Microwire",
                     "Mini DMA graphs",
                     "Mini DMA transition currents by stress/load",
+                    "Current annealing transition status",
+                    "VSM transition temp status",
+                    "Mini DMA transition status",
                     "As (C)",
                     "Af (C)",
                     "As (mA)",
@@ -111,6 +114,9 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                         "Mini DMA transition currents by stress/load": [
                             "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
                         ],
+                        "Current annealing transition status": "No transition",
+                        "VSM transition temp status": "No transition",
+                        "Mini DMA transition status": "No transition",
                         "As (C)": -23.5,
                         "Af (C)": 18.25,
                         "As (mA)": 30,
@@ -161,7 +167,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert manifest["source_project"] == str(project_path.resolve())
     assert manifest["source_saved_at"] == "2026-06-17 09:30"
     assert manifest["row_count"] == 1
-    assert manifest["column_count"] == 10
+    assert manifest["column_count"] == 13
     assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
     assert "Data source" in manifest["dropped_columns"]
     assert "Source label" in manifest["dropped_columns"]
@@ -185,10 +191,16 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "As1 (mA)" in headers
     assert "Af1 (mA)" in headers
     assert "J_As1 (A/mm^2)" in headers
+    assert "Current annealing transition status" in headers
+    assert "VSM transition temp status" in headers
+    assert "Mini DMA transition status" in headers
     assert "Mini DMA transition currents by stress/load" in headers
     row = [cell.value for cell in workbook["Assemble"][2]]
     assert "run01, run02" in row
     assert "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA" in row
+    assert row[headers.index("Current annealing transition status")] == "No transition"
+    assert row[headers.index("VSM transition temp status")] == "No transition"
+    assert row[headers.index("Mini DMA transition status")] == "No transition"
     assert '{"fit": "accepted", "points": 120}' in row
     audit_headers = [cell.value for cell in workbook["Assemble audit"][1]]
     audit_row = [cell.value for cell in workbook["Assemble audit"][2]]

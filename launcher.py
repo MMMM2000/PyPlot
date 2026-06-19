@@ -898,10 +898,10 @@ def _builder_section_rows_as_frame(
     return frame
 
 
-def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
+def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
     if frame.empty:
         return {}
-    result: dict[str, dict[str, float]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for row in frame.to_dict(orient="records"):
         key = str(row.get("_group_key") or "").strip()
         if not key:
@@ -911,7 +911,7 @@ def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
                 key = f"{composition}|{microwire.replace('/', '|')}"
         if not key:
             continue
-        entry: dict[str, float] = {}
+        entry: dict[str, Any] = {}
         for label, column in {
             "As": "As (°C)",
             "Af": "Af (°C)",
@@ -925,6 +925,23 @@ def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, float]]:
                 continue
             if math.isfinite(numeric):
                 entry[label] = numeric
+        status = row.get("Review status")
+        if status not in (None, ""):
+            entry["__review_status__"] = status
+        counts: dict[str, int] = {}
+        for source_column, target_key in {
+            "Scans": "total",
+            "Accepted": "accepted",
+            "No transition": "no_transition",
+            "Excluded": "excluded",
+            "Unreviewed": "unreviewed",
+        }.items():
+            try:
+                counts[target_key] = int(row.get(source_column) or 0)
+            except (TypeError, ValueError):
+                counts[target_key] = 0
+        if any(counts.values()):
+            entry["__review_counts__"] = counts
         if entry:
             result[key] = entry
     return result
@@ -968,6 +985,20 @@ def _run_builder_rebuild_assemble_command_lightweight(
     transition_points = _transition_rows_to_map(
         _builder_section_rows_as_frame(sections, "transition_temps")
     )
+    mini_dma_transition_reviews: dict[str, Any] = {}
+    mini_dma_section = sections.get("mini_dma")
+    if isinstance(mini_dma_section, Mapping):
+        extra = mini_dma_section.get("extra")
+        if isinstance(extra, Mapping):
+            raw_reviews = extra.get("mini_dma_transition_reviews")
+            if isinstance(raw_reviews, Mapping) and isinstance(raw_reviews.get("records"), Mapping):
+                raw_reviews = raw_reviews.get("records")
+            if isinstance(raw_reviews, Mapping):
+                mini_dma_transition_reviews = {
+                    str(key): dict(value)
+                    for key, value in raw_reviews.items()
+                    if isinstance(value, Mapping)
+                }
     result = builder_ui.build_database(
         config,
         logger=LOGGER,
@@ -1027,6 +1058,9 @@ def _run_builder_rebuild_assemble_command_lightweight(
             else {}
         ),
         transition_temps=transition_points if "transition_temps" in selected else {},
+        mini_dma_transition_reviews=(
+            mini_dma_transition_reviews if "mini_dma" in selected else {}
+        ),
         skip_exports=True,
         include_fabrication_draw_siblings=True,
     )
