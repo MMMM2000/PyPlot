@@ -16289,11 +16289,13 @@ class CurrentDensitySection(QtWidgets.QWidget):
             key_tuple = _microwire_key_from_string(key_text)
             if key_tuple is None:
                 continue
-            values = _clean_transition_values(payload.get("final_values_mA"))
-            if not values:
-                values = _clean_transition_values(payload.get("manual_values_mA"))
-            if not values and status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
-                values = _clean_transition_values(payload.get("auto_values_mA"))
+            values = _clean_transition_values(payload.get("auto_values_mA"))
+            final_values = _clean_transition_values(payload.get("final_values_mA"))
+            manual_values = _clean_transition_values(payload.get("manual_values_mA"))
+            if final_values:
+                values.update(final_values)
+            if manual_values:
+                values.update(manual_values)
             if not values:
                 continue
             setpoint = _coerce_finite_float(payload.get("setpoint_mA"))

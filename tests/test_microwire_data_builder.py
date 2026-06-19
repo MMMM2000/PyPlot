@@ -6720,6 +6720,7 @@ def test_current_density_collects_auto_annealing_transition_points() -> None:
             {
                 "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
                 "included": True,
+                "auto_values_mA": dict(auto_points[key]),
                 "manual_values_mA": {"As1": 11.0, "Ms1": 5.0},
                 "final_values_mA": {"As1": 11.0, "Ms1": 5.0},
             },
