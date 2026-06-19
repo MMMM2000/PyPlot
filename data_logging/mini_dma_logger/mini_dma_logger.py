@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import ctypes
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -19852,6 +19853,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 handle.flush()
         self._last_session_data_flush_s = time.monotonic()
 
+    def _session_measurement_csv_has_data_rows(self) -> bool:
+        handle = self._session_csv_handle
+        if handle is not None:
+            try:
+                handle.flush()
+            except Exception:
+                pass
+        csv_path = self._session_csv_path
+        if csv_path is None or not csv_path.exists():
+            return False
+        try:
+            with csv_path.open("r", encoding="utf-8", newline="") as csv_handle:
+                for line_index, line in enumerate(csv_handle):
+                    if line_index > 0 and line.strip():
+                        return True
+        except OSError:
+            return bool(self._session_points)
+        return False
+
     def _apply_ui_refresh_interval(self) -> None:
         if hasattr(self, "_ui_refresh_timer"):
             self._ui_refresh_timer.setInterval(self._ui_refresh_interval_ms())
@@ -20681,6 +20701,29 @@ class MainWindow(QtWidgets.QMainWindow):
                 "manual_session_stop",
                 detail="Session stopped without completing an active recipe.",
             )
+        if (
+            self._session_csv_writer is not None
+            and self._session_stop_reason == "recipe_completed"
+            and not self._session_measurement_csv_has_data_rows()
+        ):
+            was_logging_enabled = self._session_logging_enabled
+            self._session_logging_enabled = True
+            try:
+                record_point = self._record_current_point
+                try:
+                    record_parameters = inspect.signature(record_point).parameters
+                except (TypeError, ValueError):
+                    record_parameters = {}
+                if "quiet" in record_parameters:
+                    record_point(
+                        quiet=True,
+                        advance_heating=False,
+                        require_fresh_after_move=False,
+                    )
+                else:
+                    record_point()
+            finally:
+                self._session_logging_enabled = was_logging_enabled
         self._session_active = False
         self._session_logging_enabled = False
         self._flush_session_data_handles()

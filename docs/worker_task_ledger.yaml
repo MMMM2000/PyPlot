@@ -1,5 +1,5 @@
 ledger:
-  updated_utc: "2026-06-18 16:35"
+  updated_utc: "2026-06-19 07:25"
   integration_branch: "codex/integration-mini-dma-ready-review"
   notes: >
     Master coordination ledger for active and recently handed-off PyPlot worker
@@ -644,7 +644,7 @@ tasks:
       artifacts: []
 
   - id: "release-hardening-shared-psu-ca-mini"
-    title: "Release hardening for shared PSU, Current Annealing, and Mini DMA"
+    title: "Release hardening for shared PSU, experiment launchers, Current Annealing, AC, and Mini DMA"
     status: "integrated"
     priority: "high"
     owner:
@@ -655,26 +655,31 @@ tasks:
       base_branch: "codex/integration-mini-dma-ready-review"
       branch: "codex/integration-mini-dma-ready-review-merge-0618"
       upstream: "origin/codex/integration-mini-dma-ready-review"
-      commit: "pending-release-hardening-commit"
+      commit: "current commit; see git log"
       worktree: "9b54"
-      clean_status_reported: false
+      clean_status_reported: true
     scope:
       summary: >
         Master-thread release audit/hardening pass after integrating recent
         workers. Tightens broker lease/profile invariants, preserves Current
         Annealing shared-broker settings, caps AC HMP voltage requests, makes
-        Mini DMA shared-broker release safer, and prevents stale hidden one-way
-        current-sweep state from changing fatigue recipes.
+        Mini DMA shared-broker release safer, prevents stale hidden one-way
+        current-sweep state from changing fatigue recipes, fixes packaged AC
+        experiment startup, and makes very short completed Mini DMA recipes
+        save at least one normal measurement row.
       touched_files:
         - "data_logging/shared_power_supply/"
         - "data_logging/ac_susceptibility_logger/sweep.py"
         - "data_logging/current_annealing_logger/current_annealing_logger.py"
         - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "launcher.py"
+        - "launcher.spec"
         - "tests/"
       conflict_areas:
         - "Shared HMP broker lease/profile state"
         - "AC/Current Annealing/Mini DMA shared-broker assumptions"
         - "Mini DMA current-sweep/fatigue recipe generation"
+        - "Packaged experiment-process startup"
     readiness:
       handoff_received: true
       branch_and_commit: false
@@ -686,6 +691,9 @@ tasks:
         - "Current Annealing shared-broker port setting is restored instead of reset to 8765."
         - "Mini DMA releases leased broker channels only after asking them to turn output off."
         - "Iso-stress fatigue always saves/loads/builds up-and-back current sweeps."
+        - "Packaged launcher includes the AC Susceptibility experiment process."
+        - "PyPlot automation session registry follows the active TEMP/TMP path or explicit PYPLOT_SESSION_REGISTRY_DIR."
+        - "Very short normally completed Mini DMA recipes do not leave measurement.csv header-only."
       tests:
         - "py_compile touched modules passed."
         - "Shared PSU broker/setup/bench guard tests: 30 passed."
@@ -694,22 +702,33 @@ tasks:
         - "Mini DMA focused fatigue/shared-broker slice: 10 passed."
         - "Mini DMA logger full file: 594 passed."
         - "Mini DMA helper/reporting tests: 32 passed."
+        - "2026-06-19 release readiness: shared PSU + Current Annealing + AC + bench guard tests: 242 passed."
+        - "2026-06-19 release readiness: Mini DMA full release slice: 629 passed."
+        - "2026-06-19 release readiness: launcher/current plotting/Mini DMA plugin/PyPlot import tests: 195 passed."
+        - "2026-06-19 release readiness: experiment process + launcher tests: 47 passed."
+        - "2026-06-19 final Mini DMA fallback slice: 172 passed."
+        - "2026-06-19 final Mini DMA full release slice: 629 passed."
+        - "2026-06-19 packaged launcher rebuilt and offscreen-smoked for Current Annealing, AC Susceptibility, and Mini DMA."
+        - "2026-06-19 live AC shared-broker/LCR smoke: CH1 1 mA through local broker, 4 LCR rows, TSV written, CH1 forced off."
+        - "2026-06-19 live Mini DMA smoke: supervised iso-stress recipe at 20 MPa, 1->3->1 mA, recipe_completed, 1 measurement row, 664 control-trace rows, run_quality completed."
+        - "2026-06-19 final HMP probe: CH1 off, CH4 off, CH3 motor rail on at 12 V."
         - "git diff --check passed with expected CRLF warnings only."
       screenshots_or_artifacts: []
-      changelog_status: "changelog.d/2026-06-18-1825-release-hardening.md added."
+      changelog_status: "Release-hardening changelog fragments added."
       risks:
-        - "No live hardware validation was run in this master thread."
         - "Old remote bundle origin/codex/integration-mw-builder-docx-visualization still needs separate review; not merged here."
-        - "Mini DMA phone summary layout and one-way sweep run-quality classification remain review items, not patched in this pass."
+        - "Large remote branch origin/codex/current-annealing-anchor-import-ui was not merged; it needs separate review because it is broad and mostly outside the release blockers."
+        - "Live Mini DMA smoke was intentionally tiny and validates the real iso-stress/control/logging path, not high-stress performance or long fatigue behavior."
     integration:
       decision: "commit-before-main-merge"
-      merged_commit: ""
+      merged_commit: "current commit; see git log"
       combined_checks:
         - "Release-hardening checks listed in readiness/tests."
+        - "Live hardware evidence listed in readiness/tests."
       regression_guarantees_to_recheck:
-        - "Real shared broker simultaneous use across Current Annealing, AC, and Mini DMA after operator bench review."
+        - "A real colleague-style Current Annealing run on a sacrificial wire remains useful after merge, but the shared-broker CH1 path was live-smoked through AC."
         - "Mini DMA fatigue first-overheating and current cycles on a saved recipe before colleague release."
-      final_status: "master hardening patch verified locally; commit and push pending"
+      final_status: "master hardening patch committed after focused tests, package smoke, AC live smoke, and Mini DMA iso-stress live smoke"
     links:
       handoff: "master audit"
       pr: ""

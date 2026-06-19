@@ -14,6 +14,7 @@ a = Analysis(
     datas=plotting_datas,
     hiddenimports=[
         'data_logging.current_annealing_logger.current_annealing_logger',
+        'data_logging.ac_susceptibility_logger.ac_susceptibility_logger',
         'data_logging.mini_dma_logger.mini_dma_logger',
     ],
     hookspath=[],
