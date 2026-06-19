@@ -6508,9 +6508,19 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         )
         if not finite_mask.any():
             return
+        power_scale = metadata.get("power_axis_scale", 1.0)
+        try:
+            power_scale = float(power_scale)
+        except (TypeError, ValueError):
+            power_scale = 1.0
+        if not math.isfinite(power_scale) or power_scale <= 0.0:
+            power_scale = 1.0
+        power_axis_label = metadata.get("power_axis_label", "Power [mW]")
+        if not isinstance(power_axis_label, str) or not power_axis_label.strip():
+            power_axis_label = "Power [mW]"
         power_values = (
             np.asarray(current_values, dtype=float)[finite_mask] ** 2
-        ) * np.asarray(resistance_values, dtype=float)[finite_mask] / 1000.0
+        ) * np.asarray(resistance_values, dtype=float)[finite_mask] / 1000.0 * power_scale
         current_for_fit = np.asarray(current_values, dtype=float)[finite_mask]
         try:
             grouped = pd.DataFrame(
@@ -6550,7 +6560,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         )
         for command in commands:
             self._origin_lt_exec(lt_exec, command)
-        self._set_origin_axis_title(layer, "x2", "Power [mW]")
+        self._set_origin_axis_title(layer, "x2", power_axis_label.strip())
 
     def _origin_layer_axis_links(
         self,
@@ -14727,6 +14737,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         #   self._select_directories(title=..., start_dir=...)
         if parent is None and isinstance(self, QtWidgets.QWidget):
             parent = self
+        selector = getattr(self, "_select_directories_with_multi_select", None)
+        if callable(selector):
+            multi_selected = selector(
+                parent,
+                title=title,
+                start_dir=start_dir,
+            )
+            if multi_selected is not None:
+                return multi_selected
         selected: list[str] = []
         seen: set[str] = set()
         current_dir = Path(start_dir)
@@ -14761,6 +14780,59 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             )
             if add_more != QtWidgets.QMessageBox.StandardButton.Yes:
                 break
+        return selected
+
+    def _select_directories_with_multi_select(
+        self,
+        parent: QtWidgets.QWidget | None,
+        *,
+        title: str,
+        start_dir: Path | str,
+    ) -> list[str] | None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                platform_name = str(app.platformName() or "").strip().lower()
+            except Exception:
+                platform_name = ""
+            if platform_name in {"offscreen", "minimal", "headless"}:
+                return None
+        try:
+            dialog = QtWidgets.QFileDialog(parent, title, str(start_dir))
+            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+            dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
+            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+            dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptOpen)
+            dialog.setWindowTitle(title)
+            for view_type in (QtWidgets.QListView, QtWidgets.QTreeView):
+                for view in dialog.findChildren(view_type):
+                    view.setSelectionMode(
+                        QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+                    )
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                return []
+            return self._normalise_selected_directories(dialog.selectedFiles())
+        except Exception:
+            return None
+
+    def _normalise_selected_directories(self, entries: Iterable[str]) -> list[str]:
+        selected: list[str] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not entry:
+                continue
+            candidate = Path(entry)
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if not resolved.is_dir():
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(key)
         return selected
 
     def _set_tree_item_text(

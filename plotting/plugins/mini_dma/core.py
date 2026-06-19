@@ -32,6 +32,12 @@ STRAIN_BASELINE_MODES = {
     STRAIN_BASELINE_GLOBAL_MINIMUM,
     STRAIN_BASELINE_PER_TARGET_MINIMUM,
 }
+POWER_AXIS_ABSOLUTE_MW = "absolute_mw"
+POWER_AXIS_NORMALIZED_MW_PER_CM = "normalized_mw_per_cm"
+POWER_AXIS_MODES = {
+    POWER_AXIS_ABSOLUTE_MW,
+    POWER_AXIS_NORMALIZED_MW_PER_CM,
+}
 
 
 @dataclass(frozen=True)
@@ -141,16 +147,34 @@ def current_sweep_groups(frame: pd.DataFrame) -> list[tuple[float, pd.DataFrame]
     groups: list[tuple[float, pd.DataFrame]] = []
     for target, group in filtered.groupby("automation_target_value", sort=True):
         target_value = float(target)
-        usable = group.sort_values("elapsed_s", kind="stable").copy()
-        usable = usable[usable["current_mA"].abs() > 0.0]
-        usable = _drop_consecutive_duplicate_rows(
-            usable,
-            subset=["current_mA", "strain_pct", "resistance_ohm"],
-        )
-        if len(usable) < MIN_POINTS_PER_TARGET:
-            continue
-        groups.append((target_value, usable.reset_index(drop=True)))
+        for subgroup in _split_current_target_group(group):
+            usable = subgroup.sort_values("elapsed_s", kind="stable").copy()
+            usable = usable[usable["current_mA"].abs() > 0.0]
+            usable = _drop_consecutive_duplicate_rows(
+                usable,
+                subset=["current_mA", "strain_pct", "resistance_ohm"],
+            )
+            if len(usable) < MIN_POINTS_PER_TARGET:
+                continue
+            groups.append((target_value, usable.reset_index(drop=True)))
     return groups
+
+
+def _split_current_target_group(group: pd.DataFrame) -> list[pd.DataFrame]:
+    if "plateau_index" not in group.columns:
+        return [group]
+    plateau = pd.to_numeric(group["plateau_index"], errors="coerce")
+    if plateau.nunique(dropna=False) <= 1:
+        return [group]
+
+    keyed = group.copy()
+    keyed["_mini_dma_plateau_group"] = plateau.map(
+        lambda value: "__first_overheating__" if pd.isna(value) else f"{float(value):.12g}"
+    )
+    subgroups: list[pd.DataFrame] = []
+    for _key, subgroup in keyed.groupby("_mini_dma_plateau_group", sort=False):
+        subgroups.append(subgroup.drop(columns=["_mini_dma_plateau_group"]))
+    return subgroups
 
 
 def make_strain_current_figure(
@@ -159,6 +183,7 @@ def make_strain_current_figure(
     zero_minimum_strain: bool = False,
     strain_baseline_mode: str | None = None,
     show_power_top_axis: bool = False,
+    power_axis_mode: str = POWER_AXIS_NORMALIZED_MW_PER_CM,
 ) -> Figure:
     baseline_mode = _normalise_strain_baseline_mode(
         strain_baseline_mode,
@@ -171,6 +196,7 @@ def make_strain_current_figure(
         title_suffix="Strain vs Current",
         strain_baseline_mode=baseline_mode,
         show_power_top_axis=show_power_top_axis,
+        power_axis_mode=power_axis_mode,
     )
 
 
@@ -178,6 +204,7 @@ def make_resistance_current_figure(
     run: MiniDmaRun,
     *,
     show_power_top_axis: bool = False,
+    power_axis_mode: str = POWER_AXIS_NORMALIZED_MW_PER_CM,
 ) -> Figure:
     return _make_current_figure(
         run,
@@ -186,6 +213,7 @@ def make_resistance_current_figure(
         title_suffix="Resistance vs Current",
         filter_resistance_outliers=True,
         show_power_top_axis=show_power_top_axis,
+        power_axis_mode=power_axis_mode,
     )
 
 
@@ -198,6 +226,7 @@ def _make_current_figure(
     filter_resistance_outliers: bool = False,
     strain_baseline_mode: str = STRAIN_BASELINE_RAW,
     show_power_top_axis: bool = False,
+    power_axis_mode: str = POWER_AXIS_NORMALIZED_MW_PER_CM,
 ) -> Figure:
     groups = current_sweep_groups(run.frame)
     if not groups:
@@ -240,13 +269,15 @@ def _make_current_figure(
                     global_l0_mm,
                     global_strain_min,
                 )
+        is_first_overheating = _is_first_overheating_group(run, target, group)
         ax.plot(
             group["current_mA"].to_numpy(dtype=float),
             y_values,
-            label=_format_target_label(run, target),
-            linewidth=1.4,
-            marker="o",
-            markersize=3.5,
+            label=_format_plot_target_label(run, target, group),
+            linewidth=1.8 if is_first_overheating else 1.4,
+            linestyle="--" if is_first_overheating else "-",
+            marker="D" if is_first_overheating else "o",
+            markersize=4.2 if is_first_overheating else 3.5,
         )
     ax.set_title(f"{run.sample_name} - {title_suffix}")
     ax.set_xlabel(_current_axis_label(run, [group for _target, group in plotted_groups]))
@@ -259,11 +290,13 @@ def _make_current_figure(
     ax.set_ylabel(y_label)
     ax.grid(True, alpha=0.3)
     if show_power_top_axis:
+        power_label, power_scale = power_axis_label_and_scale(run, power_axis_mode)
         add_power_top_axis(
             ax,
             power_currents,
             power_resistances,
-            label="Power [mW]",
+            label=power_label,
+            power_scale=power_scale,
             label_size=11,
             tick_size=9,
         )
@@ -295,6 +328,17 @@ def power_axis_points(run: MiniDmaRun, *, filter_resistance_outliers: bool = Tru
         currents.extend(group["current_mA"].to_numpy(dtype=float).tolist())
         resistances.extend(group["resistance_ohm"].to_numpy(dtype=float).tolist())
     return currents, resistances
+
+
+def power_axis_label_and_scale(
+    run: MiniDmaRun,
+    mode: str = POWER_AXIS_NORMALIZED_MW_PER_CM,
+) -> tuple[str, float]:
+    if mode == POWER_AXIS_NORMALIZED_MW_PER_CM:
+        length_mm = run.initial_length_mm
+        if length_mm is not None and math.isfinite(length_mm) and length_mm > 0.0:
+            return "Power/cm [mW/cm]", 10.0 / length_mm
+    return "Power [mW]", 1.0
 
 
 def strain_from_trace_minimum_length(run: MiniDmaRun, group: pd.DataFrame) -> pd.Series:
@@ -590,12 +634,60 @@ def _format_stress_label(value: float) -> str:
     return f"{value:g} MPa"
 
 
-def _format_target_label(run: MiniDmaRun, value: float) -> str:
+def _format_target_label(run: MiniDmaRun, value: float, *, compact: bool = False) -> str:
     stress_label = _format_stress_label(value)
+    if compact:
+        stress_label = stress_label.replace(" ", "")
     load_g = _load_g_from_stress_mpa(run, value)
     if load_g is None:
         return stress_label
-    return f"{stress_label} / {_format_compact_number(load_g)} g"
+    load_label = f"{_format_compact_number(load_g)}g" if compact else f"{_format_compact_number(load_g)} g"
+    return f"{stress_label} / {load_label}"
+
+
+def _format_plot_target_label(run: MiniDmaRun, value: float, group: pd.DataFrame) -> str:
+    if _is_first_overheating_group(run, value, group):
+        return f"1st: {_format_target_label(run, value, compact=True)}"
+    return _format_target_label(run, value)
+
+
+def first_overheating_target_mpa(run: MiniDmaRun) -> float | None:
+    metadata = _metadata_for_run(run.measurement_path)
+    sections: list[dict[str, object]] = []
+    for key in ("controlled_current_sweep", "current_sweep"):
+        section = metadata.get(key)
+        if isinstance(section, dict):
+            sections.append(section)
+    recipe = metadata.get("recipe")
+    if isinstance(recipe, dict):
+        section = recipe.get("current_sweep")
+        if isinstance(section, dict):
+            sections.append(section)
+
+    for section in sections:
+        enabled = section.get("first_overheating")
+        if isinstance(enabled, str):
+            enabled_bool = enabled.strip().casefold() in {"1", "true", "yes", "on"}
+        else:
+            enabled_bool = bool(enabled)
+        if not enabled_bool:
+            continue
+        target = _dict_float(section, "first_overheating_target_mpa")
+        if target is not None:
+            return target
+    return None
+
+
+def _is_first_overheating_group(run: MiniDmaRun, target: float, group: pd.DataFrame) -> bool:
+    first_target = first_overheating_target_mpa(run)
+    if first_target is None:
+        return False
+    if not math.isclose(float(target), first_target, rel_tol=1e-9, abs_tol=1e-6):
+        return False
+    if "plateau_index" not in group.columns:
+        return True
+    plateau = pd.to_numeric(group["plateau_index"], errors="coerce")
+    return not plateau.notna().any()
 
 
 def _load_g_from_stress_mpa(run: MiniDmaRun, stress_mpa: float) -> float | None:
@@ -809,13 +901,26 @@ def _target_token(value: float) -> str:
 def iter_measurement_paths(paths: Iterable[Path]) -> list[Path]:
     resolved: list[Path] = []
     seen: set[Path] = set()
-    for path in paths:
+
+    def _add(candidate: Path) -> None:
         try:
-            measurement = resolve_measurement_path(Path(path)).resolve()
+            measurement = resolve_measurement_path(candidate).resolve()
         except ValueError:
-            continue
+            return
         if measurement in seen:
-            continue
+            return
         seen.add(measurement)
         resolved.append(measurement)
+
+    for path in paths:
+        candidate = Path(path)
+        _add(candidate)
+        if not candidate.is_dir():
+            continue
+        try:
+            children = sorted(candidate.rglob(MEASUREMENT_FILE), key=lambda item: str(item))
+        except OSError:
+            continue
+        for child in children:
+            _add(child)
     return resolved
