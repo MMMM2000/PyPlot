@@ -90,6 +90,12 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                     "Mini DMA transition currents by stress/load",
                     "As (C)",
                     "Af (C)",
+                    "As (mA)",
+                    "Ms (mA)",
+                    "As1 (mA)",
+                    "Af1 (mA)",
+                    "As current density (A/mm^2)",
+                    "J_As1 (A/mm^2)",
                     "Data source",
                     "Source label",
                     "_sources",
@@ -107,6 +113,12 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                         ],
                         "As (C)": -23.5,
                         "Af (C)": 18.25,
+                        "As (mA)": 30,
+                        "Ms (mA)": 25,
+                        "As1 (mA)": 30,
+                        "Af1 (mA)": 70,
+                        "As current density (A/mm^2)": 95.5,
+                        "J_As1 (A/mm^2)": 95.5,
                         "Data source": "Measured",
                         "Source label": "Ko\u0161ice",
                         "_sources": ["G:/internal/run01"],
@@ -149,7 +161,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert manifest["source_project"] == str(project_path.resolve())
     assert manifest["source_saved_at"] == "2026-06-17 09:30"
     assert manifest["row_count"] == 1
-    assert manifest["column_count"] == 7
+    assert manifest["column_count"] == 10
     assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
     assert "Data source" in manifest["dropped_columns"]
     assert "Source label" in manifest["dropped_columns"]
@@ -167,6 +179,12 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "_sources" not in headers
     assert "internal review note" not in headers
     assert "provenance file" not in headers
+    assert "As (mA)" not in headers
+    assert "Ms (mA)" not in headers
+    assert "As current density (A/mm^2)" not in headers
+    assert "As1 (mA)" in headers
+    assert "Af1 (mA)" in headers
+    assert "J_As1 (A/mm^2)" in headers
     assert "Mini DMA transition currents by stress/load" in headers
     row = [cell.value for cell in workbook["Assemble"][2]]
     assert "run01, run02" in row

@@ -1134,6 +1134,10 @@ _ASSEMBLE_PUBLIC_DROP_EXACT = {
     "Data source",
     "Source files",
     "Possible mismatch",
+    "As (mA)",
+    "Ms (mA)",
+    "As current density (A/mm^2)",
+    "Ms current density (A/mm^2)",
 }
 _ASSEMBLE_PUBLIC_DROP_TOKENS = ("source", "provenance", "internal")
 

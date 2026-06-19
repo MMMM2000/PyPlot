@@ -219,7 +219,7 @@ ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other annealing"
 ANNEALING_LEGACY_LOW_GRAPH_COLUMN = "Graph — low mA"
 ANNEALING_LEGACY_OTHER_GRAPH_COLUMN = "Graph — other mA"
 OPTIONAL_BUILDER_SECTIONS: Tuple[Tuple[str, str], ...] = (
-    ("current_density", "Current density"),
+    ("current_density", "Current annealing transitions"),
     ("strain", "Strain"),
     ("shape_memory_stress_strain", "Manual stress/strain"),
 )
@@ -266,6 +266,12 @@ CURRENT_DENSITY_PER_LABEL_COLUMNS = {
     "Af2": "J_Af2 (A/mm^2)",
     "Ms2": "J_Ms2 (A/mm^2)",
     "Mf2": "J_Mf2 (A/mm^2)",
+}
+SUPERSEDED_CURRENT_DENSITY_COLUMNS = {
+    "As (mA)",
+    "Ms (mA)",
+    CURRENT_DENSITY_AS_DENSITY_COLUMN,
+    CURRENT_DENSITY_MS_DENSITY_COLUMN,
 }
 CURRENT_DENSITY_AS_DELTA_COLUMN = "As2-As1 (mA)"
 CURRENT_DENSITY_AF_DELTA_COLUMN = "Af2-Af1 (mA)"
@@ -16311,7 +16317,7 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
 
 class CurrentDensitySection(QtWidgets.QWidget):
     section_key = "current_density"
-    section_title = "Current density"
+    section_title = "Current annealing transitions"
 
     status_changed = QtCore.pyqtSignal(str)
     sources_changed = QtCore.pyqtSignal(list)
@@ -16805,6 +16811,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
             micro_info = diameter_map.get(key) or diameter_map.get(base_key, {})
             setpoint_info = setpoint_map.get(key) or setpoint_map.get(base_key, {})
             phase_info = phase_map.get(key) or phase_map.get(base_key, {})
+            phase_values = dict(phase_info)
+            if phase_values.get("As1") is None and phase_values.get("As") is not None:
+                phase_values["As1"] = phase_values.get("As")
+            if phase_values.get("Ms1") is None and phase_values.get("Ms") is not None:
+                phase_values["Ms1"] = phase_values.get("Ms")
             diameter_um = micro_info.get("diameter")
             area_mm2 = self._diameter_to_area(diameter_um)
             setpoints = setpoint_info.get("setpoints", [])
@@ -16818,22 +16829,18 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 microwire_label = micro_info.get("label") or _microwire_label(draw, piece, suffix)
             except Exception:
                 microwire_label = micro_info.get("label") or f"{draw}/{piece}"
-            as1_value = phase_info.get("As1")
-            if as1_value is None:
-                as1_value = phase_info.get("As")
-            af1_value = phase_info.get("Af1")
-            ms1_value = phase_info.get("Ms1")
-            if ms1_value is None:
-                ms1_value = phase_info.get("Ms")
-            mf1_value = phase_info.get("Mf1")
-            as2_value = phase_info.get("As2")
-            af2_value = phase_info.get("Af2")
-            ms2_value = phase_info.get("Ms2")
-            mf2_value = phase_info.get("Mf2")
+            as1_value = phase_values.get("As1")
+            af1_value = phase_values.get("Af1")
+            ms1_value = phase_values.get("Ms1")
+            mf1_value = phase_values.get("Mf1")
+            as2_value = phase_values.get("As2")
+            af2_value = phase_values.get("Af2")
+            ms2_value = phase_values.get("Ms2")
+            mf2_value = phase_values.get("Mf2")
             as_density = self._compute_density(as1_value, area_mm2)
             ms_density = self._compute_density(ms1_value, area_mm2)
             per_label_densities = {
-                column: self._compute_density(phase_info.get(label), area_mm2)
+                column: self._compute_density(phase_values.get(label), area_mm2)
                 for label, column in CURRENT_DENSITY_PER_LABEL_COLUMNS.items()
             }
             as_delta = self._compute_delta(as2_value, as1_value)
@@ -28408,7 +28415,7 @@ class AssemblySection(QtWidgets.QWidget):
             ("fabrication", "Fabrication"),
             ("annealing", "Current annealing"),
             ("microscope", "Microscope"),
-            ("current_density", "Current density"),
+            ("current_density", "Current annealing transitions"),
             ("videos", "Videos"),
             ("vsm_hysteresis", "VSM hysteresis"),
             ("vsm_temperature_scan", "VSM temperature scan"),
@@ -31469,12 +31476,18 @@ class AssemblySection(QtWidgets.QWidget):
             [
                 "File 1000 mA",
                 "Other annealing files",
-                ANNEALING_TRANSITION_COLUMN,
                 *FIGURE_COLUMNS,
                 *ORIGIN_FIGURE_COLUMNS,
             ],
         )
-        add("current_density", CURRENT_DENSITY_COLUMNS)
+        add(
+            "current_density",
+            [
+                column
+                for column in CURRENT_DENSITY_COLUMNS
+                if column not in SUPERSEDED_CURRENT_DENSITY_COLUMNS
+            ],
+        )
         add(
             "transition_temps",
             [
@@ -31588,7 +31601,20 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("Core", ["Composition", "Microwire"])
         add_group("Microscope", section_map.get("microscope", []))
         add_group("Current annealing", section_map.get("annealing", []))
-        add_group("Current density", section_map.get("current_density", []))
+        add_group(
+            "Current annealing transitions",
+            [
+                *(
+                    [ANNEALING_TRANSITION_COLUMN]
+                    if ANNEALING_TRANSITION_COLUMN in available_set
+                    else []
+                ),
+                *section_map.get("current_density", []),
+            ],
+        )
+        included.update(
+            column for column in SUPERSEDED_CURRENT_DENSITY_COLUMNS if column in available_set
+        )
         add_group("VSM hysteresis", section_map.get("vsm_hysteresis", []))
         add_group("VSM temperature scan", section_map.get("vsm_temperature_scan", []))
         add_group("Transition temps", section_map.get("transition_temps", []))
@@ -33552,7 +33578,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.logger,
             _append_log,
         )
-        self.tab_widget.addTab(self.current_density_section, "Current density")
+        self.tab_widget.addTab(self.current_density_section, "Current annealing transitions")
         self.sections["current_density"] = self.current_density_section
         _pump_events()
 

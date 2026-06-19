@@ -7131,12 +7131,14 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         assembly = getattr(window, "assembly_section", None)
         assert assembly is not None
         groups = assembly._column_groups(core.OUTPUT_COLUMNS)  # noqa: SLF001 - UI grouping helper
-        current_density_group = groups.get("Current density")
-        assert isinstance(current_density_group, list)
-        assert "As1 (mA)" in current_density_group
-        assert "Af1 (mA)" in current_density_group
-        assert "As2 (mA)" in current_density_group
-        assert "Mf2-Af2 (mA)" in current_density_group
+        transition_group = groups.get("Current annealing transitions")
+        assert isinstance(transition_group, list)
+        assert ANNEALING_TRANSITION_COLUMN in transition_group
+        assert "As1 (mA)" in transition_group
+        assert "Af1 (mA)" in transition_group
+        assert "As2 (mA)" in transition_group
+        assert "Mf2-Af2 (mA)" in transition_group
+        assert "Current density" not in groups
         assert groups.get("Transition temps") == list(core.TRANSITION_TEMP_COLUMNS)
         mini_dma_group = groups.get("Mini DMA")
         assert isinstance(mini_dma_group, list)
@@ -7311,6 +7313,9 @@ def test_current_density_manual_editor_values_persist_to_snapshot() -> None:
         assert snapshot[key_text]["Af2 (mA)"] == pytest.approx(28.0)
         assert snapshot[key_text]["As2-As1 (mA)"] == pytest.approx(10.0)
         assert snapshot[key_text]["As current density (A/mm^2)"] == pytest.approx(
+            (12.0 / 1000.0) / (np.pi * 0.01 * 0.01)
+        )
+        assert snapshot[key_text]["J_As1 (A/mm^2)"] == pytest.approx(
             (12.0 / 1000.0) / (np.pi * 0.01 * 0.01)
         )
         assert snapshot[key_text]["J_Af1 (A/mm^2)"] == pytest.approx(
