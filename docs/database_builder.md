@@ -52,7 +52,7 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 - Respect the active selection (e.g. editing Af1 should not overwrite As1).
 - Store reviewed transition-current edits in the annealing `transition_reviews` project payload with one record per measurement graph. Legacy `phase_points` data is not authoritative for new reviews and should not be applied blindly across multiple graphs from the same microwire.
 - Use `scripts/audit_current_annealing_transition_reviews.py --project <copy.pydpj> --out artifacts/current_annealing_transition_review_audit` or `--input-json <review_dump.json>` to compare reviewed/manual values against current automatic candidates. The audit output highlights missing automatic labels, manual deltas, and paired loop asymmetries such as `Ms2` missing when `Ms1` is present.
-- Assemble preview/export should include the As*/Af*/Ms*/Mf* columns even when they originate from current-density or transition-review inputs.
+- Assemble preview/export should include the As*/Af*/Ms*/Mf* columns even when they originate from current-density or transition-review inputs. When a reviewer marks a transition measurement as no-transition or excluded, Assemble keeps the numeric transition columns blank and exposes the reviewed state through the visible transition status/review-count columns instead of making the row look unmeasured.
 - Current-density summary/export should include a density value for every reviewed transition current when diameter is known (`J_As1`, `J_Af1`, `J_Ms1`, `J_Mf1`, and second-pass equivalents).
 
 ## Microscope + Strain Workflow

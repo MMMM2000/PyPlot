@@ -95,7 +95,13 @@ from .core import (
     MINI_DMA_ORIGIN_COLUMN,
     MINI_DMA_STRAIN_COLUMN,
     MINI_DMA_TRANSITION_COLUMN,
+    MINI_DMA_TRANSITION_STATUS_COLUMN,
+    MINI_DMA_TRANSITION_COUNTS_COLUMN,
     MINI_DMA_BREAK_COLUMN,
+    CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN,
+    CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN,
+    VSM_TRANSITION_TEMP_STATUS_COLUMN,
+    VSM_TRANSITION_TEMP_COUNTS_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     SHAPE_MEMORY_DISPLACEMENT_COLUMN,
@@ -324,6 +330,8 @@ CURRENT_DENSITY_COLUMNS = [
     CURRENT_DENSITY_MF_AF2_DELTA_COLUMN,
     "Setpoints (mA)",
     "Sources",
+    CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN,
+    CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN,
     "Notes",
 ]
 TRANSITION_TEMP_COLUMNS = [
@@ -16787,6 +16795,98 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return None
         return _microwire_key_from_string(text)
 
+    @staticmethod
+    def _empty_review_counts() -> Dict[str, int]:
+        return {
+            "total": 0,
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "needs_attention": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+        }
+
+    @staticmethod
+    def _format_review_counts(counts: Mapping[str, int]) -> str:
+        if int(counts.get("total", 0) or 0) <= 0:
+            return ""
+        keys = (
+            "total",
+            "accepted",
+            "manual",
+            "no_transition",
+            "excluded",
+            "needs_attention",
+            "unreviewed",
+            "auto_candidates",
+        )
+        return "; ".join(f"{key}={int(counts.get(key, 0) or 0)}" for key in keys)
+
+    @staticmethod
+    def _status_from_review_counts(counts: Mapping[str, int]) -> str:
+        total = int(counts.get("total", 0) or 0)
+        if total <= 0:
+            return "Not measured"
+        manual = int(counts.get("manual", 0) or 0)
+        accepted = int(counts.get("accepted", 0) or 0)
+        no_transition = int(counts.get("no_transition", 0) or 0)
+        excluded = int(counts.get("excluded", 0) or 0)
+        needs_attention = int(counts.get("needs_attention", 0) or 0)
+        unreviewed = int(counts.get("unreviewed", 0) or 0)
+        negative = no_transition + excluded
+        reviewed = manual + accepted + negative
+        if needs_attention and needs_attention == total:
+            return "Needs attention"
+        if manual == total:
+            return "Manual adjusted"
+        if accepted == total:
+            return "Accepted auto"
+        if negative == total:
+            return "No transition" if no_transition else "Excluded"
+        if reviewed or needs_attention:
+            return "Partly reviewed"
+        if int(counts.get("auto_candidates", 0) or 0):
+            return "Auto candidate"
+        if unreviewed or total:
+            return "Unreviewed"
+        return "Not measured"
+
+    def _review_counts_for_annealing_records(
+        self,
+        records: Sequence[MeasurementRecord],
+    ) -> Dict[str, int]:
+        counts = self._empty_review_counts()
+        annealing = self._annealing_section
+        snapshot_provider = getattr(annealing, "transition_reviews_snapshot", None)
+        if callable(snapshot_provider):
+            raw_reviews = snapshot_provider()
+        else:
+            raw_reviews = getattr(annealing, "_transition_reviews", {})
+        if not isinstance(raw_reviews, dict):
+            raw_reviews = {}
+        for record in records:
+            counts["total"] += 1
+            record_id = _transition_record_id_for_annealing_record(record)
+            payload = raw_reviews.get(record_id, {}) if isinstance(raw_reviews, dict) else {}
+            status = str(payload.get("status") if isinstance(payload, dict) else "").strip()
+            if status == TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED:
+                counts["manual"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO:
+                counts["accepted"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_NO_TRANSITION:
+                counts["no_transition"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_EXCLUDED:
+                counts["excluded"] += 1
+            elif status == TRANSITION_REVIEW_STATUS_NEEDS_ATTENTION:
+                counts["needs_attention"] += 1
+            else:
+                counts["unreviewed"] += 1
+                if _auto_transition_values_for_annealing_record(record):
+                    counts["auto_candidates"] += 1
+        return counts
+
     def _calculate_frame(self) -> pd.DataFrame:
         diameter_map = self._collect_microscope_data()
         setpoint_map = self._collect_setpoint_data()
@@ -16855,6 +16955,9 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 notes.append("Ms1 missing")
             if not setpoints:
                 notes.append("No setpoint data")
+            high_record, other_records = self._fetch_records_for_key(key)
+            review_records = [record for record in (high_record, *other_records) if record is not None]
+            review_counts = self._review_counts_for_annealing_records(review_records)
             rows.append(
                 {
                     "Composition": composition_label,
@@ -16879,6 +16982,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     CURRENT_DENSITY_MF_AF2_DELTA_COLUMN: mf2_af2,
                     "Setpoints (mA)": self._format_setpoints(setpoints),
                     "Sources": self._summarise_sources(sources),
+                    CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN: self._status_from_review_counts(review_counts),
+                    CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN: self._format_review_counts(review_counts),
                     "Notes": "; ".join(notes) if notes else "",
                     "_group_key": _microwire_key_to_str(key),
                 }
@@ -18081,14 +18186,27 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if cleaned:
                 snapshot[key] = cleaned
         for key, records in self._record_groups.items():
+            counts = self._review_counts_for_records(records)
             values = self._values_for_group(key, records, include_auto=True)
+            status = self._group_status_from_counts(counts)
             if values:
-                snapshot[key] = values
+                entry: Dict[str, Any] = dict(values)
+                entry["__review_status__"] = status
+                entry["__review_counts__"] = dict(counts)
+                snapshot[key] = entry
                 continue
             if self._group_blocks_auto(records):
                 snapshot[key] = {
                     VSM_TRANSITION_STATUS_KEY: TRANSITION_REVIEW_STATUS_NO_TRANSITION,
                     VSM_TRANSITION_INCLUDED_KEY: False,
+                    "__review_status__": status,
+                    "__review_counts__": dict(counts),
+                }
+                continue
+            if counts.get("total", 0):
+                snapshot[key] = {
+                    "__review_status__": status,
+                    "__review_counts__": dict(counts),
                 }
         return snapshot
 
@@ -29434,6 +29552,7 @@ class AssemblySection(QtWidgets.QWidget):
             Dict[str, Dict[str, Any]],
             Dict[str, Dict[str, float]],
             Dict[str, Dict[str, float]],
+            Dict[str, Dict[str, Any]],
             Dict[str, Dict[str, float]],
             Dict[str, Dict[str, Any]],
         ]
@@ -29571,12 +29690,14 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_dma_isostress_groups = _group_graph_records_by_key(dma_isostress_records)
 
         mini_dma_records: List[MiniDmaRecord] = []
+        mini_dma_transition_reviews: Dict[str, Dict[str, Any]] = {}
         if "mini_dma" in selected:
             payload = self._load_payload("mini_dma", "mini_dma_records")
             if isinstance(payload, list):
                 mini_dma_records = list(payload)
                 section = self.sections.get("mini_dma")
                 if isinstance(section, MiniDmaSection):
+                    mini_dma_transition_reviews = section.transition_reviews_snapshot()
                     mini_dma_records = section.records_with_reviewed_transitions(mini_dma_records)
             else:
                 _mark_missing("Mini DMA")
@@ -29695,6 +29816,7 @@ class AssemblySection(QtWidgets.QWidget):
             overrides,
             phase_points,
             transition_points,
+            mini_dma_transition_reviews,
             video_overrides,
         )
 
@@ -33054,6 +33176,7 @@ class AssemblySection(QtWidgets.QWidget):
             overrides,
             phase_points,
             transition_points,
+            mini_dma_transition_reviews,
             video_overrides,
         ) = inputs
 
@@ -33111,6 +33234,9 @@ class AssemblySection(QtWidgets.QWidget):
                 dma_isostress_records if "dma_iso_stress" in selected else []
             ),
             "mini_dma_records": mini_dma_records if "mini_dma" in selected else [],
+            "mini_dma_transition_reviews": (
+                mini_dma_transition_reviews if "mini_dma" in selected else {}
+            ),
             "shape_memory_stress_strain_records": (
                 shape_memory_stress_strain_records
                 if "shape_memory_stress_strain" in selected
@@ -33192,6 +33318,7 @@ class AssemblySection(QtWidgets.QWidget):
             overrides,
             phase_points,
             transition_points,
+            mini_dma_transition_reviews,
             video_overrides,
         ) = inputs
 
@@ -33231,6 +33358,9 @@ class AssemblySection(QtWidgets.QWidget):
                 dma_isostress_records if "dma_iso_stress" in selected else []
             ),
             "mini_dma_records": mini_dma_records if "mini_dma" in selected else [],
+            "mini_dma_transition_reviews": (
+                mini_dma_transition_reviews if "mini_dma" in selected else {}
+            ),
             "shape_memory_stress_strain_records": (
                 shape_memory_stress_strain_records
                 if "shape_memory_stress_strain" in selected

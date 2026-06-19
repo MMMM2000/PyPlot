@@ -6662,6 +6662,139 @@ def test_build_database_respects_blocked_vsm_transition_review(tmp_path: Path) -
     assert pd.isna(row[core.TRANSITION_TEMP_MF_COLUMN])
 
 
+def test_build_database_reports_current_annealing_blocked_transition_statuses(
+    tmp_path: Path,
+) -> None:
+    no_transition_path = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    excluded_path = tmp_path / "Ni55Fe18Ga27 1_2 1000mA.txt"
+    no_transition_path.write_text("0.1 0.2 2.0\n")
+    excluded_path.write_text("0.1 0.2 2.0\n")
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[no_transition_path, excluded_path],
+            output_dir=tmp_path / "out",
+            export_formats=(),
+        ),
+        current_density_entries={
+            "Ni55Fe18Ga27|1|1": {
+                core.CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN: "No transition",
+                core.CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN: (
+                    "total=1; accepted=0; manual=0; no_transition=1; excluded=0; "
+                    "needs_attention=0; unreviewed=0; auto_candidates=0"
+                ),
+            },
+            "Ni55Fe18Ga27|1|2": {
+                core.CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN: "Excluded",
+                core.CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN: (
+                    "total=1; accepted=0; manual=0; no_transition=0; excluded=1; "
+                    "needs_attention=0; unreviewed=0; auto_candidates=0"
+                ),
+            },
+        },
+        skip_exports=True,
+    )
+
+    rows = {
+        row["Microwire"]: row
+        for row in result.dataframe.to_dict(orient="records")
+    }
+    assert pd.isna(rows["1/1"]["As1 (mA)"])
+    assert rows["1/1"][core.CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] == "No transition"
+    assert pd.isna(rows["1/2"]["As1 (mA)"])
+    assert rows["1/2"][core.CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN] == "Excluded"
+
+
+def test_build_database_reports_vsm_blocked_transition_statuses(tmp_path: Path) -> None:
+    scans = [
+        VsmTemperatureScanRecord(
+            path=tmp_path / f"scan_{piece}.txt",
+            sample=f"Ni55Fe18Ga27 1_{piece}",
+            data=pd.DataFrame(),
+            key=("Ni55Fe18Ga27", 1, piece, None),
+            label=f"scan {piece}",
+        )
+        for piece in (1, 2)
+    ]
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+            export_formats=(),
+        ),
+        vsm_temperature_scan_records=scans,
+        transition_temps={
+            "Ni55Fe18Ga27|1|1": {
+                "__review_status__": "no_transition",
+                "__included__": False,
+            },
+            "Ni55Fe18Ga27|1|2": {
+                "__review_status__": "excluded",
+                "__included__": False,
+            },
+        },
+        skip_exports=True,
+    )
+
+    rows = {
+        row["Microwire"]: row
+        for row in result.dataframe.to_dict(orient="records")
+    }
+    assert pd.isna(rows["1/1"][core.TRANSITION_TEMP_AS_COLUMN])
+    assert rows["1/1"][core.VSM_TRANSITION_TEMP_STATUS_COLUMN] == "No transition"
+    assert pd.isna(rows["1/2"][core.TRANSITION_TEMP_AS_COLUMN])
+    assert rows["1/2"][core.VSM_TRANSITION_TEMP_STATUS_COLUMN] == "Excluded"
+
+
+def test_build_database_reports_mini_dma_blocked_transition_statuses(tmp_path: Path) -> None:
+    records = []
+    reviews: dict[str, dict[str, object]] = {}
+    for piece, status in (
+        (1, builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION),
+        (2, builder_ui.MINI_DMA_REVIEW_STATUS_EXCLUDED),
+    ):
+        run_path = tmp_path / f"Ni55Fe18Ga27 1_{piece} run"
+        record = MiniDmaRecord(
+            path=run_path,
+            sample=f"Ni55Fe18Ga27 1_{piece}",
+            data=pd.DataFrame(),
+            key=("Ni55Fe18Ga27", 1, piece, None),
+            label=run_path.name,
+            transition_summary=(),
+        )
+        records.append(record)
+        reviews[f"{run_path.resolve()}::50 MPa / 1.46 g"] = {
+            "status": status,
+            "sample": record.sample,
+            "run_label": record.label,
+            "target_label": "50 MPa / 1.46 g",
+        }
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path / "out",
+            export_formats=(),
+        ),
+        mini_dma_records=records,
+        mini_dma_transition_reviews=reviews,
+        skip_exports=True,
+    )
+
+    rows = {
+        row["Microwire"]: row
+        for row in result.dataframe.to_dict(orient="records")
+    }
+    assert pd.isna(rows["1/1"][core.MINI_DMA_TRANSITION_COLUMN])
+    assert rows["1/1"][core.MINI_DMA_TRANSITION_STATUS_COLUMN] == "No transition"
+    assert pd.isna(rows["1/2"][core.MINI_DMA_TRANSITION_COLUMN])
+    assert rows["1/2"][core.MINI_DMA_TRANSITION_STATUS_COLUMN] == "Excluded"
+
+
 def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("openpyxl")
     from PIL import Image as PILImage
