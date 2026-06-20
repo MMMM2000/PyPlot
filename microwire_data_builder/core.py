@@ -7775,10 +7775,12 @@ def build_database(
                 status = review.get("status")
                 manual = _clean_review_values(review.get("manual_values_mA"))
                 auto = _clean_review_values(review.get("auto_values_mA"))
+                cleared = review.get("cleared_labels")
+                has_cleared = isinstance(cleared, (list, tuple, set)) and bool(cleared)
                 _increment_review_count_for_status(
                     counts,
                     status,
-                    has_manual_values=bool(manual),
+                    has_manual_values=bool(manual) or has_cleared,
                     has_auto_values=bool(auto),
                 )
         if not saw_targets:

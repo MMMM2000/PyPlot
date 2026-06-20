@@ -4095,6 +4095,164 @@ def _render_measurement_pixmap(
             plt.close(figure)
 
 
+def _set_transition_marker_metadata(artist: Any, label: str, kind: str) -> None:
+    try:
+        setattr(artist, "_transition_marker_label", str(label))
+        setattr(artist, "_transition_marker_kind", str(kind))
+    except Exception:
+        pass
+
+
+def _transition_marker_label(artist: Any) -> Optional[str]:
+    try:
+        value = getattr(artist, "_transition_marker_label", None)
+    except Exception:
+        return None
+    return str(value) if value not in (None, "") else None
+
+
+class _TransitionMarkerDragController:
+    def __init__(
+        self,
+        canvas: FigureCanvasQTAgg,
+        *,
+        labels: Iterable[str],
+        on_release: Callable[[str, float], None],
+        on_start: Optional[Callable[[str], None]] = None,
+        pixel_tolerance: float = 10.0,
+    ) -> None:
+        self._canvas = canvas
+        self._labels = {str(label) for label in labels}
+        self._on_release = on_release
+        self._on_start = on_start
+        self._pixel_tolerance = float(pixel_tolerance)
+        self._drag_label: Optional[str] = None
+        self._last_value: Optional[float] = None
+
+    @property
+    def dragging(self) -> bool:
+        return self._drag_label is not None
+
+    def handle_press(self, event: Any) -> bool:
+        value = self._event_xdata(event)
+        if value is None:
+            return False
+        button = getattr(event, "button", None)
+        if button not in (None, 1):
+            return False
+        label = self._nearest_label(event, value)
+        if label is None:
+            return False
+        self._drag_label = label
+        self._last_value = value
+        if callable(self._on_start):
+            try:
+                self._on_start(label)
+            except Exception:
+                pass
+        self._move_label(label, value)
+        return True
+
+    def handle_motion(self, event: Any) -> bool:
+        if self._drag_label is None:
+            return False
+        value = self._event_xdata(event)
+        if value is None:
+            return True
+        self._last_value = value
+        self._move_label(self._drag_label, value)
+        return True
+
+    def handle_release(self, event: Any) -> bool:
+        label = self._drag_label
+        if label is None:
+            return False
+        value = self._event_xdata(event)
+        if value is None:
+            value = self._last_value
+        self._drag_label = None
+        self._last_value = None
+        if value is None:
+            return True
+        self._move_label(label, value)
+        try:
+            self._on_release(label, float(value))
+        except Exception:
+            pass
+        return True
+
+    @staticmethod
+    def _event_xdata(event: Any) -> Optional[float]:
+        if event is None or getattr(event, "xdata", None) is None:
+            return None
+        try:
+            value = float(event.xdata)
+        except Exception:
+            return None
+        return value if math.isfinite(value) else None
+
+    def _nearest_label(self, event: Any, value: float) -> Optional[str]:
+        figure = getattr(self._canvas, "figure", None)
+        axes = list(getattr(figure, "axes", []) or [])
+        if not axes:
+            return None
+        event_px = getattr(event, "x", None)
+        best: Tuple[float, Optional[str]] = (math.inf, None)
+        for axis in axes:
+            for line in list(getattr(axis, "lines", []) or []):
+                label = _transition_marker_label(line)
+                if label not in self._labels:
+                    continue
+                try:
+                    x_values = list(line.get_xdata())
+                except Exception:
+                    continue
+                if not x_values:
+                    continue
+                x_value = _coerce_finite_float(x_values[0])
+                if x_value is None:
+                    continue
+                if event_px is not None:
+                    try:
+                        marker_px = axis.transData.transform((float(x_value), 0.0))[0]
+                        distance = abs(float(event_px) - float(marker_px))
+                    except Exception:
+                        distance = abs(float(value) - float(x_value))
+                else:
+                    distance = abs(float(value) - float(x_value))
+                if distance < best[0]:
+                    best = (distance, label)
+        if best[1] is None:
+            return None
+        if event_px is not None and best[0] > self._pixel_tolerance:
+            return None
+        return best[1]
+
+    def _move_label(self, label: str, value: float) -> None:
+        figure = getattr(self._canvas, "figure", None)
+        axes = list(getattr(figure, "axes", []) or [])
+        for axis in axes:
+            for line in list(getattr(axis, "lines", []) or []):
+                if _transition_marker_label(line) != label:
+                    continue
+                try:
+                    line.set_xdata([float(value), float(value)])
+                except Exception:
+                    pass
+            for text in list(getattr(axis, "texts", []) or []):
+                if _transition_marker_label(text) != label:
+                    continue
+                try:
+                    x, y = text.get_position()
+                    text.set_position((float(value), y))
+                except Exception:
+                    pass
+        try:
+            self._canvas.draw_idle()
+        except Exception:
+            pass
+
+
 def _annotate_transition_marker(
     axis: Any,
     value: float,
@@ -4102,6 +4260,7 @@ def _annotate_transition_marker(
     color: str,
     *,
     reviewed: bool = False,
+    marker_label: Optional[str] = None,
 ) -> None:
     try:
         text = axis.text(
@@ -4128,6 +4287,7 @@ def _annotate_transition_marker(
         )
         try:
             text.set_gid("reviewed_transition_label" if reviewed else "auto_transition_label")
+            _set_transition_marker_metadata(text, marker_label or label, "reviewed" if reviewed else "auto")
         except Exception:
             pass
     except Exception:
@@ -4162,7 +4322,7 @@ def _add_annealing_transition_markers(
             if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 continue
             numeric = float(value)
-            axis.axvline(
+            line = axis.axvline(
                 numeric,
                 color=color,
                 linestyle=linestyle,
@@ -4171,6 +4331,7 @@ def _add_annealing_transition_markers(
                 label="_nolegend_",
                 zorder=3,
             )
+            _set_transition_marker_metadata(line, label, "auto")
             _annotate_transition_marker(axis, numeric, label, color, reviewed=False)
             added = True
     if not added:
@@ -4216,6 +4377,7 @@ def _add_reviewed_transition_markers(
         )
         try:
             line.set_gid("reviewed_transition_marker")
+            _set_transition_marker_metadata(line, label, "reviewed")
         except Exception:
             pass
         _annotate_transition_marker(
@@ -4224,6 +4386,7 @@ def _add_reviewed_transition_markers(
             _phase_current_label(label),
             color,
             reviewed=True,
+            marker_label=label,
         )
         added = True
     if added:
@@ -5269,6 +5432,7 @@ def _select_other_measurements(
 
 class _AnnealingPlotDisplay(QtWidgets.QWidget):
     valuePicked = QtCore.pyqtSignal(float)
+    markerDragged = QtCore.pyqtSignal(str, float)
     """Render a single annealing plot with contextual details."""
 
     def __init__(
@@ -5286,6 +5450,8 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self._canvas: FigureCanvasQTAgg | None = None
         self._motion_cid: Optional[int] = None
         self._click_cid: Optional[int] = None
+        self._release_cid: Optional[int] = None
+        self._drag_controller: Optional[_TransitionMarkerDragController] = None
         self._cursor_units: str = "mA"
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -5375,6 +5541,8 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         canvas = FigureCanvasQTAgg(figure)
         if self._canvas is not None:
             self._disconnect_motion_handler()
+            self._disconnect_click_handler()
+            self._disconnect_release_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
@@ -5390,9 +5558,18 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         except Exception:
             self._motion_cid = None
         try:
-            self._click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
+            self._click_cid = canvas.mpl_connect("button_press_event", self._handle_button_press)
         except Exception:
             self._click_cid = None
+        try:
+            self._release_cid = canvas.mpl_connect("button_release_event", self._handle_button_release)
+        except Exception:
+            self._release_cid = None
+        self._drag_controller = _TransitionMarkerDragController(
+            canvas,
+            labels=PHASE_POINT_LABELS,
+            on_release=self._emit_marker_dragged,
+        )
         self._cursor_units = "mA"
         self._update_cursor_label(None)
 
@@ -5404,10 +5581,12 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         if self._canvas is not None:
             self._disconnect_motion_handler()
             self._disconnect_click_handler()
+            self._disconnect_release_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
             self._canvas = None
+            self._drag_controller = None
         self.subtitle_label.setText("")
         self._placeholder.setText(message)
         self._stack.setCurrentWidget(self._placeholder)
@@ -5429,7 +5608,19 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 pass
         self._click_cid = None
 
+    def _disconnect_release_handler(self) -> None:
+        if self._canvas is not None and self._release_cid is not None:
+            try:
+                self._canvas.mpl_disconnect(self._release_cid)
+            except Exception:
+                pass
+        self._release_cid = None
+
     def _handle_motion(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_motion(event):
+            value = getattr(event, "xdata", None)
+            self._update_cursor_label(_coerce_finite_float(value))
+            return
         if event is None or event.inaxes is None or event.xdata is None:
             self._update_cursor_label(None)
             return
@@ -5439,6 +5630,24 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             self._update_cursor_label(None)
             return
         self._update_cursor_label(value)
+
+    def _handle_button_press(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_press(event):
+            value = getattr(event, "xdata", None)
+            self._update_cursor_label(_coerce_finite_float(value))
+            return
+        self._handle_click(event)
+
+    def _handle_button_release(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_release(event):
+            value = getattr(event, "xdata", None)
+            self._update_cursor_label(_coerce_finite_float(value))
+
+    def _emit_marker_dragged(self, label: str, value: float) -> None:
+        try:
+            self.markerDragged.emit(str(label), float(value))
+        except Exception:
+            pass
 
     def _handle_click(self, event: Any) -> None:
         if event is None:
@@ -5785,6 +5994,7 @@ def _format_mini_dma_transition_review_line(
 
 class _MiniDmaTransitionEditorControls(QtWidgets.QWidget):
     valuesEdited = QtCore.pyqtSignal(dict)
+    valueCleared = QtCore.pyqtSignal(str)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -5797,7 +6007,7 @@ class _MiniDmaTransitionEditorControls(QtWidgets.QWidget):
         layout.setSpacing(4)
         layout.addWidget(QtWidgets.QLabel("Reviewed transition currents I_As/I_Af/I_Ms/I_Mf (mA)", self))
         hint = QtWidgets.QLabel(
-            "Select a transition current, then click the graph to add or move its vertical line.",
+            "Select a transition current, then click or drag a graph marker to add or move its vertical line.",
             self,
         )
         hint.setWordWrap(True)
@@ -5889,10 +6099,14 @@ class _MiniDmaTransitionEditorControls(QtWidgets.QWidget):
         self._emit_values()
 
     def _clear_selected(self) -> None:
-        edit = self._edits.get(self.selected_label())
+        label = self.selected_label()
+        edit = self._edits.get(label)
         if edit is not None:
             edit.clear()
-        self._emit_values()
+        try:
+            self.valueCleared.emit(label)
+        except Exception:
+            pass
 
     def _emit_values(self) -> None:
         if self._updating:
@@ -6059,7 +6273,7 @@ class _PhasePointEditorControls(QtWidgets.QWidget):
         layout.addWidget(header)
 
         hint = QtWidgets.QLabel(
-            "Select a transition current, then click the graph to add or move its vertical line.",
+            "Select a transition current, then click or drag a graph marker to add or move its vertical line.",
             self,
         )
         hint.setWordWrap(True)
@@ -6336,6 +6550,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             show_transition_markers=True,
         )
         self._display.valuePicked.connect(self._handle_plot_pick)
+        self._display.markerDragged.connect(self._handle_marker_dragged)
         right_layout.addWidget(self._display, 1)
         self._phase_controls = _PhasePointEditorControls(
             right,
@@ -6600,6 +6815,10 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             return None
 
     def _handle_plot_pick(self, value: float) -> None:
+        self._phase_controls.apply_picked_value(value)
+
+    def _handle_marker_dragged(self, label: str, value: float) -> None:
+        self._phase_controls.set_target(label)
         self._phase_controls.apply_picked_value(value)
 
     def _handle_phase_values_edited(self, values: Dict[str, Optional[float]]) -> None:
@@ -7040,7 +7259,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._stack.setCurrentWidget(self._placeholder)
 
     def _clear_tabs(self) -> None:
-        for canvas, motion_cid, click_cid in self._canvas_connections:
+        for canvas, motion_cid, click_cid, release_cid in self._canvas_connections:
             if motion_cid is not None:
                 try:
                     canvas.mpl_disconnect(motion_cid)
@@ -7051,7 +7270,13 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                     canvas.mpl_disconnect(click_cid)
                 except Exception:
                     pass
+            if release_cid is not None:
+                try:
+                    canvas.mpl_disconnect(release_cid)
+                except Exception:
+                    pass
         self._canvas_connections.clear()
+        self._drag_controllers.clear()
         self._canvas_records.clear()
         self._tab_canvases.clear()
         while self._tab_widget.count():
@@ -7213,6 +7438,22 @@ def _mini_dma_transition_values_from_summary(target_summary: object) -> Dict[str
     return values
 
 
+def _mini_dma_cleared_transition_labels(review: Mapping[str, Any] | None) -> Set[str]:
+    if not isinstance(review, Mapping):
+        return set()
+    raw = review.get("cleared_labels")
+    if raw is None:
+        raw = review.get("cleared_labels_mA")
+    if isinstance(raw, str):
+        candidates: Iterable[Any] = raw.replace(";", ",").split(",")
+    elif isinstance(raw, Iterable):
+        candidates = raw
+    else:
+        candidates = ()
+    valid = set(MINI_DMA_TRANSITION_LABELS)
+    return {str(label).strip() for label in candidates if str(label).strip() in valid}
+
+
 def _mini_dma_review_status_label(status: str) -> str:
     if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
         return "Accepted"
@@ -7225,8 +7466,11 @@ def _mini_dma_review_status_label(status: str) -> str:
 
 def _mini_dma_display_status(entry: _MiniDmaTransitionReviewEntry, review: Mapping[str, Any] | None) -> str:
     status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
-    if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and _clean_mini_dma_transition_values(
-        review.get("manual_values_mA") if isinstance(review, Mapping) else None
+    if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and (
+        _clean_mini_dma_transition_values(
+            review.get("manual_values_mA") if isinstance(review, Mapping) else None
+        )
+        or _mini_dma_cleared_transition_labels(review)
     ):
         return "Manual adjusted"
     label = _mini_dma_review_status_label(status)
@@ -7237,6 +7481,18 @@ def _mini_dma_display_status(entry: _MiniDmaTransitionReviewEntry, review: Mappi
     if entry.status == "partial":
         return "Needs attention"
     return "Unreviewed"
+
+
+def _apply_transition_status_color(
+    item: QtWidgets.QTreeWidgetItem,
+    status_label: str,
+    *,
+    column: int = 1,
+) -> None:
+    color = _transition_review_status_color(status_label)
+    brush = QtGui.QBrush(QtGui.QColor(color))
+    item.setForeground(column, brush)
+    item.setToolTip(column, status_label)
 
 
 @dataclass
@@ -7368,6 +7624,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self._workers: Dict[str, Tuple[QtCore.QThread, _MiniDmaTransitionReviewLoadWorker]] = {}
         self._pending_select_key: Optional[str] = None
         self._closing = False
+        self._drag_controller: Optional[_TransitionMarkerDragController] = None
 
         main_layout = QtWidgets.QVBoxLayout(self)
         controls = QtWidgets.QHBoxLayout()
@@ -7446,8 +7703,17 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.next_unreviewed_button.clicked.connect(self._select_next_unreviewed)
         self.tree.currentItemChanged.connect(self._handle_tree_selection)
         self.transition_controls.valuesEdited.connect(self._handle_transition_values_edited)
+        self.transition_controls.valueCleared.connect(self._handle_transition_label_cleared)
+        self._drag_controller = _TransitionMarkerDragController(
+            self.canvas,
+            labels=MINI_DMA_TRANSITION_LABELS,
+            on_release=self._handle_marker_dragged,
+            on_start=self.transition_controls.set_target,
+        )
         try:
-            self.canvas.mpl_connect("button_press_event", self._handle_canvas_click)
+            self.canvas.mpl_connect("button_press_event", self._handle_canvas_press)
+            self.canvas.mpl_connect("motion_notify_event", self._handle_canvas_motion)
+            self.canvas.mpl_connect("button_release_event", self._handle_canvas_release)
         except Exception:
             pass
         self._refresh_tree()
@@ -7540,13 +7806,18 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         status = str(review.get("status") or "").strip()
         if status in {MINI_DMA_REVIEW_STATUS_NO_TRANSITION, MINI_DMA_REVIEW_STATUS_EXCLUDED}:
             return {}
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
         final = _clean_mini_dma_transition_values(review.get("values"))
         if final:
+            for label in cleared_labels:
+                final.pop(label, None)
             return final
         manual = cls._manual_values_from_review(review)
         if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
             values = cls._auto_values_for_entry(entry)
             values.update(manual)
+            for label in cleared_labels:
+                values.pop(label, None)
             return values
         return manual
 
@@ -7598,11 +7869,13 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 self._visible_refs.append(ref)
                 shown += 1
                 review = self._review_for_entry(entry)
+                status_label = _mini_dma_display_status(entry, review)
                 leaf = QtWidgets.QTreeWidgetItem([
                     entry.target_label,
-                    _mini_dma_display_status(entry, review),
+                    status_label,
                 ])
                 leaf.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("entry", run.key, index))
+                _apply_transition_status_color(leaf, status_label)
                 run_item.addChild(leaf)
                 self._tree_items[ref] = leaf
             if entries and shown == 0:
@@ -7640,7 +7913,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
                 if _clean_mini_dma_transition_values(
                     review.get("manual_values_mA") if isinstance(review, Mapping) else None
-                ):
+                ) or _mini_dma_cleared_transition_labels(review if isinstance(review, Mapping) else None):
                     manual += 1
                 else:
                     accepted += 1
@@ -7811,16 +8084,21 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         auto_values = self._auto_values_for_entry(entry)
         review = self._review_for_entry(entry)
         manual_values = self._manual_values_from_review(review)
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
         values = dict(auto_values)
         values.update(manual_values)
+        for label in cleared_labels:
+            values.pop(label, None)
         if auto_values:
             payload["auto_values_mA"] = auto_values
         if manual_values:
             payload["manual_values_mA"] = manual_values
+        if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and cleared_labels:
+            payload["cleared_labels"] = sorted(cleared_labels)
         if status == MINI_DMA_REVIEW_STATUS_ACCEPTED and values:
             payload["values"] = values
         elif status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
-            payload["status"] = MINI_DMA_REVIEW_STATUS_NO_TRANSITION
+            payload["values"] = {}
         try:
             self._review_setter(record_id, payload)
         except Exception:
@@ -7831,6 +8109,23 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             self._select_next_unreviewed()
         else:
             self._redraw_current()
+
+    def _handle_canvas_press(self, event: Any) -> None:
+        if self._drag_controller is not None and self._drag_controller.handle_press(event):
+            return
+        self._handle_canvas_click(event)
+
+    def _handle_canvas_motion(self, event: Any) -> None:
+        if self._drag_controller is not None:
+            self._drag_controller.handle_motion(event)
+
+    def _handle_canvas_release(self, event: Any) -> None:
+        if self._drag_controller is not None:
+            self._drag_controller.handle_release(event)
+
+    def _handle_marker_dragged(self, label: str, value: float) -> None:
+        self.transition_controls.set_target(label)
+        self.transition_controls.apply_picked_value(value)
 
     def _handle_canvas_click(self, event: Any) -> None:
         if event is None:
@@ -7858,11 +8153,16 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         entry = entries[index]
         manual_values = _clean_mini_dma_transition_values(values)
         auto_values = self._auto_values_for_entry(entry)
+        review = self._review_for_entry(entry)
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
+        cleared_labels.difference_update(manual_values.keys())
         final_values = dict(auto_values)
         final_values.update(manual_values)
+        for label in cleared_labels:
+            final_values.pop(label, None)
         record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
         payload: Dict[str, Any] = {
-            "status": MINI_DMA_REVIEW_STATUS_ACCEPTED if final_values else MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            "status": MINI_DMA_REVIEW_STATUS_ACCEPTED,
             "sample": entry.sample,
             "run_label": entry.run_label,
             "target_label": entry.target_label,
@@ -7871,6 +8171,8 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             "manual_values_mA": manual_values,
             "values": final_values,
         }
+        if cleared_labels:
+            payload["cleared_labels"] = sorted(cleared_labels)
         try:
             self._review_setter(record_id, payload)
         except Exception:
@@ -7881,7 +8183,57 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.transition_controls.set_values(self._manual_values_from_review(review))
         item = self._tree_items.get((key, index))
         if item is not None:
-            item.setText(1, _mini_dma_display_status(entry, review))
+            status_label = _mini_dma_display_status(entry, review)
+            item.setText(1, status_label)
+            _apply_transition_status_color(item, status_label)
+        self._update_review_counts()
+        self._redraw_current()
+
+    def _handle_transition_label_cleared(self, label: str) -> None:
+        if self._current_ref is None or not callable(self._review_setter):
+            return
+        if label not in MINI_DMA_TRANSITION_LABELS:
+            return
+        key, index = self._current_ref
+        entries = self._entries_by_run.get(key, [])
+        if index < 0 or index >= len(entries):
+            return
+        entry = entries[index]
+        review = self._review_for_entry(entry)
+        auto_values = self._auto_values_for_entry(entry)
+        manual_values = self._manual_values_from_review(review)
+        manual_values.pop(label, None)
+        cleared_labels = _mini_dma_cleared_transition_labels(review)
+        cleared_labels.add(label)
+        final_values = dict(auto_values)
+        final_values.update(manual_values)
+        for cleared in cleared_labels:
+            final_values.pop(cleared, None)
+        record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+        payload: Dict[str, Any] = {
+            "status": MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            "sample": entry.sample,
+            "run_label": entry.run_label,
+            "target_label": entry.target_label,
+            "auto_status": entry.status,
+            "auto_values_mA": auto_values,
+            "manual_values_mA": manual_values,
+            "cleared_labels": sorted(cleared_labels),
+            "values": final_values,
+        }
+        try:
+            self._review_setter(record_id, payload)
+        except Exception:
+            self._logger.exception("Failed to clear Mini DMA transition review label")
+            return
+        refreshed = self._review_for_entry(entry)
+        self.transition_controls.set_auto_values(auto_values)
+        self.transition_controls.set_values(self._manual_values_from_review(refreshed))
+        item = self._tree_items.get((key, index))
+        if item is not None:
+            status_label = _mini_dma_display_status(entry, refreshed)
+            item.setText(1, status_label)
+            _apply_transition_status_color(item, status_label)
         self._update_review_counts()
         self._redraw_current()
 
@@ -8055,9 +8407,10 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             value = getattr(target_summary, attr, None)
             if value is None or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 continue
-            ax.axvline(float(value), color=color, linestyle="--", alpha=alpha)
+            line = ax.axvline(float(value), color=color, linestyle="--", alpha=alpha)
+            _set_transition_marker_metadata(line, name, "auto")
             if labels:
-                ax.text(
+                text = ax.text(
                     float(value),
                     0.98,
                     f"{name} {float(value):.0f} mA",
@@ -8068,6 +8421,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                     fontsize=8,
                     color=color,
                 )
+                _set_transition_marker_metadata(text, name, "auto")
 
     def _draw_reviewed_transition_markers(
         self,
@@ -8091,7 +8445,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 continue
             color, linestyle = specs.get(name, ("#111827", "-"))
             numeric = float(value)
-            ax.axvline(
+            line = ax.axvline(
                 numeric,
                 color=color,
                 linestyle=linestyle,
@@ -8100,9 +8454,10 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 label="_nolegend_",
                 zorder=7,
             )
+            _set_transition_marker_metadata(line, name, "reviewed")
             if not labels:
                 continue
-            ax.text(
+            text = ax.text(
                 numeric,
                 0.98,
                 f"{_mini_dma_current_label(name)} {numeric:.0f} mA",
@@ -8120,6 +8475,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                     "linewidth": 0.6,
                 },
             )
+            _set_transition_marker_metadata(text, name, "reviewed")
 
     def _draw_transition_fit_lines(
         self,
@@ -17495,6 +17851,7 @@ def _vsm_transition_review_blocks_values(payload: Mapping[str, Any] | None) -> b
 
 class _TransitionTempPreviewPanel(QtWidgets.QWidget):
     valuePicked = QtCore.pyqtSignal(str, float)
+    valueCleared = QtCore.pyqtSignal(str)
     acceptNextRequested = QtCore.pyqtSignal()
     noTransitionRequested = QtCore.pyqtSignal()
     excludeRequested = QtCore.pyqtSignal()
@@ -17510,11 +17867,13 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self._logger = logger
         self._processor = _get_vsm_temp_processor(logger)
-        self._canvas_connections: List[Tuple[FigureCanvasQTAgg, Optional[int], Optional[int]]] = []
-        self._cursor_units = "°C"
+        self._canvas_connections: List[Tuple[FigureCanvasQTAgg, Optional[int], Optional[int], Optional[int]]] = []
+        self._drag_controllers: Dict[FigureCanvasQTAgg, _TransitionMarkerDragController] = {}
+        self._cursor_units = "C"
         self._target_buttons: Dict[str, QtWidgets.QRadioButton] = {}
         self._value_labels: Dict[str, QtWidgets.QLabel] = {}
         self._auto_value_labels: Dict[str, QtWidgets.QLabel] = {}
+        self._clear_buttons: Dict[str, QtWidgets.QPushButton] = {}
         self._tab_record_ids: List[str] = []
         self._tab_auto_values: Dict[str, Dict[str, float]] = {}
         self._tab_reviewed_values: Dict[str, Dict[str, float]] = {}
@@ -17602,11 +17961,17 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             auto_label.setStyleSheet("color: #fbbf24; font-size: 10px;")
             value_label = QtWidgets.QLabel("unset")
             value_label.setStyleSheet("color: #22c55e; font-weight: 600;")
+            clear_button = QtWidgets.QPushButton(f"Clear {label}")
+            clear_button.setMaximumWidth(66)
+            clear_button.setToolTip(f"Remove only the reviewed {label} temperature.")
+            clear_button.clicked.connect(lambda _checked=False, name=label: self._emit_clear_label(name))
             self._auto_value_labels[label] = auto_label
             self._value_labels[label] = value_label
+            self._clear_buttons[label] = clear_button
             controls.addWidget(QtWidgets.QLabel(f"{label}:"))
             controls.addWidget(auto_label)
             controls.addWidget(value_label)
+            controls.addWidget(clear_button)
         controls.addStretch(1)
         layout.addLayout(controls)
 
@@ -17635,7 +18000,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self._update_value_labels(values)
         self._update_auto_value_labels(auto_values or {})
         self.review_counts_label.setText(counts_text)
-        self.review_status_label.setText("Review state: Unreviewed")
+        self.set_status_text("Review state: Unreviewed")
         self._clear_tabs()
         self._tab_auto_values = {
             str(record_id): _clean_vsm_transition_values(payload)
@@ -17681,15 +18046,27 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 pass
             click_cid = None
             motion_cid = None
+            release_cid = None
+            drag_controller = _TransitionMarkerDragController(
+                canvas,
+                labels=TRANSITION_TEMP_LABELS,
+                on_release=self._emit_dragged_value,
+                on_start=self.set_target,
+            )
+            self._drag_controllers[canvas] = drag_controller
             try:
-                click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
+                click_cid = canvas.mpl_connect("button_press_event", self._handle_button_press)
             except Exception:
                 click_cid = None
             try:
                 motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
             except Exception:
                 motion_cid = None
-            self._canvas_connections.append((canvas, motion_cid, click_cid))
+            try:
+                release_cid = canvas.mpl_connect("button_release_event", self._handle_button_release)
+            except Exception:
+                release_cid = None
+            self._canvas_connections.append((canvas, motion_cid, click_cid, release_cid))
             self._tab_record_ids.append(record_id)
             label = _record_label_for_display(record) or record.sample or "Scan"
             page = QtWidgets.QWidget(self._tab_widget)
@@ -17732,7 +18109,11 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self.review_counts_label.setText(str(text or ""))
 
     def set_status_text(self, text: str) -> None:
-        self.review_status_label.setText(str(text or "Review state: Unreviewed"))
+        rendered = str(text or "Review state: Unreviewed")
+        self.review_status_label.setText(rendered)
+        status_label = rendered.split(":", 1)[-1].strip() if ":" in rendered else rendered
+        color = _transition_review_status_color(status_label)
+        self.review_status_label.setStyleSheet(f"font-size: 10px; color: {color}; font-weight: 600;")
 
     def select_record_id(self, record_id: str) -> bool:
         if not record_id or record_id not in self._tab_record_ids:
@@ -17741,7 +18122,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         return True
 
     def _clear_tabs(self) -> None:
-        for canvas, motion_cid, click_cid in self._canvas_connections:
+        for canvas, motion_cid, click_cid, release_cid in self._canvas_connections:
             if motion_cid is not None:
                 try:
                     canvas.mpl_disconnect(motion_cid)
@@ -17752,7 +18133,13 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                     canvas.mpl_disconnect(click_cid)
                 except Exception:
                     pass
+            if release_cid is not None:
+                try:
+                    canvas.mpl_disconnect(release_cid)
+                except Exception:
+                    pass
         self._canvas_connections.clear()
+        self._drag_controllers.clear()
         while self._tab_widget.count():
             widget = self._tab_widget.widget(0)
             self._tab_widget.removeTab(0)
@@ -17786,6 +18173,11 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             pass
 
     def _handle_motion(self, event: Any) -> None:
+        canvas = getattr(event, "canvas", None)
+        controller = self._drag_controllers.get(canvas)
+        if controller is not None and controller.handle_motion(event):
+            self._update_cursor_label(_coerce_finite_float(getattr(event, "xdata", None)))
+            return
         if event is None or event.inaxes is None or event.xdata is None:
             self._update_cursor_label(None)
             return
@@ -17795,6 +18187,33 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             self._update_cursor_label(None)
             return
         self._update_cursor_label(value)
+
+    def _handle_button_press(self, event: Any) -> None:
+        canvas = getattr(event, "canvas", None)
+        controller = self._drag_controllers.get(canvas)
+        if controller is not None and controller.handle_press(event):
+            self._update_cursor_label(_coerce_finite_float(getattr(event, "xdata", None)))
+            return
+        self._handle_click(event)
+
+    def _handle_button_release(self, event: Any) -> None:
+        canvas = getattr(event, "canvas", None)
+        controller = self._drag_controllers.get(canvas)
+        if controller is not None and controller.handle_release(event):
+            self._update_cursor_label(_coerce_finite_float(getattr(event, "xdata", None)))
+
+    def _emit_dragged_value(self, label: str, value: float) -> None:
+        try:
+            self.valuePicked.emit(str(label), float(value))
+        except Exception:
+            pass
+
+    def _emit_clear_label(self, label: str) -> None:
+        self.set_target(label)
+        try:
+            self.valueCleared.emit(str(label))
+        except Exception:
+            pass
 
     def _handle_click(self, event: Any) -> None:
         if event is None:
@@ -17885,6 +18304,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                         if not prefix
                         else "transition_temp_auto_marker"
                     )
+                    _set_transition_marker_metadata(line, label, "reviewed" if not prefix else "auto")
                 except Exception:
                     continue
             try:
@@ -17911,6 +18331,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                     if not prefix
                     else "transition_temp_auto_label"
                 )
+                _set_transition_marker_metadata(text, label, "reviewed" if not prefix else "auto")
             except Exception:
                 pass
 
@@ -18082,6 +18503,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
         preview_panel.valuePicked.connect(self._apply_picked_value)
+        preview_panel.valueCleared.connect(self._clear_picked_value)
         preview_panel.acceptNextRequested.connect(self._accept_current_scan_and_next)
         preview_panel.noTransitionRequested.connect(self._mark_current_scan_no_transition)
         preview_panel.excludeRequested.connect(self._exclude_current_scan)
@@ -18972,6 +19394,22 @@ class TransitionTempsSection(QtWidgets.QWidget):
             TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
             values=manual_values,
             included=True,
+        )
+
+    def _clear_picked_value(self, label: str) -> None:
+        current = self._current_preview_record()
+        if current is None:
+            return
+        group_key, record = current
+        payload = self._review_payload_for_record(record)
+        values = self._values_for_record(record, payload)
+        values.pop(str(label), None)
+        self._store_review_for_record(
+            group_key,
+            record,
+            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+            values=values,
+            included=bool(values),
         )
 
     def _current_preview_record(self) -> Optional[Tuple[str, VsmTemperatureScanRecord]]:
@@ -22879,6 +23317,9 @@ class MiniDmaSection(MiniDatabaseSection):
         manual_values = _clean_mini_dma_transition_values(payload.get("manual_values_mA"))
         if manual_values:
             entry["manual_values_mA"] = manual_values
+        cleared_labels = _mini_dma_cleared_transition_labels(payload)
+        if cleared_labels and status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+            entry["cleared_labels"] = sorted(cleared_labels)
         return entry
 
     def _store_transition_reviews(self) -> None:

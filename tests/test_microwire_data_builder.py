@@ -2063,6 +2063,8 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
         assert payload["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION
         assert payload["target_label"] == entries[first_ref[1]].target_label
         assert dialog._tree_items[first_ref].text(1) == "No transition"  # noqa: SLF001
+        expected = builder_ui._transition_review_status_color("No transition")  # noqa: SLF001
+        assert dialog._tree_items[first_ref].foreground(1).color().name() == expected  # noqa: SLF001
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -2173,6 +2175,140 @@ def test_mini_dma_transition_review_manual_override_keeps_auto_values() -> None:
             if label == "As":
                 continue
             assert payload["values"][label] == pytest.approx(value)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_transition_review_drag_marker_persists_on_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_review(record_id: str, payload: dict[str, object]) -> None:
+        stored[record_id] = dict(payload)
+
+    record = _sample_mini_dma_record()
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+    )
+    entry_index, entry = next(
+        (
+            (index, candidate)
+            for index, candidate in enumerate(entries)
+            if builder_ui._mini_dma_transition_values_from_summary(candidate.target_summary).get("Af") is not None  # noqa: SLF001
+        ),
+        (None, None),
+    )
+    assert entry is not None
+    auto_values = builder_ui._mini_dma_transition_values_from_summary(entry.target_summary)  # noqa: SLF001
+    start_value = auto_values["Af"]
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        review_provider=lambda: stored,
+        review_setter=_set_review,
+    )
+    redraws = 0
+    original = dialog._plot_entry  # noqa: SLF001
+
+    def _counting_plot(*args: object, **kwargs: object) -> object:
+        nonlocal redraws
+        redraws += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dialog, "_plot_entry", _counting_plot)
+    try:
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, entries)  # noqa: SLF001
+        )
+        ref = (run_key, int(entry_index))
+        dialog.tree.setCurrentItem(dialog._tree_items[ref])  # noqa: SLF001
+        axis = dialog.figure.axes[0]
+        redraws = 0
+
+        dialog._handle_canvas_press(  # noqa: SLF001
+            SimpleNamespace(button=1, xdata=start_value, canvas=dialog.canvas, inaxes=axis)
+        )
+        dialog._handle_canvas_motion(  # noqa: SLF001
+            SimpleNamespace(button=1, xdata=start_value + 4.0, canvas=dialog.canvas, inaxes=axis)
+        )
+        assert redraws == 0
+        dialog._handle_canvas_release(  # noqa: SLF001
+            SimpleNamespace(button=1, xdata=start_value + 4.0, canvas=dialog.canvas, inaxes=axis)
+        )
+
+        record_id = builder_ui._mini_dma_review_record_id(entry.record, entry.target_label)  # noqa: SLF001
+        assert stored[record_id]["manual_values_mA"]["Af"] == pytest.approx(start_value + 4.0, abs=1e-3)
+        assert stored[record_id]["values"]["Af"] == pytest.approx(start_value + 4.0, abs=1e-3)
+        assert redraws == 1
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_transition_review_clear_selected_suppresses_only_that_label() -> None:
+    _ensure_qapp()
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_review(record_id: str, payload: dict[str, object]) -> None:
+        stored[record_id] = dict(payload)
+
+    record = _sample_mini_dma_record()
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+    )
+    entry_index, entry = next(
+        (
+            (index, candidate)
+            for index, candidate in enumerate(entries)
+            if {"As", "Af", "Ms", "Mf"}.issubset(
+                builder_ui._mini_dma_transition_values_from_summary(candidate.target_summary)  # noqa: SLF001
+            )
+        ),
+        (None, None),
+    )
+    assert entry is not None
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        review_provider=lambda: stored,
+        review_setter=_set_review,
+    )
+    try:
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, entries)  # noqa: SLF001
+        )
+        ref = (run_key, int(entry_index))
+        dialog.tree.setCurrentItem(dialog._tree_items[ref])  # noqa: SLF001
+        for label in ("Ms", "Mf"):
+            dialog.transition_controls.set_target(label)
+            dialog.transition_controls._clear_selected()  # noqa: SLF001
+
+        record_id = builder_ui._mini_dma_review_record_id(entry.record, entry.target_label)  # noqa: SLF001
+        payload = stored[record_id]
+        assert payload["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED
+        assert set(payload["cleared_labels"]) == {"Ms", "Mf"}
+        assert set(payload["values"]) == {"As", "Af"}
+        assert dialog._tree_items[ref].text(1) == "Manual adjusted"  # noqa: SLF001
+
+        section = builder_ui.MiniDmaSection.__new__(builder_ui.MiniDmaSection)
+        section._all_mini_dma_records = [record]  # noqa: SLF001
+        section._transition_reviews = stored  # noqa: SLF001
+        reviewed = section.records_with_reviewed_transitions([record])
+        assert len(reviewed) == 1
+        summary = "\n".join(reviewed[0].transition_summary)
+        assert "As" in summary
+        assert "Af" in summary
+        assert "Ms" not in summary
+        assert "Mf" not in summary
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -2507,6 +2643,68 @@ def test_transition_temps_preview_click_persists_manual_temperature(
         text_labels = {text.get_text() for text in canvas.figure.axes[0].texts}
         assert "auto As" in text_labels
         assert "Af" in text_labels
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_temps_preview_drag_marker_and_clear_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    scan = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 temp_scan.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(
+            {
+                "temperature": [0.0, 20.0, 40.0],
+                "field": [10000.0, 10000.0, 10000.0],
+                "signal": [0.0, 1.0, 0.5],
+                "section_index": [0, 0, 0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="temp scan",
+    )
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[scan],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        section._auto_values_for_record = lambda _record: {"As": 12.0, "Af": 32.0, "Ms": 8.0, "Mf": 4.0}  # type: ignore[method-assign]  # noqa: SLF001
+        section.refresh_data()
+        source_index = section.model.index(0, 0)
+        proxy_index = section._search_proxy.mapFromSource(source_index)  # noqa: SLF001
+        section.table_view.setCurrentIndex(proxy_index)
+        section.table_view.selectRow(proxy_index.row())
+        panel = section._preview_panel  # noqa: SLF001
+        assert panel is not None
+        section._accept_current_scan_and_next()  # noqa: SLF001
+        panel._emit_clear_label("Ms")  # noqa: SLF001
+        panel._emit_clear_label("Mf")  # noqa: SLF001
+        page = panel._tab_widget.currentWidget()  # noqa: SLF001
+        canvas = page.layout().itemAt(0).widget()
+        axis = canvas.figure.axes[0]
+        panel._handle_button_press(SimpleNamespace(button=1, xdata=12.0, canvas=canvas, inaxes=axis))  # noqa: SLF001
+        panel._handle_motion(SimpleNamespace(button=1, xdata=15.5, canvas=canvas, inaxes=axis))  # noqa: SLF001
+        panel._handle_button_release(SimpleNamespace(button=1, xdata=15.5, canvas=canvas, inaxes=axis))  # noqa: SLF001
+
+        review = next(iter(section.transition_reviews_snapshot().values()))
+        assert review["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
+        assert review["manual_values_C"] == {"As": pytest.approx(15.5), "Af": pytest.approx(32.0)}
+        assert "Ms" not in review["final_values_C"]
+        assert "Mf" not in review["final_values_C"]
+        assert "#4ade80" in panel.review_status_label.styleSheet()  # noqa: SLF001
     finally:
         section.close()
         section.deleteLater()
@@ -7876,6 +8074,125 @@ def test_annealing_transition_review_pick_updates_markers_in_place() -> None:
         }
         assert "reviewed_transition_marker" in gids
         assert "reviewed_transition_label" in gids
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_drag_marker_persists_without_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    record = MeasurementRecord(
+        path=Path("Ni44Fe27Ga23Cu3Co3 1_2 60mA drag.txt"),
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=60,
+            alt_variant=False,
+            measurement_id="review-drag",
+            file_name="Ni44Fe27Ga23Cu3Co3 1_2 60mA drag.txt",
+            relpath="Ni44Fe27Ga23Cu3Co3 1_2 60mA drag.txt",
+            timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [1.0, 30.0, 60.0], "R_Ohm": [100.0, 112.0, 120.0]}),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    calls = 0
+    original = dialog._display.set_record  # noqa: SLF001
+
+    def _counting_set_record(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dialog._display, "set_record", _counting_set_record)  # noqa: SLF001
+    try:
+        dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        dialog._phase_controls.set_target("Af1")  # noqa: SLF001
+        dialog._handle_plot_pick(24.5)  # noqa: SLF001
+        canvas = dialog._display._canvas  # noqa: SLF001
+        assert canvas is not None
+        axis = canvas.figure.axes[0]
+        calls = 0
+
+        dialog._display._handle_button_press(  # noqa: SLF001
+            SimpleNamespace(button=1, xdata=24.5, canvas=canvas, inaxes=axis)
+        )
+        dialog._display._handle_motion(  # noqa: SLF001
+            SimpleNamespace(button=1, xdata=31.25, canvas=canvas, inaxes=axis)
+        )
+        assert calls == 0
+        dialog._display._handle_button_release(  # noqa: SLF001
+            SimpleNamespace(button=1, xdata=31.25, canvas=canvas, inaxes=axis)
+        )
+
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        assert stored[record_id]["manual_values_mA"]["Af1"] == pytest.approx(31.25)
+        assert calls == 0
+    finally:
+        dialog.hide()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_clear_selected_keeps_partial_values() -> None:
+    _ensure_qapp()
+    record = MeasurementRecord(
+        path=Path("Ni44Fe27Ga23Cu3Co3 1_2 partial.txt"),
+        metadata=MeasurementMetadata(
+            composition_token="Ni44Fe27Ga23Cu3Co3",
+            draw_x=1,
+            piece_y=2,
+            setpoint_mA=60,
+            alt_variant=False,
+            measurement_id="partial-clear",
+            file_name="Ni44Fe27Ga23Cu3Co3 1_2 partial.txt",
+            relpath="Ni44Fe27Ga23Cu3Co3 1_2 partial.txt",
+            timestamp_mtime_utc="2026-06-19T00:00:00+00:00",
+        ),
+        dataframe=pd.DataFrame({"I_mA": [1.0, 30.0, 60.0], "R_Ohm": [100.0, 112.0, 120.0]}),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_values(key: str, values: dict[str, object]) -> None:
+        stored[key] = dict(values)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_values,
+    )
+    try:
+        for label, value in {"As1": 10.0, "Af1": 20.0, "Ms1": 30.0, "Mf1": 40.0}.items():
+            dialog._phase_controls.set_target(label)  # noqa: SLF001
+            dialog._handle_plot_pick(value)  # noqa: SLF001
+        for label in ("Ms1", "Mf1"):
+            dialog._phase_controls.set_target(label)  # noqa: SLF001
+            dialog._phase_controls._clear_selected()  # noqa: SLF001
+
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        payload = stored[record_id]
+        assert payload["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
+        assert payload["manual_values_mA"] == {"As1": pytest.approx(10.0), "Af1": pytest.approx(20.0)}
+        assert dialog._tree.topLevelItem(0).text(1) == "Manual adjusted"  # noqa: SLF001
     finally:
         dialog.hide()
         dialog.deleteLater()
