@@ -7259,7 +7259,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
         self._stack.setCurrentWidget(self._placeholder)
 
     def _clear_tabs(self) -> None:
-        for canvas, motion_cid, click_cid, release_cid in self._canvas_connections:
+        for canvas, motion_cid, click_cid in self._canvas_connections:
             if motion_cid is not None:
                 try:
                     canvas.mpl_disconnect(motion_cid)
@@ -7270,13 +7270,7 @@ class _ShapeMemoryPreviewPanel(QtWidgets.QWidget):
                     canvas.mpl_disconnect(click_cid)
                 except Exception:
                     pass
-            if release_cid is not None:
-                try:
-                    canvas.mpl_disconnect(release_cid)
-                except Exception:
-                    pass
         self._canvas_connections.clear()
-        self._drag_controllers.clear()
         self._canvas_records.clear()
         self._tab_canvases.clear()
         while self._tab_widget.count():
