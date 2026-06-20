@@ -225,7 +225,7 @@ ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other annealing"
 ANNEALING_LEGACY_LOW_GRAPH_COLUMN = "Graph — low mA"
 ANNEALING_LEGACY_OTHER_GRAPH_COLUMN = "Graph — other mA"
 OPTIONAL_BUILDER_SECTIONS: Tuple[Tuple[str, str], ...] = (
-    ("current_density", "Current annealing transitions"),
+    ("current_density", "Annealing transitions"),
     ("strain", "Strain"),
     ("shape_memory_stress_strain", "Manual stress/strain"),
 )
@@ -16389,7 +16389,7 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
 
 class CurrentDensitySection(QtWidgets.QWidget):
     section_key = "current_density"
-    section_title = "Current annealing transitions"
+    section_title = "Annealing transitions"
 
     status_changed = QtCore.pyqtSignal(str)
     sources_changed = QtCore.pyqtSignal(list)
@@ -16421,7 +16421,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         layout.setSpacing(8)
 
         controls = QtWidgets.QHBoxLayout()
-        self.refresh_button = QtWidgets.QPushButton("Recalculate")
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_data)
         controls.addWidget(self.refresh_button)
         self.export_button = QtWidgets.QPushButton("Export worksheet...")
@@ -16519,8 +16519,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
         try:
             frame = self._calculate_frame()
         except Exception:
-            self.logger.exception("Failed to calculate current density table")
-            self.status_label.setText("Failed to calculate current density.")
+            self.logger.exception("Failed to calculate annealing transition summary")
+            self.status_label.setText("Failed to calculate annealing transition summary.")
             self.export_button.setEnabled(False)
             return
         self._current_frame = frame
@@ -17446,7 +17446,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 f"Failed to export worksheet:\n{exc}",
             )
             return
-        self.log(f"Current density worksheet exported to {path}")
+        self.log(f"Annealing transitions worksheet exported to {path}")
         QtWidgets.QMessageBox.information(
             self,
             "Export worksheet",
@@ -17631,7 +17631,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         selected_record_id: Optional[str] = None,
     ) -> None:
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
-        self.header_label.setText(title or "Transition temps")
+        self.header_label.setText(title or "VSM transitions")
         self._update_value_labels(values)
         self._update_auto_value_labels(auto_values or {})
         self.review_counts_label.setText(counts_text)
@@ -17975,7 +17975,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
 
 class TransitionTempsSection(QtWidgets.QWidget):
     section_key = "transition_temps"
-    section_title = "Transition temps"
+    section_title = "VSM transitions"
 
     status_changed = QtCore.pyqtSignal(str)
     sources_changed = QtCore.pyqtSignal(list)
@@ -18017,7 +18017,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         layout.setSpacing(8)
 
         controls = QtWidgets.QHBoxLayout()
-        self.refresh_button = QtWidgets.QPushButton("Recalculate")
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_data)
         controls.addWidget(self.refresh_button)
         self.export_button = QtWidgets.QPushButton("Export worksheet...")
@@ -18836,10 +18836,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return
         key_tuple = self._parse_group_key(key)
         if key_tuple is None:
-            panel.update_selection("Transition temps", [], {})
+            panel.update_selection("VSM transitions", [], {})
             return
         composition, microwire = _microwire_info_from_key(key_tuple)
-        title = f"{composition} — {microwire}" if composition and microwire else "Transition temps"
+        title = f"{composition} — {microwire}" if composition and microwire else "VSM transitions"
         records = self._record_groups.get(key, [])
         values = self._values_for_group(key, records, include_auto=False)
         group_auto_values = self._auto_values_for_records(records)
@@ -19314,14 +19314,14 @@ class TransitionTempsSection(QtWidgets.QWidget):
             else:
                 export_frame.to_csv(path, index=False)
         except Exception as exc:
-            self.logger.exception("Failed to export transition temps worksheet")
+            self.logger.exception("Failed to export VSM transitions worksheet")
             QtWidgets.QMessageBox.critical(
                 self,
                 "Export worksheet",
                 f"Failed to export worksheet:\n{exc}",
             )
             return
-        self.log(f"Transition temps worksheet exported to {path}")
+        self.log(f"VSM transitions worksheet exported to {path}")
         QtWidgets.QMessageBox.information(
             self,
             "Export worksheet",
@@ -23017,6 +23017,171 @@ class MiniDmaSection(MiniDatabaseSection):
             auto_plot=True,
             open_origin=open_origin,
         )
+
+
+class DmaTransitionsSection(QtWidgets.QWidget):
+    section_title = "DMA transitions"
+
+    def __init__(
+        self,
+        mini_dma_section: MiniDmaSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._mini_dma_section = mini_dma_section
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh_data)
+        controls.addWidget(self.refresh_button)
+        self.review_button = QtWidgets.QPushButton("Review transition currents...")
+        self.review_button.setToolTip("Review Mini DMA transition-current targets.")
+        self.review_button.clicked.connect(self._open_transition_review)
+        controls.addWidget(self.review_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.status_label = QtWidgets.QLabel("Waiting for Mini DMA data.", self)
+        layout.addWidget(self.status_label)
+
+        self.summary_table = QtWidgets.QTableWidget(0, 2, self)
+        self.summary_table.setHorizontalHeaderLabels(["Status", "Count"])
+        self.summary_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.summary_table.setAlternatingRowColors(True)
+        header = self.summary_table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+        self.summary_table.verticalHeader().setVisible(False)
+        layout.addWidget(self.summary_table, 1)
+
+        for signal_name in ("data_updated", "status_changed"):
+            signal = getattr(self._mini_dma_section, signal_name, None)
+            if signal is not None:
+                try:
+                    signal.connect(self.refresh_data)
+                except Exception:
+                    pass
+        QtCore.QTimer.singleShot(0, self.refresh_data)
+
+    def refresh_data(self, *_args: object) -> None:
+        records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        if not records:
+            try:
+                self._mini_dma_section._refresh_record_groups()
+            except Exception:
+                pass
+            records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        try:
+            reviews = self._mini_dma_section.transition_reviews_snapshot()
+        except Exception:
+            reviews = {}
+        counts = {
+            "Runs": len(records),
+            "Reviewed targets": 0,
+            "Accepted": 0,
+            "No transition": 0,
+            "Excluded": 0,
+        }
+        for payload in reviews.values():
+            if not isinstance(payload, Mapping):
+                continue
+            status = str(payload.get("status") or "").strip()
+            if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
+                counts["Reviewed targets"] += 1
+                counts["Accepted"] += 1
+            elif status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
+                counts["Reviewed targets"] += 1
+                counts["No transition"] += 1
+            elif status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
+                counts["Reviewed targets"] += 1
+                counts["Excluded"] += 1
+
+        self.summary_table.setRowCount(len(counts))
+        for row_index, (label, value) in enumerate(counts.items()):
+            self.summary_table.setItem(row_index, 0, QtWidgets.QTableWidgetItem(label))
+            self.summary_table.setItem(row_index, 1, QtWidgets.QTableWidgetItem(str(value)))
+        try:
+            self.summary_table.resizeColumnsToContents()
+        except Exception:
+            pass
+        if records:
+            self.status_label.setText(
+                f"{counts['Reviewed targets']} reviewed Mini DMA transition target(s) across {counts['Runs']} run(s)."
+            )
+        else:
+            self.status_label.setText("No Mini DMA runs available yet.")
+
+    def _open_transition_review(self) -> None:
+        opener = getattr(self._mini_dma_section, "_open_transition_review", None)
+        if callable(opener):
+            opener()
+        self.refresh_data()
+
+
+class TransitionsSection(QtWidgets.QWidget):
+    section_title = "Transitions"
+
+    def __init__(
+        self,
+        annealing_transitions: CurrentDensitySection,
+        vsm_transitions: TransitionTempsSection,
+        dma_transitions: DmaTransitionsSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._view_aliases = {
+            "annealing": 0,
+            "current_density": 0,
+            "vsm": 1,
+            "transition_temps": 1,
+            "dma": 2,
+            "mini_dma": 2,
+        }
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.tab_widget = QtWidgets.QTabWidget(self)
+        self.tab_widget.addTab(annealing_transitions, "Annealing")
+        self.tab_widget.addTab(vsm_transitions, "VSM")
+        self.tab_widget.addTab(dma_transitions, "DMA")
+        layout.addWidget(self.tab_widget, 1)
+
+    def show_view(self, view: str) -> None:
+        index = self._view_aliases.get(str(view).strip().lower())
+        if index is None:
+            return
+        if 0 <= index < self.tab_widget.count():
+            try:
+                if hasattr(self.tab_widget, "isTabVisible") and not self.tab_widget.isTabVisible(index):
+                    self.tab_widget.setTabVisible(index, True)
+            except Exception:
+                pass
+            self.tab_widget.setCurrentIndex(index)
+
+    def set_view_visible(self, view: str, visible: bool) -> None:
+        index = self._view_aliases.get(str(view).strip().lower())
+        if index is None or index < 0 or index >= self.tab_widget.count():
+            return
+        try:
+            self.tab_widget.setTabVisible(index, bool(visible))
+        except Exception:
+            pass
+        try:
+            current_visible = self.tab_widget.isTabVisible(self.tab_widget.currentIndex())
+        except Exception:
+            current_visible = True
+        if not current_visible:
+            for candidate in range(self.tab_widget.count()):
+                try:
+                    if self.tab_widget.isTabVisible(candidate):
+                        self.tab_widget.setCurrentIndex(candidate)
+                        break
+                except Exception:
+                    continue
 
 
 class ShapeMemoryStressStrainSection(MiniDatabaseSection):
@@ -28598,11 +28763,11 @@ class AssemblySection(QtWidgets.QWidget):
             ("fabrication", "Fabrication"),
             ("annealing", "Current annealing"),
             ("microscope", "Microscope"),
-            ("current_density", "Current annealing transitions"),
+            ("current_density", "Annealing transitions"),
             ("videos", "Videos"),
             ("vsm_hysteresis", "VSM hysteresis"),
             ("vsm_temperature_scan", "VSM temperature scan"),
-            ("transition_temps", "Transition temps"),
+            ("transition_temps", "VSM transitions"),
             ("dma_iso_stress", "DMA iso-stress"),
             ("mini_dma", "Mini DMA"),
             ("shape_memory_stress_strain", "Manual stress/strain"),
@@ -31748,6 +31913,8 @@ class AssemblySection(QtWidgets.QWidget):
                 TRANSITION_TEMP_AF_COLUMN,
                 TRANSITION_TEMP_MS_COLUMN,
                 TRANSITION_TEMP_MF_COLUMN,
+                VSM_TRANSITION_TEMP_STATUS_COLUMN,
+                VSM_TRANSITION_TEMP_COUNTS_COLUMN,
             ],
         )
         add(
@@ -31799,6 +31966,8 @@ class AssemblySection(QtWidgets.QWidget):
                 MINI_DMA_ORIGIN_COLUMN,
                 MINI_DMA_STRAIN_COLUMN,
                 MINI_DMA_TRANSITION_COLUMN,
+                MINI_DMA_TRANSITION_STATUS_COLUMN,
+                MINI_DMA_TRANSITION_COUNTS_COLUMN,
                 MINI_DMA_BREAK_COLUMN,
             ],
         )
@@ -31855,7 +32024,7 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("Microscope", section_map.get("microscope", []))
         add_group("Current annealing", section_map.get("annealing", []))
         add_group(
-            "Current annealing transitions",
+            "Annealing transitions",
             [
                 *(
                     [ANNEALING_TRANSITION_COLUMN]
@@ -31870,7 +32039,7 @@ class AssemblySection(QtWidgets.QWidget):
         )
         add_group("VSM hysteresis", section_map.get("vsm_hysteresis", []))
         add_group("VSM temperature scan", section_map.get("vsm_temperature_scan", []))
-        add_group("Transition temps", section_map.get("transition_temps", []))
+        add_group("VSM transitions", section_map.get("transition_temps", []))
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
         add_group("Mini DMA", section_map.get("mini_dma", []))
         add_group(
@@ -33839,7 +34008,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.logger,
             _append_log,
         )
-        self.tab_widget.addTab(self.current_density_section, "Current annealing transitions")
         self.sections["current_density"] = self.current_density_section
         _pump_events()
 
@@ -33856,6 +34024,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.vsm_temperature_section = VsmTemperatureScanSection(self.logger, _append_log)
         self.tab_widget.addTab(self.vsm_temperature_section, "VSM temp scan")
         self.sections["vsm_temperature_scan"] = self.vsm_temperature_section
+        self.vsm_temperature_transitions_button = QtWidgets.QPushButton("Transitions...")
+        self.vsm_temperature_transitions_button.setToolTip("Open VSM transitions in the Transitions workspace.")
+        self.vsm_temperature_section.controls_layout.addWidget(self.vsm_temperature_transitions_button)
         _pump_events()
 
         self.transition_temps_section = TransitionTempsSection(
@@ -33863,7 +34034,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.logger,
             _append_log,
         )
-        self.tab_widget.addTab(self.transition_temps_section, "Transition temps")
         self.sections["transition_temps"] = self.transition_temps_section
         _pump_events()
 
@@ -33875,6 +34045,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
         self.tab_widget.addTab(self.mini_dma_section, "Mini DMA")
         self.sections["mini_dma"] = self.mini_dma_section
+        _pump_events()
+
+        self.dma_transitions_section = DmaTransitionsSection(self.mini_dma_section)
+        self.transitions_section = TransitionsSection(
+            self.current_density_section,
+            self.transition_temps_section,
+            self.dma_transitions_section,
+        )
+        self.tab_widget.insertTab(3, self.transitions_section, "Transitions")
+        self._install_transition_shortcuts()
         _pump_events()
 
         self.shape_memory_stress_strain_section = ShapeMemoryStressStrainSection(
@@ -34057,6 +34237,46 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._set_initial_geometry()
         self._retabify_primary_docks()
         self._startup_auto_open_scheduled = False
+
+    def _install_transition_shortcuts(self) -> None:
+        shortcuts = (
+            (
+                getattr(self.annealing_section, "review_transitions_button", None),
+                "Annealing",
+                "Open Annealing transitions in the Transitions workspace.",
+                "annealing",
+            ),
+            (
+                getattr(self, "vsm_temperature_transitions_button", None),
+                "VSM",
+                "Open VSM transitions in the Transitions workspace.",
+                "vsm",
+            ),
+            (
+                getattr(self.mini_dma_section, "review_transitions_button", None),
+                "DMA",
+                "Open DMA transitions in the Transitions workspace.",
+                "dma",
+            ),
+        )
+        for button, _label, tooltip, view in shortcuts:
+            if not isinstance(button, QtWidgets.QPushButton):
+                continue
+            try:
+                button.clicked.disconnect()
+            except Exception:
+                pass
+            button.setText("Transitions...")
+            button.setToolTip(tooltip)
+            button.clicked.connect(partial(self.show_transitions_view, view))
+
+    def show_transitions_view(self, view: str = "annealing") -> None:
+        transitions = getattr(self, "transitions_section", None)
+        if isinstance(transitions, TransitionsSection):
+            transitions.show_view(view)
+            index = self.tab_widget.indexOf(transitions)
+            if index >= 0:
+                self.tab_widget.setCurrentIndex(index)
 
     def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
         if getattr(self, "_startup_auto_open_scheduled", False):
@@ -34685,6 +34905,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(tab_widget, QtWidgets.QTabWidget):
             for key, _label in OPTIONAL_BUILDER_SECTIONS:
                 section = self.sections.get(key)
+                if key == "current_density":
+                    transitions = getattr(self, "transitions_section", None)
+                    if isinstance(transitions, TransitionsSection):
+                        transitions.set_view_visible(
+                            "annealing",
+                            key not in self._hidden_section_keys,
+                        )
                 if not isinstance(section, QtWidgets.QWidget):
                     continue
                 index = tab_widget.indexOf(section)

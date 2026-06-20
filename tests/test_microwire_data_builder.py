@@ -7264,22 +7264,71 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         assembly = getattr(window, "assembly_section", None)
         assert assembly is not None
         groups = assembly._column_groups(core.OUTPUT_COLUMNS)  # noqa: SLF001 - UI grouping helper
-        transition_group = groups.get("Current annealing transitions")
+        transition_group = groups.get("Annealing transitions")
         assert isinstance(transition_group, list)
         assert ANNEALING_TRANSITION_COLUMN in transition_group
+        assert core.CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN in transition_group
+        assert core.CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN in transition_group
         assert "As1 (mA)" in transition_group
         assert "Af1 (mA)" in transition_group
         assert "As2 (mA)" in transition_group
         assert "Mf2-Af2 (mA)" in transition_group
         assert "Current density" not in groups
-        assert groups.get("Transition temps") == list(core.TRANSITION_TEMP_COLUMNS)
+        assert "Current annealing transitions" not in groups
+        vsm_group = groups.get("VSM transitions")
+        assert isinstance(vsm_group, list)
+        assert list(core.TRANSITION_TEMP_COLUMNS) == [
+            column for column in vsm_group if column in core.TRANSITION_TEMP_COLUMNS
+        ]
+        assert core.VSM_TRANSITION_TEMP_STATUS_COLUMN in vsm_group
+        assert core.VSM_TRANSITION_TEMP_COUNTS_COLUMN in vsm_group
+        assert "Transition temps" not in groups
         mini_dma_group = groups.get("Mini DMA")
         assert isinstance(mini_dma_group, list)
         assert core.MINI_DMA_COLUMN in mini_dma_group
         assert core.MINI_DMA_ORIGIN_COLUMN in mini_dma_group
         assert MINI_DMA_STRAIN_COLUMN in mini_dma_group
         assert MINI_DMA_TRANSITION_COLUMN in mini_dma_group
+        assert core.MINI_DMA_TRANSITION_STATUS_COLUMN in mini_dma_group
+        assert core.MINI_DMA_TRANSITION_COUNTS_COLUMN in mini_dma_group
         assert MINI_DMA_BREAK_COLUMN in mini_dma_group
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_transitions_workspace_hosts_peer_views() -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        tab_labels = [
+            window.tab_widget.tabText(index)
+            for index in range(window.tab_widget.count())
+        ]
+        assert "Transitions" in tab_labels
+        assert "Current annealing transitions" not in tab_labels
+        assert "Transition temps" not in tab_labels
+
+        transitions = window.transitions_section
+        assert transitions.tab_widget.tabText(0) == "Annealing"
+        assert transitions.tab_widget.tabText(1) == "VSM"
+        assert transitions.tab_widget.tabText(2) == "DMA"
+        assert transitions.tab_widget.widget(0) is window.current_density_section
+        assert transitions.tab_widget.widget(1) is window.transition_temps_section
+        assert transitions.tab_widget.widget(2) is window.dma_transitions_section
+        assert window.current_density_section.section_key == "current_density"
+        assert window.transition_temps_section.section_key == "transition_temps"
+
+        window.show_transitions_view("vsm")
+        assert window.tab_widget.currentWidget() is transitions
+        assert transitions.tab_widget.currentIndex() == 1
+
+        assert window.annealing_section.review_transitions_button.text() == "Transitions..."
+        assert window.mini_dma_section.review_transitions_button.text() == "Transitions..."
+        assert window.vsm_temperature_transitions_button.text() == "Transitions..."
     finally:
         window._dirty = False
         window.hide()
@@ -8790,14 +8839,16 @@ def test_builder_section_visibility_menu_persists_hidden_tabs(
     window = BuilderWindow()
     try:
         action = window._section_visibility_actions["current_density"]
-        index = window.tab_widget.indexOf(window.current_density_section)
+        transitions = window.transitions_section
+        index = transitions.tab_widget.indexOf(window.current_density_section)
         assert index >= 0
-        assert window.tab_widget.isTabVisible(index)
+        assert transitions.tab_widget.isTabVisible(index)
 
         window._toggle_section_visibility("current_density", False)
 
         assert not action.isChecked()
-        assert not window.tab_widget.isTabVisible(index)
+        assert not transitions.tab_widget.isTabVisible(index)
+        assert window.tab_widget.indexOf(transitions) >= 0
         assert "current_density" in json.loads(
             str(window.settings.value(window._project_settings_key("hidden_sections")))
         )
@@ -8810,9 +8861,9 @@ def test_builder_section_visibility_menu_persists_hidden_tabs(
 
     restored = BuilderWindow()
     try:
-        restored_index = restored.tab_widget.indexOf(restored.current_density_section)
+        restored_index = restored.transitions_section.tab_widget.indexOf(restored.current_density_section)
         assert restored_index >= 0
-        assert not restored.tab_widget.isTabVisible(restored_index)
+        assert not restored.transitions_section.tab_widget.isTabVisible(restored_index)
         assert not restored._section_visibility_actions["current_density"].isChecked()
     finally:
         restored._dirty = False
