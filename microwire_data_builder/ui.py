@@ -659,6 +659,85 @@ def _log_builder_timing(
         pass
 
 
+def _log_builder_cache_event(
+    logger: logging.Logger,
+    event: str,
+    *,
+    hit: bool,
+    **fields: object,
+) -> None:
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    suffix = f" {details}" if details else ""
+    try:
+        logger.debug("Builder timing: %s cache_hit=%s%s", event, int(bool(hit)), suffix)
+    except Exception:
+        pass
+
+
+def _builder_ui_telemetry_enabled() -> bool:
+    return os.environ.get("MICROWIRE_BUILDER_UI_TELEMETRY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+class _BuilderUiHeartbeat(QtCore.QObject):
+    """Debug-only event-loop lag sampler for Builder responsiveness checks."""
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        parent: QtCore.QObject | None = None,
+        *,
+        interval_ms: int = 250,
+        report_interval_ms: int = 5000,
+        lag_threshold_ms: float = 150.0,
+    ) -> None:
+        super().__init__(parent)
+        self._logger = logger
+        self._interval_ms = max(int(interval_ms), 50)
+        self._report_interval_ms = max(int(report_interval_ms), self._interval_ms)
+        self._lag_threshold_ms = float(lag_threshold_ms)
+        self._last_tick_s: Optional[float] = None
+        self._last_report_s = time.perf_counter()
+        self._max_lag_ms = 0.0
+        self._sample_count = 0
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(self._interval_ms)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self) -> None:
+        self._last_tick_s = time.perf_counter()
+        self._last_report_s = self._last_tick_s
+        self._timer.start()
+
+    def _tick(self) -> None:
+        now = time.perf_counter()
+        if self._last_tick_s is not None:
+            elapsed_ms = (now - self._last_tick_s) * 1000.0
+            lag_ms = max(0.0, elapsed_ms - float(self._interval_ms))
+            self._max_lag_ms = max(self._max_lag_ms, lag_ms)
+            self._sample_count += 1
+        self._last_tick_s = now
+        if (now - self._last_report_s) * 1000.0 < self._report_interval_ms:
+            return
+        if self._max_lag_ms >= self._lag_threshold_ms:
+            try:
+                self._logger.debug(
+                    "Builder timing: event_loop_heartbeat max_lag_ms=%.1f samples=%d interval_ms=%d",
+                    self._max_lag_ms,
+                    self._sample_count,
+                    self._interval_ms,
+                )
+            except Exception:
+                pass
+        self._max_lag_ms = 0.0
+        self._sample_count = 0
+        self._last_report_s = now
+
+
 def _open_microwire_eda_window(config: object, parent: QtWidgets.QWidget | None = None) -> None:
     from microwire_eda import launch_eda_window
 
@@ -5498,13 +5577,21 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         description: str,
         reviewed_values: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        render_started_s = time.perf_counter()
         if record is None:
             self._show_placeholder(description)
             self.title_label.setText(self._base_title)
             return
 
         try:
+            build_started_s = time.perf_counter()
             figure = self._build_figure(record, reviewed_values=reviewed_values)
+            _log_builder_timing(
+                self._logger,
+                "current_annealing_review_build_figure",
+                build_started_s,
+                record=getattr(getattr(record, "metadata", object()), "file_name", ""),
+            )
         except Exception:
             self._logger.exception("Failed to render annealing preview for %s", getattr(record, "path", "?"))
             self._show_placeholder("Failed to render plot for the selected measurement.")
@@ -5572,6 +5659,12 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         )
         self._cursor_units = "mA"
         self._update_cursor_label(None)
+        _log_builder_timing(
+            self._logger,
+            "current_annealing_review_render",
+            render_started_s,
+            record=getattr(getattr(record, "metadata", object()), "file_name", ""),
+        )
 
     def clear(self, message: str) -> None:
         self._show_placeholder(message)
@@ -5761,6 +5854,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         return figure
 
     def update_reviewed_values(self, values: Optional[Mapping[str, Any]]) -> bool:
+        update_started_s = time.perf_counter()
         canvas = self._canvas
         if canvas is None:
             return False
@@ -5787,6 +5881,11 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 canvas.draw()
             except Exception:
                 return False
+        _log_builder_timing(
+            self._logger,
+            "current_annealing_review_marker_update",
+            update_started_s,
+        )
         return True
 
 
@@ -6479,6 +6578,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Current annealing transition review")
         self.resize(1280, 780)
+        self._logger = logger
         self._entries = _annealing_transition_review_entries(records, logger)
         self._transition_reviews_provider = transition_reviews_provider
         self._transition_reviews_setter = transition_reviews_setter
@@ -6815,44 +6915,64 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             return None
 
     def _handle_plot_pick(self, value: float) -> None:
-        self._phase_controls.apply_picked_value(value)
+        started_s = time.perf_counter()
+        try:
+            self._phase_controls.apply_picked_value(value)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="click_commit",
+            )
 
     def _handle_marker_dragged(self, label: str, value: float) -> None:
         self._phase_controls.set_target(label)
         self._phase_controls.apply_picked_value(value)
 
     def _handle_phase_values_edited(self, values: Dict[str, Optional[float]]) -> None:
+        started_s = time.perf_counter()
         record_id = self._current_record_id
-        if not record_id or not callable(self._transition_reviews_setter):
-            return
-        cleaned = _clean_transition_values(values)
-        entry = self._current_entry()
-        payload: Dict[str, Any] = dict(self._review_payload_for_id(record_id))
-        payload["status"] = TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if cleaned else TRANSITION_REVIEW_STATUS_UNREVIEWED
-        payload["included"] = bool(cleaned)
-        payload["manual_values_mA"] = cleaned
-        payload["final_values_mA"] = cleaned
-        if entry is not None:
-            payload.setdefault("auto_values_mA", dict(entry.auto_values))
         try:
-            self._transition_reviews_setter(record_id, payload)
-        except Exception:
-            return
-        if entry is not None:
-            stored_payload = self._review_payload_for_id(record_id)
-            stored_values = self._values_for_entry(entry, stored_payload)
-            self._phase_controls.set_auto_values(entry.auto_values)
-            self._summary_label.setText(self._summary_text(entry, stored_payload, stored_values))
-            if not self._display.update_reviewed_values(stored_values):
-                self._display.set_record(
-                    entry.record,
-                    setpoint=_extract_setpoint(entry.record),
-                    description="Select an annealing run to review.",
-                    reviewed_values=stored_values,
-                )
-            if self._current_item is not None:
-                self._apply_status_to_item(self._current_item, entry, stored_payload, stored_values)
-            self._refresh_counts()
+            if not record_id or not callable(self._transition_reviews_setter):
+                return
+            cleaned = _clean_transition_values(values)
+            entry = self._current_entry()
+            payload: Dict[str, Any] = dict(self._review_payload_for_id(record_id))
+            payload["status"] = TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if cleaned else TRANSITION_REVIEW_STATUS_UNREVIEWED
+            payload["included"] = bool(cleaned)
+            payload["manual_values_mA"] = cleaned
+            payload["final_values_mA"] = cleaned
+            if entry is not None:
+                payload.setdefault("auto_values_mA", dict(entry.auto_values))
+            try:
+                self._transition_reviews_setter(record_id, payload)
+            except Exception:
+                return
+            if entry is not None:
+                stored_payload = self._review_payload_for_id(record_id)
+                stored_values = self._values_for_entry(entry, stored_payload)
+                self._phase_controls.set_auto_values(entry.auto_values)
+                self._summary_label.setText(self._summary_text(entry, stored_payload, stored_values))
+                if not self._display.update_reviewed_values(stored_values):
+                    self._display.set_record(
+                        entry.record,
+                        setpoint=_extract_setpoint(entry.record),
+                        description="Select an annealing run to review.",
+                        reviewed_values=stored_values,
+                    )
+                if self._current_item is not None:
+                    self._apply_status_to_item(self._current_item, entry, stored_payload, stored_values)
+                self._refresh_counts()
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="edit_commit",
+            )
 
     def _store_current_review(
         self,
@@ -6902,41 +7022,71 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._refresh_counts()
 
     def _accept_current_and_next(self) -> None:
-        entry = self._current_entry()
-        if entry is None:
-            return
-        payload = self._review_payload_for_id(entry.record_id)
-        values = self._values_for_entry(entry, payload) or dict(entry.auto_values)
-        if values:
-            self._store_current_review(
-                TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
-                included=True,
-                values=values,
-                refresh_display=False,
+        started_s = time.perf_counter()
+        try:
+            entry = self._current_entry()
+            if entry is None:
+                return
+            payload = self._review_payload_for_id(entry.record_id)
+            values = self._values_for_entry(entry, payload) or dict(entry.auto_values)
+            if values:
+                self._store_current_review(
+                    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO,
+                    included=True,
+                    values=values,
+                    refresh_display=False,
+                )
+            else:
+                self._store_current_review(
+                    TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    included=False,
+                    refresh_display=False,
+                )
+            self._select_next_unreviewed(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="accept",
             )
-        else:
+
+    def _mark_current_no_transition(self) -> None:
+        started_s = time.perf_counter()
+        try:
             self._store_current_review(
                 TRANSITION_REVIEW_STATUS_NO_TRANSITION,
                 included=False,
                 refresh_display=False,
             )
-        self._select_next_unreviewed(fallback_next=True)
-
-    def _mark_current_no_transition(self) -> None:
-        self._store_current_review(
-            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
-            included=False,
-            refresh_display=False,
-        )
-        self._select_next_unreviewed(fallback_next=True)
+            self._select_next_unreviewed(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="no_transition",
+            )
 
     def _exclude_current_graph(self) -> None:
-        self._store_current_review(
-            TRANSITION_REVIEW_STATUS_EXCLUDED,
-            included=False,
-            refresh_display=False,
-        )
-        self._select_next_unreviewed(fallback_next=True)
+        started_s = time.perf_counter()
+        try:
+            self._store_current_review(
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+                included=False,
+                refresh_display=False,
+            )
+            self._select_next_unreviewed(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="exclude",
+            )
 
     def _select_previous_item(self) -> None:
         item = self._current_item
@@ -6947,37 +7097,47 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._tree.setCurrentItem(self._tree.topLevelItem(row - 1))
 
     def _select_next_unreviewed(self, *, fallback_next: bool = False) -> None:
+        started_s = time.perf_counter()
         count = self._tree.topLevelItemCount()
-        if count <= 0:
-            return
-        current_row = self._tree.indexOfTopLevelItem(self._current_item) if self._current_item is not None else -1
-        snapshot: Dict[str, Any] = {}
-        if callable(self._transition_reviews_provider):
-            try:
-                raw_snapshot = self._transition_reviews_provider()
-            except Exception:
-                raw_snapshot = {}
-            if isinstance(raw_snapshot, dict):
-                snapshot = raw_snapshot
-        for offset in range(1, count + 1):
-            row = (current_row + offset) % count
-            item = self._tree.topLevelItem(row)
-            if item is None:
-                continue
-            index = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            try:
-                entry = self._entries[int(index)]
-            except Exception:
-                continue
-            payload = snapshot.get(entry.record_id, {}) if entry.record_id else {}
-            if not isinstance(payload, dict):
-                payload = {}
-            status = str(payload.get("status") or "").strip()
-            if not status or status == TRANSITION_REVIEW_STATUS_UNREVIEWED:
-                self._tree.setCurrentItem(item)
+        try:
+            if count <= 0:
                 return
-        if fallback_next and current_row + 1 < count:
-            self._tree.setCurrentItem(self._tree.topLevelItem(current_row + 1))
+            current_row = self._tree.indexOfTopLevelItem(self._current_item) if self._current_item is not None else -1
+            snapshot: Dict[str, Any] = {}
+            if callable(self._transition_reviews_provider):
+                try:
+                    raw_snapshot = self._transition_reviews_provider()
+                except Exception:
+                    raw_snapshot = {}
+                if isinstance(raw_snapshot, dict):
+                    snapshot = raw_snapshot
+            for offset in range(1, count + 1):
+                row = (current_row + offset) % count
+                item = self._tree.topLevelItem(row)
+                if item is None:
+                    continue
+                index = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                try:
+                    entry = self._entries[int(index)]
+                except Exception:
+                    continue
+                payload = snapshot.get(entry.record_id, {}) if entry.record_id else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                status = str(payload.get("status") or "").strip()
+                if not status or status == TRANSITION_REVIEW_STATUS_UNREVIEWED:
+                    self._tree.setCurrentItem(item)
+                    return
+            if fallback_next and current_row + 1 < count:
+                self._tree.setCurrentItem(self._tree.topLevelItem(current_row + 1))
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="current_annealing",
+                action="select_next",
+            )
 
 
 @dataclass
@@ -8028,36 +8188,47 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 return
 
     def _select_next_unreviewed(self) -> None:
+        started_s = time.perf_counter()
         snapshot = self._review_snapshot()
-        refs: List[Tuple[str, int]] = []
-        for ref in self._visible_refs:
-            entries = self._entries_by_run.get(ref[0], [])
-            if ref[1] < 0 or ref[1] >= len(entries):
-                continue
-            entry = entries[ref[1]]
-            review = snapshot.get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
-            status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
-            if status not in {
-                MINI_DMA_REVIEW_STATUS_ACCEPTED,
-                MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
-                MINI_DMA_REVIEW_STATUS_EXCLUDED,
-            }:
-                refs.append(ref)
-        if not refs:
-            return
-        start_position = 0
-        if self._current_ref in refs:
-            start_position = refs.index(cast(Tuple[str, int], self._current_ref)) + 1
-        for ref in refs[start_position:] + refs[:start_position]:
-            item = self._tree_items.get(ref)
-            if item is not None:
-                self.tree.setCurrentItem(item)
+        try:
+            refs: List[Tuple[str, int]] = []
+            for ref in self._visible_refs:
+                entries = self._entries_by_run.get(ref[0], [])
+                if ref[1] < 0 or ref[1] >= len(entries):
+                    continue
+                entry = entries[ref[1]]
+                review = snapshot.get(_mini_dma_review_record_id(entry.record, entry.target_label), {})
+                status = str(review.get("status") if isinstance(review, Mapping) else "").strip()
+                if status not in {
+                    MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                    MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                    MINI_DMA_REVIEW_STATUS_EXCLUDED,
+                }:
+                    refs.append(ref)
+            if not refs:
                 return
+            start_position = 0
+            if self._current_ref in refs:
+                start_position = refs.index(cast(Tuple[str, int], self._current_ref)) + 1
+            for ref in refs[start_position:] + refs[:start_position]:
+                item = self._tree_items.get(ref)
+                if item is not None:
+                    self.tree.setCurrentItem(item)
+                    return
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="mini_dma",
+                action="select_next",
+            )
 
     def _accept_current_and_next(self) -> None:
         self._set_current_review(MINI_DMA_REVIEW_STATUS_ACCEPTED, move_next=True)
 
     def _set_current_review(self, status: str, *, move_next: bool = False) -> None:
+        started_s = time.perf_counter()
         if self._current_ref is None:
             return
         if not callable(self._review_setter):
@@ -8098,11 +8269,34 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         except Exception:
             self._logger.exception("Failed to store Mini DMA transition review")
             return
-        self._refresh_tree()
+        if self.accepted_only_check.isChecked() or self.rejected_only_check.isChecked():
+            self._refresh_tree()
+        else:
+            self._update_current_tree_status(entry)
+            self._update_review_counts()
         if move_next:
             self._select_next_unreviewed()
         else:
             self._redraw_current()
+        _log_builder_timing(
+            self._logger,
+            "transition_review_action",
+            started_s,
+            dialog="mini_dma",
+            action=status if not move_next else f"{status}_next",
+        )
+
+    def _update_current_tree_status(self, entry: _MiniDmaTransitionReviewEntry) -> None:
+        ref = self._current_ref
+        if ref is None:
+            return
+        item = self._tree_items.get(ref)
+        if item is None:
+            return
+        review = self._review_for_entry(entry)
+        status_label = _mini_dma_display_status(entry, review)
+        item.setText(1, status_label)
+        _apply_transition_status_color(item, status_label)
 
     def _handle_canvas_press(self, event: Any) -> None:
         if self._drag_controller is not None and self._drag_controller.handle_press(event):
@@ -8122,6 +8316,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.transition_controls.apply_picked_value(value)
 
     def _handle_canvas_click(self, event: Any) -> None:
+        started_s = time.perf_counter()
         if event is None:
             return
         button = getattr(event, "button", None)
@@ -8135,9 +8330,19 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             return
         if not math.isfinite(value):
             return
-        self.transition_controls.apply_picked_value(value)
+        try:
+            self.transition_controls.apply_picked_value(value)
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="mini_dma",
+                action="click_commit",
+            )
 
     def _handle_transition_values_edited(self, values: Dict[str, Optional[float]]) -> None:
+        started_s = time.perf_counter()
         if self._current_ref is None or not callable(self._review_setter):
             return
         key, index = self._current_ref
@@ -8182,8 +8387,16 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             _apply_transition_status_color(item, status_label)
         self._update_review_counts()
         self._redraw_current()
+        _log_builder_timing(
+            self._logger,
+            "transition_review_action",
+            started_s,
+            dialog="mini_dma",
+            action="edit_commit",
+        )
 
     def _handle_transition_label_cleared(self, label: str) -> None:
+        started_s = time.perf_counter()
         if self._current_ref is None or not callable(self._review_setter):
             return
         if label not in MINI_DMA_TRANSITION_LABELS:
@@ -8230,6 +8443,13 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             _apply_transition_status_color(item, status_label)
         self._update_review_counts()
         self._redraw_current()
+        _log_builder_timing(
+            self._logger,
+            "transition_review_action",
+            started_s,
+            dialog="mini_dma",
+            action="clear_label",
+        )
 
     def _ensure_run_loaded(self, key: str, *, select_first: bool = False) -> None:
         if key in self._entries_by_run:
@@ -8303,6 +8523,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.empty_label.show()
 
     def _plot_entry(self, entry: _MiniDmaTransitionReviewEntry) -> None:
+        started_s = time.perf_counter()
         self.empty_label.hide()
         self.canvas.show()
         self.toolbar.show()
@@ -8322,6 +8543,12 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.transition_controls.set_auto_values(self._auto_values_for_entry(entry))
         self.transition_controls.set_values(self._manual_values_from_review(review))
         self.canvas.draw_idle()
+        _log_builder_timing(
+            self._logger,
+            "mini_dma_transition_review_render",
+            started_s,
+            target=entry.target_label,
+        )
 
     def _plot_strain(
         self,
@@ -17989,6 +18216,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         counts_text: str = "",
         selected_record_id: Optional[str] = None,
     ) -> None:
+        render_started_s = time.perf_counter()
         current_index = self._tab_widget.currentIndex() if self._tab_widget.count() else 0
         self.header_label.setText(title or "VSM transitions")
         self._update_value_labels(values)
@@ -18019,6 +18247,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             return
         for record in records:
             record_id = _vsm_transition_review_record_id(record)
+            figure_started_s = time.perf_counter()
             figure = _plot_vsm_temperature_scan_figure(
                 record,
                 self._processor,
@@ -18028,6 +18257,12 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             )
             if figure is None:
                 continue
+            _log_builder_timing(
+                self._logger,
+                "vsm_transition_review_build_figure",
+                figure_started_s,
+                record=_record_label_for_display(record),
+            )
             self._draw_transition_markers(
                 figure,
                 self._tab_auto_values.get(record_id, auto_values or {}),
@@ -18086,6 +18321,13 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             self._stack.setCurrentWidget(self._tab_widget)
             self._sync_current_tab_labels()
             self._emit_scan_changed()
+        _log_builder_timing(
+            self._logger,
+            "vsm_transition_review_render",
+            render_started_s,
+            records=len(records),
+            tabs=self._tab_widget.count(),
+        )
 
     def _current_target(self) -> str:
         for label, button in self._target_buttons.items():
@@ -18210,23 +18452,33 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             pass
 
     def _handle_click(self, event: Any) -> None:
-        if event is None:
-            return
-        button = getattr(event, "button", None)
-        if button not in (None, 1):
-            return
-        if event.xdata is None:
-            return
+        started_s = time.perf_counter()
         try:
-            value = float(event.xdata)
-        except Exception:
-            return
-        target = self._current_target()
-        self._update_cursor_label(value)
-        try:
-            self.valuePicked.emit(target, value)
-        except Exception:
-            pass
+            if event is None:
+                return
+            button = getattr(event, "button", None)
+            if button not in (None, 1):
+                return
+            if event.xdata is None:
+                return
+            try:
+                value = float(event.xdata)
+            except Exception:
+                return
+            target = self._current_target()
+            self._update_cursor_label(value)
+            try:
+                self.valuePicked.emit(target, value)
+            except Exception:
+                pass
+        finally:
+            _log_builder_timing(
+                self._logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="click_commit",
+            )
 
     def _update_cursor_label(self, value: Optional[float]) -> None:
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -18353,6 +18605,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             )
 
     def update_current_reviewed_markers(self) -> None:
+        started_s = time.perf_counter()
         record_id = self.current_record_id()
         if not record_id:
             return
@@ -18386,6 +18639,12 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             canvas.draw_idle()
         except Exception:
             pass
+        _log_builder_timing(
+            self._logger,
+            "vsm_transition_review_marker_update",
+            started_s,
+            record=record_id,
+        )
 
 
 class TransitionTempsSection(QtWidgets.QWidget):
@@ -18854,6 +19113,12 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 pass
         cached = cache.get(record_id)
         if cached is not None:
+            _log_builder_cache_event(
+                self.logger,
+                "vsm_transition_auto_values",
+                hit=True,
+                record=record_id,
+            )
             return dict(cached)
         processor = _get_vsm_temp_processor(self.logger)
         if processor is None:
@@ -18867,6 +19132,12 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return {}
         cleaned = _clean_vsm_transition_values(estimated)
         cache[record_id] = dict(cleaned)
+        _log_builder_cache_event(
+            self.logger,
+            "vsm_transition_auto_values",
+            hit=False,
+            record=record_id,
+        )
         return cleaned
 
     def _refresh_group_table_row(self, group_key: str) -> None:
@@ -19375,20 +19646,30 @@ class TransitionTempsSection(QtWidgets.QWidget):
         return None
 
     def _apply_picked_value(self, label: str, value: float) -> None:
+        started_s = time.perf_counter()
         current = self._current_preview_record()
-        if current is None:
-            return
-        group_key, record = current
-        payload = self._review_payload_for_record(record)
-        manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
-        manual_values[str(label)] = float(value)
-        self._store_review_for_record(
-            group_key,
-            record,
-            TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
-            values=manual_values,
-            included=True,
-        )
+        try:
+            if current is None:
+                return
+            group_key, record = current
+            payload = self._review_payload_for_record(record)
+            manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+            manual_values[str(label)] = float(value)
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                values=manual_values,
+                included=True,
+            )
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="click_commit_store",
+            )
 
     def _clear_picked_value(self, label: str) -> None:
         current = self._current_preview_record()
@@ -19445,6 +19726,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         values: Optional[Mapping[str, Any]] = None,
         included: bool,
     ) -> None:
+        started_s = time.perf_counter()
         record_id = _vsm_transition_review_record_id(record)
         auto_values = self._auto_values_for_record(record)
         cleaned = _clean_vsm_transition_values(values or {})
@@ -19485,58 +19767,96 @@ class TransitionTempsSection(QtWidgets.QWidget):
             except Exception:
                 pass
         self._sync_preview_status()
+        _log_builder_timing(
+            self.logger,
+            "transition_review_store",
+            started_s,
+            dialog="vsm_temperature",
+            status=status,
+            record=record_id,
+        )
 
     def _accept_current_scan_and_next(self) -> None:
-        current = self._current_preview_record()
-        if current is None:
-            return
-        group_key, record = current
-        payload = self._review_payload_for_record(record)
-        manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
-        if manual_values:
-            self._store_review_for_record(
-                group_key,
-                record,
-                TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
-                values=manual_values,
-                included=True,
+        started_s = time.perf_counter()
+        try:
+            current = self._current_preview_record()
+            if current is None:
+                return
+            group_key, record = current
+            payload = self._review_payload_for_record(record)
+            manual_values = _clean_vsm_transition_values(payload.get("manual_values_C"))
+            if manual_values:
+                self._store_review_for_record(
+                    group_key,
+                    record,
+                    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                    values=manual_values,
+                    included=True,
+                )
+            else:
+                auto_values = self._auto_values_for_record(record)
+                self._store_review_for_record(
+                    group_key,
+                    record,
+                    TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO if auto_values else TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    values=auto_values,
+                    included=bool(auto_values),
+                )
+            self._select_next_unreviewed_scan(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="accept",
             )
-        else:
-            auto_values = self._auto_values_for_record(record)
-            self._store_review_for_record(
-                group_key,
-                record,
-                TRANSITION_REVIEW_STATUS_ACCEPTED_AUTO if auto_values else TRANSITION_REVIEW_STATUS_NO_TRANSITION,
-                values=auto_values,
-                included=bool(auto_values),
-            )
-        self._select_next_unreviewed_scan(fallback_next=True)
 
     def _mark_current_scan_no_transition(self) -> None:
-        current = self._current_preview_record()
-        if current is None:
-            return
-        group_key, record = current
-        self._store_review_for_record(
-            group_key,
-            record,
-            TRANSITION_REVIEW_STATUS_NO_TRANSITION,
-            included=False,
-        )
-        self._select_next_unreviewed_scan(fallback_next=True)
+        started_s = time.perf_counter()
+        try:
+            current = self._current_preview_record()
+            if current is None:
+                return
+            group_key, record = current
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                included=False,
+            )
+            self._select_next_unreviewed_scan(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="no_transition",
+            )
 
     def _exclude_current_scan(self) -> None:
-        current = self._current_preview_record()
-        if current is None:
-            return
-        group_key, record = current
-        self._store_review_for_record(
-            group_key,
-            record,
-            TRANSITION_REVIEW_STATUS_EXCLUDED,
-            included=False,
-        )
-        self._select_next_unreviewed_scan(fallback_next=True)
+        started_s = time.perf_counter()
+        try:
+            current = self._current_preview_record()
+            if current is None:
+                return
+            group_key, record = current
+            self._store_review_for_record(
+                group_key,
+                record,
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+                included=False,
+            )
+            self._select_next_unreviewed_scan(fallback_next=True)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="exclude",
+            )
 
     def _review_refs(self) -> List[Tuple[str, str]]:
         refs: List[Tuple[str, str]] = []
@@ -19569,42 +19889,52 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self._select_scan_ref(group_key, record_id)
 
     def _select_next_unreviewed_scan(self, *, fallback_next: bool = False) -> None:
+        started_s = time.perf_counter()
         refs = self._review_refs()
-        if not refs:
-            return
-        current = self._current_preview_record()
-        current_ref = (
-            (current[0], _vsm_transition_review_record_id(current[1]))
-            if current is not None
-            else refs[0]
-        )
         try:
-            start = refs.index(current_ref) + 1
-        except ValueError:
-            start = 0
-        ordered = refs[start:] + refs[:start]
-        for group_key, record_id in ordered:
-            record = next(
-                (
-                    candidate
-                    for candidate in self._record_groups.get(group_key, [])
-                    if _vsm_transition_review_record_id(candidate) == record_id
-                ),
-                None,
-            )
-            if record is None:
-                continue
-            payload = self._review_payload_for_record(record)
-            if not _vsm_transition_review_is_final(payload.get("status")):
-                self._select_scan_ref(group_key, record_id)
+            if not refs:
                 return
-        if fallback_next and refs:
+            current = self._current_preview_record()
+            current_ref = (
+                (current[0], _vsm_transition_review_record_id(current[1]))
+                if current is not None
+                else refs[0]
+            )
             try:
-                index = refs.index(current_ref)
+                start = refs.index(current_ref) + 1
             except ValueError:
-                index = -1
-            group_key, record_id = refs[(index + 1) % len(refs)]
-            self._select_scan_ref(group_key, record_id)
+                start = 0
+            ordered = refs[start:] + refs[:start]
+            for group_key, record_id in ordered:
+                record = next(
+                    (
+                        candidate
+                        for candidate in self._record_groups.get(group_key, [])
+                        if _vsm_transition_review_record_id(candidate) == record_id
+                    ),
+                    None,
+                )
+                if record is None:
+                    continue
+                payload = self._review_payload_for_record(record)
+                if not _vsm_transition_review_is_final(payload.get("status")):
+                    self._select_scan_ref(group_key, record_id)
+                    return
+            if fallback_next and refs:
+                try:
+                    index = refs.index(current_ref)
+                except ValueError:
+                    index = -1
+                group_key, record_id = refs[(index + 1) % len(refs)]
+                self._select_scan_ref(group_key, record_id)
+        finally:
+            _log_builder_timing(
+                self.logger,
+                "transition_review_action",
+                started_s,
+                dialog="vsm_temperature",
+                action="select_next",
+            )
 
     def _sync_preview_status(self) -> None:
         panel = self._preview_panel
@@ -34322,6 +34652,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.logger = logging.getLogger(LOGGER_NAME)
+        self._ui_heartbeat: _BuilderUiHeartbeat | None = None
+        if _builder_ui_telemetry_enabled():
+            self._ui_heartbeat = _BuilderUiHeartbeat(self.logger, self)
+            self._ui_heartbeat.start()
         self._base_title = "Microwire Data Builder"
         self.setWindowTitle(self._base_title)
         self.resize(1100, 720)

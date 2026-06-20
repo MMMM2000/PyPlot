@@ -2071,6 +2071,54 @@ def test_mini_dma_transition_review_actions_persist_target_status() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_mini_dma_transition_review_status_update_skips_tree_rebuild_without_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_review(record_id: str, payload: dict[str, object]) -> None:
+        stored[record_id] = dict(payload)
+
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+        review_provider=lambda: stored,
+        review_setter=_set_review,
+    )
+    try:
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+            [_sample_mini_dma_record()],
+            logging.getLogger("test"),
+        )
+        dialog._handle_load_finished(  # noqa: SLF001
+            builder_ui._MiniDmaTransitionReviewLoadResult(run_key, entries)  # noqa: SLF001
+        )
+        first_ref = dialog._visible_refs[0]  # noqa: SLF001
+        dialog.tree.setCurrentItem(dialog._tree_items[first_ref])  # noqa: SLF001
+        refresh_calls = 0
+
+        def _count_refresh_tree() -> None:
+            nonlocal refresh_calls
+            refresh_calls += 1
+
+        monkeypatch.setattr(dialog, "_refresh_tree", _count_refresh_tree)
+
+        dialog._set_current_review(  # noqa: SLF001
+            builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            move_next=False,
+        )
+
+        assert refresh_calls == 0
+        assert dialog._tree_items[first_ref].text(1) == "No transition"  # noqa: SLF001
+        assert "Done 1" in dialog.status_label.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_mini_dma_transition_review_click_places_manual_target_values() -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
@@ -8277,6 +8325,19 @@ def test_annealing_transition_review_common_actions_are_subsecond() -> None:
     ):
         median_ms = float(results["actions"][action]["median_ms"])
         assert median_ms < 1000.0, f"{action} median was {median_ms:.1f} ms"
+
+
+def test_builder_review_smoothness_benchmark_runs_headless() -> None:
+    _ensure_qapp()
+    from scripts.benchmark_builder_review_smoothness import run_benchmark
+
+    results = run_benchmark(iterations=1, record_count=6)
+
+    assert "current_annealing" in results
+    assert "mini_dma" in results
+    mini_accept = results["mini_dma"]["actions"]["accept_next"]
+    assert float(mini_accept["median_ms"]) < 1000.0
+    assert "event_loop_max_lag_ms" in mini_accept
 
 
 def test_annealing_transition_review_no_transition_detail_is_not_excluded() -> None:
