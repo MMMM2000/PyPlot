@@ -111,6 +111,7 @@
 
 ## Delegation And Subagents
 - The user gives standing project-level permission to use subagents whenever useful.
+- Default worker and subagent reasoning effort to Medium or lower. If higher reasoning effort seems necessary or materially useful for a worker, ask the user first and explain why before using it.
 
 ## Changelog
 - Keep `CHANGELOG.md` as the canonical release history on `main`.
