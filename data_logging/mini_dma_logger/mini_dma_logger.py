@@ -22599,12 +22599,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_sweep_override_values_from_controls(self) -> dict[str, float | bool]:
         pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
+        first_overheating_use_normal = bool(self.check_current_sweep_first_overheating_use_normal_end.isChecked())
+        current_end_mA = self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value()))
+        first_overheating_current_end_mA = (
+            current_end_mA
+            if first_overheating_use_normal
+            else self._recipe_current_setpoint_mA(float(self.spin_current_sweep_first_overheating_end_mA.value()))
+        )
         return {
             "target_start": float(self.spin_current_sweep_target_start.value()),
             "target_end": float(self.spin_current_sweep_target_end.value()),
             "target_step": max(1e-9, abs(float(self.spin_current_sweep_target_step.value()))),
             "current_start_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_start_mA.value())),
-            "current_end_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value())),
+            "current_end_mA": current_end_mA,
+            "first_overheating": bool(self.check_current_sweep_first_overheating.isChecked()),
+            "first_overheating_use_normal_current_end": first_overheating_use_normal,
+            "first_overheating_current_end_mA": first_overheating_current_end_mA,
             "current_ramp_rate_mA_s": max(1e-9, abs(float(self.spin_current_sweep_step_mA.value()))),
             "target_ramp_rate_value_s": max(1e-9, abs(float(self.spin_current_sweep_target_ramp_rate.value()))),
             "return_target": bool(self.check_current_sweep_return_target.isChecked()),
@@ -22618,19 +22628,24 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _current_sweep_visible_runtime_values_from_controls(self) -> dict[str, float | bool]:
+        values = self._current_sweep_override_values_from_controls()
         return {
-            "target_start": float(self.spin_current_sweep_target_start.value()),
-            "target_end": float(self.spin_current_sweep_target_end.value()),
-            "target_step": max(1e-9, abs(float(self.spin_current_sweep_target_step.value()))),
-            "target_ramp_rate_value_s": max(1e-9, abs(float(self.spin_current_sweep_target_ramp_rate.value()))),
-            "return_target": bool(self.check_current_sweep_return_target.isChecked()),
-            "current_start_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_start_mA.value())),
-            "current_end_mA": self._recipe_current_setpoint_mA(float(self.spin_current_sweep_end_mA.value())),
-            "current_ramp_rate_mA_s": max(1e-9, abs(float(self.spin_current_sweep_step_mA.value()))),
-            "current_hold_enabled": bool(self.check_current_sweep_hold_on_error.isChecked()),
-            "current_hold_pause_tolerance_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
-            "current_hold_resume_tolerance_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
-            "current_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
+            key: values[key]
+            for key in (
+                "target_start",
+                "target_end",
+                "target_step",
+                "target_ramp_rate_value_s",
+                "return_target",
+                "current_start_mA",
+                "current_end_mA",
+                "first_overheating_current_end_mA",
+                "current_ramp_rate_mA_s",
+                "current_hold_enabled",
+                "current_hold_pause_tolerance_factor",
+                "current_hold_resume_tolerance_factor",
+                "current_hold_resume_stable_s",
+            )
         }
 
     def _current_active_recipe_step_index(self) -> int:
@@ -22682,6 +22697,57 @@ class MainWindow(QtWidgets.QMainWindow):
         if str(self._automation_name) in CURRENT_SWEEP_BASIS_BY_MODE:
             return CURRENT_SWEEP_BASIS_BY_MODE[str(self._automation_name)]
         return self._current_sweep_basis()
+
+    @staticmethod
+    def _is_first_overheating_step(step: AutomationStep) -> bool:
+        return step.note == "first_overheating"
+
+    @staticmethod
+    def _is_first_overheating_up_sweep(step: AutomationStep) -> bool:
+        if step.action != "sweep_current" or step.note != "first_overheating":
+            return False
+        if step.current_start_mA is None or step.current_end_mA is None:
+            return False
+        return float(step.current_end_mA) >= float(step.current_start_mA)
+
+    def _first_overheating_up_sweep_index(self) -> int | None:
+        for index, step in enumerate(self._automation_steps):
+            if self._is_first_overheating_up_sweep(step):
+                return index
+        return None
+
+    def _first_overheating_update_rejection(
+        self,
+        values: Mapping[str, float | bool],
+        active_index: int,
+    ) -> str | None:
+        first_index = self._first_overheating_up_sweep_index()
+        if first_index is None:
+            return None
+        first_step = self._automation_steps[first_index]
+        if first_step.current_end_mA is None:
+            return None
+        old_end = self._recipe_current_setpoint_mA(float(first_step.current_end_mA))
+        new_end = self._recipe_current_setpoint_mA(float(values["first_overheating_current_end_mA"]))
+        if math.isclose(old_end, new_end, rel_tol=1e-9, abs_tol=1e-9):
+            return None
+        if active_index > first_index:
+            return (
+                "First-overheating max current can only be changed before the first-overheating "
+                "current ramp reaches its configured maximum."
+            )
+        if active_index == first_index:
+            active_setpoint = self._active_current_sweep_last_setpoint_mA
+            if active_setpoint is None:
+                active_setpoint = old_end if self._automation_index > first_index else first_step.current_start_mA
+            active_setpoint = self._recipe_current_setpoint_mA(float(active_setpoint or 0.0))
+            if new_end < active_setpoint - 1e-9:
+                return (
+                    "First-overheating max current was not lowered because the active setpoint "
+                    f"{_format_compact_unit(active_setpoint, 'mA')} is already above "
+                    f"{_format_compact_unit(new_end, 'mA')}."
+                )
+        return None
 
     @staticmethod
     def _target_values_close(left: float, right: float) -> bool:
@@ -22889,12 +22955,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if active_sweep_index is not None and 0 <= active_sweep_index < len(self._automation_steps):
             active_index = active_sweep_index
         basis = self._current_sweep_runtime_basis(active_index)
+        first_overheating_rejection = self._first_overheating_update_rejection(update_values, active_index)
         active_update, active_step_message = self._active_current_sweep_step_update(update_values, active_index)
-        replacement_tail = self._build_runtime_current_sweep_tail(
-            update_values,
-            basis=basis,
-            active_index=active_index,
-        )
+        active_step = self._automation_steps[active_index] if 0 <= active_index < len(self._automation_steps) else None
+        replacement_tail = None
+        if not (
+            active_step is not None
+            and self._is_first_overheating_step(active_step)
+            and active_step.action != "sweep_current"
+        ):
+            replacement_tail = self._build_runtime_current_sweep_tail(
+                update_values,
+                basis=basis,
+                active_index=active_index,
+            )
         tail_replanned = replacement_tail is not None
         if replacement_tail is not None:
             old_tail = self._automation_steps[active_index + 1 :]
@@ -22936,11 +23010,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 elif step.action == "sweep_current":
                     old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
                     old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
+                    current_end_key = (
+                        "first_overheating_current_end_mA"
+                        if self._is_first_overheating_step(step)
+                        else "current_end_mA"
+                    )
                     if old_end >= old_start:
                         new_start = float(update_values["current_start_mA"])
-                        new_end = float(update_values["current_end_mA"])
+                        new_end = float(update_values[current_end_key])
                     else:
-                        new_start = float(update_values["current_end_mA"])
+                        new_start = float(update_values[current_end_key])
                         new_end = float(update_values["current_start_mA"])
                     new_step = replace(
                         step,
@@ -22988,6 +23067,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "tail_replanned": tail_replanned,
             "updated_steps": updated_steps,
             "values": update_values,
+            "rejected_update_message": first_overheating_rejection,
         }
 
     def _active_current_sweep_step_update(
@@ -23010,8 +23090,13 @@ class MainWindow(QtWidgets.QMainWindow):
         old_start = self._recipe_current_setpoint_mA(float(step.current_start_mA))
         old_end = self._recipe_current_setpoint_mA(float(step.current_end_mA))
         old_direction = 1.0 if old_end >= old_start else -1.0
+        current_end_key = (
+            "first_overheating_current_end_mA"
+            if self._is_first_overheating_step(step)
+            else "current_end_mA"
+        )
         new_end = (
-            self._recipe_current_setpoint_mA(float(values["current_end_mA"]))
+            self._recipe_current_setpoint_mA(float(values[current_end_key]))
             if old_direction >= 0.0
             else self._recipe_current_setpoint_mA(float(values["current_start_mA"]))
         )
@@ -23115,8 +23200,35 @@ class MainWindow(QtWidgets.QMainWindow):
         changed_steps = list(preview["changed_steps"])
         tail_replanned = bool(preview["tail_replanned"])
         updated_steps = list(preview["updated_steps"])
+        rejected_update_message = str(preview.get("rejected_update_message") or "")
 
         if not changed_steps:
+            if rejected_update_message:
+                payload: dict[str, object] = {
+                    "timestamp_utc": _utc_timestamp(),
+                    "applied_after_step_index": active_index,
+                    "changed_step_count": 0,
+                    "active_step_updated": False,
+                    "active_step_message": rejected_update_message,
+                    "tail_replanned": False,
+                    "visible_values": values,
+                    "changes": [],
+                    "truncated": False,
+                    "result": "rejected",
+                }
+                self._current_sweep_recipe_overrides.append(payload)
+                self._write_control_trace(
+                    decision="recipe_update",
+                    result="rejected",
+                    reason=json.dumps(payload, separators=(",", ":"), default=str),
+                    task_text="Rejected first-overheating max-current update",
+                )
+                self._write_session_metadata()
+                self._log(rejected_update_message)
+                if show_message:
+                    QtWidgets.QMessageBox.warning(self, APP_NAME, rejected_update_message)
+                self._refresh_current_sweep_pending_update_ui()
+                return False
             self._current_sweep_runtime_applied_values = self._current_sweep_visible_runtime_values_from_controls()
             self._refresh_current_sweep_pending_update_ui()
             if show_message:
@@ -23129,6 +23241,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         old_active_step = self._automation_steps[active_index] if 0 <= active_index < len(self._automation_steps) else None
         new_active_step = updated_steps[active_index] if 0 <= active_index < len(updated_steps) else None
+        old_limit_checked = self._current_sweep_channel_limit_checked
+        if self._supply_controller is not None and not self._ensure_current_sweep_channel_limit(log=True):
+            self._current_sweep_channel_limit_checked = old_limit_checked
+            self._refresh_current_sweep_pending_update_ui()
+            if show_message:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    APP_NAME,
+                    "The current-sweep channel limit could not be updated, so the runtime recipe update was not applied.",
+                )
+            return False
         self._automation_steps = updated_steps
         if active_step_updated and old_active_step is not None and new_active_step is not None:
             self._apply_active_current_sweep_step_update_state(old_active_step, new_active_step, active_index)
@@ -23161,6 +23284,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "changes": changed_steps[:25],
             "truncated": len(changed_steps) > 25,
         }
+        if rejected_update_message:
+            payload["rejected_update_message"] = rejected_update_message
         self._current_sweep_recipe_overrides.append(payload)
         reason = json.dumps(payload, separators=(",", ":"), default=str)
         trace_task_text = (
@@ -23194,6 +23319,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Updated {future_change_count} future current-sweep step(s). "
                 f"The active step was left unchanged: {active_step_message}."
             )
+        if rejected_update_message:
+            log_message += f" {rejected_update_message}"
+            dialog_message += f" {rejected_update_message}"
         self._log(
             log_message
         )
@@ -23391,6 +23519,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_current_sweep_return_target,
             self.spin_current_sweep_start_mA,
             self.spin_current_sweep_end_mA,
+            self.spin_current_sweep_first_overheating_end_mA,
             self.spin_current_sweep_step_mA,
             self.check_current_sweep_hold_on_error,
             self.spin_current_sweep_hold_pause_factor,
@@ -23407,6 +23536,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_current_sweep_return_target: ("return_target",),
             self.spin_current_sweep_start_mA: ("current_start_mA",),
             self.spin_current_sweep_end_mA: ("current_end_mA",),
+            self.spin_current_sweep_first_overheating_end_mA: ("first_overheating_current_end_mA",),
             self.spin_current_sweep_step_mA: ("current_ramp_rate_mA_s",),
             self.check_current_sweep_hold_on_error: ("current_hold_enabled",),
             self.spin_current_sweep_hold_pause_factor: ("current_hold_pause_tolerance_factor",),
@@ -23480,7 +23610,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_current_sweep_first_overheating,
             self.spin_current_sweep_first_overheating_target_mpa,
             self.check_current_sweep_first_overheating_use_normal_end,
-            self.spin_current_sweep_first_overheating_end_mA,
             self.spin_current_sweep_target_speed_mm_s,
             self.spin_current_sweep_max_correction_strain_pct,
             self.spin_current_sweep_correction_rate_pct_s,
