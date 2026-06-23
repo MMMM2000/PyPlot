@@ -60,10 +60,17 @@ def test_realistic_current_holds_keep_current_fixed_while_motor_strain_changes()
         max(sample.current_ma for sample in group) - min(sample.current_ma for sample in group) <= 1e-9
         for group in hold_groups
     )
-    assert max(
+    max_hold_strain_span = max(
         max(sample.strain_pct for sample in group) - min(sample.strain_pct for sample in group)
         for group in hold_groups
-    ) >= 1.0
+    )
+    adjacent_strain_steps = [
+        abs(current.strain_pct - previous.strain_pct)
+        for previous, current in zip(trace.samples, trace.samples[1:])
+    ]
+    assert 0.02 <= max_hold_strain_span <= 0.35
+    assert max(adjacent_strain_steps) <= 0.08
+    assert trace.summary()["max_total_travel_mm"] <= 10.0
     for sample in trace.samples:
         expected_strain = (
             trace.config.reported_strain_offset_pct

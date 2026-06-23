@@ -542,22 +542,22 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             base,
             name="realistic_first_overheating",
             description=(
-                "Good 12/2-style 50 MPa measurement with stress ramp, transformation-driven "
-                "stress fluctuations, current holds, high strain, and reverse unwind."
+                "Good 12/2-style 50 MPa measurement with stress ramp, smooth transformation-driven "
+                "stress/free-length changes, current holds, high strain, and reverse unwind."
             ),
             wire=replace(
                 base.wire,
                 length_mm=33.623,
                 diameter_mm=0.0191,
-                initial_motor_mm=50.0 / 14.8,
-                elastic_stiffness_mpa_per_mm=14.8,
+                initial_motor_mm=50.0 / 500.0,
+                elastic_stiffness_mpa_per_mm=500.0,
                 transformation_onset_ma=24.0,
-                transformation_end_ma=55.0,
-                transformation_contraction_mm=3.0,
+                transformation_end_ma=60.0,
+                transformation_contraction_mm=3.3,
                 transformation_hysteresis_ma=10.0,
-                fluctuation_mpa=30.0,
+                fluctuation_mpa=0.0,
                 fluctuation_cycles=5.0,
-                noise_mpa=2.5,
+                noise_mpa=1.2,
             ),
             controller=replace(
                 base.controller,
@@ -565,7 +565,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 tolerance_mpa=2.5,
                 min_recovery_mpa=5.0,
                 motor_step_mm=0.001,
-                max_correction_mm=0.3,
+                max_correction_mm=0.02,
                 safety_min_stress_mpa=None,
                 stale_feedback_s=1.0,
             ),
@@ -574,8 +574,8 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             endpoint_hold_timeout_s=360.0,
             max_ticks=7000,
             zero_compression_stress=True,
-            reported_strain_motor_scale=0.617,
-            reported_strain_offset_pct=-8.0,
+            reported_strain_motor_scale=1.0,
+            reported_strain_offset_pct=0.2025869184784225,
             seed=184,
         ),
         "noisy_centered_first_overheating": replace(
@@ -822,10 +822,14 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
     axes[1].set_xlabel("Current (mA)")
     axes[1].set_ylabel("Strain (%)")
     axes[1].legend(fontsize=8, loc="best")
-    axes[2].plot(elapsed, current, color="#2563eb", lw=1.0, label="current")
-    axes[2].plot(elapsed, motor, color="#059669", lw=1.0, label="motor")
-    axes[2].set_ylabel("mA / mm")
-    axes[2].legend(fontsize=8, loc="best")
+    current_line = axes[2].plot(elapsed, current, color="#2563eb", lw=1.0, label="current")
+    axes[2].set_ylabel("Current (mA)", color="#2563eb")
+    axes[2].tick_params(axis="y", labelcolor="#2563eb")
+    motor_axis = axes[2].twinx()
+    motor_line = motor_axis.plot(elapsed, motor, color="#059669", lw=1.0, label="motor")
+    motor_axis.set_ylabel("Motor position (mm)", color="#059669")
+    motor_axis.tick_params(axis="y", labelcolor="#059669")
+    axes[2].legend(current_line + motor_line, ["current", "motor"], fontsize=8, loc="best")
     axes[3].bar(event_t, corrections, width=max(0.02, trace.config.sweep.sample_hz ** -1 * 0.6), color="#7c3aed")
     axes[3].set_ylabel("correction mm")
     axes[3].set_xlabel("Elapsed (s)")
