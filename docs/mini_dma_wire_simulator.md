@@ -53,7 +53,7 @@ Controller work can consume the CSV files or import `run_virtual_wire_scenario()
 
 ## Full-run software validation
 
-`data_logging.mini_dma_logger.full_run_simulator` builds on the same virtual wire model to exercise a complete first-overheating style sequence: target acquisition, current rise, current endpoint recovery, optional reverse/current unwind, bounded mechanical corrections, and slack/no-response stops. It is still software-only and deterministic. It does not open Qt, serial ports, Tic drivers, power supplies, or the Mini DMA logger hardware path.
+`data_logging.mini_dma_logger.full_run_simulator` builds on the same virtual wire model to exercise a complete first-overheating style sequence: target acquisition, current rise, current endpoint recovery, optional reverse/current unwind, bounded mechanical corrections, delayed scale feedback, and slack take-up. It is still software-only and deterministic. It does not open Qt, serial ports, Tic drivers, power supplies, or the Mini DMA logger hardware path.
 
 Run the full scenario matrix:
 
@@ -79,7 +79,7 @@ Full-run scenarios currently cover:
 - `noisy_centered_first_overheating`: high raw noise centered near target, expected to complete without unnecessary chasing.
 - `transformation_recovery`: current rise contraction forces current-hold recovery before endpoint completion.
 - `reverse_unwind_recovery`: reverse/current unwind must recover the processed center before completing.
-- `slack_after_unwind_stop`: slack/no-response stops instead of escalating displacement.
+- `slack_after_unwind_takeup`: near-zero-load slack recovery keeps taking up tension until the processed center recovers.
 - `thin_wire_delayed_feedback`: 8.3 um wire and low sample cadence remain bounded.
 
-Each full-run output folder contains `measurement.csv`, `control_trace.csv`, `summary.json`, `config.json`, `report.md`, and `full_run.png`. The plot shows processed stress center versus target, the raw stress envelope, current, motor displacement, and controller decisions. The `summary.json` records invariants such as no load/stress cruise, bounded correction size, bounded travel, endpoint waits only while unrecovered, endpoint completion only after recovery, and safe slack/no-response stopping.
+Each full-run output folder contains `measurement.csv`, `control_trace.csv`, `summary.json`, `config.json`, `report.md`, and `full_run.png`. The plot shows processed stress center versus target, the raw stress envelope, current, motor displacement, and controller decisions. The default full-run harness applies `scale_latency_s = 0.2`, so controller decisions use delayed feedback rather than the just-created physical sample. The `summary.json` records invariants such as no load/stress cruise, bounded single-correction size, no accumulated correction-travel stop, endpoint waits only while unrecovered, endpoint completion only after recovery, and delayed-feedback application.

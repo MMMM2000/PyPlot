@@ -35,14 +35,17 @@ def test_full_run_endpoint_waits_only_until_processed_recovered() -> None:
     assert trace.invariants["endpoint_completion_recovered"] is True
 
 
-def test_full_run_slack_no_response_stops_safely() -> None:
-    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("slack_after_unwind_stop"))
+def test_full_run_slack_after_unwind_keeps_taking_up_tension() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("slack_after_unwind_takeup"))
     summary = trace.summary()
 
-    assert trace.stop_reason in {"slack_no_response", "travel_limit"}
+    assert trace.stop_reason == "completed"
+    assert abs(summary["final_error_mpa"]) <= trace.config.controller.min_recovery_mpa
     assert summary["max_abs_correction_mm"] <= trace.config.controller.max_correction_mm
-    assert summary["max_total_travel_mm"] <= trace.config.max_total_travel_mm + 1e-12
-    assert trace.invariants["stops_on_slack_no_response"] is True
+    assert summary["max_total_travel_mm"] > 0.0
+    assert trace.invariants["does_not_stop_for_slack"] is True
+    assert trace.invariants["no_accumulated_correction_travel_stop"] is True
+    assert all(event.feedback_age_s >= trace.config.scale_latency_s for event in trace.events)
 
 
 def test_full_run_outputs_are_replay_shaped(tmp_path: Path) -> None:

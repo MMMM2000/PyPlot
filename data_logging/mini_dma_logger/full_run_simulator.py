@@ -2,7 +2,7 @@
 
 This harness is intentionally deterministic and hardware-free. It models a
 first-overheating style run with target acquisition, current rise, endpoint
-recovery, optional reverse unwind, mechanical corrections, and slack stops.
+recovery, optional reverse unwind, mechanical corrections, and slack take-up.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ FULL_RUN_SCENARIOS = (
     "noisy_centered_first_overheating",
     "transformation_recovery",
     "reverse_unwind_recovery",
-    "slack_after_unwind_stop",
+    "slack_after_unwind_takeup",
     "thin_wire_delayed_feedback",
 )
 
@@ -53,10 +53,9 @@ class FullRunConfig:
     reverse_current: bool = True
     target_ramp_timeout_s: float = 90.0
     endpoint_hold_timeout_s: float = 90.0
-    max_total_travel_mm: float = 0.5
     max_ticks: int = 5000
-    slack_response_floor_mpa: float = 0.2
-    slack_no_response_limit: int = 5
+    scale_latency_s: float = 0.2
+    zero_compression_stress: bool = False
     seed: int = 0
 
     def validated(self) -> "FullRunConfig":
@@ -67,10 +66,10 @@ class FullRunConfig:
             raise ValueError("target_ramp_timeout_s must be positive")
         if self.endpoint_hold_timeout_s <= 0.0:
             raise ValueError("endpoint_hold_timeout_s must be positive")
-        if self.max_total_travel_mm <= 0.0:
-            raise ValueError("max_total_travel_mm must be positive")
         if self.max_ticks <= 0:
             raise ValueError("max_ticks must be positive")
+        if self.scale_latency_s < 0.0:
+            raise ValueError("scale_latency_s must be non-negative")
         return self
 
 
@@ -93,6 +92,7 @@ class FullRunEvent:
     reason: str
     endpoint_recovered: bool
     fresh: bool
+    feedback_age_s: float
     total_travel_mm: float
     cruise_allowed: bool = False
 
@@ -118,6 +118,7 @@ class FullRunEvent:
             "result_detail": self.reason,
             "endpoint_recovered": str(bool(self.endpoint_recovered)).lower(),
             "processed_fresh": str(bool(self.fresh)).lower(),
+            "feedback_age_s": f"{self.feedback_age_s:.6f}",
             "total_travel_mm": f"{self.total_travel_mm:.9f}",
             "cruise_allowed": str(bool(self.cruise_allowed)).lower(),
         }
@@ -167,12 +168,29 @@ class _FullRunState:
         self.total_travel_mm = 0.0
         self.samples: list[MeasurementSample] = []
         self.events: list[FullRunEvent] = []
-        self.last_response_center: float | None = None
-        self.no_response_count = 0
+        self.previous_error_sign = 0
 
     @property
     def dt_s(self) -> float:
         return 1.0 / self.config.sweep.sample_hz
+
+    def feedback_samples(self) -> list[MeasurementSample]:
+        if self.config.scale_latency_s <= 0.0:
+            return list(self.samples)
+        latency_samples = max(1, int(math.ceil(self.config.scale_latency_s / self.dt_s - 1e-12)))
+        available_count = len(self.samples) - latency_samples
+        if available_count <= 0:
+            return []
+        return self.samples[:available_count]
+
+    def feedback_age_s(self, feedback_samples: list[MeasurementSample] | None = None) -> float:
+        feedback = self.feedback_samples() if feedback_samples is None else feedback_samples
+        if not feedback:
+            return math.inf
+        return max(0.0, self.elapsed_s - feedback[-1].elapsed_s)
+
+    def controller_for_decision(self) -> RobustControllerConfig:
+        return replace(self.config.controller, previous_error_sign=self.previous_error_sign)
 
     def sample(self, phase: str, *, rising: bool) -> MeasurementSample:
         wire = self.config.wire
@@ -180,6 +198,8 @@ class _FullRunState:
         free_shift_mm = wire.initial_free_length_shift_mm + fraction * wire.transformation_contraction_mm
         mechanical_mm = self.motor_mm + free_shift_mm
         base_stress = mechanical_mm * wire.elastic_stiffness_mpa_per_mm
+        if self.config.zero_compression_stress and base_stress < 0.0:
+            base_stress = 0.0
         fluctuation = 0.0
         if 0.0 < fraction < 1.0 and wire.fluctuation_mpa:
             fluctuation = wire.fluctuation_mpa * math.sin(2.0 * math.pi * wire.fluctuation_cycles * fraction)
@@ -219,8 +239,13 @@ class _FullRunState:
         self.elapsed_s += self.dt_s
 
     def record_event(self, phase: str, correction_mm: float, reason: str) -> FullRunEvent:
-        decision = decide_robust_center(self.samples, self.config.controller)
-        signal = processed_control_signal(self.samples, self.config.controller)
+        feedback = self.feedback_samples()
+        if not feedback:
+            raise ValueError("cannot record a control event without delayed feedback")
+        controller = self.controller_for_decision()
+        decision = decide_robust_center(feedback, controller)
+        signal = processed_control_signal(feedback, controller)
+        feedback_age_s = self.feedback_age_s(feedback)
         event = FullRunEvent(
             elapsed_s=self.elapsed_s,
             phase=phase,
@@ -238,15 +263,22 @@ class _FullRunState:
             correction_mm=correction_mm,
             reason=reason,
             endpoint_recovered=decision.endpoint_recovered,
-            fresh=signal.fresh,
+            fresh=signal.fresh and feedback_age_s <= self.config.controller.stale_feedback_s,
+            feedback_age_s=feedback_age_s,
             total_travel_mm=self.total_travel_mm,
             cruise_allowed=False,
         )
         self.events.append(event)
+        recovery_band = max(controller.tolerance_mpa, controller.min_recovery_mpa)
+        if abs(event.error_mpa) > recovery_band and decision.decision != "safety_stop":
+            self.previous_error_sign = 1 if event.error_mpa > 0.0 else -1
         return event
 
     def correct_toward_target(self) -> float:
-        decision = decide_robust_center(self.samples, self.config.controller)
+        feedback = self.feedback_samples()
+        if not feedback or self.feedback_age_s(feedback) > self.config.controller.stale_feedback_s:
+            return 0.0
+        decision = decide_robust_center(feedback, self.controller_for_decision())
         correction = decision.motor_step_mm
         if decision.decision in {"no_move", "wait_reversal", "safety_stop"}:
             correction = 0.0
@@ -255,43 +287,24 @@ class _FullRunState:
             -self.config.controller.max_correction_mm,
             self.config.controller.max_correction_mm,
         )
-        remaining_travel = max(0.0, self.config.max_total_travel_mm - self.total_travel_mm)
-        if abs(correction) > remaining_travel:
-            correction = math.copysign(remaining_travel, correction)
         if abs(correction) <= 0.0:
             return 0.0
-        previous_center = self.last_response_center
         self.motor_mm += correction
         self.total_travel_mm += abs(correction)
-        self.last_response_center = decision.robust_center_mpa
-        if (
-            previous_center is not None
-            and decision.error_mpa < -max(self.config.controller.min_recovery_mpa * 4.0, self.config.slack_response_floor_mpa)
-        ):
-            response = abs(decision.robust_center_mpa - previous_center)
-            if response < self.config.slack_response_floor_mpa:
-                self.no_response_count += 1
-            else:
-                self.no_response_count = 0
-        else:
-            self.no_response_count = 0
         return correction
 
 
 def _recovered(state: _FullRunState) -> bool:
-    if not state.samples:
+    feedback = state.feedback_samples()
+    if not feedback:
         return False
-    decision = decide_robust_center(state.samples, state.config.controller)
+    decision = decide_robust_center(feedback, state.controller_for_decision())
     return decision.endpoint_recovered
 
 
 def _stop_for_safety(state: _FullRunState) -> str | None:
     if state.samples and state.samples[-1].status != "ok":
         return state.samples[-1].status
-    if state.total_travel_mm >= state.config.max_total_travel_mm:
-        return "travel_limit"
-    if state.no_response_count >= state.config.slack_no_response_limit:
-        return "slack_no_response"
     return None
 
 
@@ -304,6 +317,13 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
     target_deadline = config.target_ramp_timeout_s
     while state.elapsed_s <= target_deadline and len(state.events) < config.max_ticks:
         state.sample("target_ramp", rising=True)
+        stop = _stop_for_safety(state)
+        if stop is not None:
+            stop_reason = stop
+            break
+        if not state.feedback_samples():
+            state.advance_time()
+            continue
         correction = 0.0 if _recovered(state) else state.correct_toward_target()
         state.record_event("target_ramp", correction, "target_acquisition")
         stop = _stop_for_safety(state)
@@ -313,6 +333,8 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
         if _recovered(state):
             break
         state.advance_time()
+    else:
+        stop_reason = "target_ramp_timeout"
 
     def _run_sweep(*, start_ma: float, end_ma: float, phase_name: str, rising: bool) -> str | None:
         direction = 1.0 if end_ma >= start_ma else -1.0
@@ -323,6 +345,18 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
             state.current_ma = current
             state.sample(phase_name, rising=rising)
             at_endpoint = abs(current - end_ma) <= 1e-12
+            stop = _stop_for_safety(state)
+            if stop is not None:
+                return stop
+            if not state.feedback_samples():
+                if not at_endpoint:
+                    current += direction * abs(config.sweep.rate_ma_s) * state.dt_s
+                    if direction >= 0.0:
+                        current = min(end_ma, current)
+                    else:
+                        current = max(end_ma, current)
+                state.advance_time()
+                continue
             recovered = _recovered(state)
             phase = phase_name
             reason = "current_tracking"
@@ -350,6 +384,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
         return "tick_limit"
 
     if stop_reason == "completed":
+        state.advance_time()
         stop = _run_sweep(
             start_ma=config.sweep.start_ma,
             end_ma=config.sweep.end_ma,
@@ -359,6 +394,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
         if stop is not None:
             stop_reason = stop
     if stop_reason == "completed" and config.reverse_current:
+        state.advance_time()
         stop = _run_sweep(
             start_ma=config.sweep.end_ma,
             end_ma=config.sweep.start_ma,
@@ -388,15 +424,15 @@ def check_full_run_invariants(trace: FullRunTrace) -> dict[str, bool]:
             abs(event.correction_mm) <= trace.config.controller.max_correction_mm + 1e-12
             for event in events
         ),
-        "travel_bounded": max((event.total_travel_mm for event in events), default=0.0)
-        <= trace.config.max_total_travel_mm + 1e-12,
+        "no_accumulated_correction_travel_stop": trace.stop_reason != "travel_limit",
         "endpoint_waits_when_unrecovered": all(not event.endpoint_recovered for event in endpoint_waits),
         "endpoint_completion_recovered": all(event.endpoint_recovered for event in endpoint_completions),
         "completed_run_recovered": trace.stop_reason != "completed"
         or not events
         or events[-1].endpoint_recovered,
-        "stops_on_slack_no_response": trace.stop_reason != "slack_no_response"
-        or any(abs(event.correction_mm) > 0.0 for event in events),
+        "does_not_stop_for_slack": trace.stop_reason != "slack_no_response",
+        "scale_latency_applied": trace.config.scale_latency_s <= 0.0
+        or all(event.feedback_age_s + 1e-12 >= trace.config.scale_latency_s for event in events),
     }
 
 
@@ -416,7 +452,6 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
         ),
         controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0, max_correction_mm=0.005),
         sweep=CurrentSweepConfig(start_ma=1.0, end_ma=80.0, rate_ma_s=2.0, sample_hz=4.5),
-        max_total_travel_mm=1.2,
         seed=101,
     )
     scenarios = {
@@ -433,6 +468,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             name="transformation_recovery",
             description="Transformation contraction forces current-hold mechanical recovery.",
             wire=replace(base.wire, transformation_contraction_mm=0.075, fluctuation_mpa=5.0, noise_mpa=0.5),
+            controller=replace(base.controller, safety_min_stress_mpa=None),
             sweep=replace(base.sweep, rate_ma_s=20.0),
             seed=107,
         ),
@@ -443,15 +479,13 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             wire=replace(base.wire, initial_motor_mm=0.018, transformation_contraction_mm=0.045, noise_mpa=0.45),
             seed=109,
         ),
-        "slack_after_unwind_stop": replace(
+        "slack_after_unwind_takeup": replace(
             base,
-            name="slack_after_unwind_stop",
-            description="Slack/no-response case stops instead of escalating displacement.",
-            wire=replace(base.wire, initial_motor_mm=-0.004, elastic_stiffness_mpa_per_mm=4.0, transformation_contraction_mm=0.0, noise_mpa=0.05),
-            controller=replace(base.controller, max_correction_mm=0.015),
-            max_total_travel_mm=0.08,
-            slack_response_floor_mpa=0.4,
-            slack_no_response_limit=3,
+            name="slack_after_unwind_takeup",
+            description="Near-zero-load slack case keeps taking up tension until the processed center recovers.",
+            wire=replace(base.wire, initial_motor_mm=-0.018, elastic_stiffness_mpa_per_mm=650.0, transformation_contraction_mm=0.0, noise_mpa=0.05),
+            controller=replace(base.controller, max_correction_mm=0.002, safety_min_stress_mpa=None),
+            zero_compression_stress=True,
             seed=113,
         ),
         "thin_wire_delayed_feedback": replace(
