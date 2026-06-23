@@ -9262,6 +9262,8 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.button_start_recipe.text() == "Start recipe"
         assert window.button_start_recipe.parent() is window.recipe_action_footer
         assert window.recipe_progress.parent() is window.recipe_action_footer
+        fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        assert window.recipe_progress.font().family() != fixed_font.family()
         assert window.label_current_task.parent() is window.recipe_action_footer
         assert window.label_current_task.isVisible() is False
         assert window.label_recipe_estimate.isVisible() is False
