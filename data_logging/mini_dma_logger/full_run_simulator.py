@@ -54,11 +54,14 @@ class FullRunConfig:
         default_factory=lambda: CurrentSweepConfig(start_ma=1.0, end_ma=80.0, rate_ma_s=0.8, sample_hz=4.5)
     )
     reverse_current: bool = True
+    target_ramp_start_mpa: float | None = None
+    target_ramp_rate_mpa_s: float = 5.0
     target_ramp_timeout_s: float = 90.0
     endpoint_hold_timeout_s: float = 90.0
     max_ticks: int = 5000
     scale_latency_s: float = 0.2
     zero_compression_stress: bool = False
+    max_correction_strain_pct: float | None = None
     reported_strain_motor_scale: float = 1.0
     reported_strain_offset_pct: float = 0.0
     transformation_profile: str = "wire"
@@ -73,12 +76,16 @@ class FullRunConfig:
         self.sweep.validated()
         if self.target_ramp_timeout_s <= 0.0:
             raise ValueError("target_ramp_timeout_s must be positive")
+        if self.target_ramp_rate_mpa_s <= 0.0:
+            raise ValueError("target_ramp_rate_mpa_s must be positive")
         if self.endpoint_hold_timeout_s <= 0.0:
             raise ValueError("endpoint_hold_timeout_s must be positive")
         if self.max_ticks <= 0:
             raise ValueError("max_ticks must be positive")
         if self.scale_latency_s < 0.0:
             raise ValueError("scale_latency_s must be non-negative")
+        if self.max_correction_strain_pct is not None and self.max_correction_strain_pct <= 0.0:
+            raise ValueError("max_correction_strain_pct must be positive")
         if self.reported_strain_motor_scale == 0.0:
             raise ValueError("reported_strain_motor_scale cannot be zero")
         if self.transformation_profile not in {"wire", "stepped"}:
@@ -190,6 +197,8 @@ class FullRunTrace:
             "strain_min_pct": min(strain_values, default=0.0),
             "strain_max_pct": max(strain_values, default=0.0),
             "strain_range_pct": max(strain_values, default=0.0) - min(strain_values, default=0.0),
+            "max_correction_strain_pct": self.config.max_correction_strain_pct,
+            "effective_max_correction_mm": _effective_max_correction_mm(self.config),
             "max_total_travel_mm": max((event.total_travel_mm for event in self.events), default=0.0),
             "max_abs_correction_mm": max((abs(event.correction_mm) for event in self.events), default=0.0),
             "current_hold_count": len(hold_events),
@@ -218,6 +227,11 @@ class _FullRunState:
         self.events: list[FullRunEvent] = []
         self.previous_error_sign = 0
         self.actual_transformation_fraction = 0.0
+        self.active_target_stress_mpa = (
+            config.controller.target_stress_mpa
+            if config.target_ramp_start_mpa is None
+            else config.target_ramp_start_mpa
+        )
 
     @property
     def dt_s(self) -> float:
@@ -239,7 +253,12 @@ class _FullRunState:
         return max(0.0, self.elapsed_s - feedback[-1].elapsed_s)
 
     def controller_for_decision(self) -> RobustControllerConfig:
-        return replace(self.config.controller, previous_error_sign=self.previous_error_sign)
+        return replace(
+            self.config.controller,
+            target_stress_mpa=self.active_target_stress_mpa,
+            max_correction_mm=_effective_max_correction_mm(self.config),
+            previous_error_sign=self.previous_error_sign,
+        )
 
     def sample(self, phase: str, *, rising: bool) -> MeasurementSample:
         wire = self.config.wire
@@ -307,6 +326,22 @@ class _FullRunState:
     def advance_time(self) -> None:
         self.elapsed_s += self.dt_s
 
+    def update_target_ramp(self) -> None:
+        start = self.config.target_ramp_start_mpa
+        if start is None:
+            self.active_target_stress_mpa = self.config.controller.target_stress_mpa
+            return
+        final = self.config.controller.target_stress_mpa
+        direction = 1.0 if final >= start else -1.0
+        next_target = start + direction * self.config.target_ramp_rate_mpa_s * self.elapsed_s
+        if direction >= 0.0:
+            self.active_target_stress_mpa = min(final, next_target)
+        else:
+            self.active_target_stress_mpa = max(final, next_target)
+
+    def target_ramp_complete(self) -> bool:
+        return abs(self.active_target_stress_mpa - self.config.controller.target_stress_mpa) <= 1e-12
+
     def record_event(self, phase: str, correction_mm: float, reason: str) -> FullRunEvent:
         feedback = self.feedback_samples()
         if not feedback:
@@ -320,13 +355,13 @@ class _FullRunState:
             phase=phase,
             current_ma=self.current_ma,
             motor_mm=self.motor_mm,
-            target_stress_mpa=self.config.controller.target_stress_mpa,
+            target_stress_mpa=controller.target_stress_mpa,
             processed_center_mpa=signal.center_mpa,
             processed_noise_mpa=signal.noise_mpa,
             processed_slope_mpa_s=signal.slope_mpa_s,
             raw_min_mpa=signal.raw_min_mpa,
             raw_max_mpa=signal.raw_max_mpa,
-            error_mpa=signal.center_mpa - self.config.controller.target_stress_mpa,
+            error_mpa=signal.center_mpa - controller.target_stress_mpa,
             decision=decision.decision,
             result=decision.result if reason != "endpoint_waiting_for_recovery" else reason,
             correction_mm=correction_mm,
@@ -353,8 +388,8 @@ class _FullRunState:
             correction = 0.0
         correction = _clamp(
             correction,
-            -self.config.controller.max_correction_mm,
-            self.config.controller.max_correction_mm,
+            -_effective_max_correction_mm(self.config),
+            _effective_max_correction_mm(self.config),
         )
         if abs(correction) <= 0.0:
             return 0.0
@@ -375,6 +410,13 @@ def _stop_for_safety(state: _FullRunState) -> str | None:
     if state.samples and state.samples[-1].status != "ok":
         return state.samples[-1].status
     return None
+
+
+def _effective_max_correction_mm(config: FullRunConfig) -> float:
+    if config.max_correction_strain_pct is None:
+        return config.controller.max_correction_mm
+    strain_cap_mm = config.wire.length_mm * config.max_correction_strain_pct / 100.0
+    return max(config.controller.motor_step_mm, strain_cap_mm)
 
 
 def _equilibrium_transformation_fraction(
@@ -442,6 +484,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
     # Target acquisition before heating.
     target_deadline = config.target_ramp_timeout_s
     while state.elapsed_s <= target_deadline and len(state.events) < config.max_ticks:
+        state.update_target_ramp()
         state.sample("target_ramp", rising=True)
         stop = _stop_for_safety(state)
         if stop is not None:
@@ -456,7 +499,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
         if stop is not None:
             stop_reason = stop
             break
-        if _recovered(state):
+        if state.target_ramp_complete() and _recovered(state):
             break
         state.advance_time()
     else:
@@ -554,7 +597,7 @@ def check_full_run_invariants(trace: FullRunTrace) -> dict[str, bool]:
     return {
         "no_load_stress_cruise": all(not event.cruise_allowed for event in events),
         "corrections_bounded": all(
-            abs(event.correction_mm) <= trace.config.controller.max_correction_mm + 1e-12
+            abs(event.correction_mm) <= _effective_max_correction_mm(trace.config) + 1e-12
             for event in events
         ),
         "no_accumulated_correction_travel_stop": trace.stop_reason != "travel_limit",
@@ -600,7 +643,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 base.wire,
                 length_mm=33.623,
                 diameter_mm=0.0191,
-                initial_motor_mm=50.0 / 100.0,
+                initial_motor_mm=0.0,
                 elastic_stiffness_mpa_per_mm=100.0,
                 transformation_onset_ma=24.0,
                 transformation_end_ma=60.0,
@@ -621,10 +664,13 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 stale_feedback_s=1.0,
             ),
             sweep=CurrentSweepConfig(start_ma=1.0, end_ma=80.0, rate_ma_s=0.29, sample_hz=2.0),
+            target_ramp_start_mpa=0.0,
+            target_ramp_rate_mpa_s=5.0,
             target_ramp_timeout_s=120.0,
             endpoint_hold_timeout_s=360.0,
             max_ticks=7000,
             zero_compression_stress=True,
+            max_correction_strain_pct=0.12,
             reported_strain_motor_scale=1.0,
             reported_strain_offset_pct=-0.987508550099039,
             transformation_profile="stepped",
@@ -655,7 +701,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 base.wire,
                 length_mm=45.869,
                 diameter_mm=0.0151,
-                initial_motor_mm=50.0 / 115.0,
+                initial_motor_mm=0.0,
                 elastic_stiffness_mpa_per_mm=115.0,
                 transformation_onset_ma=8.5,
                 transformation_end_ma=17.0,
@@ -678,10 +724,13 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 stale_feedback_s=1.0,
             ),
             sweep=CurrentSweepConfig(start_ma=1.0, end_ma=40.0, rate_ma_s=0.40, sample_hz=4.0),
+            target_ramp_start_mpa=0.0,
+            target_ramp_rate_mpa_s=5.0,
             target_ramp_timeout_s=140.0,
             endpoint_hold_timeout_s=1200.0,
             max_ticks=9000,
             zero_compression_stress=True,
+            max_correction_strain_pct=0.10,
             reported_strain_motor_scale=1.0,
             reported_strain_offset_pct=-0.95,
             transformation_profile="stepped",
@@ -785,11 +834,10 @@ def _write_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 
 def _full_measurement_rows(trace: FullRunTrace) -> Iterable[dict[str, Any]]:
     events_by_time = {round(event.elapsed_s, 9): event for event in trace.events}
-    target = trace.config.controller.target_stress_mpa
     for sample in trace.samples:
         row = sample.to_row()
         event = events_by_time.get(round(sample.elapsed_s, 9))
-        row_target = target if event is None else event.target_stress_mpa
+        row_target = _target_stress_at_elapsed(trace.config, sample.elapsed_s) if event is None else event.target_stress_mpa
         resistance_ohm = 285.0 + 5.8 * sample.current_ma + 55.0 * sample.transformation_fraction
         voltage_v = sample.current_ma / 1000.0 * resistance_ohm
         row["target_stress_mpa"] = f"{row_target:.6f}"
@@ -814,6 +862,18 @@ def _full_measurement_rows(trace: FullRunTrace) -> Iterable[dict[str, Any]]:
         row["endpoint_recovered"] = "" if event is None else str(bool(event.endpoint_recovered)).lower()
         row["processed_fresh"] = "" if event is None else str(bool(event.fresh)).lower()
         yield row
+
+
+def _target_stress_at_elapsed(config: FullRunConfig, elapsed_s: float) -> float:
+    start = config.target_ramp_start_mpa
+    final = config.controller.target_stress_mpa
+    if start is None:
+        return final
+    direction = 1.0 if final >= start else -1.0
+    target = start + direction * config.target_ramp_rate_mpa_s * elapsed_s
+    if direction >= 0.0:
+        return min(final, target)
+    return max(final, target)
 
 
 def write_full_run_outputs(trace: FullRunTrace, output_dir: Path | str) -> dict[str, Path]:
@@ -891,6 +951,7 @@ Scenario: `{trace.config.name}`
 - Maximum recovery time: {item["max_recovery_time_s"]:.3f} s
 - Mean recovery time: {item["mean_recovery_time_s"]:.3f} s
 - Strain range: {item["strain_min_pct"]:.4f}% to {item["strain_max_pct"]:.4f}% ({item["strain_range_pct"]:.4f}% span)
+- Effective correction cap: {item["effective_max_correction_mm"]:.6f} mm
 - Maximum total correction travel: {item["max_total_travel_mm"]:.6f} mm
 - Maximum single correction: {item["max_abs_correction_mm"]:.6f} mm
 
@@ -914,9 +975,19 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
     current = [sample.current_ma for sample in trace.samples]
     motor = [sample.motor_mm for sample in trace.samples]
     strain = [sample.strain_pct for sample in trace.samples]
+    target = [_target_stress_at_elapsed(trace.config, sample.elapsed_s) for sample in trace.samples]
     event_t = [event.elapsed_s for event in trace.events]
     center = [event.processed_center_mpa for event in trace.events]
     corrections = [event.correction_mm for event in trace.events]
+    events_by_time = {round(event.elapsed_s, 9): event for event in trace.events}
+    current_phase_samples = [
+        sample
+        for sample in trace.samples
+        if (event := events_by_time.get(round(sample.elapsed_s, 9))) is not None
+        and event.phase in {"current", "current_hold", "current_limit_unwind"}
+    ]
+    sweep_current = [sample.current_ma for sample in current_phase_samples]
+    sweep_strain = [sample.strain_pct for sample in current_phase_samples]
     hold_event_times = {round(event.elapsed_s, 9) for event in trace.events if event.phase == "current_hold"}
     hold_current = [
         sample.current_ma
@@ -931,13 +1002,13 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
     fig, axes = plt.subplots(4, 1, figsize=(11, 10), sharex=False)
     axes[0].plot(elapsed, raw, color="#94a3b8", lw=0.8, label="raw stress")
     axes[0].plot(event_t, center, color="#dc2626", lw=1.2, label="processed center")
-    axes[0].axhline(trace.config.controller.target_stress_mpa, color="#111827", ls="--", lw=0.9, label="target")
+    axes[0].plot(elapsed, target, color="#111827", ls="--", lw=0.9, label="target")
     for event in trace.events:
         if event.phase == "current_hold":
             axes[0].axvspan(event.elapsed_s, event.elapsed_s + trace.config.sweep.sample_hz ** -1, color="#f59e0b", alpha=0.08, lw=0)
     axes[0].set_ylabel("MPa")
     axes[0].legend(fontsize=8, loc="best")
-    axes[1].plot(current, strain, color="#111827", lw=0.9, label="strain")
+    axes[1].plot(sweep_current, sweep_strain, color="#111827", lw=0.9, label="strain")
     if hold_current:
         axes[1].scatter(hold_current, hold_strain, color="#f59e0b", s=8, alpha=0.7, label="current hold")
     axes[1].set_xlabel("Current (mA)")
