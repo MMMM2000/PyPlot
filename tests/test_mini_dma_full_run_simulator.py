@@ -30,8 +30,8 @@ def test_realistic_first_overheating_matches_reference_scale() -> None:
     summary = trace.summary()
 
     assert trace.stop_reason == "completed"
-    assert 850.0 <= summary["total_measurement_time_s"] <= 1100.0
-    assert 350.0 <= summary["current_hold_time_s"] <= 550.0
+    assert 950.0 <= summary["total_measurement_time_s"] <= 1250.0
+    assert 500.0 <= summary["current_hold_time_s"] <= 700.0
     assert 25.0 <= summary["max_abs_current_sweep_error_mpa"] <= 45.0
     assert -10.5 <= summary["strain_min_pct"] <= -9.0
     assert 0.3 <= summary["strain_max_pct"] <= 0.8
@@ -64,11 +64,17 @@ def test_realistic_current_holds_keep_current_fixed_while_motor_strain_changes()
         max(sample.strain_pct for sample in group) - min(sample.strain_pct for sample in group)
         for group in hold_groups
     )
+    large_hold_strain_spans = [
+        max(sample.strain_pct for sample in group) - min(sample.strain_pct for sample in group)
+        for group in hold_groups
+        if max(sample.strain_pct for sample in group) - min(sample.strain_pct for sample in group) >= 1.0
+    ]
     adjacent_strain_steps = [
         abs(current.strain_pct - previous.strain_pct)
         for previous, current in zip(trace.samples, trace.samples[1:])
     ]
-    assert 0.02 <= max_hold_strain_span <= 0.35
+    assert 1.0 <= max_hold_strain_span <= 2.5
+    assert len(large_hold_strain_spans) >= 3
     assert max(adjacent_strain_steps) <= 0.08
     assert trace.summary()["max_total_travel_mm"] <= 10.0
     for sample in trace.samples:

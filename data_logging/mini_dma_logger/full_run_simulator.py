@@ -23,6 +23,7 @@ from .wire_simulator import (
     RobustControllerConfig,
     VirtualWireConfig,
     _clamp,
+    _finite,
     _median_absolute_deviation,
     decide_robust_center,
     load_g_from_stress_mpa,
@@ -59,6 +60,10 @@ class FullRunConfig:
     zero_compression_stress: bool = False
     reported_strain_motor_scale: float = 1.0
     reported_strain_offset_pct: float = 0.0
+    transformation_profile: str = "wire"
+    rising_transformation_steps: tuple[tuple[float, float, float], ...] = ()
+    falling_transformation_steps: tuple[tuple[float, float, float], ...] = ()
+    transformation_kinetic_tau_s: float = 0.0
     seed: int = 0
 
     def validated(self) -> "FullRunConfig":
@@ -75,6 +80,17 @@ class FullRunConfig:
             raise ValueError("scale_latency_s must be non-negative")
         if self.reported_strain_motor_scale == 0.0:
             raise ValueError("reported_strain_motor_scale cannot be zero")
+        if self.transformation_profile not in {"wire", "stepped"}:
+            raise ValueError("transformation_profile must be 'wire' or 'stepped'")
+        if self.transformation_kinetic_tau_s < 0.0:
+            raise ValueError("transformation_kinetic_tau_s must be non-negative")
+        for steps in (self.rising_transformation_steps, self.falling_transformation_steps):
+            for center_ma, width_ma, weight in steps:
+                if width_ma <= 0.0:
+                    raise ValueError("transformation step width must be positive")
+                _finite(center_ma)
+                _finite(width_ma)
+                _finite(weight)
         return self
 
 
@@ -200,6 +216,7 @@ class _FullRunState:
         self.samples: list[MeasurementSample] = []
         self.events: list[FullRunEvent] = []
         self.previous_error_sign = 0
+        self.actual_transformation_fraction = 0.0
 
     @property
     def dt_s(self) -> float:
@@ -225,7 +242,7 @@ class _FullRunState:
 
     def sample(self, phase: str, *, rising: bool) -> MeasurementSample:
         wire = self.config.wire
-        fraction = transformation_fraction(self.current_ma, wire, rising=rising)
+        fraction = self._next_transformation_fraction(rising=rising)
         free_shift_mm = wire.initial_free_length_shift_mm + fraction * wire.transformation_contraction_mm
         mechanical_mm = self.motor_mm + free_shift_mm
         base_stress = mechanical_mm * wire.elastic_stiffness_mpa_per_mm
@@ -270,6 +287,21 @@ class _FullRunState:
         self.samples.append(sample)
         self.sample_index += 1
         return sample
+
+    def _next_transformation_fraction(self, *, rising: bool) -> float:
+        equilibrium = _equilibrium_transformation_fraction(
+            self.current_ma,
+            self.config,
+            rising=rising,
+        )
+        tau_s = self.config.transformation_kinetic_tau_s
+        if tau_s <= 0.0:
+            self.actual_transformation_fraction = equilibrium
+        else:
+            alpha = 1.0 - math.exp(-self.dt_s / tau_s)
+            self.actual_transformation_fraction += (equilibrium - self.actual_transformation_fraction) * alpha
+            self.actual_transformation_fraction = _clamp(self.actual_transformation_fraction, 0.0, 1.0)
+        return self.actual_transformation_fraction
 
     def advance_time(self) -> None:
         self.elapsed_s += self.dt_s
@@ -342,6 +374,24 @@ def _stop_for_safety(state: _FullRunState) -> str | None:
     if state.samples and state.samples[-1].status != "ok":
         return state.samples[-1].status
     return None
+
+
+def _equilibrium_transformation_fraction(
+    current_ma: float,
+    config: FullRunConfig,
+    *,
+    rising: bool,
+) -> float:
+    if config.transformation_profile == "wire":
+        return transformation_fraction(current_ma, config.wire, rising=rising)
+    steps = config.rising_transformation_steps if rising else config.falling_transformation_steps
+    if not steps:
+        return transformation_fraction(current_ma, config.wire, rising=rising)
+    fraction = 0.0
+    for center_ma, width_ma, weight in steps:
+        exponent = _clamp((center_ma - current_ma) / width_ma, -60.0, 60.0)
+        fraction += weight / (1.0 + math.exp(exponent))
+    return _clamp(fraction, 0.0, 1.0)
 
 
 def _recovery_times_s(events: list[FullRunEvent], recovery_band_mpa: float) -> list[float]:
@@ -542,18 +592,18 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             base,
             name="realistic_first_overheating",
             description=(
-                "Good 12/2-style 50 MPa measurement with stress ramp, smooth transformation-driven "
+                "Good 12/2-style 50 MPa measurement with stress ramp, stepped transformation-driven "
                 "stress/free-length changes, current holds, high strain, and reverse unwind."
             ),
             wire=replace(
                 base.wire,
                 length_mm=33.623,
                 diameter_mm=0.0191,
-                initial_motor_mm=50.0 / 500.0,
-                elastic_stiffness_mpa_per_mm=500.0,
+                initial_motor_mm=50.0 / 100.0,
+                elastic_stiffness_mpa_per_mm=100.0,
                 transformation_onset_ma=24.0,
                 transformation_end_ma=60.0,
-                transformation_contraction_mm=3.3,
+                transformation_contraction_mm=3.45,
                 transformation_hysteresis_ma=10.0,
                 fluctuation_mpa=0.0,
                 fluctuation_cycles=5.0,
@@ -565,7 +615,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 tolerance_mpa=2.5,
                 min_recovery_mpa=5.0,
                 motor_step_mm=0.001,
-                max_correction_mm=0.02,
+                max_correction_mm=0.0275,
                 safety_min_stress_mpa=None,
                 stale_feedback_s=1.0,
             ),
@@ -575,7 +625,21 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             max_ticks=7000,
             zero_compression_stress=True,
             reported_strain_motor_scale=1.0,
-            reported_strain_offset_pct=0.2025869184784225,
+            reported_strain_offset_pct=-0.987508550099039,
+            transformation_profile="stepped",
+            rising_transformation_steps=(
+                (24.0, 2.0, 0.08),
+                (28.6, 0.45, 0.54),
+                (41.8, 0.35, 0.32),
+                (58.0, 2.0, 0.06),
+            ),
+            falling_transformation_steps=(
+                (18.0, 2.0, 0.06),
+                (29.0, 0.55, 0.30),
+                (41.8, 0.45, 0.54),
+                (52.0, 2.0, 0.10),
+            ),
+            transformation_kinetic_tau_s=3.0,
             seed=184,
         ),
         "noisy_centered_first_overheating": replace(
