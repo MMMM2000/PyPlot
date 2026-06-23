@@ -69,6 +69,8 @@ class FullRunConfig:
     rising_transformation_steps: tuple[tuple[float, float, float], ...] = ()
     falling_transformation_steps: tuple[tuple[float, float, float], ...] = ()
     transformation_kinetic_tau_s: float = 0.0
+    free_strain_fluctuation_pct: float = 0.0
+    free_strain_fluctuation_cycles: float = 0.0
     seed: int = 0
 
     def validated(self) -> "FullRunConfig":
@@ -93,6 +95,10 @@ class FullRunConfig:
             raise ValueError("transformation_profile must be 'wire' or 'stepped'")
         if self.transformation_kinetic_tau_s < 0.0:
             raise ValueError("transformation_kinetic_tau_s must be non-negative")
+        if self.free_strain_fluctuation_pct < 0.0:
+            raise ValueError("free_strain_fluctuation_pct must be non-negative")
+        if self.free_strain_fluctuation_cycles < 0.0:
+            raise ValueError("free_strain_fluctuation_cycles must be non-negative")
         for steps in (self.rising_transformation_steps, self.falling_transformation_steps):
             for center_ma, width_ma, weight in steps:
                 if width_ma <= 0.0:
@@ -100,6 +106,8 @@ class FullRunConfig:
                 _finite(center_ma)
                 _finite(width_ma)
                 _finite(weight)
+        _finite(self.free_strain_fluctuation_pct)
+        _finite(self.free_strain_fluctuation_cycles)
         return self
 
 
@@ -186,6 +194,16 @@ class FullRunTrace:
             "scenario": self.config.name,
             "description": self.config.description,
             "stop_reason": self.stop_reason,
+            "length_mm": self.config.wire.length_mm,
+            "diameter_mm": self.config.wire.diameter_mm,
+            "elastic_stiffness_mpa_per_mm": self.config.wire.elastic_stiffness_mpa_per_mm,
+            "configured_transformation_strain_pct": (
+                self.config.wire.transformation_contraction_mm / self.config.wire.length_mm * 100.0
+            ),
+            "configured_free_strain_fluctuation_pct": self.config.free_strain_fluctuation_pct,
+            "configured_free_strain_fluctuation_cycles": self.config.free_strain_fluctuation_cycles,
+            "scale_latency_s": self.config.scale_latency_s,
+            "sample_hz": self.config.sweep.sample_hz,
             "sample_count": len(self.samples),
             "event_count": len(self.events),
             "total_measurement_time_s": total_time_s,
@@ -277,7 +295,11 @@ class _FullRunState:
     def sample(self, phase: str, *, rising: bool) -> MeasurementSample:
         wire = self.config.wire
         fraction = self._next_transformation_fraction(rising=rising)
-        free_shift_mm = wire.initial_free_length_shift_mm + fraction * wire.transformation_contraction_mm
+        free_shift_mm = (
+            wire.initial_free_length_shift_mm
+            + fraction * wire.transformation_contraction_mm
+            + _free_strain_fluctuation_mm(self.config, fraction)
+        )
         mechanical_mm = self.motor_mm + free_shift_mm
         base_stress = mechanical_mm * wire.elastic_stiffness_mpa_per_mm
         if self.config.zero_compression_stress and base_stress < 0.0:
@@ -431,6 +453,17 @@ def _effective_max_correction_mm(config: FullRunConfig) -> float:
         return config.controller.max_correction_mm
     strain_cap_mm = config.wire.length_mm * config.max_correction_strain_pct / 100.0
     return max(config.controller.motor_step_mm, strain_cap_mm)
+
+
+def _free_strain_fluctuation_mm(config: FullRunConfig, fraction: float) -> float:
+    amplitude_pct = config.free_strain_fluctuation_pct
+    if amplitude_pct <= 0.0 or fraction <= 0.0 or fraction >= 1.0:
+        return 0.0
+    cycles = config.free_strain_fluctuation_cycles if config.free_strain_fluctuation_cycles > 0.0 else 1.0
+    envelope = math.sin(math.pi * fraction)
+    return config.wire.length_mm * amplitude_pct / 100.0 * envelope * math.sin(
+        2.0 * math.pi * cycles * fraction
+    )
 
 
 def _material_state_for_sample(config: FullRunConfig, sample: MeasurementSample) -> dict[str, float]:
@@ -917,6 +950,189 @@ def run_parameter_sweep() -> list[FullRunTrace]:
     return traces
 
 
+def run_free_strain_stress_matrix() -> list[FullRunTrace]:
+    """Run a broader real-run-inspired matrix without touching hardware."""
+
+    base_good = full_run_scenario_by_name("realistic_first_overheating")
+    base_bad = full_run_scenario_by_name("bad_co6_first_overheating")
+    families = (
+        {
+            "name": "good_12_2_10pct",
+            "base": base_good,
+            "length_mm": 33.623,
+            "diameter_mm": 0.0191,
+            "stiffness": 100.0,
+            "strain_pct": 10.3,
+            "noise": 1.2,
+            "end_ma": 80.0,
+            "rate": 0.29,
+            "cap_pct": 0.12,
+            "offset_pct": -0.9875,
+            "steps": base_good.rising_transformation_steps,
+            "falling": base_good.falling_transformation_steps,
+        },
+        {
+            "name": "early_19_8_9pct",
+            "base": base_good,
+            "length_mm": 61.0,
+            "diameter_mm": 0.0089,
+            "stiffness": 24.0,
+            "strain_pct": 9.2,
+            "noise": 1.8,
+            "end_ma": 50.0,
+            "rate": 0.24,
+            "cap_pct": 0.11,
+            "offset_pct": -0.2,
+            "steps": ((22.0, 1.4, 0.08), (29.0, 0.50, 0.52), (38.5, 0.45, 0.32), (48.0, 1.5, 0.08)),
+            "falling": ((18.0, 1.2, 0.12), (27.0, 0.50, 0.36), (39.0, 0.55, 0.42), (47.0, 1.6, 0.10)),
+        },
+        {
+            "name": "co6_bad_1pct",
+            "base": base_bad,
+            "length_mm": 45.869,
+            "diameter_mm": 0.0151,
+            "stiffness": 115.0,
+            "strain_pct": 1.0,
+            "noise": 2.4,
+            "end_ma": 40.0,
+            "rate": 0.40,
+            "cap_pct": 0.10,
+            "offset_pct": -0.95,
+            "steps": base_bad.rising_transformation_steps,
+            "falling": base_bad.falling_transformation_steps,
+        },
+        {
+            "name": "weak_noisy_0p25pct",
+            "base": full_run_scenario_by_name("low_strain_noisy_first_overheating"),
+            "length_mm": 33.623,
+            "diameter_mm": 0.0191,
+            "stiffness": 500.0,
+            "strain_pct": 0.25,
+            "noise": 2.2,
+            "end_ma": 80.0,
+            "rate": 0.50,
+            "cap_pct": 0.05,
+            "offset_pct": -0.30,
+            "steps": ((25.0, 3.5, 0.35), (45.0, 5.0, 0.45), (62.0, 4.0, 0.20)),
+            "falling": ((21.0, 3.0, 0.25), (42.0, 5.0, 0.50), (58.0, 4.0, 0.25)),
+        },
+    )
+    perturbations = (
+        {"name": "nominal", "tau": 3.0, "rough_pct": 0.0, "rough_cycles": 0.0, "latency": 0.2, "sample_hz": 2.0, "stiff_scale": 1.0, "cap_scale": 1.0},
+        {"name": "fast_spiky", "tau": 0.45, "rough_pct": 0.08, "rough_cycles": 6.0, "latency": 0.2, "sample_hz": 4.0, "stiff_scale": 1.0, "cap_scale": 1.0},
+        {"name": "rough_transform", "tau": 1.2, "rough_pct": 0.18, "rough_cycles": 9.0, "latency": 0.2, "sample_hz": 3.0, "stiff_scale": 1.0, "cap_scale": 1.0},
+        {"name": "delayed_feedback", "tau": 3.5, "rough_pct": 0.06, "rough_cycles": 5.0, "latency": 0.45, "sample_hz": 1.5, "stiff_scale": 1.0, "cap_scale": 0.75},
+        {"name": "soft_underestimated", "tau": 2.5, "rough_pct": 0.05, "rough_cycles": 4.0, "latency": 0.2, "sample_hz": 2.5, "stiff_scale": 0.45, "cap_scale": 0.8},
+        {"name": "stiff_overresponsive", "tau": 1.8, "rough_pct": 0.05, "rough_cycles": 4.0, "latency": 0.2, "sample_hz": 2.5, "stiff_scale": 1.9, "cap_scale": 0.7},
+    )
+    traces: list[FullRunTrace] = []
+    index = 0
+    for family in families:
+        for perturbation in perturbations:
+            index += 1
+            base = family["base"]
+            length_mm = float(family["length_mm"])
+            contraction_mm = length_mm * float(family["strain_pct"]) / 100.0
+            cap_pct = float(family["cap_pct"]) * float(perturbation["cap_scale"])
+            config = replace(
+                base,
+                name=f"matrix_{family['name']}_{perturbation['name']}",
+                description=(
+                    "Free-strain matrix case based on measured Mini DMA wire behavior: "
+                    f"{family['name']} with {perturbation['name']} perturbation."
+                ),
+                wire=replace(
+                    base.wire,
+                    length_mm=length_mm,
+                    diameter_mm=float(family["diameter_mm"]),
+                    elastic_stiffness_mpa_per_mm=float(family["stiffness"]) * float(perturbation["stiff_scale"]),
+                    transformation_contraction_mm=contraction_mm,
+                    noise_mpa=float(family["noise"]),
+                    fluctuation_mpa=0.0,
+                    break_stress_mpa=None,
+                ),
+                controller=replace(
+                    base.controller,
+                    target_stress_mpa=50.0,
+                    tolerance_mpa=2.5,
+                    min_recovery_mpa=5.0,
+                    max_correction_mm=max(0.001, length_mm * cap_pct / 100.0),
+                    safety_min_stress_mpa=None,
+                    safety_max_stress_mpa=320.0,
+                    stale_feedback_s=max(1.0, float(perturbation["latency"]) + 0.6),
+                ),
+                sweep=CurrentSweepConfig(
+                    start_ma=1.0,
+                    end_ma=float(family["end_ma"]),
+                    rate_ma_s=float(family["rate"]),
+                    sample_hz=float(perturbation["sample_hz"]),
+                ),
+                target_ramp_start_mpa=0.0,
+                target_ramp_rate_mpa_s=5.0,
+                target_ramp_timeout_s=160.0,
+                endpoint_hold_timeout_s=600.0,
+                max_ticks=9000,
+                zero_compression_stress=True,
+                max_correction_strain_pct=cap_pct,
+                reported_strain_motor_scale=1.0,
+                reported_strain_offset_pct=float(family["offset_pct"]),
+                transformation_profile="stepped",
+                rising_transformation_steps=family["steps"],
+                falling_transformation_steps=family["falling"],
+                transformation_kinetic_tau_s=float(perturbation["tau"]),
+                free_strain_fluctuation_pct=float(perturbation["rough_pct"]),
+                free_strain_fluctuation_cycles=float(perturbation["rough_cycles"]),
+                scale_latency_s=float(perturbation["latency"]),
+                seed=4000 + index,
+            )
+            traces.append(run_full_mini_dma_simulation(config))
+    return traces
+
+
+def run_control_policy_matrix() -> list[FullRunTrace]:
+    """Compare adaptive percent-cap/recovery policies on representative matrix cases."""
+
+    representative_names = {
+        "matrix_good_12_2_10pct_delayed_feedback",
+        "matrix_good_12_2_10pct_stiff_overresponsive",
+        "matrix_early_19_8_9pct_delayed_feedback",
+        "matrix_weak_noisy_0p25pct_rough_transform",
+    }
+    base_configs = [
+        trace.config
+        for trace in run_free_strain_stress_matrix()
+        if trace.config.name in representative_names
+    ]
+    traces: list[FullRunTrace] = []
+    index = 0
+    for config in base_configs:
+        base_cap_pct = config.max_correction_strain_pct or (
+            config.controller.max_correction_mm / config.wire.length_mm * 100.0
+        )
+        for cap_scale in (0.75, 1.0, 1.4, 2.4):
+            for recovery_scale in (0.06, 0.10):
+                index += 1
+                cap_pct = base_cap_pct * cap_scale
+                recovery_mpa = max(config.controller.tolerance_mpa, config.controller.target_stress_mpa * recovery_scale)
+                policy_config = replace(
+                    config,
+                    name=f"policy_{config.name.removeprefix('matrix_')}_cap{cap_scale:g}_rec{recovery_scale:g}",
+                    description=(
+                        f"Policy comparison for {config.name}: correction cap {cap_scale:g}x "
+                        f"the geometry percent cap and recovery band {recovery_scale:g}x target stress."
+                    ),
+                    controller=replace(
+                        config.controller,
+                        max_correction_mm=max(config.controller.motor_step_mm, config.wire.length_mm * cap_pct / 100.0),
+                        min_recovery_mpa=recovery_mpa,
+                    ),
+                    max_correction_strain_pct=cap_pct,
+                    seed=config.seed + 10000 + index,
+                )
+                traces.append(run_full_mini_dma_simulation(policy_config))
+    return traces
+
+
 def _write_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     rows = list(rows)
     if not rows:
@@ -1025,24 +1241,72 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     summary_path = out / "full_run_sweep_summary.json"
+    csv_path = out / "full_run_sweep_summary.csv"
     report_path = out / "full_run_sweep_report.md"
     summary = {"runs": [trace.summary() for trace in traces]}
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    _write_csv(csv_path, summary["runs"])
     lines = [
         "# Mini DMA full-run parameter sweep",
         "",
-        "| Scenario | Stop | Max travel mm | Max correction mm | Holds | Invariants |",
-        "| --- | --- | ---: | ---: | ---: | --- |",
+        "| Scenario | Stop | Free strain span % | Measured strain span % | Max sweep error MPa | Hold time s | Mean tracking error % | Invariants |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for trace in traces:
         item = trace.summary()
         invariant_text = "ok" if all(item["invariants"].values()) else ",".join(item["warnings"])
         lines.append(
-            f"| {item['scenario']} | {item['stop_reason']} | {item['max_total_travel_mm']:.6f} | "
-            f"{item['max_abs_correction_mm']:.6f} | {item['current_hold_count']} | {invariant_text} |"
+            f"| {item['scenario']} | {item['stop_reason']} | {item['free_transformation_strain_range_pct']:.3f} | "
+            f"{item['strain_range_pct']:.3f} | {item['max_abs_current_sweep_error_mpa']:.2f} | "
+            f"{item['current_hold_time_s']:.1f} | {item['mean_abs_free_strain_tracking_error_pct']:.3f} | {invariant_text} |"
         )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"summary": summary_path, "report": report_path}
+    plot_path = out / "full_run_sweep_metrics.png"
+    paths = {"summary": summary_path, "summary_csv": csv_path, "report": report_path}
+    if _write_sweep_metrics_plot(plot_path, traces):
+        paths["plot"] = plot_path
+    return paths
+
+
+def _write_sweep_metrics_plot(path: Path, traces: list[FullRunTrace]) -> bool:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    summaries = [trace.summary() for trace in traces]
+    if not summaries:
+        return False
+    labels = [item["scenario"].replace("matrix_", "") for item in summaries]
+    max_error = [item["max_abs_current_sweep_error_mpa"] for item in summaries]
+    hold_time = [item["current_hold_time_s"] for item in summaries]
+    tracking = [item["mean_abs_free_strain_tracking_error_pct"] for item in summaries]
+    strain_span = [item["strain_range_pct"] for item in summaries]
+    free_span = [item["free_transformation_strain_range_pct"] for item in summaries]
+    x = list(range(len(summaries)))
+    fig, axes = plt.subplots(3, 1, figsize=(max(10, len(summaries) * 0.42), 9), sharex=True)
+    axes[0].bar(x, max_error, color="#dc2626", label="max sweep stress error")
+    axes[0].set_ylabel("MPa")
+    axes[0].legend(fontsize=8, loc="best")
+    axes[1].bar(x, hold_time, color="#f59e0b", label="current-hold time")
+    axes[1].set_ylabel("s")
+    axes[1].legend(fontsize=8, loc="best")
+    axes[2].plot(x, free_span, color="#64748b", lw=1.2, marker="o", label="hidden free strain")
+    axes[2].plot(x, strain_span, color="#111827", lw=1.2, marker="o", label="measured strain")
+    axes[2].bar(x, tracking, color="#7c3aed", alpha=0.35, label="mean tracking error")
+    axes[2].set_ylabel("%")
+    axes[2].legend(fontsize=8, loc="best")
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(labels, rotation=65, ha="right", fontsize=7)
+    for ax in axes:
+        ax.grid(True, axis="y", alpha=0.25)
+    fig.suptitle("Mini DMA free-strain stress-test matrix")
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return True
 
 
 def _write_full_run_report(path: Path, trace: FullRunTrace) -> None:
@@ -1175,11 +1439,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run software-only full Mini DMA first-overheating simulations.")
     parser.add_argument("--scenario", action="append", choices=FULL_RUN_SCENARIOS)
     parser.add_argument("--sweep", action="store_true", help="Run the built-in parameter sweep.")
+    parser.add_argument("--free-strain-matrix", action="store_true", help="Run the broad free-strain stress-test matrix.")
+    parser.add_argument("--policy-matrix", action="store_true", help="Run representative correction-cap/recovery policy comparisons.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-full-run-sim"))
     args = parser.parse_args(argv)
 
     traces: list[FullRunTrace]
-    if args.sweep:
+    if args.policy_matrix:
+        traces = run_control_policy_matrix()
+        write_sweep_outputs(traces, args.out)
+    elif args.free_strain_matrix:
+        traces = run_free_strain_stress_matrix()
+        write_sweep_outputs(traces, args.out)
+    elif args.sweep:
         traces = run_parameter_sweep()
         write_sweep_outputs(traces, args.out)
     else:
