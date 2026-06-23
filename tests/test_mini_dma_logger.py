@@ -14960,6 +14960,260 @@ def test_current_sweep_runtime_update_leaves_active_step_when_setpoint_beyond_ne
         _close_test_window(window)
 
 
+def test_first_overheating_runtime_update_changes_active_ramp_before_old_max(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_firstheat_update")
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=False,
+        note="first_overheating",
+    )
+    first_reverse = dataclasses.replace(first_sweep, current_start_mA=40.0, current_end_mA=1.0)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep, first_reverse]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+        window._automation_target_value = 20.0
+        window._active_current_sweep_last_setpoint_mA = 25.0
+        window._automation_interval_ms = 250
+
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(55.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0].current_end_mA == pytest.approx(55.0)
+        assert window._automation_steps[0].note == "first_overheating"
+        assert window._automation_steps[1].current_start_mA == pytest.approx(55.0)
+        assert window._automation_steps[1].current_end_mA == pytest.approx(1.0)
+
+        window._stop_session()
+        metadata = json.loads((tmp_path / "runtime_firstheat_update" / "metadata.json").read_text(encoding="utf-8"))
+        override = metadata["controlled_current_sweep"]["runtime_overrides"][0]
+        assert override["active_step_updated"] is True
+        assert override["visible_values"]["first_overheating_current_end_mA"] == pytest.approx(55.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_rejects_after_preheat_ramp(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_firstheat_too_late")
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+    normal_start = mini_dma_mod.AutomationStep(
+        "set_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_mA=1.0,
+        note="1",
+    )
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep, normal_start]
+        window._automation_index = 1
+        window._active_current_sweep_step_index = None
+        window._active_current_sweep_last_setpoint_mA = 10.0
+        window._automation_interval_ms = 250
+
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(55.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is False
+        assert window._automation_steps[0].current_end_mA == pytest.approx(40.0)
+        assert "can only be changed before" in window.log_output.toPlainText()
+
+        window._stop_session()
+        rows = list(
+            csv.DictReader((tmp_path / "runtime_firstheat_too_late" / "control_trace.csv").open(encoding="utf-8", newline=""))
+        )
+        assert rows[0]["result"] == "rejected"
+        assert rows[0]["task_text"] == "Rejected first-overheating max-current update"
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_rejects_lowering_below_active_setpoint(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_firstheat_lower_reject")
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=60.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 56.0
+        window._automation_interval_ms = 250
+
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(55.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is False
+
+        assert window._automation_steps[0] is first_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(60.0)
+        assert "was not lowered" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_refreshes_channel_limit_for_raise(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    limits: list[float] = []
+
+    class _FakeSupply:
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            limits.append(value)
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 25.0
+
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(60.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert limits == pytest.approx([60.0])
+        assert window._automation_steps[0].current_end_mA == pytest.approx(60.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_normal_current_sweep_runtime_update_ignores_independent_first_overheating_max(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=80.0,
+        current_ramp_rate_mA_s=1.0,
+        note="1",
+    )
+
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 40.0
+
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(90.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(30.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0].note == "1"
+        assert window._automation_steps[0].current_end_mA == pytest.approx(90.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_runtime_update_replans_future_stress_targets(
     tmp_path: Path,
     qtbot,
