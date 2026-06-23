@@ -32,12 +32,47 @@ def test_realistic_first_overheating_matches_reference_scale() -> None:
     assert trace.stop_reason == "completed"
     assert 850.0 <= summary["total_measurement_time_s"] <= 1100.0
     assert 350.0 <= summary["current_hold_time_s"] <= 550.0
-    assert 30.0 <= summary["max_abs_current_sweep_error_mpa"] <= 50.0
+    assert 25.0 <= summary["max_abs_current_sweep_error_mpa"] <= 45.0
     assert -10.5 <= summary["strain_min_pct"] <= -9.0
     assert 0.3 <= summary["strain_max_pct"] <= 0.8
     assert 9.5 <= summary["strain_range_pct"] <= 11.0
     assert summary["current_hold_periods"]
     assert all(trace.invariants.values())
+
+
+def test_realistic_current_holds_keep_current_fixed_while_motor_strain_changes() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("realistic_first_overheating"))
+    samples_by_time = {round(sample.elapsed_s, 9): sample for sample in trace.samples}
+    hold_groups = []
+    current_group = []
+    for event in trace.events:
+        sample = samples_by_time.get(round(event.elapsed_s, 9))
+        if event.phase == "current_hold" and sample is not None:
+            current_group.append(sample)
+        elif current_group:
+            hold_groups.append(current_group)
+            current_group = []
+    if current_group:
+        hold_groups.append(current_group)
+
+    assert hold_groups
+    assert all(
+        max(sample.current_ma for sample in group) - min(sample.current_ma for sample in group) <= 1e-9
+        for group in hold_groups
+    )
+    assert max(
+        max(sample.strain_pct for sample in group) - min(sample.strain_pct for sample in group)
+        for group in hold_groups
+    ) >= 1.0
+    for sample in trace.samples:
+        expected_strain = (
+            trace.config.reported_strain_offset_pct
+            + trace.config.reported_strain_motor_scale
+            * sample.motor_mm
+            / trace.config.wire.length_mm
+            * 100.0
+        )
+        assert sample.strain_pct == expected_strain
 
 
 def test_full_run_endpoint_waits_only_until_processed_recovered() -> None:

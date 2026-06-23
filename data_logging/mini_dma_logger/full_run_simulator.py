@@ -57,12 +57,8 @@ class FullRunConfig:
     max_ticks: int = 5000
     scale_latency_s: float = 0.2
     zero_compression_stress: bool = False
-    reported_strain_sign: float = 1.0
+    reported_strain_motor_scale: float = 1.0
     reported_strain_offset_pct: float = 0.0
-    reported_strain_current_slope_pct_per_ma: float = 0.0
-    reported_strain_transformation_shift_pct: float = 0.0
-    reported_strain_transformation_valley_pct: float = 0.0
-    reported_strain_step_count: int = 0
     seed: int = 0
 
     def validated(self) -> "FullRunConfig":
@@ -77,10 +73,8 @@ class FullRunConfig:
             raise ValueError("max_ticks must be positive")
         if self.scale_latency_s < 0.0:
             raise ValueError("scale_latency_s must be non-negative")
-        if self.reported_strain_sign == 0.0:
-            raise ValueError("reported_strain_sign cannot be zero")
-        if self.reported_strain_step_count < 0:
-            raise ValueError("reported_strain_step_count must be non-negative")
+        if self.reported_strain_motor_scale == 0.0:
+            raise ValueError("reported_strain_motor_scale cannot be zero")
         return self
 
 
@@ -248,23 +242,9 @@ class _FullRunState:
         raw_stress = stress
         status = "ok"
         safety_reason = ""
-        current_strain = (
-            (self.current_ma - self.config.sweep.start_ma)
-            * self.config.reported_strain_current_slope_pct_per_ma
-        )
-        strain_fraction = fraction
-        if self.config.reported_strain_step_count > 0:
-            step_count = self.config.reported_strain_step_count
-            strain_fraction = math.floor(fraction * step_count) / step_count
-        transformation_strain = (
-            strain_fraction * self.config.reported_strain_transformation_shift_pct
-            + math.sin(math.pi * strain_fraction) * self.config.reported_strain_transformation_valley_pct
-        )
         strain_pct = (
             self.config.reported_strain_offset_pct
-            + self.config.reported_strain_sign * mechanical_mm / wire.length_mm * 100.0
-            + current_strain
-            + transformation_strain
+            + self.config.reported_strain_motor_scale * self.motor_mm / wire.length_mm * 100.0
         )
         if wire.break_stress_mpa is not None and raw_stress >= wire.break_stress_mpa:
             status = "wire_break"
@@ -569,13 +549,13 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 base.wire,
                 length_mm=33.623,
                 diameter_mm=0.0191,
-                initial_motor_mm=50.0 / 450.0,
-                elastic_stiffness_mpa_per_mm=450.0,
+                initial_motor_mm=50.0 / 14.8,
+                elastic_stiffness_mpa_per_mm=14.8,
                 transformation_onset_ma=24.0,
-                transformation_end_ma=42.0,
-                transformation_contraction_mm=0.045,
+                transformation_end_ma=55.0,
+                transformation_contraction_mm=3.0,
                 transformation_hysteresis_ma=10.0,
-                fluctuation_mpa=28.0,
+                fluctuation_mpa=30.0,
                 fluctuation_cycles=5.0,
                 noise_mpa=2.5,
             ),
@@ -584,8 +564,8 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 target_stress_mpa=50.0,
                 tolerance_mpa=2.5,
                 min_recovery_mpa=5.0,
-                motor_step_mm=0.00025,
-                max_correction_mm=0.004,
+                motor_step_mm=0.001,
+                max_correction_mm=0.3,
                 safety_min_stress_mpa=None,
                 stale_feedback_s=1.0,
             ),
@@ -594,12 +574,8 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             endpoint_hold_timeout_s=360.0,
             max_ticks=7000,
             zero_compression_stress=True,
-            reported_strain_sign=-0.02,
-            reported_strain_offset_pct=0.55,
-            reported_strain_current_slope_pct_per_ma=0.0,
-            reported_strain_transformation_shift_pct=-10.2,
-            reported_strain_transformation_valley_pct=0.0,
-            reported_strain_step_count=14,
+            reported_strain_motor_scale=0.617,
+            reported_strain_offset_pct=-8.0,
             seed=184,
         ),
         "noisy_centered_first_overheating": replace(
