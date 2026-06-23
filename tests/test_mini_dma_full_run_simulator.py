@@ -10,6 +10,8 @@ from pathlib import Path
 from data_logging.mini_dma_logger.full_run_simulator import (
     FULL_RUN_SCENARIOS,
     full_run_scenario_by_name,
+    run_control_policy_matrix,
+    run_free_strain_stress_matrix,
     run_full_mini_dma_simulation,
     run_parameter_sweep,
     write_full_run_outputs,
@@ -42,6 +44,45 @@ def test_full_run_stress_is_derived_from_motor_free_strain_mismatch() -> None:
             sample.motor_mm + sample.free_length_shift_mm
         ) * trace.config.wire.elastic_stiffness_mpa_per_mm
         assert abs(sample.stress_mpa - expected_stress) <= 1e-9
+
+
+def test_free_strain_fluctuation_is_physical_length_input_not_plotted_strain() -> None:
+    base = full_run_scenario_by_name("realistic_first_overheating")
+    config = replace(
+        base,
+        wire=replace(base.wire, noise_mpa=0.0, fluctuation_mpa=0.0, drift_mpa_per_s=0.0),
+        free_strain_fluctuation_pct=0.20,
+        free_strain_fluctuation_cycles=7.0,
+        zero_compression_stress=False,
+        seed=441,
+    )
+
+    trace = run_full_mini_dma_simulation(config)
+
+    roughness_mm = [
+        abs(
+            sample.free_length_shift_mm
+            - (
+                trace.config.wire.initial_free_length_shift_mm
+                + sample.transformation_fraction * trace.config.wire.transformation_contraction_mm
+            )
+        )
+        for sample in trace.samples
+    ]
+    assert max(roughness_mm) >= trace.config.wire.length_mm * 0.001
+    for sample in trace.samples:
+        expected_stress = (
+            sample.motor_mm + sample.free_length_shift_mm
+        ) * trace.config.wire.elastic_stiffness_mpa_per_mm
+        expected_strain = (
+            trace.config.reported_strain_offset_pct
+            + trace.config.reported_strain_motor_scale
+            * sample.motor_mm
+            / trace.config.wire.length_mm
+            * 100.0
+        )
+        assert abs(sample.stress_mpa - expected_stress) <= 1e-9
+        assert sample.strain_pct == expected_strain
 
 
 def test_realistic_first_overheating_matches_reference_scale() -> None:
@@ -211,8 +252,48 @@ def test_parameter_sweep_runs_and_writes_summary(tmp_path: Path) -> None:
 
     assert len(traces) == 18
     assert paths["summary"].exists()
+    assert paths["summary_csv"].exists()
     assert "Mini DMA full-run parameter sweep" in paths["report"].read_text(encoding="utf-8")
     assert all(trace.invariants["corrections_bounded"] for trace in traces)
+
+
+def test_free_strain_stress_matrix_covers_real_run_inspired_wire_families(tmp_path: Path) -> None:
+    traces = run_free_strain_stress_matrix()
+    summaries = [trace.summary() for trace in traces]
+    names = {trace.config.name for trace in traces}
+
+    paths = write_sweep_outputs(traces, tmp_path)
+
+    assert len(traces) == 24
+    assert any("good_12_2_10pct" in name for name in names)
+    assert any("early_19_8_9pct" in name for name in names)
+    assert any("co6_bad_1pct" in name for name in names)
+    assert any("weak_noisy_0p25pct" in name for name in names)
+    assert any(item["configured_free_strain_fluctuation_pct"] >= 0.18 for item in summaries)
+    assert any(item["scale_latency_s"] >= 0.45 for item in summaries)
+    assert any(item["free_transformation_strain_range_pct"] >= 10.0 for item in summaries)
+    assert any(item["free_transformation_strain_range_pct"] <= 0.45 for item in summaries)
+    assert all(trace.invariants["corrections_bounded"] for trace in traces)
+    assert all(trace.invariants["scale_latency_applied"] for trace in traces)
+    assert paths["summary"].exists()
+    assert paths["summary_csv"].exists()
+    assert paths.get("plot", tmp_path / "missing").exists()
+
+
+def test_control_policy_matrix_compares_caps_on_good_and_weak_wires(tmp_path: Path) -> None:
+    traces = run_control_policy_matrix()
+    summaries = [trace.summary() for trace in traces]
+    names = {trace.config.name for trace in traces}
+
+    paths = write_sweep_outputs(traces, tmp_path)
+
+    assert len(traces) == 32
+    assert any("good_12_2_10pct" in name for name in names)
+    assert any("weak_noisy_0p25pct" in name for name in names)
+    assert any(item["max_correction_strain_pct"] < 0.06 for item in summaries)
+    assert any(item["max_correction_strain_pct"] > 0.20 for item in summaries)
+    assert all(trace.invariants["corrections_bounded"] for trace in traces)
+    assert paths["summary_csv"].exists()
 
 
 def test_full_run_cli_runs_named_scenario(tmp_path: Path) -> None:

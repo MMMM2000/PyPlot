@@ -2,7 +2,7 @@
 
 `data_logging.mini_dma_logger.wire_simulator` provides a deterministic virtual wire and processed-center control harness for software-only Mini DMA controller experiments. It does not import Qt, serial, Tic, or power-supply code.
 
-The model treats motor displacement and transformation contraction as the two contributors to tensile extension. Stress is computed from an elastic stiffness in MPa/mm, then optional transformation fluctuations, noise, spikes, and drift are added. Raw stress samples are preserved for safety rails. Motor decisions use the processed control signal: median center, MAD noise, slope, sample count, freshness, and the raw envelope.
+The model treats motor displacement and transformation contraction as the two contributors to tensile extension. Stress is computed from an elastic stiffness in MPa/mm, then optional direct stress fluctuations, noise, spikes, and drift are added. Raw stress samples are preserved for safety rails. Motor decisions use the processed control signal: median center, MAD noise, slope, sample count, freshness, and the raw envelope.
 
 Built-in scenarios cover the current control questions:
 
@@ -85,6 +85,18 @@ Run the parameter sweep across wire diameter, stiffness, and noise:
 uv run python scripts/mini_dma_full_run_simulator.py --sweep --out artifacts/mini-dma-full-run-sim/parameter-sweep
 ```
 
+Run the broader free-strain stress-test matrix:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --free-strain-matrix --out artifacts/mini-dma-free-strain-stress-matrix
+```
+
+Run representative correction-policy comparisons:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --policy-matrix --out artifacts/mini-dma-control-policy-matrix
+```
+
 Full-run scenarios currently cover:
 
 - `baseline_first_overheating`: nominal endpoint recovery.
@@ -98,3 +110,15 @@ Full-run scenarios currently cover:
 - `thin_wire_delayed_feedback`: 8.3 um wire and low sample cadence remain bounded.
 
 Each full-run output folder contains `measurement.csv`, `control_trace.csv`, `summary.json`, `config.json`, `report.md`, and `full_run.png`. The measurement CSV logs raw and processed stress, stress target/error, current setpoint, measured current, simulated voltage/resistance/power, motor position, measured motor strain, hidden free transformation contraction/strain, elastic mismatch strain, free-strain tracking error, phase, current-hold state, correction, cumulative correction travel, and feedback age for each simulated sample. The plot shows stress versus time with the active target trajectory and hold bands, measured strain versus current with a hidden free-strain reference, current/motor versus time, and controller correction decisions. The simulator advances a synthetic clock, so a run can report about 15-20 minutes of bench-equivalent measurement time while executing in seconds. The default full-run harness applies `scale_latency_s = 0.2`, so controller decisions use delayed feedback rather than the just-created physical sample. The `summary.json` records total measurement time, current-hold time and periods, maximum stress error, recovery times, measured strain range, hidden free-transformation strain range, measured-vs-free strain tracking error, correction travel, configured strain-percent correction cap, effective mm correction cap, and invariants such as no load/stress cruise, bounded single-correction size, no accumulated correction-travel stop, endpoint waits only while unrecovered, endpoint completion only after recovery, and delayed-feedback application.
+
+The free-strain stress-test matrix crosses real-run-inspired wire families with controller-relevant perturbations:
+
+- good `Ni50Fe27Ga23 12/2`-style wires with about 10% hidden transformation strain,
+- early `19/8`-style wires with about 9% hidden transformation strain and lower stiffness,
+- bad `Co6 2/1`-style wires with about 1% usable transformation strain,
+- weak/noisy wires with about 0.25% transformation strain,
+- nominal, fast/spiky, rough-transform, delayed-feedback, soft-underestimated, and stiff-overresponsive variants.
+
+`free_strain_fluctuation_pct` is a physical hidden-length perturbation during transformation. It changes the simulated free contraction/elongation and therefore changes stress through the elastic mismatch; it does not directly fabricate the plotted strain. Plotted strain remains derived from simulated motor position and gauge length. The sweep writer emits JSON, CSV, Markdown, and a compact metrics PNG so policy changes can be compared across all simulated wire families.
+
+The policy matrix reuses representative high-strain, delayed-feedback, stiff-overresponsive, and weak/noisy cases and varies only geometry-based correction-cap scale plus the recovery band as a fraction of target stress. It is intended to catch policies that improve the good 10% strain wire by moving faster but overdrive weak/noisy wires into artificial strain or long current holds.
