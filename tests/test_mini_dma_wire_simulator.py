@@ -10,9 +10,12 @@ from pathlib import Path
 import pytest
 
 from data_logging.mini_dma_logger.wire_simulator import (
+    DEFAULT_SCENARIOS,
     decide_robust_center,
+    processed_control_signal,
     run_virtual_wire_scenario,
     scenario_by_name,
+    write_scenario_matrix_report,
     write_simulation_outputs,
 )
 
@@ -144,3 +147,62 @@ def test_wire_simulator_cli_runs_named_scenario(tmp_path: Path) -> None:
     assert payload["scenarios"][0]["scenario"] == "target_spanning_cloud"
     assert (tmp_path / "measurement.csv").exists()
     assert (tmp_path / "control_trace.csv").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("low_noise_centered", "no_move"),
+        ("high_raw_centered", "no_move"),
+        ("high_raw_far_above", "bias_recovery"),
+        ("transformation_current_rise", "bias_recovery"),
+        ("reverse_current_unwind", "bias_recovery"),
+        ("slack_after_unwind", "bias_recovery"),
+        ("bad_low_apparent_stiffness", "bias_recovery"),
+        ("thin_wire_tiny_load", "no_move"),
+        ("thick_wire_larger_load", "no_move"),
+        ("delayed_scale_feedback", "bias_recovery"),
+    ],
+)
+def test_processed_center_scenario_matrix(name: str, expected: str) -> None:
+    trace, decision = _final_decision(name)
+
+    assert name in DEFAULT_SCENARIOS
+    assert trace.stop_reason == "completed"
+    assert decision.decision == expected
+    assert decision.processed_fresh is True
+
+
+def test_processed_signal_reports_center_noise_slope_samples_and_freshness() -> None:
+    trace = run_virtual_wire_scenario(scenario_by_name("high_raw_far_above"))
+
+    signal = processed_control_signal(trace.samples, trace.scenario.controller)
+
+    assert signal.sample_count >= 2
+    assert signal.fresh is True
+    assert signal.center_mpa > trace.scenario.controller.target_stress_mpa
+    assert signal.noise_mpa > 0.0
+    assert signal.raw_min_mpa < signal.raw_max_mpa
+
+
+def test_slack_and_bad_low_stiffness_scenarios_stay_bounded() -> None:
+    for name in ("slack_after_unwind", "bad_low_apparent_stiffness"):
+        trace, decision = _final_decision(name)
+
+        assert decision.decision == "bias_recovery"
+        assert abs(decision.motor_step_mm) <= trace.scenario.controller.max_correction_mm
+        assert decision.endpoint_recovered is False
+
+
+def test_scenario_matrix_report_writes_machine_and_human_outputs(tmp_path: Path) -> None:
+    traces = [
+        run_virtual_wire_scenario(scenario_by_name("low_noise_centered")),
+        run_virtual_wire_scenario(scenario_by_name("high_raw_far_above")),
+    ]
+
+    paths = write_scenario_matrix_report(traces, tmp_path)
+
+    assert Path(paths["summary"]).exists()
+    assert Path(paths["report"]).read_text(encoding="utf-8").startswith("# Mini DMA")
+    if "plot" in paths:
+        assert Path(paths["plot"]).exists()

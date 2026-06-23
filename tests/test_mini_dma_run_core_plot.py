@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 
 import pytest
+import pandas as pd
+from matplotlib import pyplot as plt
 
-from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot
+from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot, _plot_strain_current
 
 
 def test_generate_core_run_plot_writes_png_and_summary(tmp_path: Path) -> None:
@@ -88,3 +90,22 @@ def test_generate_core_run_plot_hides_wire_break_tail_from_result_axes(tmp_path:
 def test_generate_core_run_plot_rejects_missing_run_files(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="measurement.csv"):
         generate_core_run_plot(tmp_path / "missing")
+
+
+def test_grouped_strain_current_keeps_rows_without_numeric_plateau_index() -> None:
+    frame = pd.DataFrame(
+        {
+            "current_measured_mA": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "current_set_mA": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "strain_pct": [0.0, 0.1, 0.2, 0.3, 0.4],
+            "automation_basis": ["stress_mpa"] * 5,
+            "automation_target_value": [20.0] * 5,
+            "plateau_index": [float("nan")] * 5,
+        }
+    )
+    fig, ax = plt.subplots()
+    try:
+        _plot_strain_current(ax, frame, {}, grouped=True)
+        assert ax.lines
+    finally:
+        plt.close(fig)
