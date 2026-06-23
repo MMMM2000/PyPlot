@@ -596,9 +596,9 @@ SERVO_CURRENT_SWEEP_HOLD_FILTER_WINDOW_S = 1.8
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
-SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR = 20.0
-SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR = 20.0
-SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR = 10.0
+SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR = 3.0
+SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR = 3.0
+SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR = 4.0
 SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR = 2.0
 SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S = 0.3
 SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S = 1.0
@@ -15430,10 +15430,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._is_current_sweep_mode(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
         ):
-            if self._automation_phase == "target_ramp" and local_seek_stiffness is not None:
-                stiffness = local_seek_stiffness
-            else:
-                stiffness = max(valid_stiffness)
+            stiffness = max(valid_stiffness)
         else:
             stiffness = valid_stiffness[0]
         if stiffness is None or not math.isfinite(float(stiffness)) or float(stiffness) <= 0.0:
@@ -16646,6 +16643,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_supports_cruise_feedback(self, basis: str) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
+        if self._is_current_sweep_mode(self._automation_name):
+            return False
         if self._automation_step_note == "setup_preload":
             return False
         if self._automation_step_note == "setup_return_zero" or self._is_recovery_mode():
@@ -17295,11 +17294,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._current_sweep_hold_min_resume_stress_mpa(),
                 ),
             )
-            if self._automation_phase == "current_hold":
-                noise_band = max(
-                    noise_band,
-                    self._current_sweep_hold_entry_band_for_basis(acceptance_tolerance),
-                )
             if (
                 abs(delta_value) <= noise_band
                 and self._current_sweep_filtered_window_spans_target(
@@ -17774,11 +17768,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 seek_key=seek_key,
             )
             if volatile_containment_active:
-                nudge_mm = min(nudge_mm, self._motor_step_mm())
-                current_hold_correction_reason = "current_hold_volatile_single_step"
+                nudge_mm = min(
+                    nudge_mm,
+                    max(
+                        self._motor_step_mm(),
+                        self._current_sweep_hold_adaptive_command_cap_mm() * 0.5,
+                    ),
+                )
+                current_hold_correction_reason = "current_hold_volatile_capped"
                 self._log(
-                    "Current-hold response is volatile/unstable; containing recovery to one motor step "
-                    "until the load/stress response settles."
+                    "Current-hold response is volatile/unstable; capping the next correction "
+                    "while keeping one-sided processed error recovery active."
                 )
             elif current_hold_correction_reason == "current_hold_improving_recovery":
                 current_hold_correction_reason = "current_hold_unstable_improving_recovery"
@@ -26009,6 +26009,35 @@ class MainWindow(QtWidgets.QMainWindow):
         signed_error = current_value - float(step.target_value)
         return signed_error, abs(signed_error), max(1e-12, abs(float(acceptance_tolerance))), max(0.0, noise_value)
 
+    def _current_sweep_endpoint_recovered(self, step: AutomationStep) -> bool:
+        if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return True
+        error_state = self._current_sweep_target_error_and_tolerance(step, filtered=True)
+        if error_state is None:
+            return False
+        _signed_error, error_value, tolerance, noise_value = error_state
+        recovery_band = max(
+            tolerance,
+            self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance),
+            self._current_sweep_hold_min_band_for_basis(
+                step.basis,
+                self._current_sweep_hold_min_resume_stress_mpa(),
+            ),
+        )
+        if not self._current_sweep_filtered_window_spans_target(
+            step.basis,
+            float(step.target_value),
+            tolerance,
+        ):
+            recovery_band = max(
+                tolerance,
+                self._current_sweep_hold_min_band_for_basis(
+                    step.basis,
+                    self._current_sweep_hold_min_resume_stress_mpa(),
+                ),
+            )
+        return error_value <= recovery_band
+
     def _current_sweep_hold_entry_confirmed(
         self,
         step: AutomationStep,
@@ -26308,7 +26337,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if setpoint_mA <= target_mA + 1e-12:
             current_value = self._current_distribution_value(step.basis, require_after_last_move=False)
-            if not target_recovered:
+            if not target_recovered or not self._current_sweep_endpoint_recovered(step):
                 self._write_control_trace(
                     decision="wait",
                     basis=step.basis,
@@ -26316,7 +26345,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_value=current_value,
                     tolerance=tolerance,
                     result="waiting",
-                    reason="current_returned_waiting_for_target_recovery",
+                    reason="current_returned_waiting_for_processed_target_recovery",
                 )
                 return False
             self._record_current_sweep_duration(step, finished_s=time.monotonic())
@@ -26618,6 +26647,28 @@ class MainWindow(QtWidgets.QMainWindow):
         duration_s = abs(end_mA - start_mA) / ramp_rate_mA_s
         finished = elapsed_s >= duration_s and abs((self._active_current_sweep_last_setpoint_mA or setpoint_mA) - end_mA) < 1e-9
         if finished:
+            if not self._current_sweep_endpoint_recovered(step):
+                if self._current_sweep_ramp_hold_step_index != step_index:
+                    self._current_sweep_ramp_hold_step_index = step_index
+                    self._current_sweep_ramp_hold_started_s = now_s
+                    self._current_sweep_ramp_hold_in_band_since_s = None
+                    self._current_sweep_ramp_hold_seek_accepted_since_s = None
+                    self._reset_current_sweep_ramp_hold_candidate()
+                current_value = self._current_distribution_value(step.basis, require_after_last_move=False)
+                self._write_control_trace(
+                    decision="wait",
+                    basis=step.basis,
+                    target_value=step.target_value,
+                    current_value=current_value,
+                    tolerance=tolerance,
+                    result="waiting",
+                    reason="current_endpoint_waiting_for_processed_target_recovery",
+                )
+                return self._handle_current_sweep_held_recovery(
+                    step,
+                    plateau_index=plateau_index,
+                    tolerance=tolerance,
+                )
             self._record_current_sweep_duration(step, finished_s=now_s)
             self._active_current_sweep_step_index = None
             self._active_current_sweep_started_s = 0.0

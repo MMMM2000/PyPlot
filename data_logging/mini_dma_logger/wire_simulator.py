@@ -15,6 +15,16 @@ from typing import Any, Iterable
 from .trace_replay import GRAVITY_MS2
 
 DEFAULT_SCENARIOS = (
+    "low_noise_centered",
+    "high_raw_centered",
+    "high_raw_far_above",
+    "transformation_current_rise",
+    "reverse_current_unwind",
+    "slack_after_unwind",
+    "bad_low_apparent_stiffness",
+    "thin_wire_tiny_load",
+    "thick_wire_larger_load",
+    "delayed_scale_feedback",
     "high_bias_cloud",
     "wide_high_cloud",
     "target_spanning_cloud",
@@ -230,6 +240,9 @@ class ControlDecision:
     motor_step_mm: float
     reason: str
     window_samples: int
+    processed_slope_mpa_s: float = 0.0
+    processed_fresh: bool = True
+    endpoint_recovered: bool = True
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -249,6 +262,9 @@ class ControlDecision:
             "motor_step_mm": f"{self.motor_step_mm:.9f}",
             "result_detail": self.reason,
             "window_samples": self.window_samples,
+            "processed_slope_mpa_s": f"{self.processed_slope_mpa_s:.6f}",
+            "processed_fresh": str(bool(self.processed_fresh)).lower(),
+            "endpoint_recovered": str(bool(self.endpoint_recovered)).lower(),
         }
 
 
@@ -278,7 +294,58 @@ class SimulationTrace:
             "raw_min_mpa": raw_min,
             "raw_max_mpa": raw_max,
             "expected_decision": self.scenario.expected_decision,
+            "endpoint_recovered": None if final is None else final.endpoint_recovered,
+            "processed_fresh": None if final is None else final.processed_fresh,
         }
+
+
+@dataclass(frozen=True)
+class ProcessedControlSignal:
+    """Official processed Mini DMA load/stress signal for software decisions."""
+
+    center_mpa: float
+    noise_mpa: float
+    slope_mpa_s: float
+    sample_count: int
+    age_s: float
+    fresh: bool
+    raw_min_mpa: float
+    raw_max_mpa: float
+
+
+def processed_control_signal(
+    samples: list[MeasurementSample],
+    controller: RobustControllerConfig,
+) -> ProcessedControlSignal:
+    if not samples:
+        raise ValueError("at least one sample is required")
+    latest = samples[-1]
+    window_start = latest.elapsed_s - controller.window_s
+    window = [sample for sample in samples if sample.elapsed_s >= window_start]
+    if len(window) < 1:
+        window = [latest]
+    raw_values = [sample.raw_stress_mpa for sample in window]
+    center = statistics.median(raw_values)
+    noise = 1.4826 * _median_absolute_deviation(raw_values, center)
+    slope = 0.0
+    if len(window) >= 2:
+        first_half = window[: max(1, len(window) // 2)]
+        second_half = window[max(1, len(window) // 2) :]
+        first_center = statistics.median(sample.raw_stress_mpa for sample in first_half)
+        second_center = statistics.median(sample.raw_stress_mpa for sample in second_half)
+        dt = max(1e-9, statistics.median(sample.elapsed_s for sample in second_half) - statistics.median(sample.elapsed_s for sample in first_half))
+        slope = (second_center - first_center) / dt
+    age_s = max(0.0, latest.elapsed_s - window[-1].elapsed_s)
+    return ProcessedControlSignal(
+        center_mpa=center,
+        noise_mpa=noise,
+        slope_mpa_s=slope,
+        sample_count=len(window),
+        age_s=age_s,
+        fresh=len(window) >= 2 or latest.elapsed_s <= controller.stale_feedback_s,
+        raw_min_mpa=min(raw_values),
+        raw_max_mpa=max(raw_values),
+    )
 
 
 def transformation_fraction(current_ma: float, wire: VirtualWireConfig, *, rising: bool = True) -> float:
@@ -402,16 +469,15 @@ def decide_robust_center(
         raise ValueError("at least one sample is required")
     latest = samples[-1]
     window_start = latest.elapsed_s - controller.window_s
-    window = [sample for sample in samples if sample.elapsed_s >= window_start]
-    if len(window) < 1:
-        window = [latest]
-    raw_values = [sample.raw_stress_mpa for sample in window]
+    window = [sample for sample in samples if sample.elapsed_s >= window_start] or [latest]
     safety_reason = _safety_stop_for_window(window, controller)
-    center = statistics.median(raw_values)
-    noise = 1.4826 * _median_absolute_deviation(raw_values, center)
+    signal = processed_control_signal(samples, controller)
+    center = signal.center_mpa
+    noise = signal.noise_mpa
     error = center - controller.target_stress_mpa
-    raw_min = min(raw_values)
-    raw_max = max(raw_values)
+    raw_min = signal.raw_min_mpa
+    raw_max = signal.raw_max_mpa
+    endpoint_recovered = abs(error) <= max(controller.tolerance_mpa, controller.min_recovery_mpa)
     if safety_reason is not None:
         return ControlDecision(
             elapsed_s=latest.elapsed_s,
@@ -427,8 +493,11 @@ def decide_robust_center(
             motor_step_mm=0.0,
             reason=f"raw safety rail: {safety_reason}",
             window_samples=len(window),
+            processed_slope_mpa_s=signal.slope_mpa_s,
+            processed_fresh=signal.fresh,
+            endpoint_recovered=False,
         )
-    if latest.elapsed_s - window[0].elapsed_s > controller.stale_feedback_s and len(window) < 2:
+    if not signal.fresh:
         return ControlDecision(
             elapsed_s=latest.elapsed_s,
             decision="safety_stop",
@@ -443,6 +512,9 @@ def decide_robust_center(
             motor_step_mm=0.0,
             reason="stale feedback window",
             window_samples=len(window),
+            processed_slope_mpa_s=signal.slope_mpa_s,
+            processed_fresh=False,
+            endpoint_recovered=False,
         )
     noise_band = max(controller.tolerance_mpa, noise * controller.noise_sigma)
     if abs(error) <= noise_band and raw_min <= controller.target_stress_mpa <= raw_max:
@@ -460,6 +532,9 @@ def decide_robust_center(
             motor_step_mm=0.0,
             reason="robust center is near target and cloud spans target",
             window_samples=len(window),
+            processed_slope_mpa_s=signal.slope_mpa_s,
+            processed_fresh=signal.fresh,
+            endpoint_recovered=True,
         )
     if abs(error) <= max(controller.tolerance_mpa, controller.min_recovery_mpa):
         return ControlDecision(
@@ -476,6 +551,9 @@ def decide_robust_center(
             motor_step_mm=0.0,
             reason="robust center is inside configured recovery band",
             window_samples=len(window),
+            processed_slope_mpa_s=signal.slope_mpa_s,
+            processed_fresh=signal.fresh,
+            endpoint_recovered=True,
         )
     sign = 1 if error > 0.0 else -1
     if controller.previous_error_sign and sign != controller.previous_error_sign:
@@ -493,6 +571,9 @@ def decide_robust_center(
             motor_step_mm=controller.motor_step_mm,
             reason="robust error changed sign; wait or shrink step before reversing",
             window_samples=len(window),
+            processed_slope_mpa_s=signal.slope_mpa_s,
+            processed_fresh=signal.fresh,
+            endpoint_recovered=endpoint_recovered,
         )
     stress_per_mm = max(1e-9, abs(controller.target_stress_mpa) / max(0.01, controller.max_correction_mm))
     correction_mm = _clamp(abs(error) / stress_per_mm, controller.motor_step_mm, controller.max_correction_mm)
@@ -518,6 +599,9 @@ def decide_robust_center(
         motor_step_mm=-sign * correction_mm,
         reason=reason,
         window_samples=len(window),
+        processed_slope_mpa_s=signal.slope_mpa_s,
+        processed_fresh=signal.fresh,
+        endpoint_recovered=endpoint_recovered,
     )
 
 
@@ -554,6 +638,164 @@ def scenario_by_name(name: str) -> VirtualWireScenario:
 def _scenario_map() -> dict[str, VirtualWireScenario]:
     base_sweep = CurrentSweepConfig(start_ma=35.0, end_ma=45.0, rate_ma_s=20.0, sample_hz=4.5, hold_s=2.0)
     return {
+        "low_noise_centered": VirtualWireScenario(
+            name="low_noise_centered",
+            description="Low-noise processed stress center already near the 20 MPa target.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=0.0334,
+                elastic_stiffness_mpa_per_mm=600.0,
+                noise_mpa=0.15,
+                transformation_contraction_mm=0.0,
+            ),
+            sweep=base_sweep,
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0),
+            seed=3,
+            expected_decision="no_move",
+        ),
+        "high_raw_centered": VirtualWireScenario(
+            name="high_raw_centered",
+            description="Large raw fluctuations span the target while the processed center remains near target.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=0.0334,
+                elastic_stiffness_mpa_per_mm=600.0,
+                fluctuation_mpa=15.0,
+                fluctuation_cycles=2.0,
+                noise_mpa=0.8,
+                transformation_onset_ma=35.0,
+                transformation_end_ma=45.0,
+                transformation_contraction_mm=0.0,
+            ),
+            sweep=base_sweep,
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0),
+            seed=5,
+            expected_decision="no_move",
+        ),
+        "high_raw_far_above": VirtualWireScenario(
+            name="high_raw_far_above",
+            description="Large raw fluctuations remain centered far above the target and must recover.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=0.072,
+                elastic_stiffness_mpa_per_mm=600.0,
+                fluctuation_mpa=16.0,
+                fluctuation_cycles=2.0,
+                noise_mpa=0.8,
+                transformation_onset_ma=35.0,
+                transformation_end_ma=45.0,
+                transformation_contraction_mm=0.0,
+            ),
+            sweep=base_sweep,
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0),
+            seed=7,
+            expected_decision="bias_recovery",
+        ),
+        "transformation_current_rise": VirtualWireScenario(
+            name="transformation_current_rise",
+            description="Current rise contracts the wire and biases processed stress above target.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=0.033,
+                elastic_stiffness_mpa_per_mm=620.0,
+                transformation_onset_ma=35.0,
+                transformation_end_ma=45.0,
+                transformation_contraction_mm=0.075,
+                fluctuation_mpa=6.0,
+                noise_mpa=0.7,
+            ),
+            sweep=base_sweep,
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0),
+            seed=29,
+            expected_decision="bias_recovery",
+        ),
+        "reverse_current_unwind": VirtualWireScenario(
+            name="reverse_current_unwind",
+            description="Reverse current path elongates the wire and leaves processed stress below target.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=-0.004,
+                elastic_stiffness_mpa_per_mm=620.0,
+                transformation_onset_ma=35.0,
+                transformation_end_ma=45.0,
+                transformation_contraction_mm=0.065,
+                fluctuation_mpa=4.0,
+                noise_mpa=0.4,
+            ),
+            sweep=CurrentSweepConfig(start_ma=45.0, end_ma=35.0, rate_ma_s=8.0, sample_hz=4.5, hold_s=1.0),
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0),
+            seed=41,
+            expected_decision="bias_recovery",
+        ),
+        "slack_after_unwind": VirtualWireScenario(
+            name="slack_after_unwind",
+            description="Current unwind leaves the virtual wire slack below target; recovery should stay bounded.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=-0.004,
+                elastic_stiffness_mpa_per_mm=600.0,
+                transformation_onset_ma=35.0,
+                transformation_end_ma=45.0,
+                transformation_contraction_mm=0.0,
+                noise_mpa=0.15,
+            ),
+            sweep=CurrentSweepConfig(start_ma=45.0, end_ma=35.0, rate_ma_s=8.0, sample_hz=4.5, hold_s=1.0),
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0, max_correction_mm=0.02),
+            seed=43,
+            expected_decision="bias_recovery",
+        ),
+        "bad_low_apparent_stiffness": VirtualWireScenario(
+            name="bad_low_apparent_stiffness",
+            description="A bad low apparent stiffness estimate would imply a huge pull; cap keeps correction bounded.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=0.001,
+                elastic_stiffness_mpa_per_mm=11.0,
+                noise_mpa=0.05,
+                transformation_contraction_mm=0.0,
+            ),
+            sweep=base_sweep,
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0, max_correction_mm=0.02),
+            seed=47,
+            expected_decision="bias_recovery",
+        ),
+        "thin_wire_tiny_load": VirtualWireScenario(
+            name="thin_wire_tiny_load",
+            description="8.3 um wire converts the same stress target to a tiny load.",
+            wire=VirtualWireConfig(
+                diameter_mm=0.0083,
+                initial_motor_mm=0.0333,
+                elastic_stiffness_mpa_per_mm=600.0,
+                noise_mpa=0.3,
+                transformation_contraction_mm=0.0,
+            ),
+            sweep=base_sweep,
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.7, min_recovery_mpa=1.2),
+            seed=53,
+            expected_decision="no_move",
+        ),
+        "thick_wire_larger_load": VirtualWireScenario(
+            name="thick_wire_larger_load",
+            description="Thicker/stiffer wire uses larger target loads but the same processed-center rule.",
+            wire=VirtualWireConfig(
+                diameter_mm=0.04,
+                initial_motor_mm=0.0167,
+                elastic_stiffness_mpa_per_mm=1200.0,
+                noise_mpa=0.25,
+                transformation_contraction_mm=0.0,
+            ),
+            sweep=base_sweep,
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0),
+            seed=59,
+            expected_decision="no_move",
+        ),
+        "delayed_scale_feedback": VirtualWireScenario(
+            name="delayed_scale_feedback",
+            description="Low sample cadence leaves sparse processed feedback; controller must wait or use bounded correction.",
+            wire=VirtualWireConfig(
+                initial_motor_mm=0.06,
+                elastic_stiffness_mpa_per_mm=600.0,
+                noise_mpa=0.2,
+                transformation_contraction_mm=0.0,
+            ),
+            sweep=CurrentSweepConfig(start_ma=35.0, end_ma=45.0, rate_ma_s=20.0, sample_hz=0.8, hold_s=2.0),
+            controller=RobustControllerConfig(target_stress_mpa=20.0, tolerance_mpa=0.5, min_recovery_mpa=1.0, stale_feedback_s=0.75),
+            seed=61,
+            expected_decision="bias_recovery",
+        ),
         "high_bias_cloud": VirtualWireScenario(
             name="high_bias_cloud",
             description="Noisy 60-70 MPa stress cloud against a 20 MPa target.",
@@ -697,6 +939,84 @@ def write_simulation_outputs(trace: SimulationTrace, output_dir: Path | str) -> 
     }
 
 
+def write_scenario_matrix_report(traces: list[SimulationTrace], output_dir: Path | str) -> dict[str, Path]:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    summary_path = out / "scenario_matrix_summary.json"
+    report_path = out / "scenario_matrix_report.md"
+    plot_path = out / "scenario_matrix.png"
+    summaries = [trace.summary() for trace in traces]
+    summary_path.write_text(json.dumps({"scenarios": summaries}, indent=2), encoding="utf-8")
+    lines = [
+        "# Mini DMA processed-center control simulation matrix",
+        "",
+        "| Scenario | Stop | Final decision | Center MPa | Error MPa | Raw MPa | Motor step mm |",
+        "| --- | --- | --- | ---: | ---: | --- | ---: |",
+    ]
+    for summary in summaries:
+        center = summary["final_robust_center_mpa"]
+        error = summary["final_error_mpa"]
+        step = summary["final_motor_step_mm"]
+        lines.append(
+            "| {scenario} | {stop_reason} | {final_decision} | {center} | {error} | {raw_min:.2f}..{raw_max:.2f} | {step} |".format(
+                scenario=summary["scenario"],
+                stop_reason=summary["stop_reason"],
+                final_decision=summary["final_decision"],
+                center="-" if center is None else f"{float(center):.3f}",
+                error="-" if error is None else f"{float(error):.3f}",
+                raw_min=float(summary["raw_min_mpa"]),
+                raw_max=float(summary["raw_max_mpa"]),
+                step="-" if step is None else f"{float(step):.6f}",
+            )
+        )
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return {"summary": summary_path, "report": report_path}
+
+    fig, axes = plt.subplots(len(traces), 1, figsize=(11, max(3.0, 2.2 * len(traces))), sharex=False)
+    if len(traces) == 1:
+        axes = [axes]
+    for ax, trace in zip(axes, traces):
+        elapsed = [sample.elapsed_s for sample in trace.samples]
+        raw = [sample.raw_stress_mpa for sample in trace.samples]
+        current = [sample.current_ma for sample in trace.samples]
+        motor = [sample.motor_mm for sample in trace.samples]
+        decision_t = [decision.elapsed_s for decision in trace.decisions]
+        center = [decision.robust_center_mpa for decision in trace.decisions]
+        ax.plot(elapsed, raw, color="#94a3b8", lw=0.8, alpha=0.7, label="raw stress")
+        ax.plot(decision_t, center, color="#dc2626", lw=1.2, label="processed center")
+        ax.axhline(trace.scenario.controller.target_stress_mpa, color="#111827", lw=0.8, ls="--", label="target")
+        ax2 = ax.twinx()
+        ax2.plot(elapsed, current, color="#2563eb", lw=0.8, alpha=0.65, label="current")
+        ax2.plot(elapsed, motor, color="#059669", lw=0.8, alpha=0.65, label="motor mm")
+        final = trace.decisions[-1] if trace.decisions else None
+        title = trace.scenario.name
+        if final is not None:
+            title += f" | {final.decision} | error {final.error_mpa:.2f} MPa"
+        ax.set_title(title, fontsize=9)
+        ax.set_ylabel("MPa")
+        ax2.set_ylabel("mA / mm")
+        ax.grid(True, alpha=0.25)
+        if final is not None:
+            ax.annotate(
+                final.result,
+                xy=(final.elapsed_s, final.robust_center_mpa),
+                xytext=(5, 5),
+                textcoords="offset points",
+                fontsize=7,
+            )
+    axes[-1].set_xlabel("Elapsed (s)")
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=180)
+    plt.close(fig)
+    return {"summary": summary_path, "report": report_path, "plot": plot_path}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deterministic Mini DMA virtual wire scenarios.")
     parser.add_argument(
@@ -706,6 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Scenario to run. May be passed more than once. Defaults to all built-in scenarios.",
     )
     parser.add_argument("--out", type=Path, default=None, help="Directory for CSV/JSON outputs.")
+    parser.add_argument("--report", action="store_true", help="Write a scenario-matrix Markdown report and PNG plot.")
     args = parser.parse_args(argv)
 
     names = args.scenario or list(DEFAULT_SCENARIOS)
@@ -717,6 +1038,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.out is not None:
             scenario_out = args.out / name if len(names) > 1 else args.out
             write_simulation_outputs(trace, scenario_out)
+    if args.out is not None and args.report:
+        traces = [run_virtual_wire_scenario(scenario_by_name(name)) for name in names]
+        write_scenario_matrix_report(traces, args.out)
     print(json.dumps({"scenarios": summaries}, indent=2))
     return 0
 

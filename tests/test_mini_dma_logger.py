@@ -410,6 +410,25 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
         _restore_settings(snapshot)
 
 
+def test_current_sweep_hold_bands_are_bounded_processed_signal_multipliers() -> None:
+    assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR == pytest.approx(3.0)
+    assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR == pytest.approx(3.0)
+    assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR == pytest.approx(4.0)
+
+
+def test_current_sweep_load_stress_control_disables_cruise_feedback(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current"
+        window._automation_step_note = "1"
+
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_LOAD_G) is False
+    finally:
+        _close_test_window(window)
+
+
 def _wait_for_tic_commands(window: mini_dma_mod.MainWindow) -> None:
     dispatcher = getattr(window, "_tic_command_dispatcher", None)
     if dispatcher is not None:

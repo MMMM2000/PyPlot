@@ -456,7 +456,18 @@ def _plot_strain_current(ax: Axes, df: pd.DataFrame, metadata: dict[str, Any], *
     current_name = "current_measured_mA" if "current_measured_mA" in df else "current_set_mA"
     if grouped and "plateau_index" in df:
         grouped_rows: list[tuple[str, np.ndarray, np.ndarray]] = []
-        for label, part in df.groupby("plateau_index", dropna=True):
+        plateau_keys = df["plateau_index"].astype(object).copy()
+        if plateau_keys.isna().any():
+            fallback_labels = []
+            for row_index, row in df.loc[plateau_keys.isna()].iterrows():
+                target = _float_or_none(row.get("automation_target_value"))
+                basis = str(row.get("automation_basis") or "")
+                if target is not None and basis:
+                    fallback_labels.append(f"{basis}:{target:.9g}")
+                else:
+                    fallback_labels.append("unindexed")
+            plateau_keys.loc[plateau_keys.isna()] = fallback_labels
+        for label, part in df.groupby(plateau_keys, sort=True):
             x, y = _clean_xy(part, current_name, "strain_pct")
             if len(x) < 4:
                 continue
