@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from data_logging.mini_dma_logger.full_run_simulator import (
@@ -25,6 +27,23 @@ def test_full_run_baseline_preserves_invariants() -> None:
     assert all(not event.cruise_allowed for event in trace.events)
 
 
+def test_full_run_stress_is_derived_from_motor_free_strain_mismatch() -> None:
+    base = full_run_scenario_by_name("baseline_first_overheating")
+    config = replace(
+        base,
+        wire=replace(base.wire, noise_mpa=0.0, fluctuation_mpa=0.0, drift_mpa_per_s=0.0),
+        zero_compression_stress=False,
+    )
+
+    trace = run_full_mini_dma_simulation(config)
+
+    for sample in trace.samples:
+        expected_stress = (
+            sample.motor_mm + sample.free_length_shift_mm
+        ) * trace.config.wire.elastic_stiffness_mpa_per_mm
+        assert abs(sample.stress_mpa - expected_stress) <= 1e-9
+
+
 def test_realistic_first_overheating_matches_reference_scale() -> None:
     trace = run_full_mini_dma_simulation(full_run_scenario_by_name("realistic_first_overheating"))
     summary = trace.summary()
@@ -38,6 +57,9 @@ def test_realistic_first_overheating_matches_reference_scale() -> None:
     assert -10.5 <= summary["strain_min_pct"] <= -9.0
     assert 0.3 <= summary["strain_max_pct"] <= 0.8
     assert 9.5 <= summary["strain_range_pct"] <= 11.0
+    assert 10.0 <= summary["free_transformation_strain_range_pct"] <= 10.5
+    assert summary["max_abs_free_strain_tracking_error_pct"] <= 1.25
+    assert summary["mean_abs_free_strain_tracking_error_pct"] <= 0.30
     assert summary["current_hold_periods"]
     assert summary["max_correction_strain_pct"] == 0.12
     assert summary["effective_max_correction_mm"] == trace.config.wire.length_mm * 0.12 / 100.0
@@ -102,11 +124,24 @@ def test_bad_co6_first_overheating_exercises_early_failure_case() -> None:
     assert trace.stop_reason == "wire_break"
     assert max(sample.stress_mpa for sample in trace.samples) >= 240.0
     assert summary["max_abs_current_sweep_error_mpa"] >= trace.config.controller.target_stress_mpa * 0.5
+    assert summary["free_transformation_strain_range_pct"] >= summary["strain_range_pct"] * 3.0
     assert summary["current_hold_time_s"] >= 1.0
     assert summary["max_abs_correction_mm"] <= summary["effective_max_correction_mm"]
     assert trace.config.wire.length_mm == 45.869
     assert trace.config.wire.diameter_mm == 0.0151
     assert all(event.feedback_age_s >= trace.config.scale_latency_s for event in trace.events)
+
+
+def test_low_strain_noisy_wire_does_not_invent_large_measured_strain() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("low_strain_noisy_first_overheating"))
+    summary = trace.summary()
+
+    assert trace.stop_reason == "completed"
+    assert summary["free_transformation_strain_range_pct"] <= 0.30
+    assert summary["strain_range_pct"] <= 0.50
+    assert summary["max_abs_free_strain_tracking_error_pct"] <= 0.10
+    assert summary["max_abs_current_sweep_error_mpa"] <= trace.config.controller.target_stress_mpa * 0.25
+    assert all(trace.invariants.values())
 
 
 def test_full_run_endpoint_waits_only_until_processed_recovered() -> None:
@@ -141,7 +176,9 @@ def test_full_run_outputs_are_replay_shaped(tmp_path: Path) -> None:
     summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
     assert summary["scenario"] == "realistic_first_overheating"
     assert paths["control_trace"].read_text(encoding="utf-8").splitlines()[0].startswith("elapsed_s,")
-    measurement_lines = paths["measurement"].read_text(encoding="utf-8").splitlines()
+    measurement_text = paths["measurement"].read_text(encoding="utf-8")
+    measurement_lines = measurement_text.splitlines()
+    measurement_rows = list(csv.DictReader(measurement_text.splitlines()))
     measurement_header = measurement_lines[0]
     assert "processed_center_mpa" in measurement_header
     assert "current_hold_active" in measurement_header
@@ -151,9 +188,20 @@ def test_full_run_outputs_are_replay_shaped(tmp_path: Path) -> None:
     assert "voltage_V" in measurement_header
     assert "resistance_ohm" in measurement_header
     assert "power_W" in measurement_header
+    assert "free_transformation_contraction_mm" in measurement_header
+    assert "free_transformation_strain_pct" in measurement_header
+    assert "motor_strain_pct" in measurement_header
+    assert "elastic_mismatch_strain_pct" in measurement_header
+    assert "free_strain_tracking_error_pct" in measurement_header
     target_index = measurement_header.split(",").index("target_stress_mpa")
     first_target = float(measurement_lines[1].split(",")[target_index])
     assert first_target == 0.0
+    assert measurement_rows[0]["free_strain_tracking_error_pct"] == ""
+    assert any(
+        row["automation_phase"] in {"current", "current_hold", "current_limit_unwind"}
+        and row["free_strain_tracking_error_pct"] != ""
+        for row in measurement_rows
+    )
 
 
 def test_parameter_sweep_runs_and_writes_summary(tmp_path: Path) -> None:

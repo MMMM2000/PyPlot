@@ -36,6 +36,7 @@ FULL_RUN_SCENARIOS = (
     "baseline_first_overheating",
     "realistic_first_overheating",
     "bad_co6_first_overheating",
+    "low_strain_noisy_first_overheating",
     "noisy_centered_first_overheating",
     "transformation_recovery",
     "reverse_unwind_recovery",
@@ -175,7 +176,12 @@ class FullRunTrace:
         max_abs_error = max((abs(event.error_mpa) for event in self.events), default=0.0)
         max_abs_current_error = max((abs(event.error_mpa) for event in current_events), default=0.0)
         recovery_times = _recovery_times_s(self.events, recovery_band)
+        tracking_errors = _free_strain_tracking_errors_pct(self)
         strain_values = [sample.strain_pct for sample in self.samples]
+        free_strain_values = [
+            _material_state_for_sample(self.config, sample)["free_transformation_strain_pct"]
+            for sample in self.samples
+        ]
         return {
             "scenario": self.config.name,
             "description": self.config.description,
@@ -197,6 +203,14 @@ class FullRunTrace:
             "strain_min_pct": min(strain_values, default=0.0),
             "strain_max_pct": max(strain_values, default=0.0),
             "strain_range_pct": max(strain_values, default=0.0) - min(strain_values, default=0.0),
+            "free_transformation_strain_min_pct": min(free_strain_values, default=0.0),
+            "free_transformation_strain_max_pct": max(free_strain_values, default=0.0),
+            "free_transformation_strain_range_pct": max(free_strain_values, default=0.0)
+            - min(free_strain_values, default=0.0),
+            "max_abs_free_strain_tracking_error_pct": max((abs(value) for value in tracking_errors), default=0.0),
+            "mean_abs_free_strain_tracking_error_pct": (
+                statistics.fmean(abs(value) for value in tracking_errors) if tracking_errors else 0.0
+            ),
             "max_correction_strain_pct": self.config.max_correction_strain_pct,
             "effective_max_correction_mm": _effective_max_correction_mm(self.config),
             "max_total_travel_mm": max((event.total_travel_mm for event in self.events), default=0.0),
@@ -417,6 +431,50 @@ def _effective_max_correction_mm(config: FullRunConfig) -> float:
         return config.controller.max_correction_mm
     strain_cap_mm = config.wire.length_mm * config.max_correction_strain_pct / 100.0
     return max(config.controller.motor_step_mm, strain_cap_mm)
+
+
+def _material_state_for_sample(config: FullRunConfig, sample: MeasurementSample) -> dict[str, float]:
+    length_mm = config.wire.length_mm
+    free_contraction_mm = sample.free_length_shift_mm
+    free_strain_pct = -free_contraction_mm / length_mm * 100.0
+    motor_strain_pct = sample.motor_mm / length_mm * 100.0
+    elastic_mismatch_mm = sample.motor_mm + free_contraction_mm
+    elastic_mismatch_strain_pct = elastic_mismatch_mm / length_mm * 100.0
+    return {
+        "free_transformation_contraction_mm": free_contraction_mm,
+        "free_transformation_strain_pct": free_strain_pct,
+        "motor_strain_pct": motor_strain_pct,
+        "reported_motor_strain_pct": sample.strain_pct,
+        "elastic_mismatch_mm": elastic_mismatch_mm,
+        "elastic_mismatch_strain_pct": elastic_mismatch_strain_pct,
+        "elastic_mismatch_stress_mpa": elastic_mismatch_mm * config.wire.elastic_stiffness_mpa_per_mm,
+    }
+
+
+def _current_phase_samples(trace: FullRunTrace) -> list[MeasurementSample]:
+    events_by_time = {round(event.elapsed_s, 9): event for event in trace.events}
+    return [
+        sample
+        for sample in trace.samples
+        if (event := events_by_time.get(round(sample.elapsed_s, 9))) is not None
+        and event.phase in {"current", "current_hold", "current_limit_unwind"}
+    ]
+
+
+def _free_strain_tracking_errors_pct(trace: FullRunTrace) -> list[float]:
+    current_samples = _current_phase_samples(trace)
+    if not current_samples:
+        return []
+    first = current_samples[0]
+    first_free_strain = _material_state_for_sample(trace.config, first)["free_transformation_strain_pct"]
+    first_measured_strain = first.strain_pct
+    errors: list[float] = []
+    for sample in current_samples:
+        state = _material_state_for_sample(trace.config, sample)
+        free_delta = state["free_transformation_strain_pct"] - first_free_strain
+        measured_delta = sample.strain_pct - first_measured_strain
+        errors.append(measured_delta - free_delta)
+    return errors
 
 
 def _equilibrium_transformation_fraction(
@@ -755,6 +813,49 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             wire=replace(base.wire, fluctuation_mpa=0.0, noise_mpa=2.0, transformation_contraction_mm=0.0),
             seed=103,
         ),
+        "low_strain_noisy_first_overheating": replace(
+            base,
+            name="low_strain_noisy_first_overheating",
+            description=(
+                "Low-strain 50 MPa wire where a small hidden transformation strain is mixed with "
+                "larger stress noise/fluctuation, so the controller should not invent a high-strain curve."
+            ),
+            wire=replace(
+                base.wire,
+                length_mm=33.623,
+                diameter_mm=0.0191,
+                initial_motor_mm=0.0,
+                elastic_stiffness_mpa_per_mm=500.0,
+                transformation_onset_ma=24.0,
+                transformation_end_ma=65.0,
+                transformation_contraction_mm=0.08,
+                transformation_hysteresis_ma=9.0,
+                fluctuation_mpa=4.0,
+                fluctuation_cycles=8.0,
+                noise_mpa=1.8,
+            ),
+            controller=replace(
+                base.controller,
+                target_stress_mpa=50.0,
+                tolerance_mpa=2.5,
+                min_recovery_mpa=5.0,
+                motor_step_mm=0.001,
+                max_correction_mm=0.02,
+                safety_min_stress_mpa=None,
+                stale_feedback_s=1.0,
+            ),
+            sweep=CurrentSweepConfig(start_ma=1.0, end_ma=80.0, rate_ma_s=0.5, sample_hz=3.0),
+            target_ramp_start_mpa=0.0,
+            target_ramp_rate_mpa_s=8.0,
+            target_ramp_timeout_s=90.0,
+            endpoint_hold_timeout_s=240.0,
+            max_ticks=6000,
+            zero_compression_stress=True,
+            max_correction_strain_pct=0.05,
+            reported_strain_motor_scale=1.0,
+            reported_strain_offset_pct=-0.30,
+            seed=311,
+        ),
         "transformation_recovery": replace(
             base,
             name="transformation_recovery",
@@ -834,13 +935,31 @@ def _write_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 
 def _full_measurement_rows(trace: FullRunTrace) -> Iterable[dict[str, Any]]:
     events_by_time = {round(event.elapsed_s, 9): event for event in trace.events}
+    current_samples = _current_phase_samples(trace)
+    first_current = current_samples[0] if current_samples else None
+    first_current_free_strain = (
+        _material_state_for_sample(trace.config, first_current)["free_transformation_strain_pct"]
+        if first_current is not None
+        else 0.0
+    )
+    first_current_measured_strain = 0.0 if first_current is None else first_current.strain_pct
     for sample in trace.samples:
         row = sample.to_row()
         event = events_by_time.get(round(sample.elapsed_s, 9))
         row_target = _target_stress_at_elapsed(trace.config, sample.elapsed_s) if event is None else event.target_stress_mpa
+        material_state = _material_state_for_sample(trace.config, sample)
+        current_phase = event is not None and event.phase in {"current", "current_hold", "current_limit_unwind"}
+        tracking_error = ""
+        if current_phase:
+            free_delta = material_state["free_transformation_strain_pct"] - first_current_free_strain
+            measured_delta = sample.strain_pct - first_current_measured_strain
+            tracking_error = f"{measured_delta - free_delta:.9f}"
         resistance_ohm = 285.0 + 5.8 * sample.current_ma + 55.0 * sample.transformation_fraction
         voltage_v = sample.current_ma / 1000.0 * resistance_ohm
         row["target_stress_mpa"] = f"{row_target:.6f}"
+        for key, value in material_state.items():
+            row[key] = f"{value:.9f}"
+        row["free_strain_tracking_error_pct"] = tracking_error
         row["recipe_mode"] = "simulated_current_sweep_stress"
         row["current_set_mA"] = f"{sample.current_ma:.6f}"
         row["current_measured_mA"] = f"{sample.current_ma:.6f}"
@@ -951,6 +1070,9 @@ Scenario: `{trace.config.name}`
 - Maximum recovery time: {item["max_recovery_time_s"]:.3f} s
 - Mean recovery time: {item["mean_recovery_time_s"]:.3f} s
 - Strain range: {item["strain_min_pct"]:.4f}% to {item["strain_max_pct"]:.4f}% ({item["strain_range_pct"]:.4f}% span)
+- Free transformation strain range: {item["free_transformation_strain_min_pct"]:.4f}% to {item["free_transformation_strain_max_pct"]:.4f}% ({item["free_transformation_strain_range_pct"]:.4f}% span)
+- Maximum free-strain tracking error: {item["max_abs_free_strain_tracking_error_pct"]:.4f}%
+- Mean free-strain tracking error: {item["mean_abs_free_strain_tracking_error_pct"]:.4f}%
 - Effective correction cap: {item["effective_max_correction_mm"]:.6f} mm
 - Maximum total correction travel: {item["max_total_travel_mm"]:.6f} mm
 - Maximum single correction: {item["max_abs_correction_mm"]:.6f} mm
@@ -979,15 +1101,21 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
     event_t = [event.elapsed_s for event in trace.events]
     center = [event.processed_center_mpa for event in trace.events]
     corrections = [event.correction_mm for event in trace.events]
-    events_by_time = {round(event.elapsed_s, 9): event for event in trace.events}
-    current_phase_samples = [
-        sample
-        for sample in trace.samples
-        if (event := events_by_time.get(round(sample.elapsed_s, 9))) is not None
-        and event.phase in {"current", "current_hold", "current_limit_unwind"}
-    ]
+    current_phase_samples = _current_phase_samples(trace)
     sweep_current = [sample.current_ma for sample in current_phase_samples]
     sweep_strain = [sample.strain_pct for sample in current_phase_samples]
+    if current_phase_samples:
+        first_sweep = current_phase_samples[0]
+        first_free_strain = _material_state_for_sample(trace.config, first_sweep)["free_transformation_strain_pct"]
+        first_measured_strain = first_sweep.strain_pct
+        sweep_free_strain = [
+            first_measured_strain
+            + _material_state_for_sample(trace.config, sample)["free_transformation_strain_pct"]
+            - first_free_strain
+            for sample in current_phase_samples
+        ]
+    else:
+        sweep_free_strain = []
     hold_event_times = {round(event.elapsed_s, 9) for event in trace.events if event.phase == "current_hold"}
     hold_current = [
         sample.current_ma
@@ -1008,7 +1136,16 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
             axes[0].axvspan(event.elapsed_s, event.elapsed_s + trace.config.sweep.sample_hz ** -1, color="#f59e0b", alpha=0.08, lw=0)
     axes[0].set_ylabel("MPa")
     axes[0].legend(fontsize=8, loc="best")
-    axes[1].plot(sweep_current, sweep_strain, color="#111827", lw=0.9, label="strain")
+    if sweep_free_strain:
+        axes[1].plot(
+            sweep_current,
+            sweep_free_strain,
+            color="#64748b",
+            lw=0.8,
+            ls="--",
+            label="free strain reference",
+        )
+    axes[1].plot(sweep_current, sweep_strain, color="#111827", lw=0.9, label="measured strain")
     if hold_current:
         axes[1].scatter(hold_current, hold_strain, color="#f59e0b", s=8, alpha=0.7, label="current hold")
     axes[1].set_xlabel("Current (mA)")
