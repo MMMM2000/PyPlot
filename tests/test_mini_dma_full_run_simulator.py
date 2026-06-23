@@ -88,6 +88,20 @@ def test_realistic_current_holds_keep_current_fixed_while_motor_strain_changes()
         assert sample.strain_pct == expected_strain
 
 
+def test_bad_co6_first_overheating_exercises_early_failure_case() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("bad_co6_first_overheating"))
+    summary = trace.summary()
+
+    assert trace.stop_reason == "wire_break"
+    assert max(sample.stress_mpa for sample in trace.samples) >= 240.0
+    assert summary["max_abs_current_sweep_error_mpa"] >= 100.0
+    assert summary["current_hold_time_s"] >= 1.0
+    assert summary["max_abs_correction_mm"] <= trace.config.controller.max_correction_mm
+    assert trace.config.wire.length_mm == 45.869
+    assert trace.config.wire.diameter_mm == 0.0151
+    assert all(event.feedback_age_s >= trace.config.scale_latency_s for event in trace.events)
+
+
 def test_full_run_endpoint_waits_only_until_processed_recovered() -> None:
     trace = run_full_mini_dma_simulation(full_run_scenario_by_name("transformation_recovery"))
 

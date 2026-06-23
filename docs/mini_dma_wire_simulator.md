@@ -73,6 +73,12 @@ Run the calibrated realistic first-overheating scenario:
 uv run python scripts/mini_dma_full_run_simulator.py --scenario realistic_first_overheating --out artifacts/mini-dma-realistic-full-run
 ```
 
+Run the bad Co6-style first-overheating scenario:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --scenario bad_co6_first_overheating --out artifacts/mini-dma-bad-co6-full-run
+```
+
 Run the parameter sweep across wire diameter, stiffness, and noise:
 
 ```powershell
@@ -83,6 +89,7 @@ Full-run scenarios currently cover:
 
 - `baseline_first_overheating`: nominal endpoint recovery.
 - `realistic_first_overheating`: calibrated software-only 50 MPa good-wire run, based on completed `Ni50Fe27Ga23 12/2` 1-80-1 mA current-sweep stress runs with about 10% strain span; it includes target acquisition, 200 ms delayed scale feedback, current holds, stepped transformation kinetics, and reverse unwind. The stress disturbance is simulated from current-driven transformation progress, while the strain-current curve is calculated from simulated motor position and gauge-length conversion. The calibration is anchored to real run34 hold behavior, where several near-fixed-current holds move strain by more than 1% and the largest hold spans about 4% strain.
+- `bad_co6_first_overheating`: bad `Ni47Fe24Ga23Co6 2/1`-style 50 MPa run based on the stiff-validation failure. It uses the real run length and diameter, a very early transformation stress surge near 10 mA, low usable strain, 200 ms delayed feedback, and a raw stress break rail so controller experiments can distinguish recoverable tuning problems from nonrecoverable bad-wire response.
 - `noisy_centered_first_overheating`: high raw noise centered near target, expected to complete without unnecessary chasing.
 - `transformation_recovery`: current rise contraction forces current-hold recovery before endpoint completion.
 - `reverse_unwind_recovery`: reverse/current unwind must recover the processed center before completing.
