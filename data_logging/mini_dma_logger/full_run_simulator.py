@@ -33,6 +33,7 @@ from .wire_simulator import (
 
 FULL_RUN_SCENARIOS = (
     "baseline_first_overheating",
+    "realistic_first_overheating",
     "noisy_centered_first_overheating",
     "transformation_recovery",
     "reverse_unwind_recovery",
@@ -56,6 +57,12 @@ class FullRunConfig:
     max_ticks: int = 5000
     scale_latency_s: float = 0.2
     zero_compression_stress: bool = False
+    reported_strain_sign: float = 1.0
+    reported_strain_offset_pct: float = 0.0
+    reported_strain_current_slope_pct_per_ma: float = 0.0
+    reported_strain_transformation_shift_pct: float = 0.0
+    reported_strain_transformation_valley_pct: float = 0.0
+    reported_strain_step_count: int = 0
     seed: int = 0
 
     def validated(self) -> "FullRunConfig":
@@ -70,6 +77,10 @@ class FullRunConfig:
             raise ValueError("max_ticks must be positive")
         if self.scale_latency_s < 0.0:
             raise ValueError("scale_latency_s must be non-negative")
+        if self.reported_strain_sign == 0.0:
+            raise ValueError("reported_strain_sign cannot be zero")
+        if self.reported_strain_step_count < 0:
+            raise ValueError("reported_strain_step_count must be non-negative")
         return self
 
 
@@ -135,20 +146,46 @@ class FullRunTrace:
 
     def summary(self) -> dict[str, Any]:
         final = self.events[-1] if self.events else None
+        total_time_s = self.samples[-1].elapsed_s if self.samples else 0.0
+        hold_events = [event for event in self.events if event.phase == "current_hold"]
+        current_events = [
+            event
+            for event in self.events
+            if event.phase in {"current", "current_hold", "current_limit_unwind"}
+        ]
+        recovery_band = max(self.config.controller.tolerance_mpa, self.config.controller.min_recovery_mpa)
+        max_abs_error = max((abs(event.error_mpa) for event in self.events), default=0.0)
+        max_abs_current_error = max((abs(event.error_mpa) for event in current_events), default=0.0)
+        recovery_times = _recovery_times_s(self.events, recovery_band)
+        strain_values = [sample.strain_pct for sample in self.samples]
         return {
             "scenario": self.config.name,
             "description": self.config.description,
             "stop_reason": self.stop_reason,
             "sample_count": len(self.samples),
             "event_count": len(self.events),
+            "total_measurement_time_s": total_time_s,
             "final_phase": None if final is None else final.phase,
             "final_decision": None if final is None else final.decision,
             "final_result": None if final is None else final.result,
             "final_processed_center_mpa": None if final is None else final.processed_center_mpa,
             "final_error_mpa": None if final is None else final.error_mpa,
+            "max_abs_error_mpa": max_abs_error,
+            "max_abs_current_sweep_error_mpa": max_abs_current_error,
+            "time_outside_recovery_band_s": sum(
+                1 for event in self.events if abs(event.error_mpa) > recovery_band
+            )
+            / self.config.sweep.sample_hz,
+            "strain_min_pct": min(strain_values, default=0.0),
+            "strain_max_pct": max(strain_values, default=0.0),
+            "strain_range_pct": max(strain_values, default=0.0) - min(strain_values, default=0.0),
             "max_total_travel_mm": max((event.total_travel_mm for event in self.events), default=0.0),
             "max_abs_correction_mm": max((abs(event.correction_mm) for event in self.events), default=0.0),
-            "current_hold_count": sum(1 for event in self.events if event.phase == "current_hold"),
+            "current_hold_count": len(hold_events),
+            "current_hold_time_s": len(hold_events) / self.config.sweep.sample_hz,
+            "current_hold_periods": _current_hold_periods(self.events, self.config.sweep.sample_hz),
+            "max_recovery_time_s": max(recovery_times, default=0.0),
+            "mean_recovery_time_s": statistics.fmean(recovery_times) if recovery_times else 0.0,
             "endpoint_hold_count": sum(
                 1 for event in self.events if event.result == "endpoint_waiting_for_recovery"
             ),
@@ -206,10 +243,29 @@ class _FullRunState:
         noise = self.rng.gauss(0.0, wire.noise_mpa) if wire.noise_mpa else 0.0
         drift = wire.drift_mpa_per_s * self.elapsed_s
         stress = base_stress + fluctuation + noise + drift
+        if self.config.zero_compression_stress and stress < 0.0:
+            stress = 0.0
         raw_stress = stress
         status = "ok"
         safety_reason = ""
-        strain_pct = mechanical_mm / wire.length_mm * 100.0
+        current_strain = (
+            (self.current_ma - self.config.sweep.start_ma)
+            * self.config.reported_strain_current_slope_pct_per_ma
+        )
+        strain_fraction = fraction
+        if self.config.reported_strain_step_count > 0:
+            step_count = self.config.reported_strain_step_count
+            strain_fraction = math.floor(fraction * step_count) / step_count
+        transformation_strain = (
+            strain_fraction * self.config.reported_strain_transformation_shift_pct
+            + math.sin(math.pi * strain_fraction) * self.config.reported_strain_transformation_valley_pct
+        )
+        strain_pct = (
+            self.config.reported_strain_offset_pct
+            + self.config.reported_strain_sign * mechanical_mm / wire.length_mm * 100.0
+            + current_strain
+            + transformation_strain
+        )
         if wire.break_stress_mpa is not None and raw_stress >= wire.break_stress_mpa:
             status = "wire_break"
             safety_reason = "break_stress"
@@ -308,6 +364,45 @@ def _stop_for_safety(state: _FullRunState) -> str | None:
     return None
 
 
+def _recovery_times_s(events: list[FullRunEvent], recovery_band_mpa: float) -> list[float]:
+    recovery_times: list[float] = []
+    out_of_band_since: float | None = None
+    for event in events:
+        is_out_of_band = abs(event.error_mpa) > recovery_band_mpa
+        if is_out_of_band and out_of_band_since is None:
+            out_of_band_since = event.elapsed_s
+        elif not is_out_of_band and out_of_band_since is not None:
+            recovery_times.append(max(0.0, event.elapsed_s - out_of_band_since))
+            out_of_band_since = None
+    return recovery_times
+
+
+def _current_hold_periods(events: list[FullRunEvent], sample_hz: float) -> list[dict[str, float]]:
+    periods: list[dict[str, float]] = []
+    active: dict[str, float] | None = None
+    sample_dt = 1.0 / sample_hz
+    for event in events:
+        if event.phase == "current_hold":
+            if active is None:
+                active = {
+                    "start_s": event.elapsed_s,
+                    "end_s": event.elapsed_s + sample_dt,
+                    "current_ma": event.current_ma,
+                    "max_abs_error_mpa": abs(event.error_mpa),
+                }
+            else:
+                active["end_s"] = event.elapsed_s + sample_dt
+                active["max_abs_error_mpa"] = max(active["max_abs_error_mpa"], abs(event.error_mpa))
+        elif active is not None:
+            active["duration_s"] = max(0.0, active["end_s"] - active["start_s"])
+            periods.append(active)
+            active = None
+    if active is not None:
+        active["duration_s"] = max(0.0, active["end_s"] - active["start_s"])
+        periods.append(active)
+    return periods
+
+
 def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
     config = config.validated()
     state = _FullRunState(config)
@@ -341,6 +436,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
         state.current_ma = start_ma
         current = start_ma
         endpoint_hold_s = 0.0
+        current_hold_s = 0.0
         while len(state.events) < config.max_ticks:
             state.current_ma = current
             state.sample(phase_name, rising=rising)
@@ -368,12 +464,18 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
             stop = _stop_for_safety(state)
             if stop is not None:
                 return stop
+            if not recovered:
+                current_hold_s += state.dt_s
+                if at_endpoint:
+                    endpoint_hold_s += state.dt_s
+                if current_hold_s >= config.endpoint_hold_timeout_s:
+                    return "current_hold_timeout"
+                state.advance_time()
+                continue
+            current_hold_s = 0.0
             if at_endpoint:
                 if recovered:
                     return None
-                endpoint_hold_s += state.dt_s
-                if endpoint_hold_s >= config.endpoint_hold_timeout_s:
-                    return "endpoint_recovery_timeout"
             else:
                 current += direction * abs(config.sweep.rate_ma_s) * state.dt_s
                 if direction >= 0.0:
@@ -456,6 +558,50 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
     )
     scenarios = {
         base.name: base,
+        "realistic_first_overheating": replace(
+            base,
+            name="realistic_first_overheating",
+            description=(
+                "Good 12/2-style 50 MPa measurement with stress ramp, transformation-driven "
+                "stress fluctuations, current holds, high strain, and reverse unwind."
+            ),
+            wire=replace(
+                base.wire,
+                length_mm=33.623,
+                diameter_mm=0.0191,
+                initial_motor_mm=50.0 / 450.0,
+                elastic_stiffness_mpa_per_mm=450.0,
+                transformation_onset_ma=24.0,
+                transformation_end_ma=42.0,
+                transformation_contraction_mm=0.045,
+                transformation_hysteresis_ma=10.0,
+                fluctuation_mpa=28.0,
+                fluctuation_cycles=5.0,
+                noise_mpa=2.5,
+            ),
+            controller=replace(
+                base.controller,
+                target_stress_mpa=50.0,
+                tolerance_mpa=2.5,
+                min_recovery_mpa=5.0,
+                motor_step_mm=0.00025,
+                max_correction_mm=0.004,
+                safety_min_stress_mpa=None,
+                stale_feedback_s=1.0,
+            ),
+            sweep=CurrentSweepConfig(start_ma=1.0, end_ma=80.0, rate_ma_s=0.29, sample_hz=2.0),
+            target_ramp_timeout_s=120.0,
+            endpoint_hold_timeout_s=360.0,
+            max_ticks=7000,
+            zero_compression_stress=True,
+            reported_strain_sign=-0.02,
+            reported_strain_offset_pct=0.55,
+            reported_strain_current_slope_pct_per_ma=0.0,
+            reported_strain_transformation_shift_pct=-10.2,
+            reported_strain_transformation_valley_pct=0.0,
+            reported_strain_step_count=14,
+            seed=184,
+        ),
         "noisy_centered_first_overheating": replace(
             base,
             name="noisy_centered_first_overheating",
@@ -540,6 +686,39 @@ def _write_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _full_measurement_rows(trace: FullRunTrace) -> Iterable[dict[str, Any]]:
+    events_by_time = {round(event.elapsed_s, 9): event for event in trace.events}
+    target = trace.config.controller.target_stress_mpa
+    for sample in trace.samples:
+        row = sample.to_row()
+        event = events_by_time.get(round(sample.elapsed_s, 9))
+        row_target = target if event is None else event.target_stress_mpa
+        resistance_ohm = 285.0 + 5.8 * sample.current_ma + 55.0 * sample.transformation_fraction
+        voltage_v = sample.current_ma / 1000.0 * resistance_ohm
+        row["target_stress_mpa"] = f"{row_target:.6f}"
+        row["recipe_mode"] = "simulated_current_sweep_stress"
+        row["current_set_mA"] = f"{sample.current_ma:.6f}"
+        row["current_measured_mA"] = f"{sample.current_ma:.6f}"
+        row["voltage_V"] = f"{voltage_v:.6f}"
+        row["resistance_ohm"] = f"{resistance_ohm:.6f}"
+        row["power_W"] = f"{voltage_v * sample.current_ma / 1000.0:.9f}"
+        row["scale_sample_rate_hz"] = f"{trace.config.sweep.sample_hz:.6f}"
+        row["automation_phase"] = "" if event is None else event.phase
+        row["current_hold_active"] = str(bool(event is not None and event.phase == "current_hold")).lower()
+        row["decision"] = "" if event is None else event.decision
+        row["result"] = "" if event is None else event.result
+        row["processed_center_mpa"] = "" if event is None else f"{event.processed_center_mpa:.6f}"
+        row["processed_noise_mpa"] = "" if event is None else f"{event.processed_noise_mpa:.6f}"
+        row["processed_slope_mpa_s"] = "" if event is None else f"{event.processed_slope_mpa_s:.6f}"
+        row["stress_error_mpa"] = "" if event is None else f"{event.error_mpa:.6f}"
+        row["correction_mm"] = "" if event is None else f"{event.correction_mm:.9f}"
+        row["total_correction_travel_mm"] = "" if event is None else f"{event.total_travel_mm:.9f}"
+        row["feedback_age_s"] = "" if event is None else f"{event.feedback_age_s:.6f}"
+        row["endpoint_recovered"] = "" if event is None else str(bool(event.endpoint_recovered)).lower()
+        row["processed_fresh"] = "" if event is None else str(bool(event.fresh)).lower()
+        yield row
+
+
 def write_full_run_outputs(trace: FullRunTrace, output_dir: Path | str) -> dict[str, Path]:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -549,7 +728,7 @@ def write_full_run_outputs(trace: FullRunTrace, output_dir: Path | str) -> dict[
     config_path = out / "config.json"
     report_path = out / "report.md"
     plot_path = out / "full_run.png"
-    _write_csv(measurement_path, (sample.to_row() for sample in trace.samples))
+    _write_csv(measurement_path, _full_measurement_rows(trace))
     _write_csv(control_path, (event.to_row() for event in trace.events))
     summary_path.write_text(json.dumps(trace.summary(), indent=2), encoding="utf-8")
     config_path.write_text(json.dumps(asdict(trace.config), indent=2), encoding="utf-8")
@@ -603,10 +782,18 @@ Scenario: `{trace.config.name}`
 {trace.config.description}
 
 - Stop reason: {trace.stop_reason}
+- Total measurement time: {item["total_measurement_time_s"]:.3f} s
 - Samples: {item["sample_count"]}
 - Events: {item["event_count"]}
 - Current-hold events: {item["current_hold_count"]}
+- Current-hold time: {item["current_hold_time_s"]:.3f} s
 - Endpoint hold/recovery events: {item["endpoint_hold_count"]}
+- Maximum absolute stress error: {item["max_abs_error_mpa"]:.3f} MPa
+- Maximum current-sweep stress error: {item["max_abs_current_sweep_error_mpa"]:.3f} MPa
+- Time outside recovery band: {item["time_outside_recovery_band_s"]:.3f} s
+- Maximum recovery time: {item["max_recovery_time_s"]:.3f} s
+- Mean recovery time: {item["mean_recovery_time_s"]:.3f} s
+- Strain range: {item["strain_min_pct"]:.4f}% to {item["strain_max_pct"]:.4f}% ({item["strain_range_pct"]:.4f}% span)
 - Maximum total correction travel: {item["max_total_travel_mm"]:.6f} mm
 - Maximum single correction: {item["max_abs_correction_mm"]:.6f} mm
 
@@ -629,22 +816,43 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
     raw = [sample.raw_stress_mpa for sample in trace.samples]
     current = [sample.current_ma for sample in trace.samples]
     motor = [sample.motor_mm for sample in trace.samples]
+    strain = [sample.strain_pct for sample in trace.samples]
     event_t = [event.elapsed_s for event in trace.events]
     center = [event.processed_center_mpa for event in trace.events]
     corrections = [event.correction_mm for event in trace.events]
-    fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True)
+    hold_event_times = {round(event.elapsed_s, 9) for event in trace.events if event.phase == "current_hold"}
+    hold_current = [
+        sample.current_ma
+        for sample in trace.samples
+        if round(sample.elapsed_s, 9) in hold_event_times
+    ]
+    hold_strain = [
+        sample.strain_pct
+        for sample in trace.samples
+        if round(sample.elapsed_s, 9) in hold_event_times
+    ]
+    fig, axes = plt.subplots(4, 1, figsize=(11, 10), sharex=False)
     axes[0].plot(elapsed, raw, color="#94a3b8", lw=0.8, label="raw stress")
     axes[0].plot(event_t, center, color="#dc2626", lw=1.2, label="processed center")
     axes[0].axhline(trace.config.controller.target_stress_mpa, color="#111827", ls="--", lw=0.9, label="target")
+    for event in trace.events:
+        if event.phase == "current_hold":
+            axes[0].axvspan(event.elapsed_s, event.elapsed_s + trace.config.sweep.sample_hz ** -1, color="#f59e0b", alpha=0.08, lw=0)
     axes[0].set_ylabel("MPa")
     axes[0].legend(fontsize=8, loc="best")
-    axes[1].plot(elapsed, current, color="#2563eb", lw=1.0, label="current")
-    axes[1].plot(elapsed, motor, color="#059669", lw=1.0, label="motor")
-    axes[1].set_ylabel("mA / mm")
+    axes[1].plot(current, strain, color="#111827", lw=0.9, label="strain")
+    if hold_current:
+        axes[1].scatter(hold_current, hold_strain, color="#f59e0b", s=8, alpha=0.7, label="current hold")
+    axes[1].set_xlabel("Current (mA)")
+    axes[1].set_ylabel("Strain (%)")
     axes[1].legend(fontsize=8, loc="best")
-    axes[2].bar(event_t, corrections, width=max(0.02, trace.config.sweep.sample_hz ** -1 * 0.6), color="#7c3aed")
-    axes[2].set_ylabel("correction mm")
-    axes[2].set_xlabel("Elapsed (s)")
+    axes[2].plot(elapsed, current, color="#2563eb", lw=1.0, label="current")
+    axes[2].plot(elapsed, motor, color="#059669", lw=1.0, label="motor")
+    axes[2].set_ylabel("mA / mm")
+    axes[2].legend(fontsize=8, loc="best")
+    axes[3].bar(event_t, corrections, width=max(0.02, trace.config.sweep.sample_hz ** -1 * 0.6), color="#7c3aed")
+    axes[3].set_ylabel("correction mm")
+    axes[3].set_xlabel("Elapsed (s)")
     for ax in axes:
         ax.grid(True, alpha=0.25)
     fig.suptitle(f"{trace.config.name} | {trace.stop_reason}")

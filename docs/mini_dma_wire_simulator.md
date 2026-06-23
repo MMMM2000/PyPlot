@@ -67,6 +67,12 @@ Run one full-run scenario:
 uv run python scripts/mini_dma_full_run_simulator.py --scenario transformation_recovery --out artifacts/mini-dma-full-run-sim/transformation_recovery
 ```
 
+Run the calibrated realistic first-overheating scenario:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --scenario realistic_first_overheating --out artifacts/mini-dma-realistic-full-run
+```
+
 Run the parameter sweep across wire diameter, stiffness, and noise:
 
 ```powershell
@@ -76,10 +82,11 @@ uv run python scripts/mini_dma_full_run_simulator.py --sweep --out artifacts/min
 Full-run scenarios currently cover:
 
 - `baseline_first_overheating`: nominal endpoint recovery.
+- `realistic_first_overheating`: calibrated software-only 50 MPa good-wire run, based on completed `Ni50Fe27Ga23 12/2` 1-80-1 mA current-sweep stress runs with about 10% strain span; it includes target acquisition, delayed-feedback current holds, transformation-driven stress fluctuations, and a step-like high-strain current loop.
 - `noisy_centered_first_overheating`: high raw noise centered near target, expected to complete without unnecessary chasing.
 - `transformation_recovery`: current rise contraction forces current-hold recovery before endpoint completion.
 - `reverse_unwind_recovery`: reverse/current unwind must recover the processed center before completing.
 - `slack_after_unwind_takeup`: near-zero-load slack recovery keeps taking up tension until the processed center recovers.
 - `thin_wire_delayed_feedback`: 8.3 um wire and low sample cadence remain bounded.
 
-Each full-run output folder contains `measurement.csv`, `control_trace.csv`, `summary.json`, `config.json`, `report.md`, and `full_run.png`. The plot shows processed stress center versus target, the raw stress envelope, current, motor displacement, and controller decisions. The default full-run harness applies `scale_latency_s = 0.2`, so controller decisions use delayed feedback rather than the just-created physical sample. The `summary.json` records invariants such as no load/stress cruise, bounded single-correction size, no accumulated correction-travel stop, endpoint waits only while unrecovered, endpoint completion only after recovery, and delayed-feedback application.
+Each full-run output folder contains `measurement.csv`, `control_trace.csv`, `summary.json`, `config.json`, `report.md`, and `full_run.png`. The measurement CSV logs raw and processed stress, stress target/error, current setpoint, measured current, simulated voltage/resistance/power, motor position, strain, phase, current-hold state, correction, cumulative correction travel, and feedback age for each simulated sample. The plot shows stress versus time with hold bands, strain versus current with hold points, current/motor versus time, and controller correction decisions. The default full-run harness applies `scale_latency_s = 0.2`, so controller decisions use delayed feedback rather than the just-created physical sample. The `summary.json` records total measurement time, current-hold time and periods, maximum stress error, recovery times, strain range, correction travel, and invariants such as no load/stress cruise, bounded single-correction size, no accumulated correction-travel stop, endpoint waits only while unrecovered, endpoint completion only after recovery, and delayed-feedback application.

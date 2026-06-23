@@ -25,6 +25,21 @@ def test_full_run_baseline_preserves_invariants() -> None:
     assert all(not event.cruise_allowed for event in trace.events)
 
 
+def test_realistic_first_overheating_matches_reference_scale() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("realistic_first_overheating"))
+    summary = trace.summary()
+
+    assert trace.stop_reason == "completed"
+    assert 850.0 <= summary["total_measurement_time_s"] <= 1100.0
+    assert 350.0 <= summary["current_hold_time_s"] <= 550.0
+    assert 30.0 <= summary["max_abs_current_sweep_error_mpa"] <= 50.0
+    assert -10.5 <= summary["strain_min_pct"] <= -9.0
+    assert 0.3 <= summary["strain_max_pct"] <= 0.8
+    assert 9.5 <= summary["strain_range_pct"] <= 11.0
+    assert summary["current_hold_periods"]
+    assert all(trace.invariants.values())
+
+
 def test_full_run_endpoint_waits_only_until_processed_recovered() -> None:
     trace = run_full_mini_dma_simulation(full_run_scenario_by_name("transformation_recovery"))
 
@@ -40,7 +55,7 @@ def test_full_run_slack_after_unwind_keeps_taking_up_tension() -> None:
     summary = trace.summary()
 
     assert trace.stop_reason == "completed"
-    assert abs(summary["final_error_mpa"]) <= trace.config.controller.min_recovery_mpa
+    assert trace.events[-1].endpoint_recovered
     assert summary["max_abs_correction_mm"] <= trace.config.controller.max_correction_mm
     assert summary["max_total_travel_mm"] > 0.0
     assert trace.invariants["does_not_stop_for_slack"] is True
@@ -57,6 +72,15 @@ def test_full_run_outputs_are_replay_shaped(tmp_path: Path) -> None:
     summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
     assert summary["scenario"] == "thin_wire_delayed_feedback"
     assert paths["control_trace"].read_text(encoding="utf-8").splitlines()[0].startswith("elapsed_s,")
+    measurement_header = paths["measurement"].read_text(encoding="utf-8").splitlines()[0]
+    assert "processed_center_mpa" in measurement_header
+    assert "current_hold_active" in measurement_header
+    assert "feedback_age_s" in measurement_header
+    assert "current_set_mA" in measurement_header
+    assert "current_measured_mA" in measurement_header
+    assert "voltage_V" in measurement_header
+    assert "resistance_ohm" in measurement_header
+    assert "power_W" in measurement_header
 
 
 def test_parameter_sweep_runs_and_writes_summary(tmp_path: Path) -> None:
