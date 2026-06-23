@@ -50,3 +50,36 @@ Each output folder contains:
 - `scenario_matrix_summary.json`, `scenario_matrix_report.md`, and `scenario_matrix.png` when `--report` is used.
 
 Controller work can consume the CSV files or import `run_virtual_wire_scenario()` and compare its `MeasurementSample` stream against Mini DMA processed-center decisions. The simulator is deliberately simple: it is a repeatable control-test fixture, not a calibrated thermomechanical material model.
+
+## Full-run software validation
+
+`data_logging.mini_dma_logger.full_run_simulator` builds on the same virtual wire model to exercise a complete first-overheating style sequence: target acquisition, current rise, current endpoint recovery, optional reverse/current unwind, bounded mechanical corrections, and slack/no-response stops. It is still software-only and deterministic. It does not open Qt, serial ports, Tic drivers, power supplies, or the Mini DMA logger hardware path.
+
+Run the full scenario matrix:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --out artifacts/mini-dma-full-run-sim
+```
+
+Run one full-run scenario:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --scenario transformation_recovery --out artifacts/mini-dma-full-run-sim/transformation_recovery
+```
+
+Run the parameter sweep across wire diameter, stiffness, and noise:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --sweep --out artifacts/mini-dma-full-run-sim/parameter-sweep
+```
+
+Full-run scenarios currently cover:
+
+- `baseline_first_overheating`: nominal endpoint recovery.
+- `noisy_centered_first_overheating`: high raw noise centered near target, expected to complete without unnecessary chasing.
+- `transformation_recovery`: current rise contraction forces current-hold recovery before endpoint completion.
+- `reverse_unwind_recovery`: reverse/current unwind must recover the processed center before completing.
+- `slack_after_unwind_stop`: slack/no-response stops instead of escalating displacement.
+- `thin_wire_delayed_feedback`: 8.3 um wire and low sample cadence remain bounded.
+
+Each full-run output folder contains `measurement.csv`, `control_trace.csv`, `summary.json`, `config.json`, `report.md`, and `full_run.png`. The plot shows processed stress center versus target, the raw stress envelope, current, motor displacement, and controller decisions. The `summary.json` records invariants such as no load/stress cruise, bounded correction size, bounded travel, endpoint waits only while unrecovered, endpoint completion only after recovery, and safe slack/no-response stopping.

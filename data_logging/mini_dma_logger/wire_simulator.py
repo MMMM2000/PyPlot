@@ -516,7 +516,11 @@ def decide_robust_center(
             processed_fresh=False,
             endpoint_recovered=False,
         )
-    noise_band = max(controller.tolerance_mpa, noise * controller.noise_sigma)
+    bounded_noise = min(
+        noise * controller.noise_sigma,
+        max(controller.tolerance_mpa * 3.0, controller.min_recovery_mpa),
+    )
+    noise_band = max(controller.tolerance_mpa, bounded_noise)
     if abs(error) <= noise_band and raw_min <= controller.target_stress_mpa <= raw_max:
         return ControlDecision(
             elapsed_s=latest.elapsed_s,
