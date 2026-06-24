@@ -310,6 +310,7 @@ TRANSITION_TEMP_COLUMN_MAP = {
 CURRENT_DENSITY_COLUMNS = [
     "Composition",
     "Microwire",
+    "Graph",
     MICROSCOPE_D_COLUMN,
     ANNEALING_AS_COLUMN,
     ANNEALING_AF1_COLUMN,
@@ -337,6 +338,7 @@ CURRENT_DENSITY_COLUMNS = [
 TRANSITION_TEMP_COLUMNS = [
     "Composition",
     "Microwire",
+    "Graph",
     TRANSITION_TEMP_AS_COLUMN,
     TRANSITION_TEMP_AF_COLUMN,
     TRANSITION_TEMP_MS_COLUMN,
@@ -17131,7 +17133,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             ms_series = pd.to_numeric(frame[ANNEALING_MS_COLUMN], errors="coerce")
             annotated = int((as_series.notna() & ms_series.notna()).sum())
         status_text = (
-            f"{annotated} of {total} microwire(s) have As1/Ms1 annotated."
+            f"{annotated} of {total} graph row(s) have As1/Ms1 annotated."
             if total
             else "No overlapping microscope and annealing data yet."
         )
@@ -17167,9 +17169,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     key_text = _microwire_key_to_str(key_tuple)
             if not key_text:
                 continue
+            if key_text in snapshot:
+                continue
             entry: Dict[str, Any] = {}
             for column in frame.columns:
-                if column == "_group_key":
+                if str(column).startswith("_") or column == "Graph":
                     continue
                 entry[column] = row.get(column)
             if entry:
@@ -17248,7 +17252,12 @@ class CurrentDensitySection(QtWidgets.QWidget):
         if key is None:
             panel.update_selection(None, None, [], {})
             return
-        high, other_records = self._fetch_records_for_key(key)
+        row = self._selected_row_series()
+        record = self._record_for_row(row)
+        if record is not None:
+            high, other_records = record, []
+        else:
+            high, other_records = self._fetch_records_for_key(key)
         panel.update_selection(key, high, other_records, self._selected_phase_values())
 
     def _handle_selection_changed(self, *_args: Any) -> None:
@@ -17289,7 +17298,11 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 parsed_key = self._parse_group_key(key)
                 if parsed_key is None:
                     continue
-                self._store_transition_review_for_key(parsed_key, phase_values)
+                record = self._record_for_row(series)
+                if record is not None:
+                    self._store_transition_review_for_record(record, phase_values)
+                else:
+                    self._store_transition_review_for_key(parsed_key, phase_values)
                 updated = True
             except Exception:
                 self.logger.exception("Failed to persist phase transition points for %s", key)
@@ -17339,6 +17352,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         }
 
     def _apply_phase_values(self, values: Dict[str, Optional[float]]) -> None:
+        row = self._selected_row_series()
         key = self._current_selection_key()
         if key is None:
             return
@@ -17347,11 +17361,22 @@ class CurrentDensitySection(QtWidgets.QWidget):
             for label in PHASE_POINT_LABELS
         }
         try:
-            self._store_transition_review_for_key(key, cleaned)
+            record = self._record_for_row(row) if row is not None else None
+            if record is not None:
+                self._store_transition_review_for_record(record, cleaned)
+            else:
+                self._store_transition_review_for_key(key, cleaned)
         except Exception:
             self.logger.exception("Failed to persist phase transition points for %s", _microwire_key_to_str(key))
             return
         self.refresh_data()
+
+    def _selected_row_series(self) -> Optional[pd.Series]:
+        frame = self.model.frame()
+        row = self._selected_source_row()
+        if not isinstance(frame, pd.DataFrame) or row is None or row < 0 or row >= len(frame.index):
+            return None
+        return frame.iloc[row]
 
     def _store_transition_review_for_key(
         self,
@@ -17362,6 +17387,13 @@ class CurrentDensitySection(QtWidgets.QWidget):
         record = high or (other_records[0] if other_records else None)
         if record is None:
             return
+        self._store_transition_review_for_record(record, phase_values)
+
+    def _store_transition_review_for_record(
+        self,
+        record: MeasurementRecord,
+        phase_values: Mapping[str, Any],
+    ) -> None:
         record_id = _transition_record_id_for_annealing_record(record)
         setter = getattr(self._annealing_section, "set_transition_review_for_record", None)
         if not callable(setter):
@@ -17375,6 +17407,29 @@ class CurrentDensitySection(QtWidgets.QWidget):
             "auto_values_mA": _auto_transition_values_for_annealing_record(record),
         }
         setter(record_id, payload)
+
+    def _record_for_row(self, row: Optional[pd.Series]) -> Optional[MeasurementRecord]:
+        if row is None:
+            return None
+        record_id = str(row.get("_record_id") or "").strip()
+        if not record_id:
+            return None
+        lookup = getattr(self._annealing_section, "_record_by_transition_id", None)
+        if callable(lookup):
+            try:
+                record = lookup(record_id)
+            except Exception:
+                record = None
+            if isinstance(record, MeasurementRecord):
+                return record
+        key = self._parse_group_key(row.get("_group_key"))
+        if key is None:
+            return None
+        high, other_records = self._fetch_records_for_key(key)
+        for record in (high, *other_records):
+            if record is not None and _transition_record_id_for_annealing_record(record) == record_id:
+                return record
+        return None
 
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
@@ -17532,6 +17587,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         diameter_map = self._collect_microscope_data()
         setpoint_map = self._collect_setpoint_data()
         phase_map = self._collect_phase_points()
+        groups = getattr(self._annealing_section, "_record_groups", {})
         keys = sorted(
             set(setpoint_map.keys()) | set(phase_map.keys()),
             key=lambda item: (
@@ -17544,98 +17600,171 @@ class CurrentDensitySection(QtWidgets.QWidget):
         rows: List[Dict[str, Any]] = []
         all_sources: Set[str] = set()
         if not keys:
-            columns = CURRENT_DENSITY_COLUMNS + ["_group_key"]
+            columns = CURRENT_DENSITY_COLUMNS + ["_group_key", "_record_id"]
             return pd.DataFrame(columns=columns)
         for composition, draw, piece, suffix in keys:
             key = (composition, draw, piece, suffix)
             base_key = (composition, draw, piece, None)
             micro_info = diameter_map.get(key) or diameter_map.get(base_key, {})
             setpoint_info = setpoint_map.get(key) or setpoint_map.get(base_key, {})
-            phase_info = phase_map.get(key) or phase_map.get(base_key, {})
-            phase_values = dict(phase_info)
-            if phase_values.get("As1") is None and phase_values.get("As") is not None:
-                phase_values["As1"] = phase_values.get("As")
-            if phase_values.get("Ms1") is None and phase_values.get("Ms") is not None:
-                phase_values["Ms1"] = phase_values.get("Ms")
             diameter_um = micro_info.get("diameter")
             area_mm2 = self._diameter_to_area(diameter_um)
             setpoints = setpoint_info.get("setpoints", [])
             sources = setpoint_info.get("sources", [])
             all_sources.update(str(source) for source in sources)
-            notes: List[str] = []
-            if diameter_um is None or area_mm2 is None:
-                notes.append("Missing diameter")
             composition_label = micro_info.get("composition") or setpoint_info.get("composition") or composition
             try:
                 microwire_label = micro_info.get("label") or _microwire_label(draw, piece, suffix)
             except Exception:
                 microwire_label = micro_info.get("label") or f"{draw}/{piece}"
-            as1_value = phase_values.get("As1")
-            af1_value = phase_values.get("Af1")
-            ms1_value = phase_values.get("Ms1")
-            mf1_value = phase_values.get("Mf1")
-            as2_value = phase_values.get("As2")
-            af2_value = phase_values.get("Af2")
-            ms2_value = phase_values.get("Ms2")
-            mf2_value = phase_values.get("Mf2")
-            as_density = self._compute_density(as1_value, area_mm2)
-            ms_density = self._compute_density(ms1_value, area_mm2)
-            per_label_densities = {
-                column: self._compute_density(phase_values.get(label), area_mm2)
-                for label, column in CURRENT_DENSITY_PER_LABEL_COLUMNS.items()
-            }
-            as_delta = self._compute_delta(as2_value, as1_value)
-            af_delta = self._compute_delta(af2_value, af1_value)
-            ms_delta = self._compute_delta(ms2_value, ms1_value)
-            mf_delta = self._compute_delta(mf2_value, mf1_value)
-            mf1_af1 = self._compute_delta(mf1_value, af1_value)
-            mf2_af2 = self._compute_delta(mf2_value, af2_value)
-            if as1_value is None:
-                notes.append("As1 missing")
-            if ms1_value is None:
-                notes.append("Ms1 missing")
-            if not setpoints:
-                notes.append("No setpoint data")
-            high_record, other_records = self._fetch_records_for_key(key)
-            review_records = [record for record in (high_record, *other_records) if record is not None]
-            review_counts = self._review_counts_for_annealing_records(review_records)
-            rows.append(
-                {
-                    "Composition": composition_label,
-                    "Microwire": microwire_label,
-                    MICROSCOPE_D_COLUMN: diameter_um,
-                    ANNEALING_AS_COLUMN: as1_value,
-                    ANNEALING_AF1_COLUMN: af1_value,
-                    ANNEALING_MS_COLUMN: ms1_value,
-                    ANNEALING_MF1_COLUMN: mf1_value,
-                    ANNEALING_AS2_COLUMN: as2_value,
-                    ANNEALING_AF2_COLUMN: af2_value,
-                    ANNEALING_MS2_COLUMN: ms2_value,
-                    ANNEALING_MF2_COLUMN: mf2_value,
-                    CURRENT_DENSITY_AS_DENSITY_COLUMN: as_density,
-                    CURRENT_DENSITY_MS_DENSITY_COLUMN: ms_density,
-                    **per_label_densities,
-                    CURRENT_DENSITY_AS_DELTA_COLUMN: as_delta,
-                    CURRENT_DENSITY_AF_DELTA_COLUMN: af_delta,
-                    CURRENT_DENSITY_MS_DELTA_COLUMN: ms_delta,
-                    CURRENT_DENSITY_MF_DELTA_COLUMN: mf_delta,
-                    CURRENT_DENSITY_MF_AF1_DELTA_COLUMN: mf1_af1,
-                    CURRENT_DENSITY_MF_AF2_DELTA_COLUMN: mf2_af2,
-                    "Setpoints (mA)": self._format_setpoints(setpoints),
-                    "Sources": self._summarise_sources(sources),
-                    CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN: self._status_from_review_counts(review_counts),
-                    CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN: self._format_review_counts(review_counts),
-                    "Notes": "; ".join(notes) if notes else "",
-                    "_group_key": _microwire_key_to_str(key),
-                }
-            )
+            key_text = _microwire_key_to_str(key)
+            records = []
+            if isinstance(groups, dict):
+                raw_records = groups.get(key_text, [])
+                if not raw_records and suffix is not None:
+                    raw_records = groups.get(_microwire_key_to_str(base_key), [])
+                if isinstance(raw_records, list):
+                    high_record, other_records = _select_anchor_and_other_records(raw_records)
+                    records = [record for record in (high_record, *other_records) if record is not None]
+            if not records:
+                rows.append(
+                    self._current_density_row(
+                        composition_label,
+                        microwire_label,
+                        diameter_um,
+                        area_mm2,
+                        phase_map.get(key) or phase_map.get(base_key, {}),
+                        setpoints,
+                        sources,
+                        key_text,
+                        graph_label="",
+                        record=None,
+                    )
+                )
+                continue
+            for record in records:
+                row_sources = list(sources)
+                path = getattr(record, "path", None)
+                if path:
+                    try:
+                        row_sources.append(str(Path(path)))
+                    except Exception:
+                        row_sources.append(str(path))
+                all_sources.update(str(source) for source in row_sources)
+                rows.append(
+                    self._current_density_row(
+                        composition_label,
+                        microwire_label,
+                        diameter_um,
+                        area_mm2,
+                        self._phase_values_for_annealing_record(record),
+                        setpoints,
+                        row_sources,
+                        key_text,
+                        graph_label=_record_label_for_display(record),
+                        record=record,
+                    )
+                )
         self._last_sources = sorted(all_sources)
         if not rows:
-            columns = CURRENT_DENSITY_COLUMNS + ["_group_key"]
+            columns = CURRENT_DENSITY_COLUMNS + ["_group_key", "_record_id"]
             return pd.DataFrame(columns=columns)
         frame = pd.DataFrame(rows)
-        desired_order = [column for column in CURRENT_DENSITY_COLUMNS + ["_group_key"] if column in frame.columns]
+        desired_order = [column for column in CURRENT_DENSITY_COLUMNS + ["_group_key", "_record_id"] if column in frame.columns]
         return frame.loc[:, desired_order]
+
+    def _phase_values_for_annealing_record(self, record: MeasurementRecord) -> Dict[str, float]:
+        values = _auto_transition_values_for_annealing_record(record)
+        record_id = _transition_record_id_for_annealing_record(record)
+        snapshot_provider = getattr(self._annealing_section, "transition_reviews_snapshot", None)
+        raw_reviews = snapshot_provider() if callable(snapshot_provider) else getattr(self._annealing_section, "_transition_reviews", {})
+        payload = raw_reviews.get(record_id, {}) if isinstance(raw_reviews, dict) else {}
+        if isinstance(payload, dict):
+            status = str(payload.get("status") or "").strip()
+            if status in {
+                TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                TRANSITION_REVIEW_STATUS_EXCLUDED,
+            }:
+                return {}
+            final_values = _clean_transition_values(payload.get("final_values_mA"))
+            manual_values = _clean_transition_values(payload.get("manual_values_mA"))
+            if final_values:
+                values.update(final_values)
+            if manual_values:
+                values.update(manual_values)
+        return values
+
+    def _current_density_row(
+        self,
+        composition_label: str,
+        microwire_label: str,
+        diameter_um: Any,
+        area_mm2: Optional[float],
+        phase_info: Mapping[str, Any],
+        setpoints: Sequence[Any],
+        sources: Sequence[Any],
+        key_text: str,
+        *,
+        graph_label: str,
+        record: Optional[MeasurementRecord],
+    ) -> Dict[str, Any]:
+        phase_values = dict(phase_info)
+        if phase_values.get("As1") is None and phase_values.get("As") is not None:
+            phase_values["As1"] = phase_values.get("As")
+        if phase_values.get("Ms1") is None and phase_values.get("Ms") is not None:
+            phase_values["Ms1"] = phase_values.get("Ms")
+        notes: List[str] = []
+        if diameter_um is None or area_mm2 is None:
+            notes.append("Missing diameter")
+        as1_value = phase_values.get("As1")
+        af1_value = phase_values.get("Af1")
+        ms1_value = phase_values.get("Ms1")
+        mf1_value = phase_values.get("Mf1")
+        as2_value = phase_values.get("As2")
+        af2_value = phase_values.get("Af2")
+        ms2_value = phase_values.get("Ms2")
+        mf2_value = phase_values.get("Mf2")
+        if as1_value is None:
+            notes.append("As1 missing")
+        if ms1_value is None:
+            notes.append("Ms1 missing")
+        if not setpoints:
+            notes.append("No setpoint data")
+        review_records = [record] if record is not None else []
+        review_counts = self._review_counts_for_annealing_records(review_records)
+        return {
+            "Composition": composition_label,
+            "Microwire": microwire_label,
+            "Graph": graph_label,
+            MICROSCOPE_D_COLUMN: diameter_um,
+            ANNEALING_AS_COLUMN: as1_value,
+            ANNEALING_AF1_COLUMN: af1_value,
+            ANNEALING_MS_COLUMN: ms1_value,
+            ANNEALING_MF1_COLUMN: mf1_value,
+            ANNEALING_AS2_COLUMN: as2_value,
+            ANNEALING_AF2_COLUMN: af2_value,
+            ANNEALING_MS2_COLUMN: ms2_value,
+            ANNEALING_MF2_COLUMN: mf2_value,
+            CURRENT_DENSITY_AS_DENSITY_COLUMN: self._compute_density(as1_value, area_mm2),
+            CURRENT_DENSITY_MS_DENSITY_COLUMN: self._compute_density(ms1_value, area_mm2),
+            **{
+                column: self._compute_density(phase_values.get(label), area_mm2)
+                for label, column in CURRENT_DENSITY_PER_LABEL_COLUMNS.items()
+            },
+            CURRENT_DENSITY_AS_DELTA_COLUMN: self._compute_delta(as2_value, as1_value),
+            CURRENT_DENSITY_AF_DELTA_COLUMN: self._compute_delta(af2_value, af1_value),
+            CURRENT_DENSITY_MS_DELTA_COLUMN: self._compute_delta(ms2_value, ms1_value),
+            CURRENT_DENSITY_MF_DELTA_COLUMN: self._compute_delta(mf2_value, mf1_value),
+            CURRENT_DENSITY_MF_AF1_DELTA_COLUMN: self._compute_delta(mf1_value, af1_value),
+            CURRENT_DENSITY_MF_AF2_DELTA_COLUMN: self._compute_delta(mf2_value, af2_value),
+            "Setpoints (mA)": self._format_setpoints(setpoints),
+            "Sources": self._summarise_sources(sources),
+            CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN: self._status_from_review_counts(review_counts),
+            CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN: self._format_review_counts(review_counts),
+            "Notes": "; ".join(notes) if notes else "",
+            "_group_key": key_text,
+            "_record_id": _transition_record_id_for_annealing_record(record) if record is not None else "",
+        }
 
     def _collect_microscope_data(self) -> Dict[MicrowireKey, Dict[str, Any]]:
         result: Dict[MicrowireKey, Dict[str, Any]] = {}
@@ -18997,8 +19126,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
             [record for records in self._record_groups.values() for record in records]
         )
         status_text = (
-            f"{annotated} of {total} sample row(s) have accepted/reviewed transition temps; "
-            f"{auto_estimated} additional sample row(s) have automatic estimates; "
+            f"{annotated} of {total} scan row(s) have accepted/reviewed transition temps; "
+            f"{auto_estimated} additional scan row(s) have automatic estimates; "
             f"{scan_counts['reviewed']} of {scan_counts['total']} scan(s) reviewed "
             f"({scan_counts['no_transition']} no transition, {scan_counts['excluded']} excluded)."
             if total
@@ -19150,43 +19279,48 @@ class TransitionTempsSection(QtWidgets.QWidget):
             matches = []
         if not matches:
             return
-        row = int(matches[0])
-        records = self._record_groups.get(group_key, [])
-        values = self._values_for_group(group_key, records, include_auto=False)
-        counts = self._review_counts_for_records(records)
-        updates = {
-            TRANSITION_TEMP_AS_COLUMN: values.get("As"),
-            TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
-            TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
-            TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
-            "Review status": self._group_status_from_counts(counts),
-            "Scans": counts["total"],
-            "Accepted": counts["accepted"] + counts["manual"],
-            "No transition": counts["no_transition"],
-            "Excluded": counts["excluded"],
-            "Unreviewed": counts["unreviewed"],
-        }
         changed_columns: List[int] = []
-        for column, value in updates.items():
-            if column not in frame.columns:
-                continue
-            col = int(frame.columns.get_loc(column))
-            try:
-                frame.iat[row, col] = value
-                changed_columns.append(col)
-            except Exception:
-                continue
+        for raw_row in matches:
+            row = int(raw_row)
+            series = frame.iloc[row]
+            record = self._record_for_row(series)
+            records = [record] if record is not None else self._record_groups.get(group_key, [])
+            values = self._values_for_record(record) if record is not None else self._values_for_group(group_key, records, include_auto=False)
+            counts = self._review_counts_for_records(records)
+            updates = {
+                TRANSITION_TEMP_AS_COLUMN: values.get("As"),
+                TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
+                TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
+                TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
+                "Review status": self._group_status_from_counts(counts),
+                "Scans": counts["total"],
+                "Accepted": counts["accepted"] + counts["manual"],
+                "No transition": counts["no_transition"],
+                "Excluded": counts["excluded"],
+                "Unreviewed": counts["unreviewed"],
+            }
+            for column, value in updates.items():
+                if column not in frame.columns:
+                    continue
+                col = int(frame.columns.get_loc(column))
+                try:
+                    frame.iat[row, col] = value
+                    changed_columns.append(col)
+                except Exception:
+                    continue
+        if not changed_columns:
+            return
         try:
             self.model._invalidate_frame_caches()
         except Exception:
             pass
-        if changed_columns:
-            left = self.model.index(row, min(changed_columns))
-            right = self.model.index(row, max(changed_columns))
-            try:
-                self.model.dataChanged.emit(left, right, [QtCore.Qt.ItemDataRole.DisplayRole])
-            except Exception:
-                pass
+        left = self.model.index(min(int(row) for row in matches), min(changed_columns))
+        right = self.model.index(max(int(row) for row in matches), max(changed_columns))
+        try:
+            self.model.dataChanged.emit(left, right, [QtCore.Qt.ItemDataRole.DisplayRole])
+        except Exception:
+            pass
+        return
 
     def _values_for_record(
         self,
@@ -19413,36 +19547,51 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 continue
             composition, microwire = _microwire_info_from_key(key_tuple)
             records = self._record_groups.get(key, [])
-            values = self._values_for_group(key, records, include_auto=False)
-            counts = self._review_counts_for_records(records)
-            rows.append(
-                {
-                    "Composition": composition,
-                    "Microwire": microwire,
-                    TRANSITION_TEMP_AS_COLUMN: values.get("As"),
-                    TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
-                    TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
-                    TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
-                    "Review status": self._group_status_from_counts(counts),
-                    "Scans": counts["total"],
-                    "Accepted": counts["accepted"] + counts["manual"],
-                    "No transition": counts["no_transition"],
-                    "Excluded": counts["excluded"],
-                    "Unreviewed": counts["unreviewed"],
-                    "_group_key": key,
-                }
-            )
+            for record in records:
+                values = self._values_for_record(record)
+                counts = self._review_counts_for_records([record])
+                rows.append(
+                    {
+                        "Composition": composition,
+                        "Microwire": microwire,
+                        "Graph": _record_label_for_display(record),
+                        TRANSITION_TEMP_AS_COLUMN: values.get("As"),
+                        TRANSITION_TEMP_AF_COLUMN: values.get("Af"),
+                        TRANSITION_TEMP_MS_COLUMN: values.get("Ms"),
+                        TRANSITION_TEMP_MF_COLUMN: values.get("Mf"),
+                        "Review status": self._group_status_from_counts(counts),
+                        "Scans": counts["total"],
+                        "Accepted": counts["accepted"] + counts["manual"],
+                        "No transition": counts["no_transition"],
+                        "Excluded": counts["excluded"],
+                        "Unreviewed": counts["unreviewed"],
+                        "_group_key": key,
+                        "_record_id": _vsm_transition_review_record_id(record),
+                    }
+                )
         if not rows:
             return pd.DataFrame(
-                columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+                columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key", "_record_id"]
             )
         frame = pd.DataFrame(rows)
         desired = [
             col
-            for col in TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+            for col in TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key", "_record_id"]
             if col in frame.columns
         ]
         return frame.loc[:, desired]
+
+    def _record_for_row(self, row: Optional[pd.Series]) -> Optional[VsmTemperatureScanRecord]:
+        if row is None:
+            return None
+        record_id = str(row.get("_record_id") or "").strip()
+        group_key = str(row.get("_group_key") or "").strip()
+        if not record_id or not group_key:
+            return None
+        for record in self._record_groups.get(group_key, []):
+            if _vsm_transition_review_record_id(record) == record_id:
+                return record
+        return None
 
     def _hide_internal_columns(self) -> None:
         table = self.table_view
@@ -19484,7 +19633,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return None
         return str(key_value)
 
-    def _restore_selection(self, key: Optional[str]) -> None:
+    def _restore_selection(self, key: Optional[str], record_id: Optional[str] = None) -> None:
         if not key:
             return
         table = self.table_view
@@ -19497,6 +19646,15 @@ class TransitionTempsSection(QtWidgets.QWidget):
             matches = frame.index[frame["_group_key"] == key].tolist()
         except Exception:
             matches = []
+        if record_id and matches and "_record_id" in frame.columns:
+            try:
+                record_matches = frame.index[
+                    (frame["_group_key"] == key) & (frame["_record_id"] == record_id)
+                ].tolist()
+            except Exception:
+                record_matches = []
+            if record_matches:
+                matches = record_matches
         if not matches:
             return
         row = matches[0]
@@ -19528,7 +19686,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
         composition, microwire = _microwire_info_from_key(key_tuple)
         title = f"{composition} — {microwire}" if composition and microwire else "VSM transitions"
         records = self._record_groups.get(key, [])
+        row = self._selected_row_series()
+        record = self._record_for_row(row)
+        if record is not None:
+            records = [record]
         values = self._values_for_group(key, records, include_auto=False)
+        if record is not None:
+            values = self._values_for_record(record)
         group_auto_values = self._auto_values_for_records(records)
         auto_by_record: Dict[str, Dict[str, float]] = {}
         reviewed_by_record: Dict[str, Dict[str, float]] = {}
@@ -19612,7 +19776,16 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 value = self._coerce_transition_value(series.get(column))
                 if value is not None:
                     entry[label] = value
-            if entry:
+            record = self._record_for_row(series)
+            if record is not None:
+                self._store_review_for_record(
+                    key,
+                    record,
+                    TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED if entry else TRANSITION_REVIEW_STATUS_UNREVIEWED,
+                    values=entry,
+                    included=bool(entry),
+                )
+            elif entry:
                 self._transition_points[key] = entry
             elif key in self._transition_points:
                 self._transition_points.pop(key, None)
@@ -19620,6 +19793,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
         if updated:
             self._store_transition_points()
             self._update_preview()
+
+    def _selected_row_series(self) -> Optional[pd.Series]:
+        frame = self.model.frame()
+        row = self._selected_source_row()
+        if not isinstance(frame, pd.DataFrame) or row is None or row < 0 or row >= len(frame.index):
+            return None
+        return frame.iloc[row]
 
     @staticmethod
     def _coerce_transition_value(value: Any) -> Optional[float]:
@@ -19868,7 +20048,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
 
     def _select_scan_ref(self, group_key: str, record_id: str) -> None:
         self._pending_preview_record_id = record_id
-        self._restore_selection(group_key)
+        self._restore_selection(group_key, record_id)
         self._update_preview()
 
     def _select_previous_scan(self) -> None:
@@ -19949,6 +20129,23 @@ class TransitionTempsSection(QtWidgets.QWidget):
 
     def _source_row(self, proxy_row: int) -> Optional[int]:
         return self._search_proxy.map_row_to_source(proxy_row)
+
+    def _selected_source_row(self) -> Optional[int]:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return None
+        selection_model = table.selectionModel()
+        if selection_model is None:
+            return None
+        current_index = selection_model.currentIndex()
+        if current_index.isValid():
+            row = self._source_row(current_index.row())
+            if row is not None:
+                return row
+        rows = selection_model.selectedRows()
+        if rows:
+            return self._source_row(rows[0].row())
+        return None
 
     def _handle_search_changed(self, text: str) -> None:
         self._search_proxy.set_search_text(text)
@@ -23813,14 +24010,18 @@ class DmaTransitionsSection(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel("Waiting for Mini DMA data.", self)
         layout.addWidget(self.status_label)
 
-        self.summary_table = QtWidgets.QTableWidget(0, 2, self)
-        self.summary_table.setHorizontalHeaderLabels(["Status", "Count"])
+        self.summary_table = QtWidgets.QTableWidget(0, 7, self)
+        self.summary_table.setHorizontalHeaderLabels(
+            ["Composition", "Microwire", "Graph", "Target", "Review status", "Auto status", "Review counts"]
+        )
         self.summary_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.summary_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.summary_table.setAlternatingRowColors(True)
         header = self.summary_table.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(True)
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.summary_table.verticalHeader().setVisible(False)
         layout.addWidget(self.summary_table, 1)
 
@@ -23845,41 +24046,98 @@ class DmaTransitionsSection(QtWidgets.QWidget):
             reviews = self._mini_dma_section.transition_reviews_snapshot()
         except Exception:
             reviews = {}
+        logger = getattr(self._mini_dma_section, "logger", logging.getLogger(__name__))
+        entries = _mini_dma_transition_review_entries(records, logger)
+        rows: List[Tuple[_MiniDmaTransitionReviewEntry, str, str]] = []
         counts = {
-            "Runs": len(records),
-            "Reviewed targets": 0,
-            "Accepted": 0,
-            "No transition": 0,
-            "Excluded": 0,
+            "total": len(entries),
+            "reviewed": 0,
+            "accepted": 0,
+            "manual": 0,
+            "no_transition": 0,
+            "excluded": 0,
+            "unreviewed": 0,
+            "auto_candidates": 0,
+            "needs_attention": 0,
         }
-        for payload in reviews.values():
-            if not isinstance(payload, Mapping):
-                continue
-            status = str(payload.get("status") or "").strip()
-            if status == MINI_DMA_REVIEW_STATUS_ACCEPTED:
-                counts["Reviewed targets"] += 1
-                counts["Accepted"] += 1
-            elif status == MINI_DMA_REVIEW_STATUS_NO_TRANSITION:
-                counts["Reviewed targets"] += 1
-                counts["No transition"] += 1
-            elif status == MINI_DMA_REVIEW_STATUS_EXCLUDED:
-                counts["Reviewed targets"] += 1
-                counts["Excluded"] += 1
-
-        self.summary_table.setRowCount(len(counts))
-        for row_index, (label, value) in enumerate(counts.items()):
-            self.summary_table.setItem(row_index, 0, QtWidgets.QTableWidgetItem(label))
-            self.summary_table.setItem(row_index, 1, QtWidgets.QTableWidgetItem(str(value)))
+        for entry in entries:
+            record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
+            payload = reviews.get(record_id, {}) if isinstance(reviews, Mapping) else {}
+            status_label = _mini_dma_display_status(entry, payload if isinstance(payload, Mapping) else {})
+            auto_status = "Auto candidates" if entry.status == "accepted" else "Needs attention" if entry.status == "partial" else "No auto transition"
+            rows.append((entry, status_label, auto_status))
+            if entry.status == "accepted":
+                counts["auto_candidates"] += 1
+            elif entry.status == "partial":
+                counts["needs_attention"] += 1
+            if status_label == "Accepted":
+                counts["reviewed"] += 1
+                counts["accepted"] += 1
+            elif status_label == "Manual adjusted":
+                counts["reviewed"] += 1
+                counts["manual"] += 1
+            elif status_label == "No transition":
+                counts["reviewed"] += 1
+                counts["no_transition"] += 1
+            elif status_label == "Excluded":
+                counts["reviewed"] += 1
+                counts["excluded"] += 1
+            elif status_label == "Needs attention":
+                counts["needs_attention"] += 1
+                counts["unreviewed"] += 1
+            else:
+                counts["unreviewed"] += 1
+        self.summary_table.setRowCount(len(rows))
+        counts_text = self._format_counts(counts)
+        for row_index, (entry, status_label, auto_status) in enumerate(rows):
+            key_tuple = getattr(entry.record, "key", None)
+            if key_tuple:
+                composition, microwire = _microwire_info_from_key((key_tuple[0], key_tuple[1], key_tuple[2], None))
+            else:
+                parsed = _microwire_key_from_path(getattr(entry.record, "path", Path()), entry.sample)
+                composition, microwire = _microwire_info_from_key((parsed[0], parsed[1], parsed[2], None)) if parsed else ("", entry.sample)
+            values = _clean_mini_dma_transition_values(
+                (reviews.get(_mini_dma_review_record_id(entry.record, entry.target_label), {}) or {}).get("values")
+                if isinstance(reviews, Mapping)
+                else {}
+            )
+            if not values:
+                values = _mini_dma_transition_values_from_summary(entry.target_summary)
+            row_values = [
+                composition,
+                microwire,
+                entry.run_label,
+                entry.target_label,
+                status_label,
+                auto_status,
+                counts_text if row_index == 0 else "",
+            ]
+            for column, value in enumerate(row_values):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                if column == 4:
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(_transition_review_status_color(status_label))))
+                if column == 6 and values:
+                    item.setToolTip(", ".join(f"{label}={value:.3g} mA" for label, value in values.items()))
+                self.summary_table.setItem(row_index, column, item)
         try:
             self.summary_table.resizeColumnsToContents()
         except Exception:
             pass
-        if records:
+        if rows:
             self.status_label.setText(
-                f"{counts['Reviewed targets']} reviewed Mini DMA transition target(s) across {counts['Runs']} run(s)."
+                f"{counts['reviewed']} of {counts['total']} DMA target row(s) reviewed across {len(records)} run(s)."
             )
+        elif records:
+            self.status_label.setText("Mini DMA runs are available, but no transition-current targets were found.")
         else:
             self.status_label.setText("No Mini DMA runs available yet.")
+
+    @staticmethod
+    def _format_counts(counts: Mapping[str, int]) -> str:
+        return "; ".join(
+            f"{key}={int(counts.get(key, 0) or 0)}"
+            for key in ("total", "reviewed", "accepted", "manual", "no_transition", "excluded", "unreviewed", "auto_candidates")
+        )
 
     def _open_transition_review(self) -> None:
         opener = getattr(self._mini_dma_section, "_open_transition_review", None)
