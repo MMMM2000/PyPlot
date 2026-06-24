@@ -10,6 +10,7 @@ from pathlib import Path
 from data_logging.mini_dma_logger.full_run_simulator import (
     FULL_RUN_SCENARIOS,
     full_run_scenario_by_name,
+    run_adaptive_control_policy_matrix,
     run_control_policy_matrix,
     run_free_strain_stress_matrix,
     run_full_mini_dma_simulation,
@@ -322,6 +323,30 @@ def test_control_policy_matrix_compares_caps_on_good_and_weak_wires(tmp_path: Pa
     assert all(item["stop_reason"] == "completed" for item in summaries)
     assert all(item["current_phase_event_count"] > 0 for item in summaries)
     assert all(trace.invariants["corrections_bounded"] for trace in traces)
+    assert paths["summary_csv"].exists()
+
+
+def test_adaptive_control_policy_matrix_reports_response_gated_caps(tmp_path: Path) -> None:
+    traces = run_adaptive_control_policy_matrix()
+    summaries = [trace.summary() for trace in traces]
+    names = {trace.config.name for trace in traces}
+
+    paths = write_sweep_outputs(traces, tmp_path)
+
+    assert len(traces) == 25
+    assert any("weak_noisy_0p25pct" in name for name in names)
+    assert any("stress_ladder_50_100_after_unwind" in name for name in names)
+    assert all(item["stop_reason"] == "completed" for item in summaries)
+    assert any(item["adaptive_correction_cap_max_scale"] == 1.0 for item in summaries)
+    assert any(item["adaptive_correction_cap_max_scale"] > 1.0 for item in summaries)
+    assert all(
+        item["max_abs_correction_mm"] <= item["effective_max_adaptive_correction_mm"] + 1e-12
+        for item in summaries
+    )
+    assert any(
+        item["max_observed_correction_cap_mm"] > item["effective_max_correction_mm"] + 1e-12
+        for item in summaries
+    )
     assert paths["summary_csv"].exists()
 
 

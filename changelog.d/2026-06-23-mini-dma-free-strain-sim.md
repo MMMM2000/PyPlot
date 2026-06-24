@@ -7,3 +7,4 @@
 - Target-ramp simulation can now wait for fresh post-ramp feedback and cap target lead by a target-scaled fraction, preventing the simulated target from sprinting far ahead of a slack/relaxed wire.
 - Current sweep simulation now requires tight processed-center recovery before advancing current, so current holds no longer resume merely because the broader endpoint recovery band was reached.
 - Full-run summaries and policy sweeps now include target-ramp-specific error metrics, current-phase event counts, and representative 50 -> 100 MPa post-unwind ladder cases for adaptive cap/recovery comparisons.
+- Added a software-only adaptive correction-cap policy matrix. It logs per-event correction caps, compares response-gated cap growth across good, delayed-feedback, weak/noisy, and 50 -> 100 MPa stress-ladder cases, and keeps adaptive growth disabled by default because the current evidence is mixed.

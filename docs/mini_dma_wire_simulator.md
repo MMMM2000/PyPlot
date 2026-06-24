@@ -97,6 +97,12 @@ Run representative correction-policy comparisons:
 uv run python scripts/mini_dma_full_run_simulator.py --policy-matrix --out artifacts/mini-dma-control-policy-matrix
 ```
 
+Run response-gated adaptive correction-cap comparisons:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --adaptive-policy-matrix --out artifacts/mini-dma-adaptive-policy-matrix
+```
+
 Full-run scenarios currently cover:
 
 - `baseline_first_overheating`: nominal endpoint recovery.
@@ -123,3 +129,5 @@ The free-strain stress-test matrix crosses real-run-inspired wire families with 
 `free_strain_fluctuation_pct` is a physical hidden-length perturbation during transformation. It changes the simulated free contraction/elongation and therefore changes stress through the elastic mismatch; it does not directly fabricate the plotted strain. Plotted strain remains derived from simulated motor position and gauge length. The sweep writer emits JSON, CSV, Markdown, and a compact metrics PNG so policy changes can be compared across all simulated wire families.
 
 The policy matrix reuses representative high-strain, delayed-feedback, stiff-overresponsive, weak/noisy, and 50 -> 100 MPa post-unwind stress-ladder cases and varies only geometry-based correction-cap scale plus the recovery band as a fraction of target stress. It is intended to catch policies that improve the good 10% strain wire by moving faster but overdrive weak/noisy wires into artificial strain, long current holds, or poor later target-ramp recovery. Current results show good high-strain ladder cases benefiting from larger percent caps around 0.30-0.42% per command, while weak/noisy wires prefer much smaller caps around 0.05%; that is evidence for adaptive cap growth rather than one universal cap.
+
+The adaptive policy matrix is deliberately off by default in ordinary scenarios. It compares response-gated cap ceilings that can grow only during current-hold correction, based on processed-center error, processed noise, and whether same-sign corrections are actually improving the processed error. It does not use hidden free-strain truth. Current software-only results are mixed: delayed-feedback early wires can benefit from a larger temporary cap, weak/noisy wires only tolerate small growth, and the good 50 -> 100 MPa stress-ladder cases still prefer the fixed geometry-percent cap. Treat this as evidence for future controller design, not as a live-control default.

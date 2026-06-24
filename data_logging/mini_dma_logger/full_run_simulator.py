@@ -66,6 +66,8 @@ class FullRunConfig:
     scale_latency_s: float = 0.2
     zero_compression_stress: bool = False
     max_correction_strain_pct: float | None = None
+    adaptive_correction_cap_max_scale: float = 1.0
+    adaptive_correction_cap_growth: float = 1.35
     reported_strain_motor_scale: float = 1.0
     reported_strain_offset_pct: float = 0.0
     transformation_profile: str = "wire"
@@ -95,6 +97,10 @@ class FullRunConfig:
             raise ValueError("scale_latency_s must be non-negative")
         if self.max_correction_strain_pct is not None and self.max_correction_strain_pct <= 0.0:
             raise ValueError("max_correction_strain_pct must be positive")
+        if self.adaptive_correction_cap_max_scale < 1.0:
+            raise ValueError("adaptive_correction_cap_max_scale must be at least 1")
+        if self.adaptive_correction_cap_growth < 1.0:
+            raise ValueError("adaptive_correction_cap_growth must be at least 1")
         if self.reported_strain_motor_scale == 0.0:
             raise ValueError("reported_strain_motor_scale cannot be zero")
         if self.transformation_profile not in {"wire", "stepped"}:
@@ -119,6 +125,8 @@ class FullRunConfig:
         _finite(self.free_strain_fluctuation_pct)
         _finite(self.free_strain_fluctuation_cycles)
         _finite(self.inter_target_free_length_shift_mm)
+        _finite(self.adaptive_correction_cap_max_scale)
+        _finite(self.adaptive_correction_cap_growth)
         if self.target_ramp_max_lead_fraction is not None:
             _finite(self.target_ramp_max_lead_fraction)
         return self
@@ -140,6 +148,7 @@ class FullRunEvent:
     decision: str
     result: str
     correction_mm: float
+    correction_cap_mm: float
     reason: str
     endpoint_recovered: bool
     fresh: bool
@@ -165,6 +174,7 @@ class FullRunEvent:
             "sensitivity_per_mm": "",
             "motor_step_mm": "",
             "correction_mm": f"{self.correction_mm:.9f}",
+            "correction_cap_mm": f"{self.correction_cap_mm:.9f}",
             "target_mm": f"{self.motor_mm:.9f}",
             "result_detail": self.reason,
             "endpoint_recovered": str(bool(self.endpoint_recovered)).lower(),
@@ -267,6 +277,9 @@ class FullRunTrace:
             ),
             "max_correction_strain_pct": self.config.max_correction_strain_pct,
             "effective_max_correction_mm": _effective_max_correction_mm(self.config),
+            "adaptive_correction_cap_max_scale": self.config.adaptive_correction_cap_max_scale,
+            "effective_max_adaptive_correction_mm": _max_allowed_correction_mm(self.config),
+            "max_observed_correction_cap_mm": max((event.correction_cap_mm for event in self.events), default=0.0),
             "max_total_travel_mm": max((event.total_travel_mm for event in self.events), default=0.0),
             "max_abs_correction_mm": max((abs(event.correction_mm) for event in self.events), default=0.0),
             "current_hold_count": len(hold_events),
@@ -302,6 +315,9 @@ class _FullRunState:
         self.ramp_started_elapsed_s = 0.0
         self.ramp_waiting_for_fresh_feedback = False
         self.active_target_stress_mpa = self.ramp_start_stress_mpa
+        self.adaptive_correction_scale = 1.0
+        self.max_observed_adaptive_correction_scale = 1.0
+        self.previous_adaptive_error_mpa: float | None = None
 
     @property
     def dt_s(self) -> float:
@@ -332,6 +348,68 @@ class _FullRunState:
         if min_recovery_mpa is not None:
             controller = replace(controller, min_recovery_mpa=min_recovery_mpa)
         return controller
+
+    def controller_for_correction_phase(self, phase: str, controller: RobustControllerConfig) -> RobustControllerConfig:
+        cap_mm = self.correction_cap_for_phase_mm(phase, controller)
+        if cap_mm == controller.max_correction_mm:
+            return controller
+        return replace(controller, max_correction_mm=cap_mm)
+
+    def correction_cap_for_phase_mm(self, phase: str, controller: RobustControllerConfig) -> float:
+        base_cap_mm = _effective_max_correction_mm(self.config)
+        if phase != "current_hold" or self.config.adaptive_correction_cap_max_scale <= 1.0:
+            return base_cap_mm
+        feedback = self.feedback_samples()
+        if not feedback:
+            return base_cap_mm
+        signal = processed_control_signal(feedback, controller)
+        error_mpa = signal.center_mpa - controller.target_stress_mpa
+        target_scale_mpa = max(abs(controller.target_stress_mpa), 1.0)
+        error_fraction = abs(error_mpa) / target_scale_mpa
+        noise_fraction = signal.noise_mpa / target_scale_mpa
+        noise_gate = max(controller.tolerance_mpa / target_scale_mpa, 0.02)
+        if noise_fraction > noise_gate * 2.0:
+            instantaneous_scale = 1.0
+        else:
+            drive = _clamp((error_fraction - noise_gate) / max(noise_gate * 4.0, 1e-9), 0.0, 1.0)
+            confidence = _clamp(1.0 - noise_fraction / max(noise_gate * 2.0, 1e-9), 0.0, 1.0)
+            instantaneous_scale = 1.0 + (self.config.adaptive_correction_cap_max_scale - 1.0) * drive * confidence
+        scale = max(self.adaptive_correction_scale, instantaneous_scale)
+        return base_cap_mm * min(self.config.adaptive_correction_cap_max_scale, scale)
+
+    def update_adaptive_correction_scale(self, event: FullRunEvent) -> None:
+        if event.phase != "current_hold" or self.config.adaptive_correction_cap_max_scale <= 1.0:
+            self.adaptive_correction_scale = 1.0
+            self.previous_adaptive_error_mpa = None
+            return
+        if event.correction_mm == 0.0 or event.decision in {"no_move", "wait_reversal", "safety_stop"}:
+            self.adaptive_correction_scale = max(1.0, self.adaptive_correction_scale / self.config.adaptive_correction_cap_growth)
+            self.previous_adaptive_error_mpa = event.error_mpa
+            return
+        previous_error = self.previous_adaptive_error_mpa
+        self.previous_adaptive_error_mpa = event.error_mpa
+        if previous_error is None:
+            return
+        if previous_error * event.error_mpa <= 0.0:
+            self.adaptive_correction_scale = 1.0
+            return
+        improvement = abs(previous_error) - abs(event.error_mpa)
+        improvement_floor = max(
+            self.config.controller.tolerance_mpa * 0.25,
+            event.processed_noise_mpa * 0.5,
+            1e-9,
+        )
+        if improvement > improvement_floor:
+            self.adaptive_correction_scale = min(
+                self.config.adaptive_correction_cap_max_scale,
+                self.adaptive_correction_scale * self.config.adaptive_correction_cap_growth,
+            )
+        elif improvement < -improvement_floor:
+            self.adaptive_correction_scale = max(1.0, self.adaptive_correction_scale / self.config.adaptive_correction_cap_growth)
+        self.max_observed_adaptive_correction_scale = max(
+            self.max_observed_adaptive_correction_scale,
+            self.adaptive_correction_scale,
+        )
 
     def sample(self, phase: str, *, rising: bool) -> MeasurementSample:
         wire = self.config.wire
@@ -486,6 +564,7 @@ class _FullRunState:
             decision=decision.decision,
             result=decision.result if reason != "endpoint_waiting_for_recovery" else reason,
             correction_mm=correction_mm,
+            correction_cap_mm=controller.max_correction_mm,
             reason=reason,
             endpoint_recovered=decision.endpoint_recovered,
             fresh=signal.fresh and feedback_age_s <= self.config.controller.stale_feedback_s,
@@ -497,6 +576,7 @@ class _FullRunState:
         recovery_band = max(controller.tolerance_mpa, controller.min_recovery_mpa)
         if abs(event.error_mpa) > recovery_band and decision.decision != "safety_stop":
             self.previous_error_sign = 1 if event.error_mpa > 0.0 else -1
+        self.update_adaptive_correction_scale(event)
         return event
 
     def correct_toward_target(self, *, controller: RobustControllerConfig | None = None) -> float:
@@ -510,8 +590,8 @@ class _FullRunState:
             correction = 0.0
         correction = _clamp(
             correction,
-            -_effective_max_correction_mm(self.config),
-            _effective_max_correction_mm(self.config),
+            -controller.max_correction_mm,
+            controller.max_correction_mm,
         )
         if abs(correction) <= 0.0:
             return 0.0
@@ -560,6 +640,10 @@ def _effective_max_correction_mm(config: FullRunConfig) -> float:
         return config.controller.max_correction_mm
     strain_cap_mm = config.wire.length_mm * config.max_correction_strain_pct / 100.0
     return max(config.controller.motor_step_mm, strain_cap_mm)
+
+
+def _max_allowed_correction_mm(config: FullRunConfig) -> float:
+    return _effective_max_correction_mm(config) * config.adaptive_correction_cap_max_scale
 
 
 def _free_strain_fluctuation_mm(config: FullRunConfig, fraction: float) -> float:
@@ -735,6 +819,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
                 phase = "current_hold"
                 reason = "endpoint_waiting_for_recovery" if at_endpoint else "processed_recovery"
             move_controller = state.controller_for_decision(min_recovery_mpa=config.controller.tolerance_mpa)
+            move_controller = state.controller_for_correction_phase(phase, move_controller)
             correction = 0.0 if recovered else state.correct_toward_target(controller=move_controller)
             state.record_event(phase, correction, reason, controller=move_controller)
             stop = _stop_for_safety(state)
@@ -814,7 +899,7 @@ def check_full_run_invariants(trace: FullRunTrace) -> dict[str, bool]:
     return {
         "no_load_stress_cruise": all(not event.cruise_allowed for event in events),
         "corrections_bounded": all(
-            abs(event.correction_mm) <= _effective_max_correction_mm(trace.config) + 1e-12
+            abs(event.correction_mm) <= _max_allowed_correction_mm(trace.config) + 1e-12
             for event in events
         ),
         "no_accumulated_correction_travel_stop": trace.stop_reason != "travel_limit",
@@ -1302,6 +1387,56 @@ def run_control_policy_matrix() -> list[FullRunTrace]:
     return traces
 
 
+def run_adaptive_control_policy_matrix() -> list[FullRunTrace]:
+    """Compare response-gated adaptive cap ceilings on representative matrix cases."""
+
+    representative_names = {
+        "matrix_good_12_2_10pct_rough_transform",
+        "matrix_early_19_8_9pct_delayed_feedback",
+        "matrix_weak_noisy_0p25pct_rough_transform",
+    }
+    base_configs = [
+        trace.config
+        for trace in run_free_strain_stress_matrix()
+        if trace.config.name in representative_names
+    ]
+    ladder = full_run_scenario_by_name("stress_ladder_50_100_after_unwind")
+    base_configs.append(ladder)
+    base_configs.append(
+        replace(
+            ladder,
+            name="stress_ladder_50_100_after_unwind_rough_transform",
+            description=(
+                "Good-wire 50 -> 100 MPa stress ladder with rough hidden free-strain "
+                "fluctuations during transformation."
+            ),
+            free_strain_fluctuation_pct=0.16,
+            free_strain_fluctuation_cycles=8.0,
+            scale_latency_s=0.45,
+            sweep=replace(ladder.sweep, sample_hz=1.5),
+            controller=replace(ladder.controller, stale_feedback_s=1.2),
+            seed=2501,
+        )
+    )
+    traces: list[FullRunTrace] = []
+    index = 0
+    for config in base_configs:
+        for adaptive_scale in (1.0, 1.5, 2.0, 2.5, 3.0):
+            index += 1
+            policy_config = replace(
+                config,
+                name=f"adaptive_{config.name.removeprefix('matrix_')}_scale{adaptive_scale:g}",
+                description=(
+                    f"Adaptive cap comparison for {config.name}: base geometry percent cap "
+                    f"with response-gated ceiling {adaptive_scale:g}x."
+                ),
+                adaptive_correction_cap_max_scale=adaptive_scale,
+                seed=config.seed + 20000 + index,
+            )
+            traces.append(run_full_mini_dma_simulation(policy_config))
+    return traces
+
+
 def _write_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     rows = list(rows)
     if not rows:
@@ -1361,6 +1496,7 @@ def _full_measurement_rows(trace: FullRunTrace) -> Iterable[dict[str, Any]]:
         row["processed_slope_mpa_s"] = "" if event is None else f"{event.processed_slope_mpa_s:.6f}"
         row["stress_error_mpa"] = "" if event is None else f"{event.error_mpa:.6f}"
         row["correction_mm"] = "" if event is None else f"{event.correction_mm:.9f}"
+        row["correction_cap_mm"] = "" if event is None else f"{event.correction_cap_mm:.9f}"
         row["total_correction_travel_mm"] = "" if event is None else f"{event.total_travel_mm:.9f}"
         row["feedback_age_s"] = "" if event is None else f"{event.feedback_age_s:.6f}"
         row["endpoint_recovered"] = "" if event is None else str(bool(event.endpoint_recovered)).lower()
@@ -1433,8 +1569,8 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
     lines = [
         "# Mini DMA full-run parameter sweep",
         "",
-        "| Scenario | Stop | Current events | Later ramp error MPa | Max sweep error MPa | Hold time s | Measured strain span % | Mean tracking error % | Invariants |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Scenario | Stop | Current events | Later ramp error MPa | Max sweep error MPa | Hold time s | Measured strain span % | Mean tracking error % | Adaptive scale | Max cap mm | Invariants |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for trace in traces:
         item = trace.summary()
@@ -1443,7 +1579,9 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
             f"| {item['scenario']} | {item['stop_reason']} | {item['current_phase_event_count']} | "
             f"{item['max_abs_later_target_ramp_error_mpa']:.2f} | {item['max_abs_current_sweep_error_mpa']:.2f} | "
             f"{item['current_hold_time_s']:.1f} | {item['strain_range_pct']:.3f} | "
-            f"{item['mean_abs_free_strain_tracking_error_pct']:.3f} | {invariant_text} |"
+            f"{item['mean_abs_free_strain_tracking_error_pct']:.3f} | "
+            f"{item['adaptive_correction_cap_max_scale']:.2f} | {item['max_observed_correction_cap_mm']:.6f} | "
+            f"{invariant_text} |"
         )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     plot_path = out / "full_run_sweep_metrics.png"
@@ -1487,7 +1625,7 @@ def _write_sweep_metrics_plot(path: Path, traces: list[FullRunTrace]) -> bool:
     axes[2].set_xticklabels(labels, rotation=65, ha="right", fontsize=7)
     for ax in axes:
         ax.grid(True, axis="y", alpha=0.25)
-    fig.suptitle("Mini DMA free-strain stress-test matrix")
+    fig.suptitle("Mini DMA full-run simulation matrix")
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -1523,6 +1661,8 @@ Scenario: `{trace.config.name}`
 - Maximum free-strain tracking error: {item["max_abs_free_strain_tracking_error_pct"]:.4f}%
 - Mean free-strain tracking error: {item["mean_abs_free_strain_tracking_error_pct"]:.4f}%
 - Effective correction cap: {item["effective_max_correction_mm"]:.6f} mm
+- Adaptive correction cap ceiling: {item["adaptive_correction_cap_max_scale"]:.3f}x ({item["effective_max_adaptive_correction_mm"]:.6f} mm)
+- Maximum observed correction cap: {item["max_observed_correction_cap_mm"]:.6f} mm
 - Maximum total correction travel: {item["max_total_travel_mm"]:.6f} mm
 - Maximum single correction: {item["max_abs_correction_mm"]:.6f} mm
 
@@ -1626,11 +1766,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sweep", action="store_true", help="Run the built-in parameter sweep.")
     parser.add_argument("--free-strain-matrix", action="store_true", help="Run the broad free-strain stress-test matrix.")
     parser.add_argument("--policy-matrix", action="store_true", help="Run representative correction-cap/recovery policy comparisons.")
+    parser.add_argument("--adaptive-policy-matrix", action="store_true", help="Run response-gated adaptive cap comparisons.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-full-run-sim"))
     args = parser.parse_args(argv)
 
     traces: list[FullRunTrace]
-    if args.policy_matrix:
+    if args.adaptive_policy_matrix:
+        traces = run_adaptive_control_policy_matrix()
+        write_sweep_outputs(traces, args.out)
+    elif args.policy_matrix:
         traces = run_control_policy_matrix()
         write_sweep_outputs(traces, args.out)
     elif args.free_strain_matrix:
