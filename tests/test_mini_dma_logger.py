@@ -6046,6 +6046,7 @@ def test_microwire_field_ui_typing_reports_bad_fabrication_data_without_crashing
 def test_fabrication_completer_activation_applies_sample_without_rebuilding_popup(
     tmp_path: Path,
     qtbot,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -6074,6 +6075,13 @@ def test_fabrication_completer_activation_applies_sample_without_rebuilding_popu
 
         assert composition_completer is not None
         assert wire_completer is not None
+        popup = wire_completer.popup()
+        hide_calls: list[bool] = []
+
+        def _record_popup_hide() -> None:
+            hide_calls.append(True)
+
+        monkeypatch.setattr(popup, "hide", _record_popup_hide)
 
         composition_completer.activated.emit("Ni50Fe27Ga23")
         assert window.edit_name_composition.text() == "Ni50Fe27Ga23"
@@ -6087,6 +6095,7 @@ def test_fabrication_completer_activation_applies_sample_without_rebuilding_popu
         assert window.spin_diameter.value() == pytest.approx(0.0136)
         assert "fabrication diameter 13.6 um" in window.label_fabrication_status.text()
         assert window.edit_name_wire.completer() is wire_completer
+        assert hide_calls == [True]
     finally:
         _close_test_window(window)
 
@@ -9283,6 +9292,7 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.recipe_progress.parent() is window.recipe_action_footer
         fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         assert window.recipe_progress.font().family() != fixed_font.family()
+        assert "padding-left" not in window.recipe_progress.styleSheet()
         assert window.label_current_task.parent() is window.recipe_action_footer
         assert window.label_current_task.isVisible() is False
         assert window.label_recipe_estimate.isVisible() is False
@@ -12492,6 +12502,51 @@ def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
     ]
 
 
+def test_shared_broker_supply_controller_rolls_back_refused_current_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            if action == "snapshot":
+                return {
+                    "snapshot": {
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.03,
+                                }
+                            }
+                        }
+                    }
+                }
+            if action == "assign_role":
+                raise PermissionError("Cannot change CH4 role while it is leased.")
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "BrokerJsonClient",
+        lambda *, host, port: _FakeBrokerClient(),
+    )
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=0.03,
+    )
+
+    controller.connect()
+
+    with pytest.raises(PermissionError):
+        controller.set_current_limit_mA(32.0)
+
+    assert controller.current_limit_a == pytest.approx(0.03)
+
+
 def test_shared_broker_supply_controller_retries_after_stale_current_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -15189,6 +15244,66 @@ def test_first_overheating_runtime_update_refreshes_channel_limit_for_raise(
 
         assert limits == pytest.approx([60.0])
         assert window._automation_steps[0].current_end_mA == pytest.approx(60.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_rejects_limit_failure_without_stopping(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.current_limit_mA = 30.0
+
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            self.current_limit_mA = value
+            raise PermissionError("Cannot change CH4 role while it is leased.")
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=30.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 20.0
+
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(32.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is False
+
+        assert window._automation_active is True
+        assert window._automation_steps[0] is first_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(30.0)
+        assert window._current_sweep_recipe_overrides[-1]["result"] == "rejected"
+        assert "Current-sweep channel limit update failed" in window.log_output.toPlainText()
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -20866,6 +20981,7 @@ def test_recovery_position_start_restarts_ui_refresh_timer(tmp_path: Path, qtbot
 
         assert window._automation_active is True
         assert window._automation_name == mini_dma_mod.RECOVERY_POSITION
+        assert [step.action for step in window._automation_steps] == ["move", "record"]
         assert window._ui_refresh_timer.isActive() is True
     finally:
         _close_test_window(window)

@@ -4587,11 +4587,16 @@ class SharedBrokerSupplyController:
         return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
 
     def set_current_limit_mA(self, current_limit_mA: float) -> None:
+        previous_limit_a = self.current_limit_a
         self.current_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
         channel = self.selected_channel()
         if channel <= 0:
             return
-        self._ensure_confirmed_role(channel)
+        try:
+            self._ensure_confirmed_role(channel)
+        except Exception:
+            self.current_limit_a = previous_limit_a
+            raise
 
     def configure_channel(
         self,
@@ -8189,7 +8194,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.recipe_progress.setValue(0)
         self.recipe_progress.setTextVisible(True)
         self.recipe_progress.setFormat("Recipe progress: idle")
-        self.recipe_progress.setStyleSheet("QProgressBar { text-align: left; padding-left: 8px; }")
+        self.recipe_progress.setStyleSheet("QProgressBar { text-align: left; }")
         self.label_current_task = QtWidgets.QLabel("Current task: idle", self.recipe_action_footer)
         self.label_current_task.setWordWrap(True)
         task_font = self.label_current_task.font()
@@ -11066,6 +11071,11 @@ class MainWindow(QtWidgets.QMainWindow):
         display_text = MicrowireLineEdit.to_display_text(text) or text.strip()
         if not display_text:
             return
+        completer = self.edit_name_wire.completer()
+        if completer is not None:
+            popup = completer.popup()
+            if popup is not None:
+                popup.hide()
         with QtCore.QSignalBlocker(self.edit_name_wire):
             self.edit_name_wire.setText(display_text)
         self._sync_auto_name_fields()
@@ -23241,6 +23251,29 @@ class MainWindow(QtWidgets.QMainWindow):
         old_limit_checked = self._current_sweep_channel_limit_checked
         if self._supply_controller is not None and not self._ensure_current_sweep_channel_limit(log=True):
             self._current_sweep_channel_limit_checked = old_limit_checked
+            payload: dict[str, object] = {
+                "timestamp_utc": _utc_timestamp(),
+                "applied_after_step_index": active_index,
+                "changed_step_count": 0,
+                "active_step_updated": False,
+                "active_step_message": (
+                    "The current-sweep channel limit could not be updated, so the runtime recipe update "
+                    "was not applied."
+                ),
+                "tail_replanned": False,
+                "visible_values": values,
+                "changes": [],
+                "truncated": False,
+                "result": "rejected",
+            }
+            self._current_sweep_recipe_overrides.append(payload)
+            self._write_control_trace(
+                decision="recipe_update",
+                result="rejected",
+                reason=json.dumps(payload, separators=(",", ":"), default=str),
+                task_text="Rejected current-sweep runtime update",
+            )
+            self._write_session_metadata()
             self._refresh_current_sweep_pending_update_ui()
             if show_message:
                 QtWidgets.QMessageBox.warning(
@@ -24601,7 +24634,6 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_ms = self._control_interval_ms()
         move_duration_s = self._move_duration_s(distance_mm, speed_mm_s)
         steps = [AutomationStep("move", target_mm=target_mm, duration_s=move_duration_s, note=label)]
-        steps.append(AutomationStep("settle", duration_s=max(0.1, interval_ms / 500.0), note=label))
         steps.append(AutomationStep("record", note=label))
         if not self._preflight_recipe_hardware(steps):
             return
