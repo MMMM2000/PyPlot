@@ -97,8 +97,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-17.7"
-CONTROL_LOGIC_PROFILE = "adaptive-current-hold-recovery"
+CONTROL_LOGIC_VERSION = "2026-06-24.1"
+CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -127,6 +127,9 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_volatile_response_waits_for_delayed_feedback",
     "current_hold_volatile_response_requires_settling",
     "current_hold_volatile_response_contains_adaptive_recovery",
+    "current_hold_large_error_uses_geometry_base_cap_before_response",
+    "current_hold_response_stiffness_requires_error_improvement",
+    "current_hold_adaptive_cap_growth_is_response_earned",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -576,7 +579,9 @@ SERVO_CURRENT_SWEEP_TARGET_RAMP_TRUST_FRACTION = 0.15
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
+SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.24
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH = 1.35
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH = 1.6
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH = 2.0
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_REMAINING_FRACTION = 0.35
@@ -13941,7 +13946,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 adaptive_mm = cap_value / abs(float(adaptive_sensitivity))
                 return max(
                     self._motor_step_mm(),
-                    min(self._current_sweep_hold_adaptive_command_cap_mm(), adaptive_mm),
+                    min(self._current_sweep_hold_adaptive_command_cap_mm_for_response(seek_key), adaptive_mm),
                 )
             if near_threshold > 0.0 and error_abs <= near_threshold:
                 return self._motor_step_mm()
@@ -13966,7 +13971,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     SERVO_CURRENT_SWEEP_DYNAMIC_MAX_FRACTION - SERVO_CURRENT_SWEEP_DYNAMIC_MIN_FRACTION
                 ) * (1.0 - math.exp(-error_over_near / scale))
                 cap_value = min(max_cap, max(near_threshold, error_abs * fraction))
-                return max(self._motor_step_mm(), cap_value / sensitivity)
+                correction_mm = max(self._motor_step_mm(), cap_value / sensitivity)
+                if self._automation_phase == "current_hold":
+                    correction_mm = min(correction_mm, self._current_sweep_hold_base_command_cap_mm())
+                return max(self._motor_step_mm(), correction_mm)
         elif self._current_sweep_freezes_live_stiffness() and self._automation_phase != "target_ramp":
             cap_mpa = self._current_sweep_near_correction_stress_mpa()
         cap_value = _basis_cap_from_stress(cap_mpa)
@@ -13999,13 +14007,37 @@ class MainWindow(QtWidgets.QMainWindow):
         return max(self._motor_step_mm(), abs(float(cap_value)) / sensitivity)
 
     def _current_sweep_hold_adaptive_command_cap_mm(self) -> float:
+        return self._current_sweep_hold_adaptive_command_cap_mm_for_response(None)
+
+    def _current_sweep_hold_base_command_cap_mm(self) -> float:
         strain_cap_mm = self._strain_pct_to_stage_mm(
-            SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+            SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
         )
         return max(
             self._motor_step_mm(),
             min(strain_cap_mm, self._current_sweep_max_correction_mm()),
         )
+
+    def _current_sweep_hold_adaptive_command_cap_mm_for_response(
+        self,
+        seek_key: tuple[str, int, float] | None,
+    ) -> float:
+        base_cap_mm = self._current_sweep_hold_base_command_cap_mm()
+        strain_cap_mm = self._strain_pct_to_stage_mm(
+            SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+        )
+        max_cap_mm = max(
+            self._motor_step_mm(),
+            min(strain_cap_mm, self._current_sweep_max_correction_mm()),
+        )
+        if seek_key is None:
+            return max_cap_mm
+        count = self._current_sweep_hold_response_count_by_key.get(seek_key, 0)
+        earned_steps = max(0, count - SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_SAMPLES + 1)
+        if earned_steps <= 0:
+            return base_cap_mm
+        earned_cap_mm = base_cap_mm * (SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH ** earned_steps)
+        return max(self._motor_step_mm(), min(max_cap_mm, earned_cap_mm))
 
     def _is_iso_current_stress_target_ramp(self, basis: str | None = None) -> bool:
         if not self._is_constant_current_stress_ramp_mode(self._automation_name):
@@ -15720,6 +15752,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if signed_delta_position * signed_delta_value <= 0.0:
             return
+        target_value = float(seek_key[2])
+        previous_error = float(previous_value) - target_value
+        current_error = float(current_value) - target_value
+        if previous_error * current_error <= 0.0:
+            return
+        improvement = abs(previous_error) - abs(current_error)
+        improvement_floor = max(abs(previous_error) * 0.02, 1e-9)
+        if improvement <= improvement_floor:
+            return
         load_stiffness = self._load_stiffness_from_basis_sensitivity(basis, delta_value / delta_position)
         if load_stiffness is None:
             return
@@ -15759,6 +15800,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if delta_value <= 0.0 or not math.isfinite(delta_value):
             return
         if signed_delta_position * signed_delta_value <= 0.0:
+            return
+        target_value = float(seek_key[2])
+        previous_error = float(previous_value) - target_value
+        current_error = float(current_value) - target_value
+        if previous_error * current_error <= 0.0:
+            return
+        improvement = abs(previous_error) - abs(current_error)
+        improvement_floor = max(abs(previous_error) * 0.02, 1e-9)
+        if improvement <= improvement_floor:
             return
         load_stiffness = self._load_stiffness_from_basis_sensitivity(basis, delta_value / delta_position)
         if load_stiffness is None:
@@ -16034,7 +16084,7 @@ class MainWindow(QtWidgets.QMainWindow):
         response_cap_mm = response_cap_value / observed_sensitivity
         hard_cap_mm = min(
             self._current_sweep_max_correction_mm(),
-            self._current_sweep_hold_adaptive_command_cap_mm(),
+            self._current_sweep_hold_adaptive_command_cap_mm_for_response(seek_key),
             max(motor_step_mm, response_cap_mm),
         )
         if hard_cap_mm <= motor_step_mm:
@@ -16120,7 +16170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         drift_step_mm = cap_value / sensitivity
         hard_cap_mm = min(
             self._current_sweep_max_correction_mm(),
-            self._current_sweep_hold_adaptive_command_cap_mm(),
+            self._current_sweep_hold_adaptive_command_cap_mm_for_response(seek_key),
             max(self._motor_step_mm(), drift_step_mm),
         )
         minimum_escape_mm = max(abs(float(base_step_mm)), self._motor_step_mm() * 1.25)
@@ -16258,7 +16308,7 @@ class MainWindow(QtWidgets.QMainWindow):
         large_error_band = max(
             out_of_band_floor,
             self._current_sweep_hold_entry_band_for_basis(effective_tolerance),
-        ) * SERVO_CURRENT_SWEEP_HOLD_NOISY_LARGE_ERROR_FACTOR
+        ) * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR
         if abs(float(error_value)) > large_error_band:
             self._seek_out_of_band_since_by_key.pop(seek_key, None)
             self._seek_out_of_band_sign_by_key.pop(seek_key, None)
@@ -17772,7 +17822,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     nudge_mm,
                     max(
                         self._motor_step_mm(),
-                        self._current_sweep_hold_adaptive_command_cap_mm() * 0.5,
+                        self._current_sweep_hold_adaptive_command_cap_mm_for_response(seek_key) * 0.5,
                     ),
                 )
                 current_hold_correction_reason = "current_hold_volatile_capped"
@@ -20027,8 +20077,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_adaptive_min_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION,
                 "current_hold_adaptive_max_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION,
                 "current_hold_adaptive_large_error_mpa": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA,
+                "current_hold_base_command_strain_pct": (
+                    SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
+                ),
                 "current_hold_adaptive_max_command_strain_pct": (
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+                ),
+                "current_hold_adaptive_command_growth": (
+                    SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH
                 ),
                 "current_hold_improving_step_growth": SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH,
                 "current_hold_improving_strong_step_growth": (
@@ -26073,7 +26129,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
         if (
             abs(float(signed_error))
-            > entry_band * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR
+            > entry_band * SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR * 2.0
         ):
             self._reset_current_sweep_ramp_hold_candidate()
             return True
@@ -26166,12 +26222,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_sweep_hold_min_pause_stress_mpa(),
             ),
         )
-        resume_noise_band = self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance)
-        if not self._current_sweep_filtered_window_spans_target(
+        resume_window_spans_target = self._current_sweep_filtered_window_spans_target(
             step.basis,
             float(step.target_value),
             tolerance,
-        ):
+        )
+        if resume_window_spans_target:
+            resume_noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
+        else:
             resume_noise_band = 0.0
         resume_band = max(
             tolerance * resume_factor,
