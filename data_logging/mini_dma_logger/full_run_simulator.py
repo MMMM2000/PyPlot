@@ -418,18 +418,12 @@ class _FullRunState:
         if not feedback:
             return base_cap_mm
         signal = processed_control_signal(feedback, controller)
-        error_mpa = signal.center_mpa - controller.target_stress_mpa
         target_scale_mpa = max(abs(controller.target_stress_mpa), 1.0)
-        error_fraction = abs(error_mpa) / target_scale_mpa
         noise_fraction = signal.noise_mpa / target_scale_mpa
         noise_gate = max(controller.tolerance_mpa / target_scale_mpa, 0.02)
         if noise_fraction > noise_gate * 2.0:
-            instantaneous_scale = 1.0
-        else:
-            drive = _clamp((error_fraction - noise_gate) / max(noise_gate * 4.0, 1e-9), 0.0, 1.0)
-            confidence = _clamp(1.0 - noise_fraction / max(noise_gate * 2.0, 1e-9), 0.0, 1.0)
-            instantaneous_scale = 1.0 + (self.config.adaptive_correction_cap_max_scale - 1.0) * drive * confidence
-        scale = max(self.adaptive_correction_scale, instantaneous_scale)
+            return base_cap_mm
+        scale = self.adaptive_correction_scale
         return base_cap_mm * min(self.config.adaptive_correction_cap_max_scale, scale)
 
     def update_adaptive_correction_scale(self, event: FullRunEvent) -> None:

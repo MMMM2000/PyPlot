@@ -9,6 +9,7 @@ from pathlib import Path
 
 from data_logging.mini_dma_logger.full_run_simulator import (
     FULL_RUN_SCENARIOS,
+    _effective_max_correction_mm,
     full_run_scenario_by_name,
     run_adaptive_control_policy_matrix,
     run_control_policy_matrix,
@@ -452,6 +453,18 @@ def test_adaptive_control_policy_matrix_reports_response_gated_caps(tmp_path: Pa
         for item in summaries
     )
     assert paths["summary_csv"].exists()
+
+
+def test_adaptive_cap_growth_requires_observed_response() -> None:
+    base = full_run_scenario_by_name("realistic_run32_first_target")
+    config = replace(base, adaptive_correction_cap_max_scale=3.0)
+
+    trace = run_full_mini_dma_simulation(config)
+    hold_events = [event for event in trace.events if event.phase == "current_hold"]
+
+    assert hold_events
+    assert hold_events[0].correction_cap_mm == _effective_max_correction_mm(config)
+    assert max(event.correction_cap_mm for event in hold_events) > hold_events[0].correction_cap_mm
 
 
 def test_full_run_cli_runs_named_scenario(tmp_path: Path) -> None:
