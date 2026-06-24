@@ -13,6 +13,7 @@ import json
 import math
 import random
 import statistics
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -1542,6 +1543,53 @@ def run_stress_ladder_matrix() -> list[FullRunTrace]:
         run_full_mini_dma_simulation(
             replace(
                 base_ladder,
+                name="ladder_thin_1_2_high_strain_high_hold",
+                description=(
+                    "Real-run-inspired Ni50Fe26Ga24 1/2 thin-wire ladder: 8.3 um diameter, "
+                    "about 15% hidden transformation strain, low maximum current, delayed feedback, "
+                    "and high current-hold fraction."
+                ),
+                wire=replace(
+                    base_ladder.wire,
+                    length_mm=47.861,
+                    diameter_mm=0.0083,
+                    elastic_stiffness_mpa_per_mm=42.0,
+                    transformation_contraction_mm=47.861 * 14.8 / 100.0,
+                    transformation_hysteresis_ma=7.0,
+                    noise_mpa=1.8,
+                ),
+                sweep=CurrentSweepConfig(start_ma=1.0, end_ma=30.0, rate_ma_s=0.18, sample_hz=1.6),
+                controller=replace(
+                    base_ladder.controller,
+                    stale_feedback_s=1.4,
+                    safety_max_stress_mpa=280.0,
+                ),
+                transformation_profile="stepped",
+                rising_transformation_steps=(
+                    (9.5, 0.9, 0.10),
+                    (14.0, 0.45, 0.42),
+                    (18.5, 0.55, 0.34),
+                    (23.5, 1.3, 0.14),
+                ),
+                falling_transformation_steps=(
+                    (8.0, 1.1, 0.16),
+                    (13.0, 0.55, 0.36),
+                    (18.0, 0.55, 0.34),
+                    (23.0, 1.4, 0.14),
+                ),
+                transformation_kinetic_tau_s=3.5,
+                max_correction_strain_pct=0.12,
+                scale_latency_s=0.45,
+                inter_target_free_length_shift_mm=-0.45,
+                max_ticks=22000,
+                seed=77003,
+            )
+        )
+    )
+    traces.append(
+        run_full_mini_dma_simulation(
+            replace(
+                base_ladder,
                 name="ladder_thin_delayed_tiny_load",
                 description="Very thin delayed-feedback 50 -> 100 MPa stress ladder.",
                 wire=replace(
@@ -1846,7 +1894,106 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
     paths = {"summary": summary_path, "summary_csv": csv_path, "report": report_path}
     if _write_sweep_metrics_plot(plot_path, traces):
         paths["plot"] = plot_path
+    policy_rank = _combined_policy_rankings(summary["runs"])
+    if policy_rank:
+        policy_rank_path = out / "stable_seed_policy_grid_ranked.json"
+        policy_rank_path.write_text(json.dumps(policy_rank, indent=2), encoding="utf-8")
+        paths["policy_rank"] = policy_rank_path
+        policy_plot_path = out / "stable_seed_policy_grid_top18.png"
+        if _write_combined_policy_rank_plot(policy_plot_path, policy_rank):
+            paths["policy_plot"] = policy_plot_path
     return paths
+
+
+def _combined_policy_rankings(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[float, float, float], list[dict[str, Any]]] = defaultdict(list)
+    for item in summaries:
+        key = _combined_policy_key(str(item.get("scenario", "")))
+        if key is not None:
+            groups[key].append(item)
+    if not groups:
+        return []
+
+    rankings: list[dict[str, Any]] = []
+    for (lead_fraction, cap_scale, adaptive_scale), group in groups.items():
+        statuses = Counter(str(item.get("quality_status", "")) for item in group)
+        flags = Counter(flag for item in group for flag in item.get("quality_flags", []))
+        rankings.append(
+            {
+                "lead_fraction": lead_fraction,
+                "cap_scale": cap_scale,
+                "adaptive_scale": adaptive_scale,
+                "case_count": len(group),
+                "quality_score_sum": sum(float(item["quality_score"]) for item in group),
+                "ok": statuses.get("ok", 0),
+                "needs_tuning": statuses.get("needs_tuning", 0),
+                "failed": statuses.get("failed", 0),
+                "hold_time_sum_s": sum(float(item["current_hold_time_s"]) for item in group),
+                "later_error_fraction_sum": sum(
+                    float(item["max_abs_later_target_ramp_error_fraction_of_target"]) for item in group
+                ),
+                "current_error_fraction_sum": sum(
+                    float(item["max_abs_current_sweep_error_fraction_of_target"]) for item in group
+                ),
+                "tracking_fraction_sum": sum(
+                    float(item["mean_abs_free_strain_tracking_error_fraction_of_span"]) for item in group
+                ),
+                "max_total_travel_mm": max(float(item["max_total_travel_mm"]) for item in group),
+                "flags": dict(flags),
+            }
+        )
+    rankings.sort(key=lambda item: (item["failed"], -item["ok"], item["quality_score_sum"], item["hold_time_sum_s"]))
+    return rankings
+
+
+def _combined_policy_key(name: str) -> tuple[float, float, float] | None:
+    parts = name.split("_", 4)
+    if len(parts) < 5 or parts[0] != "combined":
+        return None
+    try:
+        return (float(parts[1][1:]), float(parts[2][1:]), float(parts[3][1:]))
+    except (IndexError, ValueError):
+        return None
+
+
+def _write_combined_policy_rank_plot(path: Path, rankings: list[dict[str, Any]]) -> bool:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    if not rankings:
+        return False
+
+    top = rankings[:18]
+    labels = [
+        f"l{item['lead_fraction']:g}/c{item['cap_scale']:g}/a{item['adaptive_scale']:g}"
+        for item in top
+    ]
+    x = list(range(len(top)))
+    fig, axes = plt.subplots(3, 1, figsize=(max(10, len(top) * 0.65), 10), constrained_layout=True)
+    axes[0].bar(x, [item["quality_score_sum"] for item in top], color="#1f77b4")
+    axes[0].set_ylabel("aggregate quality score")
+    axes[0].set_title("Mini DMA stress-ladder policy grid: top candidates")
+    axes[1].bar(x, [item["hold_time_sum_s"] / 60.0 for item in top], color="#f59e0b")
+    axes[1].set_ylabel("total hold time (min)")
+    ok = [item["ok"] for item in top]
+    axes[2].bar(x, ok, color="#2ca02c", label="ok cases")
+    axes[2].bar(x, [item["failed"] for item in top], bottom=ok, color="#d62728", label="failed cases")
+    axes[2].set_ylabel("case count")
+    axes[2].legend(fontsize=8, loc="best")
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(labels, rotation=45, ha="right")
+    for ax in axes:
+        ax.grid(True, axis="y", alpha=0.25)
+        if ax is not axes[2]:
+            ax.set_xticks(x)
+            ax.set_xticklabels([])
+    fig.savefig(path, dpi=170)
+    plt.close(fig)
+    return True
 
 
 def _write_sweep_metrics_plot(path: Path, traces: list[FullRunTrace]) -> bool:

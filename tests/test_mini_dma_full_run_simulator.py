@@ -341,12 +341,13 @@ def test_stress_ladder_matrix_covers_representative_wires(tmp_path: Path) -> Non
 
     paths = write_sweep_outputs(traces, tmp_path)
 
-    assert len(traces) == 7
+    assert len(traces) == 8
     assert any("good_12_2_10pct" in name for name in names)
     assert any("early_19_8_9pct" in name for name in names)
     assert any("co6_bad_1pct" in name for name in names)
     assert any("weak_noisy_0p25pct" in name for name in names)
     assert any("thin_delayed_tiny_load" in name for name in names)
+    assert any("thin_1_2_high_strain_high_hold" in name for name in names)
     assert any("stiffer_thicker_high_load" in name for name in names)
     assert all(item["target_stress_sequence_mpa"] == [50.0, 100.0] for item in summaries)
     assert all(item["inter_target_free_length_shift_mm"] < 0.0 for item in summaries)
@@ -373,7 +374,7 @@ def test_stress_ladder_candidate_policy_improves_aggregate_quality(tmp_path: Pat
 
     baseline = [item for item in summaries if not item["scenario"].startswith("candidate_")]
     candidates = [item for item in summaries if item["scenario"].startswith("candidate_")]
-    assert len(baseline) == len(candidates) == 7
+    assert len(baseline) == len(candidates) == 8
     assert sum(item["quality_score"] for item in candidates) < sum(item["quality_score"] for item in baseline)
     assert all(item["stop_reason"] == "completed" for item in candidates)
     assert all(item["quality_status"] == "ok" for item in candidates if "stiffer_thicker" in item["scenario"])
@@ -392,7 +393,7 @@ def test_stress_ladder_combined_policy_grid_supports_small_slices(tmp_path: Path
 
     paths = write_sweep_outputs(traces, tmp_path)
 
-    assert len(traces) == 7
+    assert len(traces) == 8
     assert all(item["scenario"].startswith("combined_l0.05_c1.35_a1_") for item in summaries)
     assert all(item["target_stress_sequence_mpa"] == [50.0, 100.0] for item in summaries)
     assert any(item["quality_status"] == "ok" for item in summaries)
@@ -400,6 +401,13 @@ def test_stress_ladder_combined_policy_grid_supports_small_slices(tmp_path: Path
     assert any(item["quality_status"] == "failed" for item in summaries)
     assert any("incomplete" in item["quality_flags"] for item in summaries)
     assert paths["summary_csv"].exists()
+    assert paths["policy_rank"].exists()
+    assert paths["policy_plot"].exists()
+    rank = json.loads(paths["policy_rank"].read_text(encoding="utf-8"))
+    assert rank[0]["lead_fraction"] == 0.05
+    assert rank[0]["cap_scale"] == 1.35
+    assert rank[0]["adaptive_scale"] == 1.0
+    assert rank[0]["case_count"] == 8
 
 
 def test_adaptive_control_policy_matrix_reports_response_gated_caps(tmp_path: Path) -> None:
