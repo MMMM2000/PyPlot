@@ -15,6 +15,7 @@ from data_logging.mini_dma_logger.full_run_simulator import (
     run_free_strain_stress_matrix,
     run_full_mini_dma_simulation,
     run_parameter_sweep,
+    run_stress_ladder_combined_policy_grid,
     run_stress_ladder_candidate_policy_comparison,
     run_stress_ladder_matrix,
     write_full_run_outputs,
@@ -378,6 +379,26 @@ def test_stress_ladder_candidate_policy_improves_aggregate_quality(tmp_path: Pat
     assert all(item["quality_status"] == "ok" for item in candidates if "stiffer_thicker" in item["scenario"])
     assert all(item["quality_status"] == "ok" for item in candidates if "stress_ladder_50_100_after_unwind" in item["scenario"])
     assert any("later_target_ramp_error_high" in item["quality_flags"] for item in candidates)
+    assert paths["summary_csv"].exists()
+
+
+def test_stress_ladder_combined_policy_grid_supports_small_slices(tmp_path: Path) -> None:
+    traces = run_stress_ladder_combined_policy_grid(
+        lead_fractions=(0.05,),
+        cap_scales=(1.35,),
+        adaptive_scales=(1.0,),
+    )
+    summaries = [trace.summary() for trace in traces]
+
+    paths = write_sweep_outputs(traces, tmp_path)
+
+    assert len(traces) == 7
+    assert all(item["scenario"].startswith("combined_l0.05_c1.35_a1_") for item in summaries)
+    assert all(item["target_stress_sequence_mpa"] == [50.0, 100.0] for item in summaries)
+    assert any(item["quality_status"] == "ok" for item in summaries)
+    assert any(item["quality_status"] == "needs_tuning" for item in summaries)
+    assert any(item["quality_status"] == "failed" for item in summaries)
+    assert any("incomplete" in item["quality_flags"] for item in summaries)
     assert paths["summary_csv"].exists()
 
 

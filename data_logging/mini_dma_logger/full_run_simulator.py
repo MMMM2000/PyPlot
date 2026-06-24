@@ -1593,6 +1593,51 @@ def run_stress_ladder_candidate_policy_comparison() -> list[FullRunTrace]:
     return traces
 
 
+def run_stress_ladder_combined_policy_grid(
+    *,
+    lead_fractions: tuple[float, ...] = (0.03, 0.05, 0.07, 0.10),
+    cap_scales: tuple[float, ...] = (1.0, 1.35, 1.5),
+    adaptive_scales: tuple[float, ...] = (1.0, 2.0, 3.0),
+) -> list[FullRunTrace]:
+    """Run a broad 0 -> 50 -> 100 MPa ladder policy grid."""
+
+    traces: list[FullRunTrace] = []
+    base_configs = [trace.config for trace in run_stress_ladder_matrix()]
+    for lead_fraction in lead_fractions:
+        for cap_scale in cap_scales:
+            for adaptive_scale in adaptive_scales:
+                for case_index, config in enumerate(base_configs, start=1):
+                    base_cap_pct = config.max_correction_strain_pct or (
+                        config.controller.max_correction_mm / config.wire.length_mm * 100.0
+                    )
+                    stable_seed = (
+                        config.seed
+                        + 990000
+                        + int(round(lead_fraction * 1000.0)) * 10000
+                        + int(round(cap_scale * 100.0)) * 100
+                        + int(round(adaptive_scale * 10.0)) * 10
+                        + case_index
+                    )
+                    policy_config = replace(
+                        config,
+                        name=(
+                            f"combined_l{lead_fraction:g}_c{cap_scale:g}_a{adaptive_scale:g}_"
+                            f"{config.name}"
+                        ),
+                        description=(
+                            f"Combined ladder policy grid for {config.name}: target lead "
+                            f"{lead_fraction:g}x, geometry-percent cap {cap_scale:g}x, "
+                            f"response-gated adaptive ceiling {adaptive_scale:g}x."
+                        ),
+                        target_ramp_max_lead_fraction=lead_fraction,
+                        max_correction_strain_pct=base_cap_pct * cap_scale,
+                        adaptive_correction_cap_max_scale=adaptive_scale,
+                        seed=stable_seed,
+                    )
+                    traces.append(run_full_mini_dma_simulation(policy_config))
+    return traces
+
+
 def run_adaptive_control_policy_matrix() -> list[FullRunTrace]:
     """Compare response-gated adaptive cap ceilings on representative matrix cases."""
 
@@ -1976,6 +2021,14 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
     return True
 
 
+def _stdout_summary(trace: FullRunTrace) -> dict[str, Any]:
+    """Keep CLI output compact; detailed periods remain in artifact JSON/CSV."""
+
+    summary = dict(trace.summary())
+    summary.pop("current_hold_periods", None)
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run software-only full Mini DMA first-overheating simulations.")
     parser.add_argument("--scenario", action="append", choices=FULL_RUN_SCENARIOS)
@@ -1984,6 +2037,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-matrix", action="store_true", help="Run representative correction-cap/recovery policy comparisons.")
     parser.add_argument("--stress-ladder-matrix", action="store_true", help="Run 0 -> 50 -> 100 MPa ladder cases across representative wires.")
     parser.add_argument("--stress-ladder-candidate-policy", action="store_true", help="Compare baseline stress ladders with the current moderate candidate policy.")
+    parser.add_argument("--stress-ladder-policy-grid", action="store_true", help="Run the combined stress-ladder lead/cap/adaptive policy grid.")
     parser.add_argument("--adaptive-policy-matrix", action="store_true", help="Run response-gated adaptive cap comparisons.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-full-run-sim"))
     args = parser.parse_args(argv)
@@ -1997,6 +2051,9 @@ def main(argv: list[str] | None = None) -> int:
         write_sweep_outputs(traces, args.out)
     elif args.stress_ladder_candidate_policy:
         traces = run_stress_ladder_candidate_policy_comparison()
+        write_sweep_outputs(traces, args.out)
+    elif args.stress_ladder_policy_grid:
+        traces = run_stress_ladder_combined_policy_grid()
         write_sweep_outputs(traces, args.out)
     elif args.policy_matrix:
         traces = run_control_policy_matrix()
@@ -2013,7 +2070,7 @@ def main(argv: list[str] | None = None) -> int:
         for trace in traces:
             scenario_out = args.out / trace.config.name if len(traces) > 1 else args.out
             write_full_run_outputs(trace, scenario_out)
-    print(json.dumps({"runs": [trace.summary() for trace in traces]}, indent=2))
+    print(json.dumps({"runs": [_stdout_summary(trace) for trace in traces]}, indent=2))
     return 0
 
 

@@ -109,6 +109,12 @@ Compare the stress-ladder matrix against the current moderate candidate policy:
 uv run python scripts/mini_dma_full_run_simulator.py --stress-ladder-candidate-policy --out artifacts/mini-dma-stress-ladder-candidate-policy
 ```
 
+Run the broader stress-ladder policy grid:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --stress-ladder-policy-grid --out artifacts/mini-dma-stress-ladder-policy-grid
+```
+
 Run response-gated adaptive correction-cap comparisons:
 
 ```powershell
@@ -145,5 +151,7 @@ The policy matrix reuses representative high-strain, delayed-feedback, stiff-ove
 The stress-ladder matrix runs the full 0 -> 50 MPa target ramp, first current cycle, post-unwind free-length/slack disturbance, 50 -> 100 MPa target ramp, and second current cycle across representative good, early/delayed, bad Co6-style, weak/noisy, very thin delayed-feedback, and stiffer/thicker simulated wires. These cases are expected to complete without accumulated correction-travel stops, while still reporting large second-ramp stress errors for wires or controller settings that are not good enough. This makes the ladder a quality regression as well as a safety regression.
 
 The stress-ladder candidate-policy comparison pairs every baseline ladder with a moderate policy variant using a 0.07x target-lead gate and a 1.35x geometry-percent correction cap. In current software-only results this improves aggregate quality score and shortens several holds, but it intentionally leaves weak/noisy, Co6-style, and stiff-overresponsive cases marked `needs_tuning`; those remaining flags are input for future controller work, not a reason to hide the cases.
+
+The stress-ladder policy grid expands that comparison across target-lead gates, geometry-percent correction-cap scales, and response-gated adaptive cap ceilings on the same 0 -> 50 -> 100 MPa ladder cases. Current stable-seed software-only results favor moderate target lead and cap growth: the best aggregate tested so far is around a 0.07x target-lead gate and 1.5x geometry-percent correction cap without adaptive growth on the full ladder set. Larger adaptive ceilings reduce current-hold time in some cases, but they can worsen hidden-free-strain tracking on weak/noisy wires, so they are not a universal default.
 
 The adaptive policy matrix is deliberately off by default in ordinary scenarios. It compares response-gated cap ceilings that can grow only during current-hold correction, based on processed-center error, processed noise, and whether same-sign corrections are actually improving the processed error. It does not use hidden free-strain truth. Current software-only results are mixed: delayed-feedback early wires can benefit from a larger temporary cap, weak/noisy wires only tolerate small growth, and the good 50 -> 100 MPa stress-ladder cases still prefer the fixed geometry-percent cap. Treat this as evidence for future controller design, not as a live-control default.
