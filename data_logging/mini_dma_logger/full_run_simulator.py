@@ -1802,6 +1802,72 @@ def run_stress_ladder_combined_policy_grid(
     return traces
 
 
+CONTROL_VALIDATION_POLICIES = (
+    "baseline",
+    "moderate_response",
+    "aggressive_cap",
+    "crossing_moderate",
+)
+
+
+def run_control_validation_suite(
+    *,
+    policies: tuple[str, ...] = CONTROL_VALIDATION_POLICIES,
+) -> list[FullRunTrace]:
+    """Compare production-candidate control policies on realistic full-run cases."""
+
+    base_configs = [full_run_scenario_by_name("realistic_run32_first_target")]
+    base_configs.extend(trace.config for trace in run_stress_ladder_matrix())
+    traces: list[FullRunTrace] = []
+    for policy_index, policy in enumerate(policies, start=1):
+        if policy not in CONTROL_VALIDATION_POLICIES:
+            known = ", ".join(CONTROL_VALIDATION_POLICIES)
+            raise ValueError(f"unknown Mini DMA validation policy {policy!r}; known: {known}")
+        for case_index, config in enumerate(base_configs, start=1):
+            traces.append(run_full_mini_dma_simulation(_control_validation_config(config, policy, policy_index, case_index)))
+    return traces
+
+
+def _control_validation_config(
+    config: FullRunConfig,
+    policy: str,
+    policy_index: int,
+    case_index: int,
+) -> FullRunConfig:
+    base_cap_pct = config.max_correction_strain_pct or (
+        config.controller.max_correction_mm / config.wire.length_mm * 100.0
+    )
+    policy_config = replace(
+        config,
+        name=f"validation_{policy}__{config.name}",
+        description=f"Control-validation policy {policy} applied to {config.description}",
+        seed=config.seed + 310000 + case_index,
+    )
+    if policy == "baseline":
+        return policy_config
+
+    cap_scale = 1.35
+    adaptive_scale = 2.0
+    requires_crossing = False
+    if policy == "aggressive_cap":
+        cap_scale = 2.0
+    elif policy == "crossing_moderate":
+        requires_crossing = True
+
+    lead_fraction = config.target_ramp_max_lead_fraction
+    if config.target_stress_sequence_mpa:
+        lead_fraction = 0.05
+
+    return replace(
+        policy_config,
+        target_ramp_max_lead_fraction=lead_fraction,
+        max_correction_strain_pct=base_cap_pct * cap_scale,
+        adaptive_correction_cap_max_scale=adaptive_scale,
+        current_resume_requires_target_crossing=requires_crossing,
+        seed=config.seed + 310000 + policy_index * 10000 + case_index,
+    )
+
+
 def run_adaptive_control_policy_matrix() -> list[FullRunTrace]:
     """Compare response-gated adaptive cap ceilings on representative matrix cases."""
 
@@ -2020,6 +2086,14 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
         policy_plot_path = out / "stable_seed_policy_grid_top18.png"
         if _write_combined_policy_rank_plot(policy_plot_path, policy_rank):
             paths["policy_plot"] = policy_plot_path
+    validation_rank = _validation_policy_rankings(summary["runs"])
+    if validation_rank:
+        validation_rank_path = out / "control_validation_ranked.json"
+        validation_rank_path.write_text(json.dumps(validation_rank, indent=2), encoding="utf-8")
+        paths["validation_rank"] = validation_rank_path
+        validation_plot_path = out / "control_validation_top.png"
+        if _write_validation_policy_rank_plot(validation_plot_path, validation_rank):
+            paths["validation_plot"] = validation_plot_path
     return paths
 
 
@@ -2072,6 +2146,111 @@ def _combined_policy_key(name: str) -> tuple[float, float, float] | None:
         return (float(parts[1][1:]), float(parts[2][1:]), float(parts[3][1:]))
     except (IndexError, ValueError):
         return None
+
+
+def _validation_policy_rankings(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in summaries:
+        policy = _validation_policy_key(str(item.get("scenario", "")))
+        if policy is not None:
+            groups[policy].append(item)
+    if not groups:
+        return []
+
+    rankings: list[dict[str, Any]] = []
+    for policy, group in groups.items():
+        statuses = Counter(str(item.get("quality_status", "")) for item in group)
+        flags = Counter(flag for item in group for flag in item.get("quality_flags", []))
+        run32 = next((item for item in group if str(item.get("scenario", "")).endswith("realistic_run32_first_target")), None)
+        rankings.append(
+            {
+                "policy": policy,
+                "case_count": len(group),
+                "quality_score_sum": sum(float(item["quality_score"]) for item in group),
+                "ok": statuses.get("ok", 0),
+                "needs_tuning": statuses.get("needs_tuning", 0),
+                "failed": statuses.get("failed", 0),
+                "hold_time_sum_s": sum(float(item["current_hold_time_s"]) for item in group),
+                "total_measurement_time_sum_s": sum(float(item["total_measurement_time_s"]) for item in group),
+                "later_error_fraction_sum": sum(
+                    float(item["max_abs_later_target_ramp_error_fraction_of_target"]) for item in group
+                ),
+                "current_error_fraction_sum": sum(
+                    float(item["max_abs_current_sweep_error_fraction_of_target"]) for item in group
+                ),
+                "tracking_fraction_sum": sum(
+                    float(item["mean_abs_free_strain_tracking_error_fraction_of_span"]) for item in group
+                ),
+                "max_total_travel_mm": max(float(item["max_total_travel_mm"]) for item in group),
+                "run32_p95_current_sweep_error_mpa": (
+                    None if run32 is None else float(run32["p95_abs_current_sweep_error_mpa"])
+                ),
+                "run32_hold_time_s": None if run32 is None else float(run32["current_hold_time_s"]),
+                "flags": dict(flags),
+            }
+        )
+    rankings.sort(key=lambda item: (item["failed"], -item["ok"], item["quality_score_sum"], item["hold_time_sum_s"]))
+    return rankings
+
+
+def _validation_policy_key(name: str) -> str | None:
+    if not name.startswith("validation_") or "__" not in name:
+        return None
+    return name.split("__", 1)[0].removeprefix("validation_")
+
+
+def _write_validation_policy_rank_plot(path: Path, rankings: list[dict[str, Any]]) -> bool:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    if not rankings:
+        return False
+
+    labels = [item["policy"] for item in rankings]
+    x = list(range(len(rankings)))
+    fig, axes = plt.subplots(4, 1, figsize=(max(9, len(rankings) * 1.6), 11), constrained_layout=True)
+    axes[0].bar(x, [item["quality_score_sum"] for item in rankings], color="#1f77b4")
+    axes[0].set_ylabel("aggregate score")
+    axes[0].set_title("Mini DMA control-validation policy ranking")
+    axes[1].bar(x, [item["hold_time_sum_s"] / 60.0 for item in rankings], color="#f59e0b")
+    axes[1].set_ylabel("hold time (min)")
+    axes[2].bar(x, [item["current_error_fraction_sum"] for item in rankings], color="#dc2626", label="current sweep")
+    axes[2].bar(
+        x,
+        [item["later_error_fraction_sum"] for item in rankings],
+        bottom=[item["current_error_fraction_sum"] for item in rankings],
+        color="#7c3aed",
+        label="later ramp",
+    )
+    axes[2].set_ylabel("error fraction sum")
+    axes[2].legend(fontsize=8, loc="best")
+    ok = [item["ok"] for item in rankings]
+    needs = [item["needs_tuning"] for item in rankings]
+    axes[3].bar(x, ok, color="#2ca02c", label="ok")
+    axes[3].bar(x, needs, bottom=ok, color="#f59e0b", label="needs tuning")
+    axes[3].bar(
+        x,
+        [item["failed"] for item in rankings],
+        bottom=[ok_count + needs_count for ok_count, needs_count in zip(ok, needs, strict=True)],
+        color="#d62728",
+        label="failed",
+    )
+    axes[3].set_ylabel("case count")
+    axes[3].legend(fontsize=8, loc="best")
+    axes[3].set_xticks(x)
+    axes[3].set_xticklabels(labels, rotation=25, ha="right")
+    for ax in axes:
+        ax.grid(True, axis="y", alpha=0.25)
+        if ax is not axes[3]:
+            ax.set_xticks(x)
+            ax.set_xticklabels([])
+    fig.savefig(path, dpi=170)
+    plt.close(fig)
+    return True
 
 
 def _write_combined_policy_rank_plot(path: Path, rankings: list[dict[str, Any]]) -> bool:
@@ -2305,6 +2484,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stress-ladder-matrix", action="store_true", help="Run 0 -> 50 -> 100 MPa ladder cases across representative wires.")
     parser.add_argument("--stress-ladder-candidate-policy", action="store_true", help="Compare baseline stress ladders with the current moderate candidate policy.")
     parser.add_argument("--stress-ladder-policy-grid", action="store_true", help="Run the combined stress-ladder lead/cap/adaptive policy grid.")
+    parser.add_argument("--control-validation", action="store_true", help="Rank candidate control policies on run32 and 0 -> 50 -> 100 MPa ladder cases.")
     parser.add_argument("--adaptive-policy-matrix", action="store_true", help="Run response-gated adaptive cap comparisons.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-full-run-sim"))
     args = parser.parse_args(argv)
@@ -2312,6 +2492,9 @@ def main(argv: list[str] | None = None) -> int:
     traces: list[FullRunTrace]
     if args.adaptive_policy_matrix:
         traces = run_adaptive_control_policy_matrix()
+        write_sweep_outputs(traces, args.out)
+    elif args.control_validation:
+        traces = run_control_validation_suite()
         write_sweep_outputs(traces, args.out)
     elif args.stress_ladder_matrix:
         traces = run_stress_ladder_matrix()

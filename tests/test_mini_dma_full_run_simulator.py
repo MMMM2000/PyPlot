@@ -12,6 +12,7 @@ from data_logging.mini_dma_logger.full_run_simulator import (
     _effective_max_correction_mm,
     full_run_scenario_by_name,
     run_adaptive_control_policy_matrix,
+    run_control_validation_suite,
     run_control_policy_matrix,
     run_free_strain_stress_matrix,
     run_full_mini_dma_simulation,
@@ -479,6 +480,49 @@ def test_current_resume_target_crossing_is_opt_in_tradeoff() -> None:
     assert crossing_summary["p95_abs_current_sweep_error_mpa"] < default_summary["p95_abs_current_sweep_error_mpa"]
     assert crossing_summary["current_hold_time_s"] > default_summary["current_hold_time_s"]
     assert all(crossing_trace.invariants.values())
+
+
+def test_control_validation_suite_ranks_policy_tradeoffs(tmp_path: Path) -> None:
+    traces = run_control_validation_suite(
+        policies=("baseline", "moderate_response", "aggressive_cap", "crossing_moderate")
+    )
+    summaries = [trace.summary() for trace in traces]
+
+    paths = write_sweep_outputs(traces, tmp_path)
+
+    assert len(traces) == 36
+    assert {item["scenario"].split("__", 1)[0] for item in summaries} == {
+        "validation_baseline",
+        "validation_moderate_response",
+        "validation_aggressive_cap",
+        "validation_crossing_moderate",
+    }
+    assert any(item["scenario"].endswith("realistic_run32_first_target") for item in summaries)
+    ladder_summaries = [
+        item
+        for item in summaries
+        if item["target_stress_sequence_mpa"] == [50.0, 100.0]
+    ]
+    assert len(ladder_summaries) == 32
+    assert any(item["scenario"].endswith("ladder_thin_delayed_tiny_load") for item in ladder_summaries)
+    assert all(
+        trace.config.target_ramp_start_mpa == 0.0
+        for trace in traces
+        if trace.config.target_stress_sequence_mpa == (50.0, 100.0)
+    )
+    assert paths["validation_rank"].exists()
+    assert paths["validation_plot"].exists()
+    rank = json.loads(paths["validation_rank"].read_text(encoding="utf-8"))
+    assert {item["policy"] for item in rank} == {
+        "baseline",
+        "moderate_response",
+        "aggressive_cap",
+        "crossing_moderate",
+    }
+    assert all(item["case_count"] == 9 for item in rank)
+    ranked = {item["policy"]: item for item in rank}
+    assert ranked["moderate_response"]["quality_score_sum"] <= ranked["baseline"]["quality_score_sum"]
+    assert ranked["crossing_moderate"]["hold_time_sum_s"] >= ranked["moderate_response"]["hold_time_sum_s"]
 
 
 def test_full_run_cli_runs_named_scenario(tmp_path: Path) -> None:
