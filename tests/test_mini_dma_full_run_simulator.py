@@ -186,6 +186,8 @@ def test_low_strain_noisy_wire_does_not_invent_large_measured_strain() -> None:
     assert summary["strain_range_pct"] <= 0.50
     assert summary["max_abs_free_strain_tracking_error_pct"] <= 0.10
     assert summary["max_abs_current_sweep_error_mpa"] <= trace.config.controller.target_stress_mpa * 0.25
+    assert summary["p95_abs_current_sweep_error_mpa"] <= summary["max_abs_current_sweep_error_mpa"]
+    assert summary["adaptive_correction_phases"] == ["current_hold"]
     assert all(trace.invariants.values())
 
 
@@ -267,7 +269,10 @@ def test_full_run_outputs_are_replay_shaped(tmp_path: Path) -> None:
     assert "free_strain_tracking_error_pct" in measurement_header
     assert "quality_status" in summary
     assert "quality_score" in summary
+    assert "p95_abs_current_sweep_error_mpa" in summary
+    assert "adaptive_correction_phases" in summary
     assert "Quality status:" in paths["report"].read_text(encoding="utf-8")
+    assert "P95 current-sweep stress error" in paths["report"].read_text(encoding="utf-8")
     target_index = measurement_header.split(",").index("target_stress_mpa")
     first_target = float(measurement_lines[1].split(",")[target_index])
     assert first_target == 0.0

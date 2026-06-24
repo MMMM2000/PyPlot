@@ -69,6 +69,7 @@ class FullRunConfig:
     max_correction_strain_pct: float | None = None
     adaptive_correction_cap_max_scale: float = 1.0
     adaptive_correction_cap_growth: float = 1.35
+    adaptive_correction_phases: tuple[str, ...] = ("current_hold",)
     reported_strain_motor_scale: float = 1.0
     reported_strain_offset_pct: float = 0.0
     transformation_profile: str = "wire"
@@ -102,6 +103,9 @@ class FullRunConfig:
             raise ValueError("adaptive_correction_cap_max_scale must be at least 1")
         if self.adaptive_correction_cap_growth < 1.0:
             raise ValueError("adaptive_correction_cap_growth must be at least 1")
+        allowed_adaptive_phases = {"current_hold", "target_ramp"}
+        if any(phase not in allowed_adaptive_phases for phase in self.adaptive_correction_phases):
+            raise ValueError("adaptive_correction_phases may only contain current_hold and target_ramp")
         if self.reported_strain_motor_scale == 0.0:
             raise ValueError("reported_strain_motor_scale cannot be zero")
         if self.transformation_profile not in {"wire", "stepped"}:
@@ -225,6 +229,14 @@ class FullRunTrace:
             (abs(event.error_mpa) for event in later_target_ramp_events),
             default=0.0,
         )
+        p95_abs_current_error = _percentile(
+            [abs(event.error_mpa) for event in current_events],
+            0.95,
+        )
+        p95_abs_later_target_ramp_error = _percentile(
+            [abs(event.error_mpa) for event in later_target_ramp_events],
+            0.95,
+        )
         recovery_times = _recovery_times_s(self.events, recovery_band)
         tracking_errors = _free_strain_tracking_errors_pct(self)
         strain_values = [sample.strain_pct for sample in self.samples]
@@ -246,6 +258,8 @@ class FullRunTrace:
             invariant_warnings=self.warnings,
             max_abs_current_sweep_error_mpa=max_abs_current_error,
             max_abs_later_target_ramp_error_mpa=max_abs_later_target_ramp_error,
+            p95_abs_current_sweep_error_mpa=p95_abs_current_error,
+            p95_abs_later_target_ramp_error_mpa=p95_abs_later_target_ramp_error,
             max_abs_free_strain_tracking_error_pct=max_abs_tracking_error_pct,
             mean_abs_free_strain_tracking_error_pct=mean_abs_tracking_error_pct,
             free_transformation_strain_range_pct=free_strain_range_pct,
@@ -284,8 +298,12 @@ class FullRunTrace:
             "max_abs_current_sweep_error_mpa": max_abs_current_error,
             "max_abs_target_ramp_error_mpa": max_abs_target_ramp_error,
             "max_abs_later_target_ramp_error_mpa": max_abs_later_target_ramp_error,
+            "p95_abs_current_sweep_error_mpa": p95_abs_current_error,
+            "p95_abs_later_target_ramp_error_mpa": p95_abs_later_target_ramp_error,
             "max_abs_current_sweep_error_fraction_of_target": max_abs_current_error / max_target_mpa,
             "max_abs_later_target_ramp_error_fraction_of_target": max_abs_later_target_ramp_error / max_target_mpa,
+            "p95_abs_current_sweep_error_fraction_of_target": p95_abs_current_error / max_target_mpa,
+            "p95_abs_later_target_ramp_error_fraction_of_target": p95_abs_later_target_ramp_error / max_target_mpa,
             "time_outside_recovery_band_s": sum(
                 1 for event in self.events if abs(event.error_mpa) > recovery_band
             )
@@ -307,6 +325,7 @@ class FullRunTrace:
             "max_correction_strain_pct": self.config.max_correction_strain_pct,
             "effective_max_correction_mm": _effective_max_correction_mm(self.config),
             "adaptive_correction_cap_max_scale": self.config.adaptive_correction_cap_max_scale,
+            "adaptive_correction_phases": list(self.config.adaptive_correction_phases),
             "effective_max_adaptive_correction_mm": _max_allowed_correction_mm(self.config),
             "max_observed_correction_cap_mm": max((event.correction_cap_mm for event in self.events), default=0.0),
             "max_total_travel_mm": max((event.total_travel_mm for event in self.events), default=0.0),
@@ -392,7 +411,7 @@ class _FullRunState:
 
     def correction_cap_for_phase_mm(self, phase: str, controller: RobustControllerConfig) -> float:
         base_cap_mm = _effective_max_correction_mm(self.config)
-        if phase != "current_hold" or self.config.adaptive_correction_cap_max_scale <= 1.0:
+        if phase not in self.config.adaptive_correction_phases or self.config.adaptive_correction_cap_max_scale <= 1.0:
             return base_cap_mm
         feedback = self.feedback_samples()
         if not feedback:
@@ -413,7 +432,7 @@ class _FullRunState:
         return base_cap_mm * min(self.config.adaptive_correction_cap_max_scale, scale)
 
     def update_adaptive_correction_scale(self, event: FullRunEvent) -> None:
-        if event.phase != "current_hold" or self.config.adaptive_correction_cap_max_scale <= 1.0:
+        if event.phase not in self.config.adaptive_correction_phases or self.config.adaptive_correction_cap_max_scale <= 1.0:
             self.adaptive_correction_scale = 1.0
             self.previous_adaptive_error_mpa = None
             return
@@ -670,12 +689,29 @@ def _target_sequence(config: FullRunConfig) -> tuple[float, ...]:
     return config.target_stress_sequence_mpa or (config.controller.target_stress_mpa,)
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = _clamp(fraction, 0.0, 1.0) * (len(ordered) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[int(position)]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
 def _quality_summary(
     *,
     stop_reason: str,
     invariant_warnings: list[str],
     max_abs_current_sweep_error_mpa: float,
     max_abs_later_target_ramp_error_mpa: float,
+    p95_abs_current_sweep_error_mpa: float,
+    p95_abs_later_target_ramp_error_mpa: float,
     max_abs_free_strain_tracking_error_pct: float,
     mean_abs_free_strain_tracking_error_pct: float,
     free_transformation_strain_range_pct: float,
@@ -687,6 +723,8 @@ def _quality_summary(
     free_span_scale = max(0.25, abs(float(free_transformation_strain_range_pct)))
     current_error_fraction = abs(float(max_abs_current_sweep_error_mpa)) / target_scale
     later_ramp_fraction = abs(float(max_abs_later_target_ramp_error_mpa)) / target_scale
+    p95_current_error_fraction = abs(float(p95_abs_current_sweep_error_mpa)) / target_scale
+    p95_later_ramp_fraction = abs(float(p95_abs_later_target_ramp_error_mpa)) / target_scale
     max_tracking_fraction = abs(float(max_abs_free_strain_tracking_error_pct)) / free_span_scale
     mean_tracking_fraction = abs(float(mean_abs_free_strain_tracking_error_pct)) / free_span_scale
     hold_fraction = (
@@ -701,7 +739,7 @@ def _quality_summary(
         flags.append("invariant_warning")
     if later_ramp_fraction > 0.25:
         flags.append("later_target_ramp_error_high")
-    if current_error_fraction > 0.60:
+    if p95_current_error_fraction > 0.35:
         flags.append("current_sweep_error_high")
     if max_tracking_fraction > 0.35:
         flags.append("free_strain_tracking_error_high")
@@ -710,8 +748,10 @@ def _quality_summary(
     if hold_fraction > 0.65:
         flags.append("current_hold_fraction_high")
     score = (
-        current_error_fraction
+        0.35 * current_error_fraction
+        + 0.65 * p95_current_error_fraction
         + later_ramp_fraction
+        + 0.35 * p95_later_ramp_fraction
         + mean_tracking_fraction
         + 0.25 * hold_fraction
         + (2.0 if stop_reason != "completed" else 0.0)
@@ -1868,7 +1908,7 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
     lines = [
         "# Mini DMA full-run parameter sweep",
         "",
-        "| Scenario | Quality | Stop | Current events | Later ramp error | Max sweep error | Hold time | Measured strain span % | Mean tracking error | Adaptive scale | Max cap mm | Invariants |",
+        "| Scenario | Quality | Stop | Current events | Later ramp error | Sweep error | Hold time | Measured strain span % | Mean tracking error | Adaptive scale | Max cap mm | Invariants |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for trace in traces:
@@ -1880,8 +1920,10 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
         lines.append(
             f"| {item['scenario']} | {quality_text} | {item['stop_reason']} | {item['current_phase_event_count']} | "
             f"{item['max_abs_later_target_ramp_error_mpa']:.2f} MPa "
+            f"max, {item['p95_abs_later_target_ramp_error_mpa']:.2f} p95 "
             f"({item['max_abs_later_target_ramp_error_fraction_of_target']:.2f}x) | "
             f"{item['max_abs_current_sweep_error_mpa']:.2f} MPa "
+            f"max, {item['p95_abs_current_sweep_error_mpa']:.2f} p95 "
             f"({item['max_abs_current_sweep_error_fraction_of_target']:.2f}x) | "
             f"{item['current_hold_time_s']:.1f} | {item['strain_range_pct']:.3f} | "
             f"{item['mean_abs_free_strain_tracking_error_pct']:.3f} "
@@ -2060,7 +2102,9 @@ Scenario: `{trace.config.name}`
 - Endpoint hold/recovery events: {item["endpoint_hold_count"]}
 - Maximum absolute stress error: {item["max_abs_error_mpa"]:.3f} MPa
 - Maximum current-sweep stress error: {item["max_abs_current_sweep_error_mpa"]:.3f} MPa ({item["max_abs_current_sweep_error_fraction_of_target"]:.4f}x target)
+- P95 current-sweep stress error: {item["p95_abs_current_sweep_error_mpa"]:.3f} MPa ({item["p95_abs_current_sweep_error_fraction_of_target"]:.4f}x target)
 - Maximum later target-ramp stress error: {item["max_abs_later_target_ramp_error_mpa"]:.3f} MPa ({item["max_abs_later_target_ramp_error_fraction_of_target"]:.4f}x target)
+- P95 later target-ramp stress error: {item["p95_abs_later_target_ramp_error_mpa"]:.3f} MPa ({item["p95_abs_later_target_ramp_error_fraction_of_target"]:.4f}x target)
 - Time outside recovery band: {item["time_outside_recovery_band_s"]:.3f} s
 - Maximum recovery time: {item["max_recovery_time_s"]:.3f} s
 - Mean recovery time: {item["mean_recovery_time_s"]:.3f} s
