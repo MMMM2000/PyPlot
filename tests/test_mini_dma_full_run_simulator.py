@@ -208,6 +208,23 @@ def test_full_run_slack_after_unwind_keeps_taking_up_tension() -> None:
     assert all(event.feedback_age_s >= trace.config.scale_latency_s for event in trace.events)
 
 
+def test_stress_ladder_ramps_from_50_to_100_after_unwind_slack() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("stress_ladder_50_100_after_unwind"))
+    summary = trace.summary()
+    target_ramp_events = [event for event in trace.events if event.phase == "target_ramp"]
+    second_ramp_events = [event for event in target_ramp_events if event.target_stress_mpa > 50.0]
+
+    assert trace.stop_reason == "completed"
+    assert second_ramp_events
+    assert max(event.target_stress_mpa for event in trace.events) == 100.0
+    assert min(event.processed_center_mpa for event in second_ramp_events) < 25.0
+    assert second_ramp_events[-1].endpoint_recovered
+    assert summary["inter_target_free_length_shift_mm"] < 0.0
+    assert summary["strain_range_pct"] > 12.0
+    assert all(trace.invariants.values())
+    assert all(event.feedback_age_s >= trace.config.scale_latency_s for event in trace.events)
+
+
 def test_full_run_outputs_are_replay_shaped(tmp_path: Path) -> None:
     trace = run_full_mini_dma_simulation(full_run_scenario_by_name("realistic_first_overheating"))
 

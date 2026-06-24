@@ -42,6 +42,7 @@ FULL_RUN_SCENARIOS = (
     "reverse_unwind_recovery",
     "slack_after_unwind_takeup",
     "thin_wire_delayed_feedback",
+    "stress_ladder_50_100_after_unwind",
 )
 
 
@@ -56,6 +57,7 @@ class FullRunConfig:
     )
     reverse_current: bool = True
     target_ramp_start_mpa: float | None = None
+    target_stress_sequence_mpa: tuple[float, ...] = ()
     target_ramp_rate_mpa_s: float = 5.0
     target_ramp_timeout_s: float = 90.0
     endpoint_hold_timeout_s: float = 90.0
@@ -71,6 +73,7 @@ class FullRunConfig:
     transformation_kinetic_tau_s: float = 0.0
     free_strain_fluctuation_pct: float = 0.0
     free_strain_fluctuation_cycles: float = 0.0
+    inter_target_free_length_shift_mm: float = 0.0
     seed: int = 0
 
     def validated(self) -> "FullRunConfig":
@@ -99,6 +102,10 @@ class FullRunConfig:
             raise ValueError("free_strain_fluctuation_pct must be non-negative")
         if self.free_strain_fluctuation_cycles < 0.0:
             raise ValueError("free_strain_fluctuation_cycles must be non-negative")
+        if not self.target_stress_sequence_mpa:
+            _finite(self.controller.target_stress_mpa)
+        for target in self.target_stress_sequence_mpa:
+            _finite(target)
         for steps in (self.rising_transformation_steps, self.falling_transformation_steps):
             for center_ma, width_ma, weight in steps:
                 if width_ma <= 0.0:
@@ -108,6 +115,7 @@ class FullRunConfig:
                 _finite(weight)
         _finite(self.free_strain_fluctuation_pct)
         _finite(self.free_strain_fluctuation_cycles)
+        _finite(self.inter_target_free_length_shift_mm)
         return self
 
 
@@ -202,6 +210,8 @@ class FullRunTrace:
             ),
             "configured_free_strain_fluctuation_pct": self.config.free_strain_fluctuation_pct,
             "configured_free_strain_fluctuation_cycles": self.config.free_strain_fluctuation_cycles,
+            "target_stress_sequence_mpa": list(_target_sequence(self.config)),
+            "inter_target_free_length_shift_mm": self.config.inter_target_free_length_shift_mm,
             "scale_latency_s": self.config.scale_latency_s,
             "sample_hz": self.config.sweep.sample_hz,
             "sample_count": len(self.samples),
@@ -259,11 +269,12 @@ class _FullRunState:
         self.events: list[FullRunEvent] = []
         self.previous_error_sign = 0
         self.actual_transformation_fraction = 0.0
-        self.active_target_stress_mpa = (
-            config.controller.target_stress_mpa
-            if config.target_ramp_start_mpa is None
-            else config.target_ramp_start_mpa
-        )
+        self.permanent_free_length_shift_mm = config.wire.initial_free_length_shift_mm
+        initial_target = _target_sequence(config)[0]
+        self.ramp_start_stress_mpa = initial_target if config.target_ramp_start_mpa is None else config.target_ramp_start_mpa
+        self.ramp_final_stress_mpa = initial_target
+        self.ramp_started_elapsed_s = 0.0
+        self.active_target_stress_mpa = self.ramp_start_stress_mpa
 
     @property
     def dt_s(self) -> float:
@@ -296,7 +307,7 @@ class _FullRunState:
         wire = self.config.wire
         fraction = self._next_transformation_fraction(rising=rising)
         free_shift_mm = (
-            wire.initial_free_length_shift_mm
+            self.permanent_free_length_shift_mm
             + fraction * wire.transformation_contraction_mm
             + _free_strain_fluctuation_mm(self.config, fraction)
         )
@@ -362,21 +373,29 @@ class _FullRunState:
     def advance_time(self) -> None:
         self.elapsed_s += self.dt_s
 
+    def start_target_ramp(self, start: float, final: float) -> None:
+        self.ramp_start_stress_mpa = start
+        self.ramp_final_stress_mpa = final
+        self.ramp_started_elapsed_s = self.elapsed_s
+        self.active_target_stress_mpa = start
+        self.previous_error_sign = 0
+
+    def apply_inter_target_free_length_shift(self) -> None:
+        self.permanent_free_length_shift_mm += self.config.inter_target_free_length_shift_mm
+
     def update_target_ramp(self) -> None:
-        start = self.config.target_ramp_start_mpa
-        if start is None:
-            self.active_target_stress_mpa = self.config.controller.target_stress_mpa
-            return
-        final = self.config.controller.target_stress_mpa
+        start = self.ramp_start_stress_mpa
+        final = self.ramp_final_stress_mpa
         direction = 1.0 if final >= start else -1.0
-        next_target = start + direction * self.config.target_ramp_rate_mpa_s * self.elapsed_s
+        elapsed = max(0.0, self.elapsed_s - self.ramp_started_elapsed_s)
+        next_target = start + direction * self.config.target_ramp_rate_mpa_s * elapsed
         if direction >= 0.0:
             self.active_target_stress_mpa = min(final, next_target)
         else:
             self.active_target_stress_mpa = max(final, next_target)
 
     def target_ramp_complete(self) -> bool:
-        return abs(self.active_target_stress_mpa - self.config.controller.target_stress_mpa) <= 1e-12
+        return abs(self.active_target_stress_mpa - self.ramp_final_stress_mpa) <= 1e-12
 
     def record_event(self, phase: str, correction_mm: float, reason: str) -> FullRunEvent:
         feedback = self.feedback_samples()
@@ -446,6 +465,10 @@ def _stop_for_safety(state: _FullRunState) -> str | None:
     if state.samples and state.samples[-1].status != "ok":
         return state.samples[-1].status
     return None
+
+
+def _target_sequence(config: FullRunConfig) -> tuple[float, ...]:
+    return config.target_stress_sequence_mpa or (config.controller.target_stress_mpa,)
 
 
 def _effective_max_correction_mm(config: FullRunConfig) -> float:
@@ -572,29 +595,27 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
     state = _FullRunState(config)
     stop_reason = "completed"
 
-    # Target acquisition before heating.
-    target_deadline = config.target_ramp_timeout_s
-    while state.elapsed_s <= target_deadline and len(state.events) < config.max_ticks:
-        state.update_target_ramp()
-        state.sample("target_ramp", rising=True)
-        stop = _stop_for_safety(state)
-        if stop is not None:
-            stop_reason = stop
-            break
-        if not state.feedback_samples():
+    def _run_target_ramp(*, start_mpa: float, final_mpa: float) -> str | None:
+        state.start_target_ramp(start_mpa, final_mpa)
+        target_deadline = state.elapsed_s + config.target_ramp_timeout_s
+        while state.elapsed_s <= target_deadline and len(state.events) < config.max_ticks:
+            state.update_target_ramp()
+            state.sample("target_ramp", rising=True)
+            stop = _stop_for_safety(state)
+            if stop is not None:
+                return stop
+            if not state.feedback_samples():
+                state.advance_time()
+                continue
+            correction = 0.0 if _recovered(state) else state.correct_toward_target()
+            state.record_event("target_ramp", correction, "target_acquisition")
+            stop = _stop_for_safety(state)
+            if stop is not None:
+                return stop
+            if state.target_ramp_complete() and _recovered(state):
+                return None
             state.advance_time()
-            continue
-        correction = 0.0 if _recovered(state) else state.correct_toward_target()
-        state.record_event("target_ramp", correction, "target_acquisition")
-        stop = _stop_for_safety(state)
-        if stop is not None:
-            stop_reason = stop
-            break
-        if state.target_ramp_complete() and _recovered(state):
-            break
-        state.advance_time()
-    else:
-        stop_reason = "target_ramp_timeout"
+        return "target_ramp_timeout"
 
     def _run_sweep(*, start_ma: float, end_ma: float, phase_name: str, rising: bool) -> str | None:
         direction = 1.0 if end_ma >= start_ma else -1.0
@@ -650,7 +671,15 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
             state.advance_time()
         return "tick_limit"
 
-    if stop_reason == "completed":
+    targets = _target_sequence(config)
+    ramp_start = config.target_ramp_start_mpa if config.target_ramp_start_mpa is not None else targets[0]
+    for target_index, target_mpa in enumerate(targets):
+        if stop_reason != "completed":
+            break
+        stop = _run_target_ramp(start_mpa=ramp_start, final_mpa=target_mpa)
+        if stop is not None:
+            stop_reason = stop
+            break
         state.advance_time()
         stop = _run_sweep(
             start_ma=config.sweep.start_ma,
@@ -660,16 +689,23 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
         )
         if stop is not None:
             stop_reason = stop
-    if stop_reason == "completed" and config.reverse_current:
-        state.advance_time()
-        stop = _run_sweep(
-            start_ma=config.sweep.end_ma,
-            end_ma=config.sweep.start_ma,
-            phase_name="current_limit_unwind",
-            rising=False,
-        )
-        if stop is not None:
-            stop_reason = stop
+            break
+        if config.reverse_current:
+            state.advance_time()
+            stop = _run_sweep(
+                start_ma=config.sweep.end_ma,
+                end_ma=config.sweep.start_ma,
+                phase_name="current_limit_unwind",
+                rising=False,
+            )
+            if stop is not None:
+                stop_reason = stop
+                break
+        if target_index < len(targets) - 1:
+            if config.inter_target_free_length_shift_mm:
+                state.apply_inter_target_free_length_shift()
+            state.advance_time()
+            ramp_start = target_mpa
 
     invariants = check_full_run_invariants(FullRunTrace(config, state.samples, state.events, stop_reason, {}, []))
     warnings = [name for name, passed in invariants.items() if not passed]
@@ -924,6 +960,27 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             seed=127,
         ),
     }
+    realistic = scenarios["realistic_first_overheating"]
+    scenarios["stress_ladder_50_100_after_unwind"] = replace(
+        realistic,
+        name="stress_ladder_50_100_after_unwind",
+        description=(
+            "Good-wire 50 MPa then 100 MPa target ladder with a post-unwind free-length "
+            "elongation/slack disturbance before the second target ramp."
+        ),
+        controller=replace(
+            realistic.controller,
+            safety_max_stress_mpa=220.0,
+        ),
+        target_stress_sequence_mpa=(50.0, 100.0),
+        target_ramp_start_mpa=0.0,
+        target_ramp_rate_mpa_s=5.0,
+        target_ramp_timeout_s=220.0,
+        endpoint_hold_timeout_s=420.0,
+        max_ticks=14000,
+        inter_target_free_length_shift_mm=-0.35,
+        seed=501,
+    )
     try:
         return scenarios[name]
     except KeyError as exc:
@@ -1162,7 +1219,7 @@ def _full_measurement_rows(trace: FullRunTrace) -> Iterable[dict[str, Any]]:
     for sample in trace.samples:
         row = sample.to_row()
         event = events_by_time.get(round(sample.elapsed_s, 9))
-        row_target = _target_stress_at_elapsed(trace.config, sample.elapsed_s) if event is None else event.target_stress_mpa
+        row_target = _target_stress_for_elapsed(trace, sample.elapsed_s) if event is None else event.target_stress_mpa
         material_state = _material_state_for_sample(trace.config, sample)
         current_phase = event is not None and event.phase in {"current", "current_hold", "current_limit_unwind"}
         tracking_error = ""
@@ -1209,6 +1266,21 @@ def _target_stress_at_elapsed(config: FullRunConfig, elapsed_s: float) -> float:
     if direction >= 0.0:
         return min(final, target)
     return max(final, target)
+
+
+def _target_stress_for_elapsed(trace: FullRunTrace, elapsed_s: float) -> float:
+    if not trace.events:
+        return _target_stress_at_elapsed(trace.config, elapsed_s)
+    if elapsed_s < trace.events[0].elapsed_s:
+        if trace.config.target_ramp_start_mpa is not None:
+            return trace.config.target_ramp_start_mpa
+        return _target_sequence(trace.config)[0]
+    target = trace.events[0].target_stress_mpa
+    for event in trace.events:
+        if event.elapsed_s - elapsed_s > 1e-9:
+            break
+        target = event.target_stress_mpa
+    return target
 
 
 def write_full_run_outputs(trace: FullRunTrace, output_dir: Path | str) -> dict[str, Path]:
@@ -1361,7 +1433,7 @@ def _write_full_run_plot(path: Path, trace: FullRunTrace) -> bool:
     current = [sample.current_ma for sample in trace.samples]
     motor = [sample.motor_mm for sample in trace.samples]
     strain = [sample.strain_pct for sample in trace.samples]
-    target = [_target_stress_at_elapsed(trace.config, sample.elapsed_s) for sample in trace.samples]
+    target = [_target_stress_for_elapsed(trace, sample.elapsed_s) for sample in trace.samples]
     event_t = [event.elapsed_s for event in trace.events]
     center = [event.processed_center_mpa for event in trace.events]
     corrections = [event.correction_mm for event in trace.events]
