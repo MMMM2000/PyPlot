@@ -198,12 +198,14 @@ VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
 
 MICROSCOPE_D_COLUMN = "d (\u00b5m)"
 MICROSCOPE_CAP_D_COLUMN = "D (\u00b5m)"
+MICROSCOPE_STATUS_COLUMN = "Microscope status"
 MICROSCOPE_TABLE_COLUMNS = [
     "Composition",
     "Microwire",
     MICROSCOPE_D_COLUMN,
     MICROSCOPE_CAP_D_COLUMN,
     "d/D",
+    MICROSCOPE_STATUS_COLUMN,
     BRITTLE_COLUMN,
     MICROSCOPE_IMAGE_COLUMNS[0],
     MICROSCOPE_IMAGE_COLUMNS[1],
@@ -14704,6 +14706,7 @@ class MicroscopeSection(MiniDatabaseSection):
         # are removed even when there are no overrides/validations stored.
         self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
+        self._refresh_status_column()
         self._update_hidden_columns()
         self._update_missing_summary()
         self.partial_row_ready.connect(
@@ -14726,6 +14729,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._load_extra_state()
         self._apply_overrides_to_table(clear_preview_cache=True)
         self._normalise_brittle_column()
+        self._refresh_status_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
@@ -14742,6 +14746,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._load_extra_state()
         self._apply_overrides_to_table(restore_selection=False, clear_preview_cache=True)
         self._normalise_brittle_column()
+        self._refresh_status_column()
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(self._show_other_ends)
@@ -14770,6 +14775,8 @@ class MicroscopeSection(MiniDatabaseSection):
                 for key, value in stored_overrides.items()
                 if isinstance(value, dict)
             }
+        else:
+            self._overrides = {}
 
         stored_validated = self.data.extra.get("validated")
         if isinstance(stored_validated, dict):
@@ -14779,6 +14786,8 @@ class MicroscopeSection(MiniDatabaseSection):
                     continue
                 cleaned[str(key)] = dict(payload)
             self._validated = cleaned
+        else:
+            self._validated = {}
 
     def _normalise_brittle_column(self) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
@@ -14793,7 +14802,10 @@ class MicroscopeSection(MiniDatabaseSection):
             if str(current).strip().lower() == "brittle":
                 continue
             sources: List[Path] = []
-            for path_value in row.get("_images") or []:
+            image_values = row.get("_images")
+            if not isinstance(image_values, (list, tuple, set)):
+                image_values = []
+            for path_value in image_values:
                 try:
                     sources.append(Path(path_value))
                 except Exception:
@@ -14983,6 +14995,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._show_other_ends = True
         if hasattr(self, "other_end_checkbox"):
             self.other_end_checkbox.setChecked(True)
+        self._refresh_status_column()
         self._search_proxy.set_row_predicate(self._row_visible)
         self._update_missing_summary()
         self._update_review_buttons()
@@ -14995,6 +15008,7 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             pass
         self._search_proxy.set_row_predicate(self._row_visible)
+        self._refresh_status_column()
         self._ensure_valid_selection()
 
     def _row_visible(self, row: pd.Series) -> bool:  # type: ignore[override]
@@ -15179,6 +15193,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_D_COLUMN: None,
                     MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
+                    MICROSCOPE_STATUS_COLUMN: None,
                     BRITTLE_COLUMN: None,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
@@ -15203,6 +15218,7 @@ class MicroscopeSection(MiniDatabaseSection):
                 )
                 frame = pd.DataFrame(existing_rows + new_rows)
         frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        frame = self._with_status_column(frame)
         frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
         return frame
 
@@ -15213,8 +15229,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._auto_fit_columns()
         self._update_missing_summary()
 
-    @staticmethod
     def _merge_rows_into_frame(
+        self,
         frame: pd.DataFrame,
         rows: Sequence[Mapping[str, Any]],
     ) -> pd.DataFrame:
@@ -15264,6 +15280,7 @@ class MicroscopeSection(MiniDatabaseSection):
             if column not in merged.columns:
                 merged[column] = pd.Series([None] * len(merged))
         merged = merged.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        merged = self._with_status_column(merged)
         return merged
 
     def _build_image_ref_rows(
@@ -15362,6 +15379,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_D_COLUMN: existing_d,
                     MICROSCOPE_CAP_D_COLUMN: existing_D,
                     "d/D": existing_ratio,
+                    MICROSCOPE_STATUS_COLUMN: None,
                     BRITTLE_COLUMN: (
                         existing_brittle
                         if existing_brittle
@@ -15491,6 +15509,7 @@ class MicroscopeSection(MiniDatabaseSection):
             MICROSCOPE_D_COLUMN: d_value,
             MICROSCOPE_CAP_D_COLUMN: D_value,
             "d/D": ratio,
+            MICROSCOPE_STATUS_COLUMN: None,
             MICROSCOPE_IMAGE_COLUMNS[0]: None,
             MICROSCOPE_IMAGE_COLUMNS[1]: None,
             "_key": key_str,
@@ -15536,6 +15555,7 @@ class MicroscopeSection(MiniDatabaseSection):
             return
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         frame = self._merge_rows_into_frame(frame, rows)
+        frame = self._with_status_column(frame)
         self.data.table = frame
         self.model.set_frame(frame)
         self._auto_fit_columns()
@@ -15893,7 +15913,7 @@ class MicroscopeSection(MiniDatabaseSection):
             return QtGui.QBrush(QtGui.QColor("#22c55e" if reviewed else "#ef4444"))
         return None
 
-    def _is_cell_reviewed(self, key: str, column: str) -> bool:
+    def _reviewed_for_row(self, key: str, column: str, row: pd.Series) -> bool:
         entry = self._validated.get(key)
         if not isinstance(entry, dict):
             return False
@@ -15904,17 +15924,99 @@ class MicroscopeSection(MiniDatabaseSection):
             reviewed = bool(entry.get("D_reviewed")) if has_flags else True
         else:
             return False
-        if not reviewed:
+        return bool(reviewed and self._is_valid_diameter(row.get(column)))
+
+    def _status_for_row(self, row: pd.Series) -> str:
+        key = str(row.get("_key") or "").strip()
+        suffix = ""
+        parsed = _microwire_key_from_string(key) if key else None
+        if parsed is not None:
+            suffix = str(parsed[3] or "").strip().lower()
+        prefix = "Other end - " if suffix == "oe" else ""
+
+        brittle = str(row.get(BRITTLE_COLUMN) or "").strip().lower() == "brittle"
+        core_present = self._has_image_value(row.get("_core_image"))
+        glass_present = self._has_image_value(row.get("_glass_image"))
+        images = row.get("_images")
+        has_any_image = bool(images) if isinstance(images, (list, tuple, set)) else False
+        if not core_present and not glass_present and not has_any_image:
+            return f"{prefix}Missing image"
+        missing_labeled: List[str] = []
+        if not brittle and not core_present:
+            missing_labeled.append("core")
+        if not glass_present:
+            missing_labeled.append("glass")
+        if missing_labeled:
+            return f"{prefix}Image found; missing {'/'.join(missing_labeled)} label"
+
+        d_valid = self._is_valid_diameter(row.get(MICROSCOPE_D_COLUMN))
+        D_valid = self._is_valid_diameter(row.get(MICROSCOPE_CAP_D_COLUMN))
+        if not d_valid or not D_valid:
+            missing_values = []
+            if not d_valid:
+                missing_values.append("d")
+            if not D_valid:
+                missing_values.append("D")
+            return f"{prefix}Image found; enter/review {' and '.join(missing_values)}"
+
+        d_reviewed = self._reviewed_for_row(key, MICROSCOPE_D_COLUMN, row)
+        D_reviewed = self._reviewed_for_row(key, MICROSCOPE_CAP_D_COLUMN, row)
+        if not d_reviewed or not D_reviewed:
+            return f"{prefix}Values need review"
+        return f"{prefix}Reviewed"
+
+    @staticmethod
+    def _has_image_value(value: object) -> bool:
+        if value is None:
             return False
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, str):
+            text = value.strip()
+            return bool(text and text.lower() not in {"nan", "none"})
+        return bool(value)
+
+    def _with_status_column(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame):
+            return pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
+        updated = frame.copy()
+        for column in MICROSCOPE_TABLE_COLUMNS:
+            if column not in updated.columns:
+                updated[column] = pd.Series([None] * len(updated))
+        if updated.empty:
+            return updated.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        for index, row in updated.iterrows():
+            updated.at[index, MICROSCOPE_STATUS_COLUMN] = self._status_for_row(row)
+        return updated.loc[:, MICROSCOPE_TABLE_COLUMNS]
+
+    def _refresh_status_column(self) -> None:
+        selected_key = self._selected_key
+        active_column = self._active_column
+        if not selected_key:
+            row = self._selected_row()
+            if row is not None:
+                raw_key = row.get("_key")
+                selected_key = str(raw_key) if raw_key is not None else None
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        updated = self._with_status_column(frame)
+        self.data.table = updated
+        self.model.set_frame(updated)
+        if selected_key:
+            self._select_row_for_key(selected_key, active_column or None)
+
+    def _is_cell_reviewed(self, key: str, column: str) -> bool:
         row = self._row_for_key(key)
-        if row is not None and not self._is_valid_diameter(row.get(column)):
+        if row is None:
             return False
-        return True
+        return self._reviewed_for_row(key, column, row)
 
     def _row_missing_images(self, row: pd.Series) -> bool:
         brittle = bool(row.get(BRITTLE_COLUMN))
-        core_present = bool(row.get("_core_image"))
-        glass_present = bool(row.get("_glass_image"))
+        core_present = self._has_image_value(row.get("_core_image"))
+        glass_present = self._has_image_value(row.get("_glass_image"))
         extras = row.get("_images")
         if not core_present and isinstance(extras, (list, tuple)) and extras:
             core_present = True
@@ -16579,6 +16681,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self.data.extra["validated"] = self._validated
         if persist:
             self.store.save(self.data)
+        self._refresh_status_column()
         self._refresh_review_display()
         self._update_review_buttons()
         try:
@@ -16725,6 +16828,7 @@ class MicroscopeSection(MiniDatabaseSection):
             frame.at[index, MICROSCOPE_D_COLUMN] = d_value
             frame.at[index, MICROSCOPE_CAP_D_COLUMN] = D_value
             frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
+        frame = self._with_status_column(frame)
         self.data.table = frame
         self.model.set_frame(frame)
         if autosize:
@@ -16854,6 +16958,7 @@ class MicroscopeSection(MiniDatabaseSection):
         rows_to_apply = self._build_image_ref_rows(unique_paths, expected_keys, table)
         if rows_to_apply:
             table = self._merge_rows_into_frame(table, rows_to_apply)
+        table = self._with_status_column(table)
         merged_index = self._build_microscope_index_from_table(table)
         filtered_overrides = {
             key: value
@@ -30614,6 +30719,22 @@ class AssemblySection(QtWidgets.QWidget):
                 table = None
             if isinstance(payload, dict) and payload:
                 microscope_index = payload
+                if isinstance(table, pd.DataFrame) and not table.empty:
+                    table_index = self._build_microscope_index_from_table(table)
+                    if table_index and self._microscope_payload_stale(payload, table_index):
+                        self.logger.warning(
+                            "Microscope saved payload is stale; using the visible table values and repairing the payload."
+                        )
+                        microscope_index = table_index
+                        if isinstance(microscope_section, MicroscopeSection):
+                            try:
+                                microscope_section.store.save_payload("microscope_index", table_index)
+                                payload_map = dict(microscope_section.data.extra.get("payloads", {}))
+                                payload_map["microscope_index"] = "microscope_index"
+                                microscope_section.data.extra["payloads"] = payload_map
+                                microscope_section.store.save(microscope_section.data)
+                            except Exception:
+                                self.logger.exception("Failed to repair stale microscope payload")
             elif isinstance(table, pd.DataFrame) and not table.empty:
                 microscope_index = self._build_microscope_index_from_table(table)
             else:
@@ -30947,6 +31068,36 @@ class AssemblySection(QtWidgets.QWidget):
             if brittle_value == "brittle":
                 measurements.brittle = True
         return index
+
+    def _microscope_payload_stale(
+        self,
+        payload: Mapping[MicrowireKey, MicroscopeMeasurements],
+        table_index: Mapping[MicrowireKey, MicroscopeMeasurements],
+    ) -> bool:
+        if set(payload.keys()) != set(table_index.keys()):
+            return True
+        for key, table_measurements in table_index.items():
+            payload_measurements = payload.get(key)
+            if payload_measurements is None:
+                return True
+            for getter in ("best_core", "best_glass"):
+                table_value = getattr(table_measurements, getter)()
+                payload_value = getattr(payload_measurements, getter)()
+                if table_value is None:
+                    continue
+                if payload_value is None:
+                    return True
+                try:
+                    if not math.isclose(float(table_value), float(payload_value), rel_tol=0.0, abs_tol=1e-9):
+                        return True
+                except (TypeError, ValueError):
+                    return True
+            for attr in ("core", "glass"):
+                table_entries = getattr(table_measurements, attr, [])
+                payload_entries = getattr(payload_measurements, attr, [])
+                if table_entries and not payload_entries:
+                    return True
+        return False
 
     def _update_preview(self, frame: pd.DataFrame) -> None:
         previous_order = self._column_order or self._current_preview_column_order()

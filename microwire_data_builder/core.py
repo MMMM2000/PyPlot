@@ -2183,6 +2183,8 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
     def _suffix_from_text(text: str, start_idx: int) -> Optional[str]:
         if start_idx >= len(text):
             return None
+        while start_idx < len(text) and text[start_idx] in "-_":
+            start_idx += 1
         suffix_chars: List[str] = []
         started = False
         for ch in text[start_idx:]:
@@ -2203,6 +2205,12 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
         composition = _extract_composition_token(text)
         if not composition or not any(ch.isdigit() for ch in composition):
             return None
+        composition_start = text.find(composition)
+        if composition_start < 0:
+            return None
+        pair_text = text[composition_start + len(composition):]
+        if not pair_text:
+            return None
 
         def _to_pair(
             match: re.Match[str], source_text: str
@@ -2216,7 +2224,7 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
             return composition, draw_x, piece_y, suffix
 
         for pattern in MICROSCOPE_PAIR_PATTERNS:
-            normalised = text
+            normalised = pair_text
             if pattern is MICROSCOPE_PAIR_PATTERNS[1]:
                 normalised = normalised.replace("-", "/")
             match = pattern.search(normalised)
@@ -2229,12 +2237,12 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
                 if pair is not None:
                     return pair
 
-        for match in MICROSCOPE_WHITESPACE_PAIR.finditer(text):
-            pair = _to_pair(match, text)
+        for match in MICROSCOPE_WHITESPACE_PAIR.finditer(pair_text):
+            pair = _to_pair(match, pair_text)
             if pair is not None:
                 return pair
 
-        tokens = re.split(r"\s+", text)
+        tokens = re.split(r"\s+", pair_text)
         for token in tokens:
             if not token:
                 continue
