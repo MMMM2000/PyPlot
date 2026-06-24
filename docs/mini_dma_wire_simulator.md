@@ -121,6 +121,12 @@ Summarize real measured Mini DMA runs for simulator calibration:
 uv run python scripts/mini_dma_real_run_reference.py "G:\My Drive\1 Projects\Praha\mini DMA" --out artifacts/mini-dma-real-run-reference
 ```
 
+Compare a real measurement CSV against a simulator output:
+
+```powershell
+uv run python scripts/mini_dma_real_sim_compare.py --real "G:\My Drive\1 Projects\Praha\mini DMA\Ni50Fe27Ga23 12_2 test_run32\measurement.csv" --sim artifacts\mini-dma-realistic-full-run\measurement.csv --max-target-mpa 50 --target-tolerance-mpa 2 --out artifacts\mini-dma-real-vs-sim-12-2-50mpa
+```
+
 Run response-gated adaptive correction-cap comparisons:
 
 ```powershell
@@ -131,6 +137,7 @@ Full-run scenarios currently cover:
 
 - `baseline_first_overheating`: nominal endpoint recovery.
 - `realistic_first_overheating`: calibrated software-only 50 MPa good-wire run, based on completed `Ni50Fe27Ga23 12/2` 1-80-1 mA current-sweep stress runs with about 10% strain span; it starts unloaded, ramps the simulated target from 0 MPa to 50 MPa, then runs the current rise, current holds, endpoint recovery, and reverse unwind with 200 ms delayed scale feedback. The stress disturbance is simulated from current-driven transformation progress, while the strain-current curve is calculated only from simulated motor position and gauge-length conversion. The correction cap is expressed as strain percent of gauge length so it scales with the wire. The calibration is anchored to real run34 hold behavior, where several near-fixed-current holds move strain by more than 1% and the largest hold spans about 4% strain.
+- `realistic_run32_first_target`: calibrated software-only first 50 MPa target segment based on `Ni50Fe27Ga23 12_2 test_run32`. It uses the real 58.328 mm gauge length, 19.1 um diameter, 1 mA/s current ramp, about 10% transformation strain, a concentrated transformation burst near 30 mA, and hidden free-strain roughness during transformation so the strain-vs-current plot includes large near-vertical hold segments similar to the real first-target data without fabricating measured strain.
 - `bad_co6_first_overheating`: bad `Ni47Fe24Ga23Co6 2/1`-style 50 MPa run based on the stiff-validation failure. It starts unloaded, ramps the target from 0 MPa to 50 MPa, then applies the real run length and diameter, a very early transformation stress surge near 10 mA, low usable strain, 200 ms delayed feedback, and a raw stress break rail so controller experiments can distinguish recoverable tuning problems from nonrecoverable bad-wire response.
 - `low_strain_noisy_first_overheating`: low-strain 50 MPa wire where the hidden free transformation strain is small and stress noise/fluctuation is comparatively large; this guards against controller policies that manufacture a large measured strain-current loop from a weak material response.
 - `noisy_centered_first_overheating`: high raw noise centered near target, expected to complete without unnecessary chasing.
@@ -165,3 +172,5 @@ The production iso-current stress-ramp per-command cap is intentionally geometry
 The adaptive policy matrix is deliberately off by default in ordinary scenarios. It compares response-gated cap ceilings that can grow only during current-hold correction, based on processed-center error, processed noise, and whether same-sign corrections are actually improving the processed error. It does not use hidden free-strain truth. Current software-only results are mixed: delayed-feedback early wires can benefit from a larger temporary cap, weak/noisy wires only tolerate small growth, and the good 50 -> 100 MPa stress-ladder cases still prefer the fixed geometry-percent cap. Treat this as evidence for future controller design, not as a live-control default.
 
 The real-run reference summarizer is read-only with respect to measurement folders. It scans `run_quality.json` plus sibling `measurement.csv` files, then writes CSV/JSON/Markdown/PNG artifacts with measured strain spans, target ranges, current ranges, stress-error summaries, current-hold fractions, and inclusion/exclusion metadata. Use those outputs to select good high-strain references, weak/noisy wires, delayed-feedback cases, and bad-wire stress tests before adding or retuning simulator scenarios.
+
+The real-vs-simulation comparator is also read-only with respect to measurement folders. It normalizes real and simulator measurement CSVs into elapsed time, stress, target, current, strain, and current-hold state, then writes a metrics JSON, Markdown summary, and side-by-side plot for stress-vs-time, strain-vs-current, current-vs-time, and current-hold fraction. Use it to check whether a simulator scenario has the same scale and geometry as a real run before using that scenario for controller-policy claims.

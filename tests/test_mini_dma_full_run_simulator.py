@@ -162,6 +162,21 @@ def test_realistic_current_holds_keep_current_fixed_while_motor_strain_changes()
         assert sample.strain_pct == expected_strain
 
 
+def test_realistic_run32_first_target_matches_reference_segment_scale() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("realistic_run32_first_target"))
+    summary = trace.summary()
+
+    assert trace.stop_reason == "completed"
+    assert 400.0 <= summary["total_measurement_time_s"] <= 500.0
+    assert 9.5 <= summary["strain_range_pct"] <= 10.8
+    assert 0.55 <= summary["current_hold_fraction_of_measurement"] <= 0.68
+    assert 30.0 <= summary["p95_abs_current_sweep_error_mpa"] <= 55.0
+    assert summary["max_abs_current_sweep_error_mpa"] >= 80.0
+    assert summary["scale_latency_s"] == 0.2
+    assert summary["max_correction_strain_pct"] == 0.16
+    assert all(trace.invariants.values())
+
+
 def test_bad_co6_first_overheating_exercises_early_failure_case() -> None:
     trace = run_full_mini_dma_simulation(full_run_scenario_by_name("bad_co6_first_overheating"))
     summary = trace.summary()
