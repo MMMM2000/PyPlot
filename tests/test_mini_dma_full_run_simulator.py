@@ -92,8 +92,8 @@ def test_realistic_first_overheating_matches_reference_scale() -> None:
     current_events = [event for event in trace.events if event.phase in {"current", "current_hold"}]
 
     assert trace.stop_reason == "completed"
-    assert 850.0 <= summary["total_measurement_time_s"] <= 1100.0
-    assert 300.0 <= summary["current_hold_time_s"] <= 500.0
+    assert 1100.0 <= summary["total_measurement_time_s"] <= 1250.0
+    assert 550.0 <= summary["current_hold_time_s"] <= 700.0
     assert 25.0 <= summary["max_abs_current_sweep_error_mpa"] <= 45.0
     assert -10.5 <= summary["strain_min_pct"] <= -9.0
     assert 0.3 <= summary["strain_max_pct"] <= 0.8
@@ -217,8 +217,16 @@ def test_stress_ladder_ramps_from_50_to_100_after_unwind_slack() -> None:
     assert trace.stop_reason == "completed"
     assert second_ramp_events
     assert max(event.target_stress_mpa for event in trace.events) == 100.0
-    assert min(event.processed_center_mpa for event in second_ramp_events) < 25.0
-    assert second_ramp_events[-1].endpoint_recovered
+    assert all(
+        current.target_stress_mpa + 1e-12 >= previous.target_stress_mpa
+        for previous, current in zip(second_ramp_events, second_ramp_events[1:])
+    )
+    assert min(event.processed_center_mpa for event in second_ramp_events) < 50.0
+    assert max(abs(event.error_mpa) for event in second_ramp_events) <= 12.0
+    assert summary["max_abs_later_target_ramp_error_mpa"] <= 12.0
+    assert summary["target_ramp_event_count"] == len(target_ramp_events)
+    assert summary["current_phase_event_count"] > 0
+    assert any(event.phase in {"current", "current_hold"} and event.target_stress_mpa == 100.0 for event in trace.events)
     assert summary["inter_target_free_length_shift_mm"] < 0.0
     assert summary["strain_range_pct"] > 12.0
     assert all(trace.invariants.values())
@@ -304,11 +312,15 @@ def test_control_policy_matrix_compares_caps_on_good_and_weak_wires(tmp_path: Pa
 
     paths = write_sweep_outputs(traces, tmp_path)
 
-    assert len(traces) == 32
+    assert len(traces) == 84
     assert any("good_12_2_10pct" in name for name in names)
     assert any("weak_noisy_0p25pct" in name for name in names)
+    assert any("stress_ladder_50_100_after_unwind" in name for name in names)
     assert any(item["max_correction_strain_pct"] < 0.06 for item in summaries)
     assert any(item["max_correction_strain_pct"] > 0.20 for item in summaries)
+    assert any(item["max_abs_later_target_ramp_error_mpa"] > 0.0 for item in summaries)
+    assert all(item["stop_reason"] == "completed" for item in summaries)
+    assert all(item["current_phase_event_count"] > 0 for item in summaries)
     assert all(trace.invariants["corrections_bounded"] for trace in traces)
     assert paths["summary_csv"].exists()
 

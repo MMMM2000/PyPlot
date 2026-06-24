@@ -4,3 +4,6 @@
 - The full-run simulator now includes a broad free-strain stress-test matrix with real-run-inspired good, early 19/8, bad Co6, and weak/noisy wire families, physical free-strain roughness during transformation, delayed-feedback variants, and JSON/CSV/Markdown/PNG matrix summaries.
 - A representative Mini DMA control-policy matrix now compares geometry-percent correction caps and target-fraction recovery bands across good high-strain and weak/noisy simulated wires before changing live control behavior.
 - Full-run simulations can now exercise multi-target stress ladders, including a 0 -> 50 -> 100 MPa good-wire scenario with post-unwind free-length/slack disturbance before the second target ramp.
+- Target-ramp simulation can now wait for fresh post-ramp feedback and cap target lead by a target-scaled fraction, preventing the simulated target from sprinting far ahead of a slack/relaxed wire.
+- Current sweep simulation now requires tight processed-center recovery before advancing current, so current holds no longer resume merely because the broader endpoint recovery band was reached.
+- Full-run summaries and policy sweeps now include target-ramp-specific error metrics, current-phase event counts, and representative 50 -> 100 MPa post-unwind ladder cases for adaptive cap/recovery comparisons.

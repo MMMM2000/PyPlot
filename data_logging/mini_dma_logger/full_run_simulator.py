@@ -59,6 +59,7 @@ class FullRunConfig:
     target_ramp_start_mpa: float | None = None
     target_stress_sequence_mpa: tuple[float, ...] = ()
     target_ramp_rate_mpa_s: float = 5.0
+    target_ramp_max_lead_fraction: float | None = None
     target_ramp_timeout_s: float = 90.0
     endpoint_hold_timeout_s: float = 90.0
     max_ticks: int = 5000
@@ -84,6 +85,8 @@ class FullRunConfig:
             raise ValueError("target_ramp_timeout_s must be positive")
         if self.target_ramp_rate_mpa_s <= 0.0:
             raise ValueError("target_ramp_rate_mpa_s must be positive")
+        if self.target_ramp_max_lead_fraction is not None and self.target_ramp_max_lead_fraction <= 0.0:
+            raise ValueError("target_ramp_max_lead_fraction must be positive")
         if self.endpoint_hold_timeout_s <= 0.0:
             raise ValueError("endpoint_hold_timeout_s must be positive")
         if self.max_ticks <= 0:
@@ -116,6 +119,8 @@ class FullRunConfig:
         _finite(self.free_strain_fluctuation_pct)
         _finite(self.free_strain_fluctuation_cycles)
         _finite(self.inter_target_free_length_shift_mm)
+        if self.target_ramp_max_lead_fraction is not None:
+            _finite(self.target_ramp_max_lead_fraction)
         return self
 
 
@@ -183,6 +188,19 @@ class FullRunTrace:
         final = self.events[-1] if self.events else None
         total_time_s = self.samples[-1].elapsed_s if self.samples else 0.0
         hold_events = [event for event in self.events if event.phase == "current_hold"]
+        target_ramp_events = [event for event in self.events if event.phase == "target_ramp"]
+        targets = _target_sequence(self.config)
+        first_target = targets[0] if targets else self.config.controller.target_stress_mpa
+        increasing_targets = max(targets, default=first_target) >= first_target
+        later_target_ramp_events = [
+            event
+            for event in target_ramp_events
+            if (
+                event.target_stress_mpa > first_target + 1e-12
+                if increasing_targets
+                else event.target_stress_mpa < first_target - 1e-12
+            )
+        ]
         current_events = [
             event
             for event in self.events
@@ -211,11 +229,14 @@ class FullRunTrace:
             "configured_free_strain_fluctuation_pct": self.config.free_strain_fluctuation_pct,
             "configured_free_strain_fluctuation_cycles": self.config.free_strain_fluctuation_cycles,
             "target_stress_sequence_mpa": list(_target_sequence(self.config)),
+            "target_ramp_max_lead_fraction": self.config.target_ramp_max_lead_fraction,
             "inter_target_free_length_shift_mm": self.config.inter_target_free_length_shift_mm,
             "scale_latency_s": self.config.scale_latency_s,
             "sample_hz": self.config.sweep.sample_hz,
             "sample_count": len(self.samples),
             "event_count": len(self.events),
+            "target_ramp_event_count": len(target_ramp_events),
+            "current_phase_event_count": len(current_events),
             "total_measurement_time_s": total_time_s,
             "final_phase": None if final is None else final.phase,
             "final_decision": None if final is None else final.decision,
@@ -224,6 +245,11 @@ class FullRunTrace:
             "final_error_mpa": None if final is None else final.error_mpa,
             "max_abs_error_mpa": max_abs_error,
             "max_abs_current_sweep_error_mpa": max_abs_current_error,
+            "max_abs_target_ramp_error_mpa": max((abs(event.error_mpa) for event in target_ramp_events), default=0.0),
+            "max_abs_later_target_ramp_error_mpa": max(
+                (abs(event.error_mpa) for event in later_target_ramp_events),
+                default=0.0,
+            ),
             "time_outside_recovery_band_s": sum(
                 1 for event in self.events if abs(event.error_mpa) > recovery_band
             )
@@ -274,6 +300,7 @@ class _FullRunState:
         self.ramp_start_stress_mpa = initial_target if config.target_ramp_start_mpa is None else config.target_ramp_start_mpa
         self.ramp_final_stress_mpa = initial_target
         self.ramp_started_elapsed_s = 0.0
+        self.ramp_waiting_for_fresh_feedback = False
         self.active_target_stress_mpa = self.ramp_start_stress_mpa
 
     @property
@@ -295,13 +322,16 @@ class _FullRunState:
             return math.inf
         return max(0.0, self.elapsed_s - feedback[-1].elapsed_s)
 
-    def controller_for_decision(self) -> RobustControllerConfig:
-        return replace(
+    def controller_for_decision(self, *, min_recovery_mpa: float | None = None) -> RobustControllerConfig:
+        controller = replace(
             self.config.controller,
             target_stress_mpa=self.active_target_stress_mpa,
             max_correction_mm=_effective_max_correction_mm(self.config),
             previous_error_sign=self.previous_error_sign,
         )
+        if min_recovery_mpa is not None:
+            controller = replace(controller, min_recovery_mpa=min_recovery_mpa)
+        return controller
 
     def sample(self, phase: str, *, rising: bool) -> MeasurementSample:
         wire = self.config.wire
@@ -377,6 +407,7 @@ class _FullRunState:
         self.ramp_start_stress_mpa = start
         self.ramp_final_stress_mpa = final
         self.ramp_started_elapsed_s = self.elapsed_s
+        self.ramp_waiting_for_fresh_feedback = True
         self.active_target_stress_mpa = start
         self.previous_error_sign = 0
 
@@ -386,6 +417,15 @@ class _FullRunState:
     def update_target_ramp(self) -> None:
         start = self.ramp_start_stress_mpa
         final = self.ramp_final_stress_mpa
+        previous_target = self.active_target_stress_mpa
+        feedback = self.feedback_samples()
+        if self.ramp_waiting_for_fresh_feedback:
+            self.active_target_stress_mpa = start
+            if not feedback or feedback[-1].elapsed_s + 1e-12 < self.ramp_started_elapsed_s:
+                return
+            self.ramp_waiting_for_fresh_feedback = False
+            self.ramp_started_elapsed_s = self.elapsed_s
+            return
         direction = 1.0 if final >= start else -1.0
         elapsed = max(0.0, self.elapsed_s - self.ramp_started_elapsed_s)
         next_target = start + direction * self.config.target_ramp_rate_mpa_s * elapsed
@@ -393,15 +433,41 @@ class _FullRunState:
             self.active_target_stress_mpa = min(final, next_target)
         else:
             self.active_target_stress_mpa = max(final, next_target)
+        lead_fraction = self.config.target_ramp_max_lead_fraction
+        if lead_fraction is None or not feedback:
+            return
+        signal = processed_control_signal(feedback, self.controller_for_decision())
+        lead_mpa = max(abs(final), abs(start), 1.0) * lead_fraction
+        if direction >= 0.0:
+            planned_target = self.active_target_stress_mpa
+            self.active_target_stress_mpa = min(self.active_target_stress_mpa, signal.center_mpa + lead_mpa)
+            self.active_target_stress_mpa = max(previous_target, self.active_target_stress_mpa)
+            if self.active_target_stress_mpa + 1e-12 < planned_target:
+                progressed = max(0.0, self.active_target_stress_mpa - start)
+                self.ramp_started_elapsed_s = self.elapsed_s - progressed / self.config.target_ramp_rate_mpa_s
+        else:
+            planned_target = self.active_target_stress_mpa
+            self.active_target_stress_mpa = max(self.active_target_stress_mpa, signal.center_mpa - lead_mpa)
+            self.active_target_stress_mpa = min(previous_target, self.active_target_stress_mpa)
+            if self.active_target_stress_mpa - 1e-12 > planned_target:
+                progressed = max(0.0, start - self.active_target_stress_mpa)
+                self.ramp_started_elapsed_s = self.elapsed_s - progressed / self.config.target_ramp_rate_mpa_s
 
     def target_ramp_complete(self) -> bool:
         return abs(self.active_target_stress_mpa - self.ramp_final_stress_mpa) <= 1e-12
 
-    def record_event(self, phase: str, correction_mm: float, reason: str) -> FullRunEvent:
+    def record_event(
+        self,
+        phase: str,
+        correction_mm: float,
+        reason: str,
+        *,
+        controller: RobustControllerConfig | None = None,
+    ) -> FullRunEvent:
         feedback = self.feedback_samples()
         if not feedback:
             raise ValueError("cannot record a control event without delayed feedback")
-        controller = self.controller_for_decision()
+        controller = controller or self.controller_for_decision()
         decision = decide_robust_center(feedback, controller)
         signal = processed_control_signal(feedback, controller)
         feedback_age_s = self.feedback_age_s(feedback)
@@ -433,11 +499,12 @@ class _FullRunState:
             self.previous_error_sign = 1 if event.error_mpa > 0.0 else -1
         return event
 
-    def correct_toward_target(self) -> float:
+    def correct_toward_target(self, *, controller: RobustControllerConfig | None = None) -> float:
         feedback = self.feedback_samples()
         if not feedback or self.feedback_age_s(feedback) > self.config.controller.stale_feedback_s:
             return 0.0
-        decision = decide_robust_center(feedback, self.controller_for_decision())
+        controller = controller or self.controller_for_decision()
+        decision = decide_robust_center(feedback, controller)
         correction = decision.motor_step_mm
         if decision.decision in {"no_move", "wait_reversal", "safety_stop"}:
             correction = 0.0
@@ -459,6 +526,23 @@ def _recovered(state: _FullRunState) -> bool:
         return False
     decision = decide_robust_center(feedback, state.controller_for_decision())
     return decision.endpoint_recovered
+
+
+def _current_sweep_ready_to_advance(state: _FullRunState) -> bool:
+    feedback = state.feedback_samples()
+    if not feedback:
+        return False
+    controller = state.controller_for_decision(min_recovery_mpa=state.config.controller.tolerance_mpa)
+    decision = decide_robust_center(feedback, controller)
+    return decision.endpoint_recovered
+
+
+def _target_ramp_centered_for_move(state: _FullRunState) -> bool:
+    feedback = state.feedback_samples()
+    if not feedback:
+        return False
+    signal = processed_control_signal(feedback, state.controller_for_decision())
+    return abs(signal.center_mpa - state.active_target_stress_mpa) <= state.config.controller.tolerance_mpa
 
 
 def _stop_for_safety(state: _FullRunState) -> str | None:
@@ -607,8 +691,13 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
             if not state.feedback_samples():
                 state.advance_time()
                 continue
-            correction = 0.0 if _recovered(state) else state.correct_toward_target()
-            state.record_event("target_ramp", correction, "target_acquisition")
+            move_controller = state.controller_for_decision(min_recovery_mpa=config.controller.tolerance_mpa)
+            correction = (
+                0.0
+                if _target_ramp_centered_for_move(state)
+                else state.correct_toward_target(controller=move_controller)
+            )
+            state.record_event("target_ramp", correction, "target_acquisition", controller=move_controller)
             stop = _stop_for_safety(state)
             if stop is not None:
                 return stop
@@ -639,14 +728,15 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
                         current = max(end_ma, current)
                 state.advance_time()
                 continue
-            recovered = _recovered(state)
+            recovered = _current_sweep_ready_to_advance(state)
             phase = phase_name
             reason = "current_tracking"
             if not recovered:
                 phase = "current_hold"
                 reason = "endpoint_waiting_for_recovery" if at_endpoint else "processed_recovery"
-            correction = 0.0 if recovered else state.correct_toward_target()
-            state.record_event(phase, correction, reason)
+            move_controller = state.controller_for_decision(min_recovery_mpa=config.controller.tolerance_mpa)
+            correction = 0.0 if recovered else state.correct_toward_target(controller=move_controller)
+            state.record_event(phase, correction, reason, controller=move_controller)
             stop = _stop_for_safety(state)
             if stop is not None:
                 return stop
@@ -975,10 +1065,12 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
         target_stress_sequence_mpa=(50.0, 100.0),
         target_ramp_start_mpa=0.0,
         target_ramp_rate_mpa_s=5.0,
+        target_ramp_max_lead_fraction=0.10,
         target_ramp_timeout_s=220.0,
         endpoint_hold_timeout_s=420.0,
         max_ticks=14000,
         inter_target_free_length_shift_mm=-0.35,
+        max_correction_strain_pct=0.30,
         seed=501,
     )
     try:
@@ -1151,6 +1243,7 @@ def run_control_policy_matrix() -> list[FullRunTrace]:
 
     representative_names = {
         "matrix_good_12_2_10pct_delayed_feedback",
+        "matrix_good_12_2_10pct_rough_transform",
         "matrix_good_12_2_10pct_stiff_overresponsive",
         "matrix_early_19_8_9pct_delayed_feedback",
         "matrix_weak_noisy_0p25pct_rough_transform",
@@ -1160,6 +1253,24 @@ def run_control_policy_matrix() -> list[FullRunTrace]:
         for trace in run_free_strain_stress_matrix()
         if trace.config.name in representative_names
     ]
+    ladder = full_run_scenario_by_name("stress_ladder_50_100_after_unwind")
+    base_configs.append(ladder)
+    base_configs.append(
+        replace(
+            ladder,
+            name="stress_ladder_50_100_after_unwind_rough_transform",
+            description=(
+                "Good-wire 50 -> 100 MPa stress ladder with rough hidden free-strain "
+                "fluctuations during transformation."
+            ),
+            free_strain_fluctuation_pct=0.16,
+            free_strain_fluctuation_cycles=8.0,
+            scale_latency_s=0.45,
+            sweep=replace(ladder.sweep, sample_hz=1.5),
+            controller=replace(ladder.controller, stale_feedback_s=1.2),
+            seed=1501,
+        )
+    )
     traces: list[FullRunTrace] = []
     index = 0
     for config in base_configs:
@@ -1167,10 +1278,11 @@ def run_control_policy_matrix() -> list[FullRunTrace]:
             config.controller.max_correction_mm / config.wire.length_mm * 100.0
         )
         for cap_scale in (0.75, 1.0, 1.4, 2.4):
-            for recovery_scale in (0.06, 0.10):
+            for recovery_scale in (0.04, 0.06, 0.10):
                 index += 1
                 cap_pct = base_cap_pct * cap_scale
-                recovery_mpa = max(config.controller.tolerance_mpa, config.controller.target_stress_mpa * recovery_scale)
+                target_scale_mpa = max(abs(target) for target in _target_sequence(config))
+                recovery_mpa = max(config.controller.tolerance_mpa, target_scale_mpa * recovery_scale)
                 policy_config = replace(
                     config,
                     name=f"policy_{config.name.removeprefix('matrix_')}_cap{cap_scale:g}_rec{recovery_scale:g}",
@@ -1321,16 +1433,17 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
     lines = [
         "# Mini DMA full-run parameter sweep",
         "",
-        "| Scenario | Stop | Free strain span % | Measured strain span % | Max sweep error MPa | Hold time s | Mean tracking error % | Invariants |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Scenario | Stop | Current events | Later ramp error MPa | Max sweep error MPa | Hold time s | Measured strain span % | Mean tracking error % | Invariants |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for trace in traces:
         item = trace.summary()
         invariant_text = "ok" if all(item["invariants"].values()) else ",".join(item["warnings"])
         lines.append(
-            f"| {item['scenario']} | {item['stop_reason']} | {item['free_transformation_strain_range_pct']:.3f} | "
-            f"{item['strain_range_pct']:.3f} | {item['max_abs_current_sweep_error_mpa']:.2f} | "
-            f"{item['current_hold_time_s']:.1f} | {item['mean_abs_free_strain_tracking_error_pct']:.3f} | {invariant_text} |"
+            f"| {item['scenario']} | {item['stop_reason']} | {item['current_phase_event_count']} | "
+            f"{item['max_abs_later_target_ramp_error_mpa']:.2f} | {item['max_abs_current_sweep_error_mpa']:.2f} | "
+            f"{item['current_hold_time_s']:.1f} | {item['strain_range_pct']:.3f} | "
+            f"{item['mean_abs_free_strain_tracking_error_pct']:.3f} | {invariant_text} |"
         )
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     plot_path = out / "full_run_sweep_metrics.png"
