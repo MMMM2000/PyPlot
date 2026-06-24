@@ -20370,7 +20370,7 @@ def test_iso_current_stress_ramp_target_uses_larger_dynamic_step_cap(
         )
 
         assert correction_mm > window.spin_current_sweep_nudge_mm.value()
-        assert correction_mm == pytest.approx(50.0 * 0.0008)
+        assert correction_mm == pytest.approx(50.0 * 0.0012)
     finally:
         _close_test_window(window)
 

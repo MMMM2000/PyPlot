@@ -12,3 +12,4 @@
 - Full-run summaries and policy sweeps now include target-ramp-specific error metrics, current-phase event counts, and representative 50 -> 100 MPa post-unwind ladder cases for adaptive cap/recovery comparisons.
 - Added a software-only adaptive correction-cap policy matrix. It logs per-event correction caps, compares response-gated cap growth across good, delayed-feedback, weak/noisy, and 50 -> 100 MPa stress-ladder cases, and keeps adaptive growth disabled by default because the current evidence is mixed.
 - Added a broader stress-ladder policy grid across target-lead, geometry-percent correction cap, and adaptive-cap settings, with stable per-policy seeds and compact CLI summaries so verbose current-hold periods stay in artifact files.
+- Increased the production iso-current stress-ramp per-command cap from 0.08% to 0.12% strain of gauge length based on the stable 0 -> 50 -> 100 MPa simulator grid, while leaving adaptive cap growth disabled by default.
