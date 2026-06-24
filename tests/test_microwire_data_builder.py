@@ -71,6 +71,27 @@ def test_microscope_key_preserves_decimal_composition_token() -> None:
     assert parsed == ("Mn58.1Ni4.3Si18.5Sn18.8", 3, 2, None)
 
 
+def test_microscope_key_draw_piece_starts_after_composition_boundary() -> None:
+    assert core._microscope_key(Path("Ni44Fe27Ga23Cu3Co3_1-5 glass.jpg")) == (
+        "Ni44Fe27Ga23Cu3Co3",
+        1,
+        5,
+        None,
+    )
+    assert core._microscope_key(Path("Ni44Fe27Ga23Cu3Co3 1_5 core.jpg")) == (
+        "Ni44Fe27Ga23Cu3Co3",
+        1,
+        5,
+        None,
+    )
+    assert core._microscope_key(Path("Ni46Fe27Ga23Cu2Co2-2_1-No1 glass.jpg")) == (
+        "Ni46Fe27Ga23Cu2Co2",
+        2,
+        1,
+        "No1",
+    )
+
+
 def test_microscope_key_ignores_google_drive_shortcut_ancestors(tmp_path: Path) -> None:
     video_path = (
         tmp_path
@@ -3500,6 +3521,7 @@ def test_microscope_prepopulate_images(tmp_path: Path) -> None:
     row = frame.iloc[0]
     assert row["_core_image"] == str(core_path)
     assert row["_glass_image"] == str(glass_path)
+    assert row[builder_ui.MICROSCOPE_STATUS_COLUMN] == "Image found; enter/review d and D"
     images = row["_images"]
     assert isinstance(images, list)
     assert str(core_path) in images
@@ -4102,6 +4124,61 @@ def test_microscope_section_auto_selects_first_row_and_loads_previews(tmp_path: 
         assert selected["_key"] == "Ni46Fe23Ga23Co8|1|1"
         assert bool(getattr(section.core_preview_label, "_pixmap", None))
         assert bool(getattr(section.glass_preview_label, "_pixmap", None))
+        updated = section.model.frame()
+        assert updated.at[0, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Values need review"
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_status_distinguishes_missing_images_and_other_ends(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        core_path = tmp_path / "TestCompA 1_2 core.jpg"
+        core_path.write_bytes(b"core")
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompA",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    "_key": "TestCompA|1|1",
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                },
+                {
+                    "Composition": "TestCompA",
+                    "Microwire": "1/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    "_key": "TestCompA|1|2",
+                    "_core_image": str(core_path),
+                    "_glass_image": None,
+                    "_images": [str(core_path)],
+                },
+                {
+                    "Composition": "TestCompA",
+                    "Microwire": "1/3oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: 7.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 28.0,
+                    "d/D": 0.25,
+                    "_key": "TestCompA|1|3|oe",
+                    "_core_image": str(core_path),
+                    "_glass_image": str(core_path),
+                    "_images": [str(core_path)],
+                },
+            ]
+        )
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        updated = section.model.frame()
+        assert updated.at[0, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Missing image"
+        assert updated.at[1, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Image found; missing glass label"
+        assert updated.at[2, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Other end - Values need review"
     finally:
         section._shutdown_background_threads()
         section.close()
@@ -9838,6 +9915,85 @@ def test_assemble_prepare_inputs_respects_hide_other_ends_setting(qtbot, tmp_pat
         assert ("Ni50Fe27Ga23", 5, 4, "oe") not in prepared_index
     finally:
         window.close()
+
+
+def test_assemble_prepare_inputs_repairs_stale_microscope_payload(
+    qtbot,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _ensure_qapp()
+    log = logging.getLogger("test")
+    microscope = builder_ui.MicroscopeSection(log, lambda *_: None)
+    assembly = builder_ui.AssemblySection({"microscope": microscope}, log, lambda *_: None)
+    qtbot.addWidget(microscope)
+    qtbot.addWidget(assembly)
+    try:
+        key = ("Ni50Fe27Ga23", 5, 4, None)
+        core_path = tmp_path / "Ni50Fe27Ga23 5_4 core.jpg"
+        glass_path = tmp_path / "Ni50Fe27Ga23 5_4 glass.jpg"
+        core_path.write_bytes(b"core")
+        glass_path.write_bytes(b"glass")
+        stale = core.MicroscopeMeasurements(
+            core=[
+                core.MicroscopeDetection(
+                    value=10.0,
+                    image_path=core_path,
+                    source="manual",
+                )
+            ],
+            glass=[
+                core.MicroscopeDetection(
+                    value=30.0,
+                    image_path=glass_path,
+                    source="manual",
+                )
+            ],
+        )
+        stale.core[0].category = "core"
+        stale.glass[0].category = "glass"
+        microscope.store.save_payload("microscope_index", {key: stale})
+        microscope.apply_data(
+            builder_ui.MiniDatabaseData(
+                table=pd.DataFrame(
+                    [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "5/4",
+                            builder_ui.MICROSCOPE_D_COLUMN: 12.0,
+                            builder_ui.MICROSCOPE_CAP_D_COLUMN: 36.0,
+                            "d/D": round(12.0 / 36.0, 3),
+                            BRITTLE_COLUMN: None,
+                            builder_ui.MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                            builder_ui.MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                            "_key": "Ni50Fe27Ga23|5|4",
+                            "_core_image": str(core_path),
+                            "_glass_image": str(glass_path),
+                            "_images": [str(core_path), str(glass_path)],
+                        }
+                    ]
+                ),
+                extra={"payloads": {"microscope_index": "microscope_index"}},
+            )
+        )
+
+        with caplog.at_level(logging.WARNING):
+            payload = assembly._prepare_builder_inputs(
+                {"microscope"},
+                require_payloads=False,
+            )
+
+        assert payload is not None
+        prepared_index = payload[9]
+        assert prepared_index[key].best_core() == pytest.approx(12.0)
+        assert prepared_index[key].best_glass() == pytest.approx(36.0)
+        repaired = microscope.store.load_payload("microscope_index")
+        assert repaired[key].best_core() == pytest.approx(12.0)
+        assert "Microscope saved payload is stale" in caplog.text
+    finally:
+        assembly.close()
+        microscope._shutdown_background_threads()
+        microscope.close()
 
 
 def test_build_database_include_fabrication_draw_siblings_limits_to_last_meaningful_piece(
