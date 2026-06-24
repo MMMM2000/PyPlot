@@ -6,6 +6,7 @@
 - Full-run simulations can now exercise multi-target stress ladders, including a 0 -> 50 -> 100 MPa good-wire scenario with post-unwind free-length/slack disturbance before the second target ramp.
 - Added a multi-wire 0 -> 50 -> 100 MPa stress-ladder matrix covering good, early/delayed, bad Co6-style, weak/noisy, very thin delayed-feedback, and stiffer/thicker simulated wires so second-ramp slack/stiffness failures can be compared without live hardware.
 - Full-run simulation summaries and sweep reports now include target-scaled quality status, normalized stress-error/tracking metrics, and quality flags so completed-but-poor simulated runs are visible to controller tuning.
+- Added a stress-ladder candidate-policy comparison that pairs each baseline 0 -> 50 -> 100 MPa ladder with a moderate target-lead/correction-cap policy and reports aggregate quality improvement without hiding bad-wire tuning flags.
 - Target-ramp simulation can now wait for fresh post-ramp feedback and cap target lead by a target-scaled fraction, preventing the simulated target from sprinting far ahead of a slack/relaxed wire.
 - Current sweep simulation now requires tight processed-center recovery before advancing current, so current holds no longer resume merely because the broader endpoint recovery band was reached.
 - Full-run summaries and policy sweeps now include target-ramp-specific error metrics, current-phase event counts, and representative 50 -> 100 MPa post-unwind ladder cases for adaptive cap/recovery comparisons.

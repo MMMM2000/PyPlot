@@ -1568,6 +1568,31 @@ def run_stress_ladder_matrix() -> list[FullRunTrace]:
     return traces
 
 
+def run_stress_ladder_candidate_policy_comparison() -> list[FullRunTrace]:
+    """Compare baseline ladder cases with a moderate target-lead/cap candidate."""
+
+    traces: list[FullRunTrace] = []
+    for baseline in run_stress_ladder_matrix():
+        traces.append(baseline)
+        config = baseline.config
+        base_cap_pct = config.max_correction_strain_pct or (
+            config.controller.max_correction_mm / config.wire.length_mm * 100.0
+        )
+        candidate = replace(
+            config,
+            name=f"candidate_{config.name}",
+            description=(
+                f"Candidate moderate-policy variant of {config.name}: target lead 0.07x "
+                "and a 1.35x geometry-percent correction cap."
+            ),
+            target_ramp_max_lead_fraction=0.07,
+            max_correction_strain_pct=base_cap_pct * 1.35,
+            seed=config.seed + 881,
+        )
+        traces.append(run_full_mini_dma_simulation(candidate))
+    return traces
+
+
 def run_adaptive_control_policy_matrix() -> list[FullRunTrace]:
     """Compare response-gated adaptive cap ceilings on representative matrix cases."""
 
@@ -1958,6 +1983,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--free-strain-matrix", action="store_true", help="Run the broad free-strain stress-test matrix.")
     parser.add_argument("--policy-matrix", action="store_true", help="Run representative correction-cap/recovery policy comparisons.")
     parser.add_argument("--stress-ladder-matrix", action="store_true", help="Run 0 -> 50 -> 100 MPa ladder cases across representative wires.")
+    parser.add_argument("--stress-ladder-candidate-policy", action="store_true", help="Compare baseline stress ladders with the current moderate candidate policy.")
     parser.add_argument("--adaptive-policy-matrix", action="store_true", help="Run response-gated adaptive cap comparisons.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-full-run-sim"))
     args = parser.parse_args(argv)
@@ -1968,6 +1994,9 @@ def main(argv: list[str] | None = None) -> int:
         write_sweep_outputs(traces, args.out)
     elif args.stress_ladder_matrix:
         traces = run_stress_ladder_matrix()
+        write_sweep_outputs(traces, args.out)
+    elif args.stress_ladder_candidate_policy:
+        traces = run_stress_ladder_candidate_policy_comparison()
         write_sweep_outputs(traces, args.out)
     elif args.policy_matrix:
         traces = run_control_policy_matrix()

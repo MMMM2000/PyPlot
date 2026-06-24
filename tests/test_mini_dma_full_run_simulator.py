@@ -15,6 +15,7 @@ from data_logging.mini_dma_logger.full_run_simulator import (
     run_free_strain_stress_matrix,
     run_full_mini_dma_simulation,
     run_parameter_sweep,
+    run_stress_ladder_candidate_policy_comparison,
     run_stress_ladder_matrix,
     write_full_run_outputs,
     write_sweep_outputs,
@@ -360,6 +361,23 @@ def test_stress_ladder_matrix_covers_representative_wires(tmp_path: Path) -> Non
     assert all(trace.invariants["no_accumulated_correction_travel_stop"] for trace in traces)
     assert all(trace.invariants["does_not_stop_for_slack"] for trace in traces)
     assert all(trace.invariants["scale_latency_applied"] for trace in traces)
+    assert paths["summary_csv"].exists()
+
+
+def test_stress_ladder_candidate_policy_improves_aggregate_quality(tmp_path: Path) -> None:
+    traces = run_stress_ladder_candidate_policy_comparison()
+    summaries = [trace.summary() for trace in traces]
+
+    paths = write_sweep_outputs(traces, tmp_path)
+
+    baseline = [item for item in summaries if not item["scenario"].startswith("candidate_")]
+    candidates = [item for item in summaries if item["scenario"].startswith("candidate_")]
+    assert len(baseline) == len(candidates) == 7
+    assert sum(item["quality_score"] for item in candidates) < sum(item["quality_score"] for item in baseline)
+    assert all(item["stop_reason"] == "completed" for item in candidates)
+    assert all(item["quality_status"] == "ok" for item in candidates if "stiffer_thicker" in item["scenario"])
+    assert all(item["quality_status"] == "ok" for item in candidates if "stress_ladder_50_100_after_unwind" in item["scenario"])
+    assert any("later_target_ramp_error_high" in item["quality_flags"] for item in candidates)
     assert paths["summary_csv"].exists()
 
 
