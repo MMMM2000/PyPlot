@@ -1387,6 +1387,93 @@ def run_control_policy_matrix() -> list[FullRunTrace]:
     return traces
 
 
+def run_stress_ladder_matrix() -> list[FullRunTrace]:
+    """Exercise 0 -> 50 -> 100 MPa target ladders on representative wire families."""
+
+    base_ladder = full_run_scenario_by_name("stress_ladder_50_100_after_unwind")
+    selected_matrix_names = {
+        "matrix_good_12_2_10pct_stiff_overresponsive",
+        "matrix_early_19_8_9pct_delayed_feedback",
+        "matrix_co6_bad_1pct_fast_spiky",
+        "matrix_weak_noisy_0p25pct_rough_transform",
+    }
+    traces = [run_full_mini_dma_simulation(base_ladder)]
+    for trace in run_free_strain_stress_matrix():
+        if trace.config.name not in selected_matrix_names:
+            continue
+        config = trace.config
+        ladder_config = replace(
+            config,
+            name=f"ladder_{config.name.removeprefix('matrix_')}",
+            description=(
+                "Stress-ladder regression for post-unwind slack/stiffness behavior: "
+                f"{config.description}"
+            ),
+            target_stress_sequence_mpa=(50.0, 100.0),
+            target_ramp_start_mpa=0.0,
+            target_ramp_max_lead_fraction=0.10,
+            target_ramp_timeout_s=280.0,
+            endpoint_hold_timeout_s=900.0,
+            max_ticks=18000,
+            inter_target_free_length_shift_mm=-max(0.20, config.wire.length_mm * 0.008),
+            controller=replace(
+                config.controller,
+                target_stress_mpa=50.0,
+                safety_max_stress_mpa=320.0,
+            ),
+            seed=config.seed + 70000,
+        )
+        traces.append(run_full_mini_dma_simulation(ladder_config))
+    traces.append(
+        run_full_mini_dma_simulation(
+            replace(
+                base_ladder,
+                name="ladder_stiffer_thicker_high_load",
+                description="Stiffer/thicker high-load 50 -> 100 MPa stress ladder.",
+                wire=replace(
+                    base_ladder.wire,
+                    length_mm=28.0,
+                    diameter_mm=0.040,
+                    elastic_stiffness_mpa_per_mm=240.0,
+                    transformation_contraction_mm=2.2,
+                    noise_mpa=0.9,
+                ),
+                max_correction_strain_pct=0.18,
+                inter_target_free_length_shift_mm=-0.25,
+                seed=77001,
+            )
+        )
+    )
+    traces.append(
+        run_full_mini_dma_simulation(
+            replace(
+                base_ladder,
+                name="ladder_thin_delayed_tiny_load",
+                description="Very thin delayed-feedback 50 -> 100 MPa stress ladder.",
+                wire=replace(
+                    base_ladder.wire,
+                    length_mm=50.0,
+                    diameter_mm=0.0083,
+                    elastic_stiffness_mpa_per_mm=30.0,
+                    transformation_contraction_mm=4.0,
+                    noise_mpa=1.3,
+                ),
+                sweep=replace(base_ladder.sweep, end_ma=55.0, rate_ma_s=0.24, sample_hz=1.4),
+                controller=replace(
+                    base_ladder.controller,
+                    stale_feedback_s=1.3,
+                    safety_max_stress_mpa=260.0,
+                ),
+                max_correction_strain_pct=0.12,
+                scale_latency_s=0.45,
+                inter_target_free_length_shift_mm=-0.35,
+                seed=77002,
+            )
+        )
+    )
+    return traces
+
+
 def run_adaptive_control_policy_matrix() -> list[FullRunTrace]:
     """Compare response-gated adaptive cap ceilings on representative matrix cases."""
 
@@ -1766,6 +1853,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sweep", action="store_true", help="Run the built-in parameter sweep.")
     parser.add_argument("--free-strain-matrix", action="store_true", help="Run the broad free-strain stress-test matrix.")
     parser.add_argument("--policy-matrix", action="store_true", help="Run representative correction-cap/recovery policy comparisons.")
+    parser.add_argument("--stress-ladder-matrix", action="store_true", help="Run 0 -> 50 -> 100 MPa ladder cases across representative wires.")
     parser.add_argument("--adaptive-policy-matrix", action="store_true", help="Run response-gated adaptive cap comparisons.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-full-run-sim"))
     args = parser.parse_args(argv)
@@ -1773,6 +1861,9 @@ def main(argv: list[str] | None = None) -> int:
     traces: list[FullRunTrace]
     if args.adaptive_policy_matrix:
         traces = run_adaptive_control_policy_matrix()
+        write_sweep_outputs(traces, args.out)
+    elif args.stress_ladder_matrix:
+        traces = run_stress_ladder_matrix()
         write_sweep_outputs(traces, args.out)
     elif args.policy_matrix:
         traces = run_control_policy_matrix()

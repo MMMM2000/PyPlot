@@ -15,6 +15,7 @@ from data_logging.mini_dma_logger.full_run_simulator import (
     run_free_strain_stress_matrix,
     run_full_mini_dma_simulation,
     run_parameter_sweep,
+    run_stress_ladder_matrix,
     write_full_run_outputs,
     write_sweep_outputs,
 )
@@ -323,6 +324,32 @@ def test_control_policy_matrix_compares_caps_on_good_and_weak_wires(tmp_path: Pa
     assert all(item["stop_reason"] == "completed" for item in summaries)
     assert all(item["current_phase_event_count"] > 0 for item in summaries)
     assert all(trace.invariants["corrections_bounded"] for trace in traces)
+    assert paths["summary_csv"].exists()
+
+
+def test_stress_ladder_matrix_covers_representative_wires(tmp_path: Path) -> None:
+    traces = run_stress_ladder_matrix()
+    summaries = [trace.summary() for trace in traces]
+    names = {trace.config.name for trace in traces}
+
+    paths = write_sweep_outputs(traces, tmp_path)
+
+    assert len(traces) == 7
+    assert any("good_12_2_10pct" in name for name in names)
+    assert any("early_19_8_9pct" in name for name in names)
+    assert any("co6_bad_1pct" in name for name in names)
+    assert any("weak_noisy_0p25pct" in name for name in names)
+    assert any("thin_delayed_tiny_load" in name for name in names)
+    assert any("stiffer_thicker_high_load" in name for name in names)
+    assert all(item["target_stress_sequence_mpa"] == [50.0, 100.0] for item in summaries)
+    assert all(item["inter_target_free_length_shift_mm"] < 0.0 for item in summaries)
+    assert all(item["max_abs_later_target_ramp_error_mpa"] > 0.0 for item in summaries)
+    assert any(item["max_abs_later_target_ramp_error_mpa"] > 40.0 for item in summaries)
+    assert any(item["scale_latency_s"] >= 0.45 for item in summaries)
+    assert all(item["stop_reason"] == "completed" for item in summaries)
+    assert all(trace.invariants["no_accumulated_correction_travel_stop"] for trace in traces)
+    assert all(trace.invariants["does_not_stop_for_slack"] for trace in traces)
+    assert all(trace.invariants["scale_latency_applied"] for trace in traces)
     assert paths["summary_csv"].exists()
 
 
