@@ -3449,6 +3449,35 @@ def test_manual_auto_connect_enables_motor_supply_before_tic_status(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_manual_auto_connect_preserves_live_stress_conversion(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_diameter.setValue(0.01)
+    window._latest_scale_value_g = 21.155
+    window._latest_scale_text = "21.155 g"
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        expected_stress = mini_dma_mod.stress_mpa_from_load_g(0.045, 0.01)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert expected_stress == pytest.approx(5.617, rel=5e-4)
+        assert called == ["scale", "supply", "current", "tic"]
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window.spin_diameter.value() == pytest.approx(0.01)
+        assert window._dashboard_value_labels["load_g"].text() == "0.045 g"
+        assert window._dashboard_value_labels["stress_mpa"].text() == "5.6 MPa"
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_connects_selected_ir_without_hardware_steal(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     called: list[str] = []
