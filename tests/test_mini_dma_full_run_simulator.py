@@ -231,6 +231,8 @@ def test_stress_ladder_ramps_from_50_to_100_after_unwind_slack() -> None:
     assert any(event.phase in {"current", "current_hold"} and event.target_stress_mpa == 100.0 for event in trace.events)
     assert summary["inter_target_free_length_shift_mm"] < 0.0
     assert summary["strain_range_pct"] > 12.0
+    assert summary["quality_status"] == "ok"
+    assert summary["max_abs_later_target_ramp_error_fraction_of_target"] <= 0.12
     assert all(trace.invariants.values())
     assert all(event.feedback_age_s >= trace.config.scale_latency_s for event in trace.events)
 
@@ -261,6 +263,9 @@ def test_full_run_outputs_are_replay_shaped(tmp_path: Path) -> None:
     assert "motor_strain_pct" in measurement_header
     assert "elastic_mismatch_strain_pct" in measurement_header
     assert "free_strain_tracking_error_pct" in measurement_header
+    assert "quality_status" in summary
+    assert "quality_score" in summary
+    assert "Quality status:" in paths["report"].read_text(encoding="utf-8")
     target_index = measurement_header.split(",").index("target_stress_mpa")
     first_target = float(measurement_lines[1].split(",")[target_index])
     assert first_target == 0.0
@@ -345,6 +350,11 @@ def test_stress_ladder_matrix_covers_representative_wires(tmp_path: Path) -> Non
     assert all(item["inter_target_free_length_shift_mm"] < 0.0 for item in summaries)
     assert all(item["max_abs_later_target_ramp_error_mpa"] > 0.0 for item in summaries)
     assert any(item["max_abs_later_target_ramp_error_mpa"] > 40.0 for item in summaries)
+    assert any(item["quality_status"] == "ok" for item in summaries)
+    assert any(item["quality_status"] == "needs_tuning" for item in summaries)
+    assert any("later_target_ramp_error_high" in item["quality_flags"] for item in summaries)
+    assert all(item["max_abs_current_sweep_error_fraction_of_target"] >= 0.0 for item in summaries)
+    assert all(item["mean_abs_free_strain_tracking_error_fraction_of_span"] >= 0.0 for item in summaries)
     assert any(item["scale_latency_s"] >= 0.45 for item in summaries)
     assert all(item["stop_reason"] == "completed" for item in summaries)
     assert all(trace.invariants["no_accumulated_correction_travel_stop"] for trace in traces)
