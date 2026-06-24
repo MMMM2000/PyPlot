@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import json
 import math
@@ -14,6 +14,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 import warnings
 from pathlib import Path
 from typing import Any, Callable, Sequence, cast
@@ -26,15 +27,21 @@ except Exception:  # pragma: no cover - optional runtime fallback
 
 from data_logging.current_annealing_logger.current_annealing_logger import (
     DEFAULT_LOG_DIR,
+    HMP4040_PROFILE,
     MainWindow as CurrentAnnealingWindow,
     SUPPLY_PROFILES,
     _apply_app_font_to_matplotlib,
 )
+from data_logging.shared_power_supply.broker import ROLE_AC_SUSCEPTIBILITY, SharedPowerSupplyBroker
+from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.protocol import BrokerJsonClient, start_broker_server
 from plotting.shared.experiment_processes import gui_python_executable, hidden_process_creationflags
 from plotting.shared.utils import ensure_app_theme
 
 from .lcr6000 import (
     DEFAULT_BAUDRATE,
+    LcrCorrectionResult,
+    LcrCorrectionStatus,
     Lcr6000Reading,
     Lcr6000Serial,
     Lcr6000Settings,
@@ -89,6 +96,11 @@ OWON_DEFAULT_VOLTAGE_LIMIT_V = 61.0
 HMP_DEFAULT_VOLTAGE_LIMIT_V = 30.0
 AC_DEFAULT_LOG_DIR = Path.home() / "Downloads" / "ac_susceptibility"
 AC_DEFAULT_SWEEP_BASE = "ac_susc_current_sweep"
+AC_DEFAULT_BROKER_HOST = "127.0.0.1"
+AC_DEFAULT_BROKER_PORT = 8765
+AC_DEFAULT_BROKER_CHANNEL = 0
+AC_DEFAULT_LCR_DEBUG_CADENCE_S = 1.0
+AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT = 120
 AC_LEGACY_INHERITED_BASES = {"anneal_log", "ac_susceptibility_log"}
 AC_PLOT_REFRESH_INTERVAL_S = 1.0
 AC_PLOT_RECENT_POINTS = 800
@@ -104,6 +116,10 @@ AC_PLOT_SPREAD_PIXELS = {
 AC_UI_TELEMETRY_INTERVAL_MS = 16
 AC_UI_TELEMETRY_REPORT_TICKS = 60
 AC_DIAGNOSTICS_DEFAULT_PATH = AC_DEFAULT_LOG_DIR / "ac_susc_diagnostics.jsonl"
+_AC_EXCEPTION_HOOKS_INSTALLED = False
+_AC_PREVIOUS_SYS_EXCEPTHOOK: Any | None = None
+_AC_PREVIOUS_THREADING_EXCEPTHOOK: Any | None = None
+_AC_PREVIOUS_QT_MESSAGE_HANDLER: Any | None = None
 AC_LCR_SLOW_RETRY_MIN_FREQUENCY_HZ = 1000.0
 AC_LCR_SLOW_RETRY_MIN_RATE_HZ = 20.0
 AC_LCR_SLOW_RETRY_CHECK_S = 3.0
@@ -118,6 +134,82 @@ LEGACY_DEFAULT_LEVEL_TEXTS = {"0.1, 0.3, 1.0", "0.1, 0.3, 1"}
 LEGACY_CURRENT_LEVEL_TEXTS = {"1, 5, 10, 20", "1, 5, 20", "1, 5, 10, 20.0"}
 DEFAULT_CURRENT_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_CURRENT_PRESETS_MA)
 DEFAULT_VOLTAGE_LEVEL_TEXT = ", ".join(f"{value:g}" for value in LCR_FRONT_PANEL_VOLTAGE_PRESETS_V)
+
+
+def _write_ac_global_diagnostic(event: str, **payload: Any) -> None:
+    try:
+        AC_DIAGNOSTICS_DEFAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            "event": event,
+            **payload,
+        }
+        with AC_DIAGNOSTICS_DEFAULT_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def _install_ac_exception_hooks() -> None:
+    global _AC_EXCEPTION_HOOKS_INSTALLED
+    global _AC_PREVIOUS_SYS_EXCEPTHOOK
+    global _AC_PREVIOUS_THREADING_EXCEPTHOOK
+    global _AC_PREVIOUS_QT_MESSAGE_HANDLER
+    if _AC_EXCEPTION_HOOKS_INSTALLED:
+        return
+    _AC_EXCEPTION_HOOKS_INSTALLED = True
+    _AC_PREVIOUS_SYS_EXCEPTHOOK = sys.excepthook
+    _AC_PREVIOUS_THREADING_EXCEPTHOOK = getattr(threading, "excepthook", None)
+
+    def _sys_hook(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
+        _write_ac_global_diagnostic(
+            "sys_excepthook",
+            exception_type=getattr(exc_type, "__name__", str(exc_type)),
+            message=str(exc),
+            traceback="".join(traceback.format_exception(exc_type, exc, tb)),
+        )
+        previous = _AC_PREVIOUS_SYS_EXCEPTHOOK
+        if callable(previous):
+            previous(exc_type, exc, tb)
+
+    def _thread_hook(args: Any) -> None:
+        _write_ac_global_diagnostic(
+            "threading_excepthook",
+            thread=getattr(getattr(args, "thread", None), "name", ""),
+            exception_type=getattr(getattr(args, "exc_type", None), "__name__", str(getattr(args, "exc_type", ""))),
+            message=str(getattr(args, "exc_value", "")),
+            traceback="".join(
+                traceback.format_exception(
+                    getattr(args, "exc_type", BaseException),
+                    getattr(args, "exc_value", None),
+                    getattr(args, "exc_traceback", None),
+                )
+            ),
+        )
+        previous = _AC_PREVIOUS_THREADING_EXCEPTHOOK
+        if callable(previous):
+            previous(args)
+
+    sys.excepthook = _sys_hook
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _thread_hook  # type: ignore[assignment]
+
+    def _qt_message_handler(mode: Any, context: Any, message: str) -> None:
+        mode_name = getattr(mode, "name", str(mode))
+        if "Fatal" in mode_name or "Critical" in mode_name:
+            _write_ac_global_diagnostic(
+                "qt_message",
+                mode=mode_name,
+                message=str(message),
+                file=getattr(context, "file", ""),
+                line=getattr(context, "line", 0),
+                function=getattr(context, "function", ""),
+            )
+        previous = _AC_PREVIOUS_QT_MESSAGE_HANDLER
+        if callable(previous):
+            previous(mode, context, message)
+
+    _AC_PREVIOUS_QT_MESSAGE_HANDLER = QtCore.qInstallMessageHandler(_qt_message_handler)
 
 
 class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
@@ -136,6 +228,21 @@ class CompactDoubleSpinBox(QtWidgets.QDoubleSpinBox):
             return float(cleaned)
         except ValueError:
             return float(self.value())
+
+
+class AcValueChip(QtWidgets.QPushButton):
+    """Small checkable value button used for common LCR scan presets."""
+
+    def __init__(self, label: str, value: float, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(label, parent)
+        self.value = float(value)
+        self.setCheckable(True)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(
+            "QPushButton { padding: 3px 7px; border-radius: 4px; }"
+            "QPushButton:checked { background: #265f72; border: 1px solid #39a9c4; }"
+        )
 
 
 @dataclass
@@ -288,6 +395,7 @@ class AcBaselineWorker(QtCore.QObject):
         point_duration_s: float,
         settle_s: float,
         total_planned_s: float,
+        lcr_correction: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.meter = meter
@@ -296,6 +404,7 @@ class AcBaselineWorker(QtCore.QObject):
         self.point_duration_s = max(0.0, float(point_duration_s))
         self.settle_s = max(0.0, float(settle_s))
         self.total_planned_s = max(0.001, float(total_planned_s))
+        self.lcr_correction = lcr_correction
         self._stop_requested = False
 
     def request_stop(self) -> None:
@@ -321,6 +430,7 @@ class AcBaselineWorker(QtCore.QObject):
                     self.plan,
                     point_duration_s=self.point_duration_s,
                     settle_s=self.settle_s,
+                    lcr_correction=self.lcr_correction,
                 )
                 for setting_index, setting in enumerate(self.plan, start=1):
                     if self._stop_requested:
@@ -473,6 +583,31 @@ class AcBaselineWorker(QtCore.QObject):
         fh.flush()
 
 
+class LcrCorrectionWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(str, object, object)
+    failed = QtCore.pyqtSignal(str, str)
+
+    def __init__(self, *, meter: Any, kind: str, timeout_s: float = 120.0) -> None:
+        super().__init__()
+        self.meter = meter
+        self.kind = kind
+        self.timeout_s = max(1.0, float(timeout_s))
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            if self.kind == "open":
+                result = self.meter.run_open_lcr_correction(timeout_s=self.timeout_s)
+            elif self.kind == "short":
+                result = self.meter.run_short_lcr_correction(timeout_s=self.timeout_s)
+            else:
+                raise ValueError(f"unsupported LCR correction kind: {self.kind}")
+            status = self.meter.correction_status()
+            self.finished.emit(self.kind, result, status)
+        except Exception as exc:
+            self.failed.emit(self.kind, str(exc))
+
+
 class AcSweepWorker(QtCore.QObject):
     row_ready = QtCore.pyqtSignal(object)
     finished = QtCore.pyqtSignal(str, bool)
@@ -521,6 +656,14 @@ class AcSweepWorker(QtCore.QObject):
             if self._stop_requested:
                 self.finished.emit(str(self.output_path), True)
                 return
+            sweep.record_ac_run_exception(self.output_path, exc, phase="worker_exception")
+            _write_ac_global_diagnostic(
+                "ac_sweep_worker_exception",
+                output_path=str(self.output_path),
+                message=str(exc),
+                exception_type=type(exc).__name__,
+                traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            )
             self.failed.emit(str(exc))
 
 
@@ -626,6 +769,7 @@ class MainWindow(CurrentAnnealingWindow):
     """Current annealing logger extended with LCR-6200 measurements."""
 
     def __init__(self) -> None:
+        _install_ac_exception_hooks()
         self.ac_settings = QtCore.QSettings("microwire", "ac_susceptibility_logger")
         self.lcr_meter: Lcr6000Serial | None = None
         self._lcr_plan: list[Lcr6000Settings] = []
@@ -661,8 +805,22 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_psu_backend = "hmp4030"
         self._ac_psu_resource = ""
         self._ac_psu_baudrate = 115200
+        self._ac_shared_broker_host = AC_DEFAULT_BROKER_HOST
+        self._ac_shared_broker_port = AC_DEFAULT_BROKER_PORT
+        self._ac_shared_broker_channel = AC_DEFAULT_BROKER_CHANNEL
+        self._ac_shared_broker_channel_confirmed = False
+        self._ac_lcr_chip_syncing = False
+        self._lcr_correction_status = LcrCorrectionStatus(
+            open_enabled=None,
+            short_enabled=None,
+            checked_utc="",
+            raw_open_state="",
+            raw_short_state="",
+        )
+        self._lcr_correction_last_result: LcrCorrectionResult | None = None
         self._ac_progress_units = "count"
         self._ac_active_sweep_config: sweep.AcSweepConfig | None = None
+        self._ac_active_output_path: Path | None = None
         self._ac_worker_thread: QtCore.QThread | None = None
         self._ac_worker: QtCore.QObject | None = None
         self._ac_psu_watchdog: AcPsuWatchdogGuard | None = None
@@ -1744,6 +1902,7 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(hidden, QtWidgets.QLineEdit):
             hidden.setText(full)
         self.f_name = full
+        self._refresh_ac_output_status()
         try:
             ready = bool(getattr(self, "_ac_output_settings_ready", False))
         except RuntimeError:
@@ -1761,6 +1920,7 @@ class MainWindow(CurrentAnnealingWindow):
             pass
 
     def build_log_path(self) -> str:  # type: ignore[override]
+        self._ac_output_path_fallback_reason = ""
         try:
             directory = self.ui.lineEdit_log_dir.text().strip() or str(AC_DEFAULT_LOG_DIR)
             base = self.ui.lineEdit_log_file.text().strip() or AC_DEFAULT_SWEEP_BASE
@@ -1770,8 +1930,43 @@ class MainWindow(CurrentAnnealingWindow):
                 base = base[:-4]
             os.makedirs(directory, exist_ok=True)
             return os.path.join(directory, f"{base}.tsv")
-        except Exception:
-            return str(AC_DEFAULT_LOG_DIR / f"{AC_DEFAULT_SWEEP_BASE}.tsv")
+        except Exception as exc:
+            self._ac_output_path_fallback_reason = str(exc)
+            fallback = AC_DEFAULT_LOG_DIR / f"{AC_DEFAULT_SWEEP_BASE}.tsv"
+            try:
+                fallback.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            return str(fallback)
+
+    def _refresh_ac_output_status(self) -> None:
+        try:
+            label = getattr(self, "label_ac_output_status", None)
+        except RuntimeError:
+            return
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        try:
+            path_text = str(getattr(self, "f_name", "") or "")
+            if not path_text:
+                path_text = self.build_log_path()
+        except RuntimeError:
+            return
+        fallback_reason = str(getattr(self, "_ac_output_path_fallback_reason", "") or "")
+        status_detail = self._format_ac_output_status_paths(path_text)
+        if fallback_reason:
+            label.setText(
+                "Output fallback: selected path is unavailable; "
+                f"using {path_text}. Reason: {fallback_reason}\n{status_detail}"
+            )
+            return
+        label.setText(f"Output path ready: {path_text}\n{status_detail}")
+
+    def _format_ac_output_status_paths(self, output_path: str | Path) -> str:
+        path = Path(output_path)
+        status_path = sweep.ac_run_status_path_for_output(path)
+        fallback_path = sweep.ac_run_status_fallback_path_for_output(path)
+        return f"Run status sidecar: {status_path}; local fallback: {fallback_path}"
 
     def handle_browse_log_dir(self) -> None:  # type: ignore[override]
         start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, "lineEdit_log_dir") else str(AC_DEFAULT_LOG_DIR)
@@ -1819,12 +2014,12 @@ class MainWindow(CurrentAnnealingWindow):
         if isinstance(serial_group, QtWidgets.QGroupBox):
             serial_group.hide()
 
-        group = QtWidgets.QGroupBox("Instrument setup", frame)
+        group = QtWidgets.QGroupBox("AC susceptibility workflow", frame)
         outer = QtWidgets.QVBoxLayout(group)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(8)
 
-        output_group = QtWidgets.QGroupBox("Output", group)
+        output_group = QtWidgets.QGroupBox("1. Output and resume", group)
         output_grid = QtWidgets.QGridLayout(output_group)
         output_grid.setColumnStretch(1, 1)
         output_grid.addWidget(getattr(self.ui, "label_log_dir"), 0, 0)
@@ -1852,31 +2047,49 @@ class MainWindow(CurrentAnnealingWindow):
         )
         self.label_ac_baseline_file.setWordWrap(True)
         output_grid.addWidget(self.label_ac_baseline_file, 2, 1, 1, 2)
+        self.label_ac_output_status = QtWidgets.QLabel("", output_group)
+        self.label_ac_output_status.setWordWrap(True)
+        self.label_ac_output_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        output_grid.addWidget(self.label_ac_output_status, 3, 1, 1, 2)
+        self.label_ac_resume_status = QtWidgets.QLabel(
+            "Resume point: use Continue from previous sweep; complete AC settings are skipped and partial settings repeat.",
+            output_group,
+        )
+        self.label_ac_resume_status.setWordWrap(True)
+        output_grid.addWidget(self.label_ac_resume_status, 4, 1, 1, 2)
         outer.addWidget(output_group)
+        self._refresh_ac_output_status()
 
-        hardware_group = QtWidgets.QGroupBox("Hardware", group)
+        hardware_group = QtWidgets.QGroupBox("2. Setup and hardware status", group)
         hardware_layout = QtWidgets.QVBoxLayout(hardware_group)
         hardware_layout.setContentsMargins(8, 8, 8, 8)
         hardware_layout.setSpacing(8)
-        hardware_top = QtWidgets.QHBoxLayout()
+        hardware_top = QtWidgets.QVBoxLayout()
         hardware_top.setContentsMargins(0, 0, 0, 0)
+        hardware_top.setSpacing(6)
         self.label_ac_hardware_status = QtWidgets.QLabel("Hardware not connected", hardware_group)
         self.label_ac_hardware_status.setWordWrap(True)
+        self.label_ac_hardware_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.pushButton_auto_setup = QtWidgets.QPushButton("Auto-connect hardware", hardware_group)
         self.pushButton_ac_hardware_details = QtWidgets.QToolButton(hardware_group)
         self.pushButton_ac_hardware_details.setText("Show hardware details")
         self.pushButton_ac_hardware_details.setCheckable(True)
         self.pushButton_ac_hardware_details.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-        hardware_top.addWidget(self.label_ac_hardware_status, stretch=1)
-        hardware_top.addWidget(self.pushButton_auto_setup)
-        hardware_top.addWidget(self.pushButton_ac_hardware_details)
+        hardware_buttons = QtWidgets.QHBoxLayout()
+        hardware_buttons.setContentsMargins(0, 0, 0, 0)
+        hardware_buttons.addWidget(self.pushButton_auto_setup)
+        hardware_buttons.addWidget(self.pushButton_ac_hardware_details)
+        hardware_buttons.addStretch(1)
+        hardware_top.addWidget(self.label_ac_hardware_status)
+        hardware_top.addLayout(hardware_buttons)
         hardware_layout.addLayout(hardware_top)
 
         self.frame_ac_hardware_details = QtWidgets.QFrame(hardware_group)
         details_grid = QtWidgets.QGridLayout(self.frame_ac_hardware_details)
         details_grid.setContentsMargins(0, 0, 0, 0)
+        details_grid.setHorizontalSpacing(8)
+        details_grid.setVerticalSpacing(6)
         details_grid.setColumnStretch(1, 1)
-        details_grid.setColumnStretch(3, 1)
         supply_combo = getattr(self.ui, "comboBox_supply", None)
         psu_port_combo = getattr(self.ui, "comboBox_port", None)
         baud_combo = getattr(self.ui, "comboBox_baudrate", None)
@@ -1884,11 +2097,37 @@ class MainWindow(CurrentAnnealingWindow):
             details_grid.addWidget(QtWidgets.QLabel("PSU:", self.frame_ac_hardware_details), 0, 0)
             details_grid.addWidget(supply_combo, 0, 1)
         if isinstance(psu_port_combo, QtWidgets.QComboBox):
-            details_grid.addWidget(QtWidgets.QLabel("PSU port:", self.frame_ac_hardware_details), 0, 2)
-            details_grid.addWidget(psu_port_combo, 0, 3)
+            self.label_ac_psu_port = QtWidgets.QLabel("PSU port:", self.frame_ac_hardware_details)
+            details_grid.addWidget(self.label_ac_psu_port, 1, 0)
+            details_grid.addWidget(psu_port_combo, 1, 1)
         if isinstance(baud_combo, QtWidgets.QComboBox):
-            details_grid.addWidget(QtWidgets.QLabel("Baud:", self.frame_ac_hardware_details), 1, 0)
-            details_grid.addWidget(baud_combo, 1, 1)
+            self.label_ac_psu_baud = QtWidgets.QLabel("Baud:", self.frame_ac_hardware_details)
+            details_grid.addWidget(self.label_ac_psu_baud, 2, 0)
+            details_grid.addWidget(baud_combo, 2, 1)
+        self.label_ac_broker_host = QtWidgets.QLabel("Broker host:", self.frame_ac_hardware_details)
+        self.lineEdit_ac_broker_host = QtWidgets.QLineEdit(self.frame_ac_hardware_details)
+        self.lineEdit_ac_broker_host.setText(AC_DEFAULT_BROKER_HOST)
+        self.spinBox_ac_broker_port = QtWidgets.QSpinBox(self.frame_ac_hardware_details)
+        self.spinBox_ac_broker_port.setRange(1, 65535)
+        self.spinBox_ac_broker_port.setValue(AC_DEFAULT_BROKER_PORT)
+        self.comboBox_ac_broker_channel = QtWidgets.QComboBox(self.frame_ac_hardware_details)
+        self.comboBox_ac_broker_channel.addItem("Select channel...", 0)
+        for channel in range(1, 5):
+            self.comboBox_ac_broker_channel.addItem(f"CH{channel}", channel)
+        self.comboBox_ac_broker_channel.setToolTip(
+            "Select the wired HMP channel explicitly. On the current shared bench, AC susceptibility uses CH1."
+        )
+        details_grid.addWidget(self.label_ac_broker_host, 3, 0)
+        details_grid.addWidget(self.lineEdit_ac_broker_host, 3, 1)
+        broker_row = QtWidgets.QHBoxLayout()
+        broker_row.setContentsMargins(0, 0, 0, 0)
+        self.label_ac_broker_port = QtWidgets.QLabel("Port:", self.frame_ac_hardware_details)
+        broker_row.addWidget(self.label_ac_broker_port)
+        broker_row.addWidget(self.spinBox_ac_broker_port)
+        self.label_ac_broker_channel = QtWidgets.QLabel("CH:", self.frame_ac_hardware_details)
+        broker_row.addWidget(self.label_ac_broker_channel)
+        broker_row.addWidget(self.comboBox_ac_broker_channel)
+        details_grid.addLayout(broker_row, 4, 1)
         connect_port_button = getattr(self.ui, "pushButton_connect_port", None)
         if isinstance(connect_port_button, QtWidgets.QPushButton):
             connect_port_button.hide()
@@ -1896,21 +2135,23 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_refresh_lcr_ports = QtWidgets.QPushButton("Refresh", group)
         self.pushButton_connect_lcr = QtWidgets.QPushButton("Connect LCR", group)
         self.pushButton_identify_lcr = QtWidgets.QPushButton("Identify", group)
-        details_grid.addWidget(QtWidgets.QLabel("LCR port:", self.frame_ac_hardware_details), 1, 2)
-        details_grid.addWidget(self.comboBox_lcr_port, 1, 3)
+        details_grid.addWidget(QtWidgets.QLabel("LCR port:", self.frame_ac_hardware_details), 5, 0)
+        details_grid.addWidget(self.comboBox_lcr_port, 5, 1)
         lcr_button_row = QtWidgets.QHBoxLayout()
         lcr_button_row.setContentsMargins(0, 0, 0, 0)
         lcr_button_row.addWidget(self.pushButton_refresh_lcr_ports)
         lcr_button_row.addWidget(self.pushButton_connect_lcr)
         lcr_button_row.addWidget(self.pushButton_identify_lcr)
-        details_grid.addLayout(lcr_button_row, 2, 2, 1, 2)
+        details_grid.addLayout(lcr_button_row, 6, 1)
         self.pushButton_identify_lcr.hide()
         self.frame_ac_hardware_details.hide()
         hardware_layout.addWidget(self.frame_ac_hardware_details)
         outer.addWidget(hardware_group)
         self.groupBox_ac_hardware = hardware_group
 
-        grid = QtWidgets.QGridLayout()
+        lcr_group = QtWidgets.QGroupBox("3. LCR measurement settings", group)
+        grid = QtWidgets.QGridLayout(lcr_group)
+        grid.setContentsMargins(8, 8, 8, 8)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         self.lineEdit_lcr_frequencies = QtWidgets.QLineEdit(group)
@@ -1942,6 +2183,18 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_lcr_all_frequencies = QtWidgets.QPushButton("All practical frequencies", group)
         self.pushButton_lcr_all_levels = QtWidgets.QPushButton("All currents", group)
         self.pushButton_measure_lcr_baseline = QtWidgets.QPushButton("Measure empty-coil baseline", group)
+        self.pushButton_lcr_open_correction = QtWidgets.QPushButton("Open", group)
+        self.pushButton_lcr_open_correction.setToolTip(
+            "Run AC open correction on the LCR meter with the fixture open and no DUT connected."
+        )
+        self.pushButton_lcr_short_correction = QtWidgets.QPushButton("Short", group)
+        self.pushButton_lcr_short_correction.setToolTip(
+            "Run AC short correction on the LCR meter with the fixture terminals shorted."
+        )
+        self.pushButton_lcr_disable_correction = QtWidgets.QPushButton("Disable", group)
+        self.pushButton_lcr_disable_correction.setToolTip("Disable stored LCR open and short correction.")
+        self.label_lcr_correction_status = QtWidgets.QLabel("Not checked", group)
+        self.label_lcr_correction_status.setWordWrap(True)
         self.label_ac_psu_status = QtWidgets.QLabel("", group)
         self.label_ac_psu_status.setWordWrap(True)
         self.spinBox_ac_voltage_limit = CompactDoubleSpinBox(group)
@@ -1972,6 +2225,18 @@ class MainWindow(CurrentAnnealingWindow):
         self.checkBox_ac_include_zero_current.setToolTip(
             "Add one no-current point before the PSU current loop. Useful because the OWON cannot regulate below about 10 mA."
         )
+        self.checkBox_ac_lcr_debug_log = QtWidgets.QCheckBox("Write LCR debug stream", group)
+        self.checkBox_ac_lcr_debug_log.setToolTip(
+            "Write a bounded JSONL sidecar during settle and measurement windows for transition debugging."
+        )
+        self.spinBox_ac_lcr_debug_cadence = CompactDoubleSpinBox(group)
+        self.spinBox_ac_lcr_debug_cadence.setRange(0.1, 60.0)
+        self.spinBox_ac_lcr_debug_cadence.setDecimals(3)
+        self.spinBox_ac_lcr_debug_cadence.setSuffix(" s")
+        self.spinBox_ac_lcr_debug_cadence.setValue(AC_DEFAULT_LCR_DEBUG_CADENCE_S)
+        self.spinBox_ac_lcr_debug_max_rows = QtWidgets.QSpinBox(group)
+        self.spinBox_ac_lcr_debug_max_rows.setRange(1, 10000)
+        self.spinBox_ac_lcr_debug_max_rows.setValue(AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT)
         self.spinBox_ac_dwell = CompactDoubleSpinBox(group)
         self.spinBox_ac_dwell.setRange(0.0, 3600.0)
         self.spinBox_ac_dwell.setDecimals(3)
@@ -1991,37 +2256,81 @@ class MainWindow(CurrentAnnealingWindow):
 
         self.lineEdit_lcr_frequencies.setPlaceholderText("10, 20, 50, 100, 200, 500, 1k, 2k, 5k, 10k, 20k, 50k, 100k, 200k")
         self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.5, 1, 5, 10, 20 mA")
+        self.lineEdit_lcr_frequencies.setVisible(False)
+        self.lineEdit_lcr_levels.setVisible(False)
+        self.frame_lcr_frequency_chips = self._build_lcr_chip_grid(
+            group,
+            DEFAULT_FREQUENCY_PRESETS_HZ,
+            formatter=self._format_lcr_frequency_chip,
+            columns=7,
+            changed=self._sync_lcr_frequencies_from_chips,
+        )
+        self.frame_lcr_level_chips = self._build_lcr_chip_grid(
+            group,
+            LCR_FRONT_PANEL_CURRENT_PRESETS_MA,
+            formatter=self._format_lcr_level_chip,
+            columns=6,
+            changed=self._sync_lcr_levels_from_chips,
+        )
+        self.toolButton_lcr_custom_lists = QtWidgets.QToolButton(group)
+        self.toolButton_lcr_custom_lists.setText("Custom lists")
+        self.toolButton_lcr_custom_lists.setCheckable(True)
+        self.toolButton_lcr_custom_lists.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        self.toolButton_lcr_custom_lists.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.frame_lcr_custom_lists = QtWidgets.QFrame(group)
+        custom_grid = QtWidgets.QGridLayout(self.frame_lcr_custom_lists)
+        custom_grid.setContentsMargins(0, 0, 0, 0)
+        custom_grid.setColumnStretch(1, 1)
+        custom_grid.addWidget(QtWidgets.QLabel("Frequency list:", self.frame_lcr_custom_lists), 0, 0)
+        custom_grid.addWidget(self.lineEdit_lcr_frequencies, 0, 1)
+        custom_grid.addWidget(self.pushButton_lcr_all_frequencies, 0, 2)
+        self.label_lcr_custom_levels = QtWidgets.QLabel("Excitation list:", self.frame_lcr_custom_lists)
+        custom_grid.addWidget(self.label_lcr_custom_levels, 1, 0)
+        custom_grid.addWidget(self.lineEdit_lcr_levels, 1, 1)
+        custom_grid.addWidget(self.pushButton_lcr_all_levels, 1, 2)
+        self.frame_lcr_custom_lists.hide()
+        self.lineEdit_lcr_frequencies.setVisible(True)
+        self.lineEdit_lcr_levels.setVisible(True)
 
         grid.addWidget(QtWidgets.QLabel("Frequencies:", group), 0, 0)
-        grid.addWidget(self.lineEdit_lcr_frequencies, 0, 1, 1, 3)
+        grid.addWidget(self.frame_lcr_frequency_chips, 0, 1, 1, 3)
         preset_row = QtWidgets.QHBoxLayout()
         preset_row.addWidget(self.pushButton_lcr_default_presets)
-        preset_row.addWidget(self.pushButton_lcr_all_frequencies)
-        preset_row.addWidget(self.pushButton_lcr_all_levels)
+        preset_row.addWidget(self.toolButton_lcr_custom_lists)
         preset_row.addStretch(1)
         grid.addLayout(preset_row, 1, 1, 1, 3)
         self.label_lcr_levels = QtWidgets.QLabel("LCR excitation current:", group)
         grid.addWidget(self.label_lcr_levels, 2, 0)
-        grid.addWidget(self.lineEdit_lcr_levels, 2, 1, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Model:", group), 3, 0)
+        grid.addWidget(self.frame_lcr_level_chips, 2, 1, 1, 3)
+        grid.addWidget(self.frame_lcr_custom_lists, 3, 1, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Model:", group), 4, 0)
         model_label = QtWidgets.QLabel("Ls-Rs", group)
         model_label.setToolTip("Recommended default for the overnight AC susceptibility workflow.")
-        grid.addWidget(model_label, 3, 1)
-        grid.addWidget(self.checkBox_lcr_model_lprp, 3, 2, 1, 2)
-        grid.addWidget(QtWidgets.QLabel("LCR speed:", group), 4, 0)
-        grid.addWidget(self.comboBox_lcr_aperture, 4, 1)
-        grid.addWidget(QtWidgets.QLabel("Monitor 1:", group), 4, 2)
-        grid.addWidget(self.comboBox_lcr_monitor1, 4, 3)
+        grid.addWidget(model_label, 4, 1)
+        grid.addWidget(self.checkBox_lcr_model_lprp, 4, 2, 1, 2)
+        grid.addWidget(QtWidgets.QLabel("LCR speed:", group), 5, 0)
+        grid.addWidget(self.comboBox_lcr_aperture, 5, 1)
+        grid.addWidget(QtWidgets.QLabel("Monitor 1:", group), 5, 2)
+        grid.addWidget(self.comboBox_lcr_monitor1, 5, 3)
         self.comboBox_lcr_monitor2.hide()
-        grid.addWidget(QtWidgets.QLabel("Excitation mode:", group), 5, 0)
-        grid.addWidget(self.comboBox_lcr_level_mode, 5, 1)
-        grid.addWidget(self.comboBox_lcr_function, 5, 2)
-        grid.addWidget(self.checkBox_lcr_model_lsrs, 5, 3)
-        grid.addWidget(self.checkBox_ac_plan_loops, 6, 0)
-        grid.addWidget(self.pushButton_apply_lcr_setting, 6, 3)
-        outer.addLayout(grid)
+        grid.addWidget(QtWidgets.QLabel("Excitation mode:", group), 6, 0)
+        grid.addWidget(self.comboBox_lcr_level_mode, 6, 1)
+        grid.addWidget(self.comboBox_lcr_function, 6, 2)
+        grid.addWidget(self.checkBox_lcr_model_lsrs, 6, 3)
+        grid.addWidget(QtWidgets.QLabel("Fixture correction:", group), 7, 0)
+        correction_row = QtWidgets.QHBoxLayout()
+        correction_row.setContentsMargins(0, 0, 0, 0)
+        correction_row.addWidget(self.pushButton_lcr_open_correction)
+        correction_row.addWidget(self.pushButton_lcr_short_correction)
+        correction_row.addWidget(self.pushButton_lcr_disable_correction)
+        grid.addLayout(correction_row, 7, 1)
+        grid.addWidget(self.label_lcr_correction_status, 7, 2, 1, 2)
+        grid.addWidget(self.checkBox_ac_plan_loops, 8, 0)
+        grid.addWidget(self.pushButton_apply_lcr_setting, 8, 3)
+        outer.addWidget(lcr_group)
+        self.groupBox_ac_lcr_plan = lcr_group
 
-        plan_group = QtWidgets.QGroupBox("Experiment plan", group)
+        plan_group = QtWidgets.QGroupBox("4. Measurement plan and live run", group)
         plan_grid = QtWidgets.QGridLayout(plan_group)
         plan_grid.setColumnStretch(1, 1)
         plan_grid.setColumnStretch(3, 1)
@@ -2047,25 +2356,46 @@ class MainWindow(CurrentAnnealingWindow):
         plan_grid.addWidget(self.label_ac_settle_time, 3, 0)
         plan_grid.addWidget(self.spinBox_ac_dwell, 3, 1)
         plan_grid.addWidget(self.checkBox_ac_include_zero_current, 3, 2, 1, 2)
-        plan_grid.addWidget(self.label_ac_sweep_estimate, 4, 0, 1, 4)
-        action_row = QtWidgets.QHBoxLayout()
-        action_row.addWidget(self.pushButton_measure_lcr_baseline)
-        action_row.addWidget(self.pushButton_run_ac_sweep)
-        action_row.addWidget(self.pushButton_continue_ac_sweep)
-        action_row.addWidget(self.pushButton_stop_ac_sweep)
+        plan_grid.addWidget(self.checkBox_ac_lcr_debug_log, 4, 0)
+        plan_grid.addWidget(QtWidgets.QLabel("Debug cadence:", plan_group), 4, 1)
+        plan_grid.addWidget(self.spinBox_ac_lcr_debug_cadence, 4, 2)
+        plan_grid.addWidget(self.spinBox_ac_lcr_debug_max_rows, 4, 3)
+        plan_grid.addWidget(self.label_ac_sweep_estimate, 5, 0, 1, 4)
+        action_row = QtWidgets.QGridLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setHorizontalSpacing(6)
+        action_row.setVerticalSpacing(6)
+        action_row.addWidget(self.pushButton_measure_lcr_baseline, 0, 0)
+        action_row.addWidget(self.pushButton_run_ac_sweep, 0, 1)
+        action_row.addWidget(self.pushButton_continue_ac_sweep, 1, 0)
+        action_row.addWidget(self.pushButton_stop_ac_sweep, 1, 1)
+        action_row.setColumnStretch(0, 1)
+        action_row.setColumnStretch(1, 1)
         self.frame_ac_plan_actions = QtWidgets.QFrame(plan_group)
         self.frame_ac_plan_actions.setLayout(action_row)
-        self.frame_ac_plan_actions.hide()
-        plan_grid.addWidget(self.frame_ac_plan_actions, 5, 0, 1, 4)
+        plan_grid.addWidget(self.frame_ac_plan_actions, 6, 0, 1, 4)
         outer.addWidget(plan_group)
         self.groupBox_ac_plan = plan_group
 
-        self.label_lcr_status = QtWidgets.QLabel("LCR not connected", group)
+        status_group = QtWidgets.QGroupBox("Run status and recovery", group)
+        status_layout = QtWidgets.QVBoxLayout(status_group)
+        status_layout.setContentsMargins(8, 8, 8, 8)
+        status_layout.setSpacing(6)
+        self.label_ac_broker_status = QtWidgets.QLabel("", status_group)
+        self.label_ac_broker_status.setWordWrap(True)
+        self.label_ac_broker_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        status_layout.addWidget(self.label_ac_broker_status)
+        self.label_lcr_status = QtWidgets.QLabel("Run state: idle; LCR not connected.", status_group)
         self.label_lcr_status.setWordWrap(True)
-        outer.addWidget(self.label_lcr_status)
+        self.label_lcr_status.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        status_layout.addWidget(self.label_lcr_status)
+        outer.addWidget(status_group)
+        self.groupBox_ac_status = status_group
 
         cast(QtWidgets.QVBoxLayout, layout).addWidget(group)
         self.groupBox_lcr_settings = group
+        self._refresh_ac_broker_status()
+        self._make_ac_settings_panel_width_friendly()
 
         self.pushButton_refresh_lcr_ports.clicked.connect(self.populate_lcr_ports)
         self.pushButton_connect_lcr.clicked.connect(self.handle_connect_lcr_clicked)
@@ -2073,6 +2403,9 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_auto_setup.clicked.connect(self.handle_auto_setup_clicked)
         self.pushButton_ac_hardware_details.toggled.connect(self._set_ac_hardware_details_visible)
         self.pushButton_apply_lcr_setting.clicked.connect(self.handle_apply_lcr_setting_clicked)
+        self.pushButton_lcr_open_correction.clicked.connect(lambda: self.handle_lcr_correction_clicked("open"))
+        self.pushButton_lcr_short_correction.clicked.connect(lambda: self.handle_lcr_correction_clicked("short"))
+        self.pushButton_lcr_disable_correction.clicked.connect(self.handle_disable_lcr_correction_clicked)
         self.pushButton_measure_lcr_baseline.clicked.connect(self.handle_measure_lcr_baseline_clicked)
         self.pushButton_run_ac_sweep.clicked.connect(self.handle_run_ac_sweep_clicked)
         self.pushButton_continue_ac_sweep.clicked.connect(self.handle_continue_ac_sweep_clicked)
@@ -2080,17 +2413,25 @@ class MainWindow(CurrentAnnealingWindow):
         self.pushButton_lcr_default_presets.clicked.connect(self.apply_default_lcr_presets)
         self.pushButton_lcr_all_frequencies.clicked.connect(self.apply_all_lcr_frequencies)
         self.pushButton_lcr_all_levels.clicked.connect(self.apply_all_lcr_levels)
+        self.toolButton_lcr_custom_lists.toggled.connect(self._set_lcr_custom_lists_visible)
         self.comboBox_lcr_level_mode.currentIndexChanged.connect(lambda *_args: self._handle_lcr_level_mode_changed())
         for shared in (
             getattr(self.ui, "comboBox_supply", None),
             getattr(self.ui, "comboBox_port", None),
             getattr(self.ui, "comboBox_baudrate", None),
+            self.lineEdit_ac_broker_host,
+            self.spinBox_ac_broker_port,
         ):
-            if isinstance(shared, QtWidgets.QComboBox):
-                shared.currentIndexChanged.connect(lambda *_args: self._sync_ac_psu_from_shared_controls())
+            signal = getattr(shared, "currentIndexChanged", None) or getattr(shared, "valueChanged", None) or getattr(shared, "textChanged", None)
+            if signal is not None:
+                signal.connect(lambda *_args: self._sync_ac_psu_from_shared_controls())
+        self.comboBox_ac_broker_channel.currentIndexChanged.connect(
+            lambda *_args: self._handle_ac_broker_channel_changed()
+        )
         for edit in (self.lineEdit_lcr_frequencies, self.lineEdit_lcr_levels):
             edit.editingFinished.connect(self._store_lcr_settings)
             edit.editingFinished.connect(self._update_ac_sweep_estimate)
+            edit.editingFinished.connect(self._sync_lcr_chips_from_text)
         for combo in (
             self.comboBox_lcr_level_mode,
             self.comboBox_lcr_function,
@@ -2115,17 +2456,192 @@ class MainWindow(CurrentAnnealingWindow):
             self.comboBox_ac_direction,
             self.spinBox_ac_dwell,
             self.spinBox_ac_point_duration,
+            self.checkBox_ac_lcr_debug_log,
+            self.spinBox_ac_lcr_debug_cadence,
+            self.spinBox_ac_lcr_debug_max_rows,
         ):
             signal = getattr(widget, "currentIndexChanged", None) or getattr(widget, "valueChanged", None)
+            signal = signal or getattr(widget, "toggled", None)
             if signal is not None:
                 signal.connect(lambda *_args: self._store_lcr_settings())
                 signal.connect(lambda *_args: self._update_ac_sweep_estimate())
         self._install_ac_wheel_guard(group)
 
+    def _make_ac_settings_panel_width_friendly(self) -> None:
+        scroll = getattr(getattr(self, "ui", None), "left_scroll", None)
+        if isinstance(scroll, QtWidgets.QScrollArea):
+            scroll.setMinimumWidth(540)
+            scroll.setMaximumWidth(660)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            viewport = scroll.widget()
+            if isinstance(viewport, QtWidgets.QWidget):
+                viewport.setMinimumWidth(0)
+                viewport.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Ignored,
+                    QtWidgets.QSizePolicy.Policy.Preferred,
+                )
+            parent = scroll.parentWidget()
+            if isinstance(parent, QtWidgets.QWidget):
+                parent.setMinimumWidth(540)
+                parent.setMaximumWidth(660)
+        for widget in self.groupBox_lcr_settings.findChildren(
+            (
+                QtWidgets.QComboBox,
+                QtWidgets.QLineEdit,
+                QtWidgets.QAbstractSpinBox,
+                QtWidgets.QPushButton,
+                QtWidgets.QToolButton,
+            )
+        ):
+            widget.setMinimumWidth(0)
+            policy = widget.sizePolicy()
+            if isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QComboBox, QtWidgets.QAbstractSpinBox)):
+                widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, policy.verticalPolicy())
+            if isinstance(widget, QtWidgets.QComboBox):
+                widget.setMinimumContentsLength(0)
+                widget.setSizeAdjustPolicy(
+                    QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+                )
+
+    def _build_lcr_chip_grid(
+        self,
+        parent: QtWidgets.QWidget,
+        values: Sequence[float],
+        *,
+        formatter: Callable[[float], str],
+        columns: int,
+        changed: Callable[[], None],
+    ) -> QtWidgets.QFrame:
+        frame = QtWidgets.QFrame(parent)
+        layout = QtWidgets.QGridLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(4)
+        layout.setVerticalSpacing(4)
+        buttons: list[AcValueChip] = []
+        for index, value in enumerate(values):
+            button = AcValueChip(formatter(float(value)), float(value), frame)
+            button.toggled.connect(lambda _checked=False, callback=changed: callback())
+            row, column = divmod(index, max(1, int(columns)))
+            layout.addWidget(button, row, column)
+            buttons.append(button)
+        for column in range(max(1, int(columns))):
+            layout.setColumnStretch(column, 1)
+        frame.setProperty("_ac_lcr_chip_buttons", buttons)
+        return frame
+
+    @staticmethod
+    def _format_lcr_frequency_chip(value_hz: float) -> str:
+        if value_hz >= 1000.0 and math.isclose(value_hz % 1000.0, 0.0, abs_tol=1e-9):
+            return f"{value_hz / 1000.0:g} kHz"
+        return f"{value_hz:g} Hz"
+
+    def _format_lcr_level_chip(self, value: float) -> str:
+        mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+        unit = "mA" if mode == "current" else "V"
+        return f"{value:g} {unit}"
+
+    def _lcr_chip_buttons(self, frame: QtWidgets.QFrame) -> list[AcValueChip]:
+        buttons = frame.property("_ac_lcr_chip_buttons")
+        if isinstance(buttons, list):
+            return [button for button in buttons if isinstance(button, AcValueChip)]
+        return []
+
+    def _set_lcr_custom_lists_visible(self, visible: bool) -> None:
+        self.frame_lcr_custom_lists.setVisible(bool(visible))
+        self.toolButton_lcr_custom_lists.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow if visible else QtCore.Qt.ArrowType.RightArrow
+        )
+
+    def _sync_lcr_frequencies_from_chips(self) -> None:
+        if bool(getattr(self, "_ac_lcr_chip_syncing", False)):
+            return
+        values = [button.value for button in self._lcr_chip_buttons(self.frame_lcr_frequency_chips) if button.isChecked()]
+        self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(values))
+        self._store_lcr_settings()
+        self._update_ac_sweep_estimate()
+
+    def _sync_lcr_levels_from_chips(self) -> None:
+        if bool(getattr(self, "_ac_lcr_chip_syncing", False)):
+            return
+        values = [button.value for button in self._lcr_chip_buttons(self.frame_lcr_level_chips) if button.isChecked()]
+        self.lineEdit_lcr_levels.setText(self._format_numeric_list(values))
+        self._store_lcr_settings()
+        self._update_ac_sweep_estimate()
+
+    def _sync_lcr_chips_from_text(self) -> None:
+        if not hasattr(self, "frame_lcr_frequency_chips") or not hasattr(self, "frame_lcr_level_chips"):
+            return
+        self._ac_lcr_chip_syncing = True
+        try:
+            self._sync_lcr_chip_frame_from_text(
+                self.frame_lcr_frequency_chips,
+                self.lineEdit_lcr_frequencies.text(),
+                parser=lambda text: parse_numeric_list(text, quantity="frequency"),
+            )
+            level_mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+            if level_mode == "current":
+                level_parser = lambda text: [value * 1000.0 for value in self._parse_lcr_levels(text, level_mode=level_mode)]
+            else:
+                level_parser = lambda text: self._parse_lcr_levels(text, level_mode=level_mode)
+            self._sync_lcr_chip_frame_from_text(
+                self.frame_lcr_level_chips,
+                self.lineEdit_lcr_levels.text(),
+                parser=level_parser,
+            )
+        finally:
+            self._ac_lcr_chip_syncing = False
+
+    def _sync_lcr_chip_frame_from_text(
+        self,
+        frame: QtWidgets.QFrame,
+        text: str,
+        *,
+        parser: Callable[[str], list[float]],
+    ) -> None:
+        try:
+            selected_values = parser(text)
+        except Exception:
+            selected_values = []
+        for button in self._lcr_chip_buttons(frame):
+            button.setChecked(
+                any(math.isclose(float(button.value), float(value), rel_tol=1e-9, abs_tol=1e-9) for value in selected_values)
+            )
+
+    def _rebuild_lcr_level_chips(self) -> None:
+        mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
+        values = LCR_FRONT_PANEL_CURRENT_PRESETS_MA if mode == "current" else LCR_FRONT_PANEL_VOLTAGE_PRESETS_V
+        layout = self.frame_lcr_level_chips.layout()
+        if layout is not None:
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+        rebuilt = self._build_lcr_chip_grid(
+            self.frame_lcr_level_chips.parentWidget() or self,
+            values,
+            formatter=self._format_lcr_level_chip,
+            columns=6,
+            changed=self._sync_lcr_levels_from_chips,
+        )
+        new_buttons = self._lcr_chip_buttons(rebuilt)
+        if layout is not None:
+            for index, button in enumerate(new_buttons):
+                button.setParent(self.frame_lcr_level_chips)
+                row, column = divmod(index, 6)
+                layout.addWidget(button, row, column)
+            self.frame_lcr_level_chips.setProperty("_ac_lcr_chip_buttons", new_buttons)
+            rebuilt.deleteLater()
+        self._sync_lcr_chips_from_text()
+
     def _simplify_inherited_ac_workflow(self) -> None:
         settings_menu_action = self._find_menu_action("&Settings")
         if settings_menu_action is not None:
             settings_menu_action.setVisible(False)
+        inherited_progress = getattr(self.ui, "progressBar_process", None)
+        if isinstance(inherited_progress, QtWidgets.QProgressBar):
+            inherited_progress.hide()
         process_frame = getattr(self.ui, "frame_process_settings", None)
         if isinstance(process_frame, QtWidgets.QWidget):
             process_frame.hide()
@@ -2149,18 +2665,11 @@ class MainWindow(CurrentAnnealingWindow):
                 pass
             button.clicked.connect(slot)
         sticky_run = getattr(self.ui, "pushButton_show_history", None)
-        sticky_stop = getattr(self.ui, "pushButton_reverse_now", None)
-        if isinstance(sticky_run, QtWidgets.QPushButton) and isinstance(sticky_stop, QtWidgets.QPushButton):
+        if isinstance(sticky_run, QtWidgets.QPushButton):
             button_frame = sticky_run.parentWidget()
-            layout = button_frame.layout() if isinstance(button_frame, QtWidgets.QWidget) else None
-            if isinstance(layout, QtWidgets.QBoxLayout):
-                self.pushButton_continue_ac_sweep_sticky = QtWidgets.QPushButton(
-                    "Continue from previous sweep...",
-                    button_frame,
-                )
-                self.pushButton_continue_ac_sweep_sticky.clicked.connect(self.handle_continue_ac_sweep_clicked)
-                stop_index = layout.indexOf(sticky_stop)
-                layout.insertWidget(max(0, stop_index), self.pushButton_continue_ac_sweep_sticky)
+            if isinstance(button_frame, QtWidgets.QWidget):
+                button_frame.hide()
+        self.pushButton_continue_ac_sweep_sticky = self.pushButton_continue_ac_sweep
 
     def _find_menu_action(self, text: str) -> QtGui.QAction | None:
         menu_bar = self.menuBar()
@@ -2171,27 +2680,20 @@ class MainWindow(CurrentAnnealingWindow):
         return None
 
     def _install_ac_sticky_progress(self) -> None:
-        start_button = getattr(self.ui, "pushButton_start_process", None)
-        button_frame = start_button.parentWidget() if isinstance(start_button, QtWidgets.QPushButton) else None
-        container = button_frame.parentWidget() if isinstance(button_frame, QtWidgets.QWidget) else None
-        layout = container.layout() if isinstance(container, QtWidgets.QWidget) else None
-        if layout is None or button_frame is None:
+        plan_group = getattr(self, "groupBox_ac_plan", None)
+        plan_layout = plan_group.layout() if isinstance(plan_group, QtWidgets.QGroupBox) else None
+        if not isinstance(plan_layout, QtWidgets.QGridLayout):
             return
-        self.label_ac_current_task = QtWidgets.QLabel("Current task: idle", container)
+        self.label_ac_current_task = QtWidgets.QLabel("Current task: idle", plan_group)
         self.label_ac_current_task.setWordWrap(True)
-        self.progress_ac_run = QtWidgets.QProgressBar(container)
+        self.label_ac_current_task.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.progress_ac_run = QtWidgets.QProgressBar(plan_group)
         self.progress_ac_run.setRange(0, 100)
         self.progress_ac_run.setValue(0)
         self.progress_ac_run.setTextVisible(True)
         self.progress_ac_run.setFormat("AC progress: idle")
-        button_frame_index = layout.indexOf(button_frame)
-        if button_frame_index >= 0:
-            layout.insertWidget(button_frame_index, self.label_ac_current_task)
-            button_frame_index = layout.indexOf(button_frame)
-            layout.insertWidget(button_frame_index, self.progress_ac_run)
-        else:
-            layout.addWidget(self.label_ac_current_task)
-            layout.addWidget(self.progress_ac_run)
+        plan_layout.addWidget(self.label_ac_current_task, 7, 0, 1, 4)
+        plan_layout.addWidget(self.progress_ac_run, 8, 0, 1, 4)
 
     def _load_lcr_settings(self) -> None:
         self._ac_loading_settings = True
@@ -2234,12 +2736,22 @@ class MainWindow(CurrentAnnealingWindow):
                 legacy_repeats = float(self.ac_settings.value("sweep_repeats", 10))
                 point_duration = max(1.0, legacy_repeats)
             self.spinBox_ac_point_duration.setValue(float(point_duration))
+            self.checkBox_ac_lcr_debug_log.setChecked(
+                str(self.ac_settings.value("lcr_debug_enabled", 0)).lower() in {"1", "true", "yes"}
+            )
+            self.spinBox_ac_lcr_debug_cadence.setValue(
+                float(self.ac_settings.value("lcr_debug_cadence_s", AC_DEFAULT_LCR_DEBUG_CADENCE_S))
+            )
+            self.spinBox_ac_lcr_debug_max_rows.setValue(
+                int(self.ac_settings.value("lcr_debug_max_rows_per_point", AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT))
+            )
             self._load_ac_psu_settings()
             self._apply_ac_psu_controls()
             self._refresh_ac_psu_status()
             include_zero = self.ac_settings.value("include_zero_current", 0)
             self.checkBox_ac_include_zero_current.setChecked(str(include_zero).lower() in {"1", "true", "yes"})
             self._refresh_lcr_level_mode_ui(reset_levels=False)
+            self._sync_lcr_chips_from_text()
         finally:
             self._ac_loading_settings = False
 
@@ -2280,6 +2792,10 @@ class MainWindow(CurrentAnnealingWindow):
         self.ac_settings.setValue("dwell_s", float(self.spinBox_ac_dwell.value()))
         self.ac_settings.setValue("point_duration_s", float(self.spinBox_ac_point_duration.value()))
         self.ac_settings.setValue("include_zero_current", int(self.checkBox_ac_include_zero_current.isChecked()))
+        self.ac_settings.setValue("lcr_debug_enabled", int(self.checkBox_ac_lcr_debug_log.isChecked()))
+        self.ac_settings.setValue("lcr_debug_cadence_s", float(self.spinBox_ac_lcr_debug_cadence.value()))
+        self.ac_settings.setValue("lcr_debug_max_rows_per_point", int(self.spinBox_ac_lcr_debug_max_rows.value()))
+        self.ac_settings.sync()
 
     def _handle_lcr_level_mode_changed(self) -> None:
         if not bool(getattr(self, "_ac_loading_settings", False)):
@@ -2316,18 +2832,22 @@ class MainWindow(CurrentAnnealingWindow):
         mode = str(self.comboBox_lcr_level_mode.currentData() or "current")
         if mode == "current":
             self.label_lcr_levels.setText("LCR excitation current:")
+            self.label_lcr_custom_levels.setText("Excitation list:")
             self.lineEdit_lcr_levels.setPlaceholderText("0.1, 0.5, 1, 5, 10, 20 mA")
             self.pushButton_lcr_all_levels.setText("All currents")
             self.comboBox_lcr_monitor1.setCurrentText("IAC")
             self.comboBox_lcr_monitor2.setCurrentText("VAC")
         else:
             self.label_lcr_levels.setText("LCR excitation voltage:")
+            self.label_lcr_custom_levels.setText("Excitation list:")
             self.lineEdit_lcr_levels.setPlaceholderText("0.01, 0.1, 0.3, 0.5, 1, 1.5, 2 V")
             self.pushButton_lcr_all_levels.setText("All voltages")
             self.comboBox_lcr_monitor1.setCurrentText("VAC")
             self.comboBox_lcr_monitor2.setCurrentText("IAC")
         if reset_levels:
             self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
+        if hasattr(self, "frame_lcr_level_chips"):
+            self._rebuild_lcr_level_chips()
 
     def populate_lcr_ports(self) -> None:
         self.comboBox_lcr_port.clear()
@@ -2361,6 +2881,17 @@ class MainWindow(CurrentAnnealingWindow):
     def auto_detect_power_supply(self) -> list[sweep.PowerSupplyCandidate]:
         self._auto_detect_used_connected_psu = False
         backend = self._selected_ac_psu_backend()
+        if backend == "shared_hmp_broker":
+            self._sync_ac_psu_from_shared_controls()
+            try:
+                self._ensure_ac_shared_broker_running()
+                self.label_lcr_status.setText(
+                    f"Shared HMP broker ready for AC susceptibility on {self._ac_broker_resource_display()}."
+                )
+            except Exception as exc:
+                self.label_lcr_status.setText(f"Shared HMP broker connection failed: {exc}")
+            self._store_lcr_settings()
+            return []
         resource = self._selected_ac_psu_resource()
         if bool(getattr(self, "is_connected", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
             self._auto_detect_used_connected_psu = True
@@ -2411,8 +2942,9 @@ class MainWindow(CurrentAnnealingWindow):
                     self.lcr_meter = Lcr6000Serial(port, baudrate=DEFAULT_BAUDRATE)
                     idn = self.lcr_meter.identify()
                     self.pushButton_connect_lcr.setText("Disconnect LCR")
-                    self.label_lcr_status.setText(f"Connected: {idn or port}")
+                    self.label_lcr_status.setText(f"Connected: {idn or port}; idle, not sweeping.")
                     self._configure_lcr_for_current_index()
+                    self._refresh_lcr_correction_status()
                     lcr_connected = True
                 except Exception as exc:
                     self.lcr_meter = None
@@ -2422,7 +2954,13 @@ class MainWindow(CurrentAnnealingWindow):
         if not candidates:
             backend = self._selected_ac_psu_backend()
             resource = self._selected_ac_psu_resource()
-            if bool(getattr(self, "_auto_detect_used_connected_psu", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
+            if backend == "shared_hmp_broker":
+                self._sync_ac_psu_from_shared_controls()
+                if "Shared HMP broker" not in self.label_lcr_status.text():
+                    self.label_lcr_status.setText(
+                        "Kept Shared HMP broker selection; choose the broker channel manually."
+                    )
+            elif bool(getattr(self, "_auto_detect_used_connected_psu", False)) and resource and backend in sweep.POWER_SUPPLY_PROFILES:
                 self.label_lcr_status.setText(
                     f"Using connected AC {sweep.POWER_SUPPLY_PROFILES[backend]['label']} on {resource}; "
                     "skipped ID probe because the port is already open."
@@ -2440,12 +2978,8 @@ class MainWindow(CurrentAnnealingWindow):
                 )
         else:
             self.label_lcr_status.setText(
-                f"Auto-detect selected {candidates[0].label} and LCR-6200-safe sweep defaults."
+                f"Auto-detect selected {candidates[0].label}; kept selected LCR sweep plan."
             )
-        self.apply_all_lcr_frequencies()
-        self.apply_all_lcr_levels()
-        self.checkBox_lcr_model_lsrs.setChecked(True)
-        self.checkBox_lcr_model_lprp.setChecked(False)
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
         self._refresh_ac_psu_status()
@@ -2456,7 +2990,8 @@ class MainWindow(CurrentAnnealingWindow):
             self.lcr_meter.close()
             self.lcr_meter = None
             self.pushButton_connect_lcr.setText("Connect LCR")
-            self.label_lcr_status.setText("LCR disconnected")
+            self.label_lcr_status.setText("Run state: idle; LCR disconnected.")
+            self._refresh_lcr_correction_status()
             self._refresh_ac_hardware_status()
             return
         port = str(self.comboBox_lcr_port.currentData() or "").strip()
@@ -2472,8 +3007,9 @@ class MainWindow(CurrentAnnealingWindow):
             self.label_lcr_status.setText(f"LCR connection failed: {exc}")
             return
         self.pushButton_connect_lcr.setText("Disconnect LCR")
-        self.label_lcr_status.setText(f"Connected: {idn or port}")
+        self.label_lcr_status.setText(f"Connected: {idn or port}; idle, not sweeping.")
         self._configure_lcr_for_current_index()
+        self._refresh_lcr_correction_status()
         self._refresh_ac_hardware_status()
 
     def handle_identify_lcr_clicked(self) -> None:
@@ -2486,12 +3022,179 @@ class MainWindow(CurrentAnnealingWindow):
         except Exception as exc:
             self.label_lcr_status.setText(f"Identify failed: {exc}")
             return
-        self.label_lcr_status.setText(f"Connected: {idn}")
+        self.label_lcr_status.setText(f"Connected: {idn}; idle, not sweeping.")
+        self._refresh_lcr_correction_status()
 
     def handle_apply_lcr_setting_clicked(self) -> None:
         self._prepare_lcr_plan()
         self._lcr_plan_index = 0
         self._configure_lcr_for_current_index(show_errors=True)
+
+    def _set_lcr_correction_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            getattr(self, "pushButton_lcr_open_correction", None),
+            getattr(self, "pushButton_lcr_short_correction", None),
+            getattr(self, "pushButton_lcr_disable_correction", None),
+        ):
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(enabled)
+
+    def _set_lcr_correction_busy(self, busy: bool) -> None:
+        self._set_lcr_correction_controls_enabled(not busy)
+        for widget in (
+            getattr(self, "pushButton_measure_lcr_baseline", None),
+            getattr(self, "pushButton_run_ac_sweep", None),
+            getattr(self, "pushButton_continue_ac_sweep", None),
+        ):
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(not busy)
+
+    def _set_lcr_correction_progress(self, *, kind: str, running: bool) -> None:
+        progress = getattr(self, "progress_ac_run", None)
+        if not isinstance(progress, QtWidgets.QProgressBar):
+            return
+        if running:
+            progress.setRange(0, 0)
+            progress.setFormat(f"LCR {kind} correction: running on meter...")
+            self._set_ac_current_task(f"Current task: LCR {kind} correction running")
+            return
+        progress.setRange(0, 100)
+        progress.setValue(0)
+        progress.setFormat("AC progress: idle")
+        self._set_ac_current_task("Current task: idle")
+
+    def _update_lcr_correction_status_label(self) -> None:
+        status = self._lcr_correction_status
+
+        def fmt(value: bool | None) -> str:
+            if value is True:
+                return "on"
+            if value is False:
+                return "off"
+            return "unknown"
+
+        label = getattr(self, "label_lcr_correction_status", None)
+        if isinstance(label, QtWidgets.QLabel):
+            if status.checked_utc:
+                label.setText(f"Open {fmt(status.open_enabled)}, short {fmt(status.short_enabled)}")
+            else:
+                label.setText("Not checked")
+
+    def _refresh_lcr_correction_status(self) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            self._lcr_correction_status = LcrCorrectionStatus(
+                open_enabled=None,
+                short_enabled=None,
+                checked_utc="",
+                raw_open_state="",
+                raw_short_state="",
+            )
+            self._update_lcr_correction_status_label()
+            return
+        try:
+            self._lcr_correction_status = meter.correction_status()
+        except Exception as exc:
+            self.label_lcr_status.setText(f"LCR correction status failed: {exc}")
+        self._update_lcr_correction_status_label()
+
+    def handle_lcr_correction_clicked(self, kind: str) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
+            return
+        if self._ac_sweep_running or self._ac_worker is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "AC run active",
+                "Wait until the current AC LCR operation finishes before running fixture correction.",
+            )
+            return
+        if kind == "open":
+            message = (
+                "Open-circuit the LCR fixture terminals with no DUT connected, then start AC open correction. "
+                "This talks only to the LCR meter and does not touch the PSU."
+            )
+        elif kind == "short":
+            message = (
+                "Short-circuit the LCR fixture terminals at the measurement contacts, then start AC short correction. "
+                "This talks only to the LCR meter and does not touch the PSU."
+            )
+        else:
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            f"Run LCR {kind} correction",
+            message,
+            QtWidgets.QMessageBox.StandardButton.Ok | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Ok:
+            return
+        worker = LcrCorrectionWorker(meter=meter, kind=kind, timeout_s=180.0)
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        worker.finished.connect(self._handle_lcr_correction_finished)
+        worker.failed.connect(self._handle_lcr_correction_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_ac_worker_refs)
+        self._ac_worker = worker
+        self._ac_worker_thread = thread
+        self._set_lcr_correction_busy(True)
+        self._set_lcr_correction_progress(kind=kind, running=True)
+        self.label_lcr_status.setText(f"Running LCR {kind} correction...")
+        thread.start()
+
+    def handle_disable_lcr_correction_clicked(self) -> None:
+        meter = self.lcr_meter
+        if meter is None or not meter.is_open:
+            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
+            return
+        if self._ac_sweep_running or self._ac_worker is not None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "AC run active",
+                "Wait until the current AC LCR operation finishes before changing fixture correction.",
+            )
+            return
+        try:
+            self._lcr_correction_status = meter.set_correction_state(open_enabled=False, short_enabled=False)
+            self._lcr_correction_last_result = None
+            self._update_lcr_correction_status_label()
+            self.label_lcr_status.setText("LCR open/short correction disabled")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "LCR correction failed", str(exc))
+            self.label_lcr_status.setText(f"LCR correction disable failed: {exc}")
+
+    def _handle_lcr_correction_finished(
+        self,
+        kind: str,
+        result: LcrCorrectionResult,
+        status: LcrCorrectionStatus,
+    ) -> None:
+        self._lcr_correction_last_result = result
+        self._lcr_correction_status = status
+        self._set_lcr_correction_busy(False)
+        self._set_lcr_correction_progress(kind=kind, running=False)
+        self._update_lcr_correction_status_label()
+        outcome = "finished" if result.passed else "failed"
+        self.label_lcr_status.setText(f"LCR {kind} correction {outcome}: {', '.join(result.responses)}")
+        if not result.passed:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "LCR correction failed",
+                f"LCR {kind} correction returned: {', '.join(result.responses)}",
+            )
+
+    def _handle_lcr_correction_failed(self, kind: str, message: str) -> None:
+        self._set_lcr_correction_busy(False)
+        self._set_lcr_correction_progress(kind=kind, running=False)
+        self.label_lcr_status.setText(f"LCR {kind} correction failed: {message}")
+        QtWidgets.QMessageBox.warning(self, "LCR correction failed", message)
 
     def handle_run_ac_sweep_clicked(self) -> None:
         if self._ac_sweep_running:
@@ -2542,6 +3245,20 @@ class MainWindow(CurrentAnnealingWindow):
             )
         else:
             message = resume_plan.summary
+        unclean_statuses = [item for item in resume_plan.run_statuses if item.is_unclean]
+        if unclean_statuses:
+            details = "\n".join(
+                f"- {item.output_path.name}: {item.status}"
+                for item in unclean_statuses[:5]
+            )
+            if len(unclean_statuses) > 5:
+                details += "\n- ..."
+            message = (
+                f"{message}\n\n"
+                "Previous run status warning:\n"
+                f"{details}\n\n"
+                "Continuation will still repeat any partial setting from its first current point."
+            )
         response = QtWidgets.QMessageBox.question(
             self,
             "Continue AC sweep",
@@ -2567,37 +3284,83 @@ class MainWindow(CurrentAnnealingWindow):
     ) -> None:
         meter = self.lcr_meter
         if meter is None or not meter.is_open:
-            QtWidgets.QMessageBox.information(self, "LCR not connected", "Connect the LCR port first.")
-            return
-        self._release_inherited_psu_port_for_ac(config.psu_resource)
-        psu = sweep.SerialScpiCurrentSource(
-            backend_id=config.psu_backend,
-            resource=config.psu_resource,
-            baudrate=self._selected_ac_psu_baudrate(),
-            voltage_limit_v=config.voltage_limit_v,
-        )
+            self.handle_auto_setup_clicked()
+            meter = self.lcr_meter
+            if meter is None or not meter.is_open:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Hardware not connected",
+                    "Auto-connect could not connect the LCR meter. Check the hardware connection and try again.",
+                )
+                return
         output_path = self._sweep_output_path()
+        if config.lcr_continuous_log_enabled and not config.lcr_continuous_log_path:
+            config = replace(
+                config,
+                lcr_continuous_log_path=str(output_path.with_name(f"{output_path.stem}_lcr_debug.jsonl")),
+            )
+        if config.uses_shared_broker:
+            try:
+                self._ensure_ac_shared_broker_running(config)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Shared HMP broker unavailable",
+                    f"Could not connect or start the shared HMP broker for the AC sweep:\n{exc}",
+                )
+                self.label_lcr_status.setText(f"Shared HMP broker connection failed: {exc}")
+                self._refresh_ac_hardware_status()
+                return
+            psu = sweep.SharedBrokerCurrentSource(
+                host=config.shared_broker_host,
+                port=config.shared_broker_port,
+                channel=int(config.shared_broker_channel or 0),
+                voltage_limit_v=config.voltage_limit_v,
+            )
+        else:
+            try:
+                self._release_inherited_psu_port_for_ac(config.psu_resource)
+                psu = sweep.SerialScpiCurrentSource(
+                    backend_id=config.psu_backend,
+                    resource=config.psu_resource,
+                    baudrate=self._selected_ac_psu_baudrate(),
+                    voltage_limit_v=config.voltage_limit_v,
+                )
+            except Exception as exc:
+                self._lcr_last_error = str(exc)
+                self.label_lcr_status.setText(f"Power supply preparation failed: {exc}")
+                self._refresh_ac_hardware_status()
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "AC power supply unavailable",
+                    f"Could not prepare the selected power supply for the AC sweep:\n{exc}",
+                )
+                return
         self._reset_ac_live_plots(reset_reason)
         self._ac_sweep_running = True
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = config
-        watchdog = AcPsuWatchdogGuard(
-            config=config,
-            output_path=output_path,
-            baudrate=self._selected_ac_psu_baudrate(),
-        )
-        try:
-            watchdog.start()
-        except Exception as exc:
-            self._ac_sweep_running = False
-            self._ac_active_sweep_config = None
-            QtWidgets.QMessageBox.warning(
-                self,
-                "AC sweep watchdog failed",
-                f"Could not arm the PSU watchdog, so the sweep was not started:\n{exc}",
+        self._ac_active_output_path = output_path
+        watchdog = None
+        if not config.uses_shared_broker:
+            watchdog = AcPsuWatchdogGuard(
+                config=config,
+                output_path=output_path,
+                baudrate=self._selected_ac_psu_baudrate(),
             )
-            return
-        self._ac_psu_watchdog = watchdog
+            try:
+                watchdog.start()
+            except Exception as exc:
+                self._ac_sweep_running = False
+                self._ac_active_sweep_config = None
+                self._ac_active_output_path = None
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "AC sweep watchdog failed",
+                    f"Could not arm the PSU watchdog, so the sweep was not started:\n{exc}",
+                )
+                return
+            self._ac_psu_watchdog = watchdog
         self._reset_ac_progress("Microwire sweep", self._sweep_total_reads(config), units="time")
         self._set_ac_current_task("Current task: preparing microwire current sweep")
         self.pushButton_run_ac_sweep.setEnabled(False)
@@ -2631,8 +3394,11 @@ class MainWindow(CurrentAnnealingWindow):
             thread.start()
             return
         except Exception as exc:
-            watchdog.stop()
+            if watchdog is not None:
+                watchdog.stop()
             self._ac_psu_watchdog = None
+            self._finish_ac_worker_state()
+            self._clear_ac_worker_refs()
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"AC sweep failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "AC sweep failed", str(exc))
@@ -2701,6 +3467,7 @@ class MainWindow(CurrentAnnealingWindow):
                 point_duration_s=point_duration,
                 settle_s=dwell,
                 total_planned_s=baseline_seconds,
+                lcr_correction=self._lcr_correction_metadata(),
             )
             thread = QtCore.QThread(self)
             worker.moveToThread(thread)
@@ -2722,6 +3489,9 @@ class MainWindow(CurrentAnnealingWindow):
             thread.start()
             return
         except Exception as exc:
+            if bool(getattr(self, "_ac_sweep_running", False)):
+                self._finish_ac_worker_state()
+                self._clear_ac_worker_refs()
             self._lcr_last_error = str(exc)
             self.label_lcr_status.setText(f"Baseline failed: {exc}")
             QtWidgets.QMessageBox.warning(self, "Baseline failed", str(exc))
@@ -2744,6 +3514,7 @@ class MainWindow(CurrentAnnealingWindow):
         self._ac_sweep_running = False
         self._ac_sweep_stop_requested = False
         self._ac_active_sweep_config = None
+        self._ac_active_output_path = None
         self.pushButton_measure_lcr_baseline.setEnabled(True)
         self.pushButton_run_ac_sweep.setEnabled(True)
         self.pushButton_continue_ac_sweep.setEnabled(True)
@@ -2780,28 +3551,70 @@ class MainWindow(CurrentAnnealingWindow):
     def _handle_sweep_worker_finished(self, path_text: str, stopped: bool = False) -> None:
         self._finish_ac_worker_state()
         path = Path(path_text)
+        detail = self._format_ac_run_status_detail(path)
         if stopped:
-            self.label_lcr_status.setText(f"AC sweep stopped; partial file saved: {path}")
+            display_message = f"Saved partial AC sweep to:\n{path}"
+            if detail:
+                display_message = f"{display_message}\n\n{detail}"
+            self.label_lcr_status.setText(f"AC sweep stopped; partial file saved: {path}" + (f"\n{detail}" if detail else ""))
             self._set_ac_current_task("Current task: stopped")
-            QtWidgets.QMessageBox.information(self, "AC sweep stopped", f"Saved partial AC sweep to:\n{path}")
+            QtWidgets.QMessageBox.information(self, "AC sweep stopped", display_message)
             return
-        self.label_lcr_status.setText(f"AC sweep saved: {path}")
+        display_message = f"Saved AC sweep to:\n{path}"
+        if detail:
+            display_message = f"{display_message}\n\n{detail}"
+        self.label_lcr_status.setText(f"AC sweep saved: {path}" + (f"\n{detail}" if detail else ""))
         self._complete_ac_progress("Microwire sweep")
         self._set_ac_current_task("Current task: microwire sweep complete")
-        QtWidgets.QMessageBox.information(self, "AC sweep saved", f"Saved AC sweep to:\n{path}")
+        QtWidgets.QMessageBox.information(self, "AC sweep saved", display_message)
 
     @QtCore.pyqtSlot(str)
     def _handle_ac_worker_failed(self, message: str) -> None:
         stopped = "stopped by user" in message.lower()
+        output_path = getattr(self, "_ac_active_output_path", None)
         self._finish_ac_worker_state()
         if stopped:
             self.label_lcr_status.setText("AC run stopped by user.")
             self._set_ac_current_task("Current task: stopped")
             return
         self._lcr_last_error = message
-        self.label_lcr_status.setText(f"AC run failed: {message}")
+        detail = self._format_ac_failure_status_detail(output_path, message)
+        display_message = f"{message}\n\n{detail}" if detail else message
+        self.label_lcr_status.setText(f"AC run failed: {display_message}")
         self._set_ac_current_task("Current task: failed")
-        QtWidgets.QMessageBox.warning(self, "AC run failed", message)
+        QtWidgets.QMessageBox.warning(self, "AC run failed", display_message)
+
+    def _format_ac_failure_status_detail(self, output_path: Path | None, message: str) -> str:
+        return self._format_ac_run_status_detail(output_path, message=message)
+
+    def _format_ac_run_status_detail(self, output_path: Path | None, *, message: str = "") -> str:
+        if output_path is None:
+            return ""
+        try:
+            summary = sweep.classify_ac_run_status(output_path)
+        except Exception:
+            return ""
+        primary_status_path = sweep.ac_run_status_path_for_output(output_path)
+        fallback_status_path = sweep.ac_run_status_fallback_path_for_output(output_path)
+        status_path = Path(summary.status_path)
+        try:
+            status_exists = status_path.exists()
+        except OSError:
+            status_exists = False
+        if not status_exists and summary.status in {"unknown", "unknown_no_run_status"} and not summary.stop_reason:
+            return ""
+        parts: list[str] = [f"Run status: {summary.status}"]
+        if summary.phase:
+            parts[-1] += f" ({summary.phase})"
+        if summary.rows_written:
+            parts.append(f"Rows written: {summary.rows_written}")
+        if summary.stop_reason and summary.stop_reason not in message:
+            parts.append(f"Stop reason: {summary.stop_reason}")
+        if status_path == fallback_status_path and status_path != primary_status_path:
+            parts.append(f"Local fallback status: {status_path}")
+        else:
+            parts.append(f"Run status file: {status_path}")
+        return "\n".join(parts)
 
     def _reset_ac_progress(self, label: str, total: int, *, units: str = "count") -> None:
         self._ac_progress_total = max(1, int(total))
@@ -3001,10 +3814,15 @@ class MainWindow(CurrentAnnealingWindow):
             include_zero=self._include_zero_current_selected(),
         )
         self._sync_ac_psu_from_shared_controls()
-        psu_resource = self._selected_ac_psu_resource()
-        if not psu_resource:
-            raise ValueError("Select the power-supply serial port first.")
         backend = self._selected_ac_psu_backend()
+        if backend == "shared_hmp_broker":
+            psu_resource = self._selected_ac_broker_resource()
+            shared_channel = self._selected_ac_broker_channel()
+        else:
+            psu_resource = self._selected_ac_psu_resource()
+            shared_channel = None
+            if not psu_resource:
+                raise ValueError("Select the power-supply serial port first.")
         voltage_limit_v = sweep.effective_power_supply_voltage_limit(
             backend,
             float(self.spinBox_ac_voltage_limit.value()),
@@ -3019,7 +3837,73 @@ class MainWindow(CurrentAnnealingWindow):
             psu_resource=psu_resource,
             voltage_limit_v=voltage_limit_v,
             point_duration_s=max(0.1, float(self.spinBox_ac_point_duration.value())),
+            shared_broker_host=self._selected_ac_broker_host(),
+            shared_broker_port=self._selected_ac_broker_port(),
+            shared_broker_channel=shared_channel,
+            lcr_continuous_log_enabled=self._lcr_debug_log_enabled(),
+            lcr_continuous_log_cadence_s=self._lcr_debug_log_cadence_s(),
+            lcr_continuous_log_aggregate_s=self._lcr_debug_log_cadence_s(),
+            lcr_continuous_log_max_rows_per_point=self._lcr_debug_log_max_rows_per_point(),
+            lcr_correction=self._lcr_correction_metadata(),
         )
+
+    def _lcr_correction_metadata(self) -> dict[str, Any]:
+        try:
+            status = self._lcr_correction_status
+        except RuntimeError:
+            status = LcrCorrectionStatus(
+                open_enabled=None,
+                short_enabled=None,
+                checked_utc="",
+                raw_open_state="",
+                raw_short_state="",
+            )
+        try:
+            result = self._lcr_correction_last_result
+        except RuntimeError:
+            result = None
+        payload: dict[str, Any] = {
+            "open_enabled": status.open_enabled,
+            "short_enabled": status.short_enabled,
+            "checked_utc": status.checked_utc,
+            "source": "queried_meter" if status.checked_utc else "not_checked",
+            "raw_open_state": status.raw_open_state,
+            "raw_short_state": status.raw_short_state,
+            "mode": "full_range_lcr_open_short",
+        }
+        if result is not None:
+            payload["last_result"] = {
+                "kind": result.kind,
+                "passed": bool(result.passed),
+                "timestamp_utc": result.timestamp_utc,
+                "responses": list(result.responses),
+            }
+        return payload
+
+    def _lcr_debug_log_enabled(self) -> bool:
+        try:
+            widget = getattr(self, "checkBox_ac_lcr_debug_log", None)
+        except RuntimeError:
+            widget = None
+        return bool(isinstance(widget, QtWidgets.QCheckBox) and widget.isChecked())
+
+    def _lcr_debug_log_cadence_s(self) -> float:
+        try:
+            widget = getattr(self, "spinBox_ac_lcr_debug_cadence", None)
+        except RuntimeError:
+            widget = None
+        if isinstance(widget, QtWidgets.QDoubleSpinBox):
+            return max(0.1, float(widget.value()))
+        return AC_DEFAULT_LCR_DEBUG_CADENCE_S
+
+    def _lcr_debug_log_max_rows_per_point(self) -> int:
+        try:
+            widget = getattr(self, "spinBox_ac_lcr_debug_max_rows", None)
+        except RuntimeError:
+            widget = None
+        if isinstance(widget, QtWidgets.QSpinBox):
+            return max(1, int(widget.value()))
+        return AC_DEFAULT_LCR_DEBUG_MAX_ROWS_PER_POINT
 
     def _update_ac_sweep_estimate(self) -> None:
         try:
@@ -3218,17 +4102,20 @@ class MainWindow(CurrentAnnealingWindow):
     def apply_default_lcr_presets(self, *, store: bool = True) -> None:
         self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(DEFAULT_FREQUENCY_PRESETS_HZ))
         self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
+        self._sync_lcr_chips_from_text()
         if store:
             self._store_lcr_settings()
             self._update_ac_sweep_estimate()
 
     def apply_all_lcr_frequencies(self) -> None:
         self.lineEdit_lcr_frequencies.setText(self._format_numeric_list(PRACTICAL_FREQUENCY_PRESETS_HZ))
+        self._sync_lcr_chips_from_text()
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
 
     def apply_all_lcr_levels(self) -> None:
         self.lineEdit_lcr_levels.setText(self._default_lcr_level_text())
+        self._sync_lcr_chips_from_text()
         self._store_lcr_settings()
         self._update_ac_sweep_estimate()
 
@@ -3281,6 +4168,24 @@ class MainWindow(CurrentAnnealingWindow):
                 self.baudrate = self._ac_psu_baudrate
             except ValueError:
                 pass
+        try:
+            host_edit = getattr(self, "lineEdit_ac_broker_host", None)
+        except RuntimeError:
+            host_edit = None
+        if isinstance(host_edit, QtWidgets.QLineEdit):
+            self._ac_shared_broker_host = host_edit.text().strip() or AC_DEFAULT_BROKER_HOST
+        try:
+            port_spin = getattr(self, "spinBox_ac_broker_port", None)
+        except RuntimeError:
+            port_spin = None
+        if isinstance(port_spin, QtWidgets.QSpinBox):
+            self._ac_shared_broker_port = int(port_spin.value())
+        try:
+            channel_combo = getattr(self, "comboBox_ac_broker_channel", None)
+        except RuntimeError:
+            channel_combo = None
+        if isinstance(channel_combo, QtWidgets.QComboBox):
+            self._ac_shared_broker_channel = int(channel_combo.currentData() or 0)
 
     def _backend_from_ac_supply_combo(self) -> str:
         combo = getattr(getattr(self, "ui", None), "comboBox_supply", None)
@@ -3318,6 +4223,26 @@ class MainWindow(CurrentAnnealingWindow):
         )
         port = self.ac_settings.value(self._psu_profile_key(backend, "port"), legacy_port, type=str)
         baud_text = self.ac_settings.value(self._psu_profile_key(backend, "baud"), legacy_baud, type=str)
+        broker_host = self.ac_settings.value(
+            self._psu_profile_key(backend, "broker_host"),
+            self.ac_settings.value("shared_broker_host", AC_DEFAULT_BROKER_HOST, type=str),
+            type=str,
+        )
+        broker_port = self.ac_settings.value(
+            self._psu_profile_key(backend, "broker_port"),
+            self.ac_settings.value("shared_broker_port", AC_DEFAULT_BROKER_PORT, type=int),
+        )
+        broker_channel = self.ac_settings.value(
+            self._psu_profile_key(backend, "broker_channel"),
+            self.ac_settings.value("shared_broker_channel", AC_DEFAULT_BROKER_CHANNEL, type=int),
+        )
+        broker_channel_confirmed = bool(
+            self.ac_settings.value(
+                self._psu_profile_key(backend, "broker_channel_confirmed"),
+                False,
+                type=bool,
+            )
+        )
         voltage = self.ac_settings.value(
             self._psu_profile_key(backend, "voltage_limit_v"),
             self.ac_settings.value("voltage_limit_v", default_voltage) if legacy_matches_backend else default_voltage,
@@ -3327,11 +4252,41 @@ class MainWindow(CurrentAnnealingWindow):
             self._ac_psu_baudrate = int(str(baud_text))
         except ValueError:
             self._ac_psu_baudrate = 115200
+        self._ac_shared_broker_host = str(broker_host or AC_DEFAULT_BROKER_HOST).strip() or AC_DEFAULT_BROKER_HOST
+        try:
+            self._ac_shared_broker_port = int(broker_port)
+        except (TypeError, ValueError):
+            self._ac_shared_broker_port = AC_DEFAULT_BROKER_PORT
+        try:
+            parsed_broker_channel = int(broker_channel)
+        except (TypeError, ValueError):
+            parsed_broker_channel = AC_DEFAULT_BROKER_CHANNEL
+        if backend == "shared_hmp_broker" and not broker_channel_confirmed:
+            parsed_broker_channel = AC_DEFAULT_BROKER_CHANNEL
+        self._ac_shared_broker_channel = parsed_broker_channel
+        self._ac_shared_broker_channel_confirmed = bool(
+            backend == "shared_hmp_broker"
+            and broker_channel_confirmed
+            and self._ac_shared_broker_channel > 0
+        )
         with QtCore.QSignalBlocker(self.spinBox_ac_voltage_limit):
             try:
                 self.spinBox_ac_voltage_limit.setValue(float(voltage))
             except (TypeError, ValueError):
                 self.spinBox_ac_voltage_limit.setValue(default_voltage)
+        if hasattr(self, "lineEdit_ac_broker_host"):
+            with QtCore.QSignalBlocker(self.lineEdit_ac_broker_host):
+                self.lineEdit_ac_broker_host.setText(self._ac_shared_broker_host)
+        if hasattr(self, "spinBox_ac_broker_port"):
+            with QtCore.QSignalBlocker(self.spinBox_ac_broker_port):
+                self.spinBox_ac_broker_port.setValue(self._ac_shared_broker_port)
+        if hasattr(self, "comboBox_ac_broker_channel"):
+            with QtCore.QSignalBlocker(self.comboBox_ac_broker_channel):
+                channel_index = self.comboBox_ac_broker_channel.findData(self._ac_shared_broker_channel)
+                if channel_index < 0:
+                    channel_index = self.comboBox_ac_broker_channel.findData(0)
+                if channel_index >= 0:
+                    self.comboBox_ac_broker_channel.setCurrentIndex(channel_index)
 
     def _store_ac_psu_profile_settings(self, backend: str | None = None) -> None:
         backend = backend or self._ac_psu_backend
@@ -3339,6 +4294,13 @@ class MainWindow(CurrentAnnealingWindow):
             return
         self.ac_settings.setValue(self._psu_profile_key(backend, "port"), self._ac_psu_resource)
         self.ac_settings.setValue(self._psu_profile_key(backend, "baud"), str(self._ac_psu_baudrate))
+        self.ac_settings.setValue(self._psu_profile_key(backend, "broker_host"), self._ac_shared_broker_host)
+        self.ac_settings.setValue(self._psu_profile_key(backend, "broker_port"), int(self._ac_shared_broker_port))
+        self.ac_settings.setValue(self._psu_profile_key(backend, "broker_channel"), int(self._ac_shared_broker_channel))
+        self.ac_settings.setValue(
+            self._psu_profile_key(backend, "broker_channel_confirmed"),
+            bool(self._ac_shared_broker_channel_confirmed and self._ac_shared_broker_channel > 0),
+        )
         self.ac_settings.setValue(
             self._psu_profile_key(backend, "voltage_limit_v"),
             float(self.spinBox_ac_voltage_limit.value()),
@@ -3364,6 +4326,177 @@ class MainWindow(CurrentAnnealingWindow):
         self._capture_ac_psu_controls()
         return self._ac_psu_baudrate
 
+    def _selected_ac_broker_host(self) -> str:
+        self._capture_ac_psu_controls()
+        try:
+            host = self._ac_shared_broker_host
+        except RuntimeError:
+            host = AC_DEFAULT_BROKER_HOST
+        return host or AC_DEFAULT_BROKER_HOST
+
+    def _selected_ac_broker_port(self) -> int:
+        self._capture_ac_psu_controls()
+        try:
+            port = self._ac_shared_broker_port
+        except RuntimeError:
+            port = AC_DEFAULT_BROKER_PORT
+        return int(port or AC_DEFAULT_BROKER_PORT)
+
+    def _selected_ac_broker_channel(self) -> int:
+        self._capture_ac_psu_controls()
+        try:
+            raw_channel = self._ac_shared_broker_channel
+        except RuntimeError:
+            raw_channel = AC_DEFAULT_BROKER_CHANNEL
+        channel = int(raw_channel or 0)
+        try:
+            confirmed = bool(getattr(self, "_ac_shared_broker_channel_confirmed", False))
+        except RuntimeError:
+            confirmed = False
+        if channel <= 0 or not confirmed:
+            raise ValueError("Select a shared HMP broker channel first; use CH1 on the current shared bench.")
+        return channel
+
+    def _selected_ac_broker_resource(self) -> str:
+        return f"{self._selected_ac_broker_host()}:{self._selected_ac_broker_port()}/CH{self._selected_ac_broker_channel()}"
+
+    def _ac_broker_resource_display(self) -> str:
+        channel = int(getattr(self, "_ac_shared_broker_channel", 0) or 0)
+        if channel > 0 and bool(getattr(self, "_ac_shared_broker_channel_confirmed", False)):
+            channel_text = f"CH{channel}"
+        else:
+            channel_text = "Select channel..."
+        return f"{self._selected_ac_broker_host()}:{self._selected_ac_broker_port()}/{channel_text}"
+
+    def _ensure_ac_shared_broker_running(self, config: sweep.AcSweepConfig | None = None) -> None:
+        host = config.shared_broker_host if config is not None else self._selected_ac_broker_host()
+        port = int(config.shared_broker_port if config is not None else self._selected_ac_broker_port())
+        channel = int(
+            (config.shared_broker_channel if config is not None else self._selected_ac_broker_channel()) or 0
+        )
+        if channel <= 0:
+            raise ValueError("Select a shared HMP broker channel first; use CH1 on the current shared bench.")
+
+        if self._owned_shared_broker_server is not None:
+            try:
+                BrokerJsonClient(host=host, port=port).snapshot()
+                return
+            except Exception:
+                self._stop_owned_shared_broker()
+
+        try:
+            BrokerJsonClient(host=host, port=port).snapshot()
+            return
+        except Exception as first_exc:
+            if not self._auto_detect_hmp_port(show_errors=False):
+                raise RuntimeError(
+                    "No existing shared HMP broker answered, and automatic HMP discovery did not "
+                    "find a supported HMP4030/HMP4040 power supply."
+                ) from first_exc
+
+        self._start_owned_ac_shared_broker(host=host, port=port, channel=channel, config=config)
+        BrokerJsonClient(host=host, port=port).snapshot()
+
+    def _start_owned_ac_shared_broker(
+        self,
+        *,
+        host: str,
+        port: int,
+        channel: int,
+        config: sweep.AcSweepConfig | None = None,
+    ) -> None:
+        if self._owned_shared_broker_server is not None:
+            return
+        baudrate = int(getattr(self, "baudrate", 115200) or 115200)
+        baud_combo = getattr(self.ui, "comboBox_baudrate", None)
+        if isinstance(baud_combo, QtWidgets.QComboBox):
+            try:
+                baudrate = int(baud_combo.currentText())
+            except Exception:
+                pass
+        voltage_limit_v = float(config.voltage_limit_v) if config is not None else HMP4040_PROFILE.max_voltage_v
+        widget = getattr(self, "spinBox_ac_voltage_limit", None)
+        if config is None and isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+            voltage_limit_v = float(widget.value())
+        current_limit_a = self._ac_shared_broker_current_limit_a(config)
+        candidates = self._candidate_hmp_ports_for_broker()
+        if not candidates:
+            raise RuntimeError(
+                "No shared HMP broker is running. Auto-detect the HMP COM port, then connect the broker."
+            )
+
+        errors: list[str] = []
+        for port_name in candidates:
+            driver = HmpSerialDriver(port_name=port_name, baudrate=baudrate, timeout_s=0.7)
+            try:
+                driver.connect()
+                idn_text = driver.identify()
+                if driver.profile is None:
+                    raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
+                broker = SharedPowerSupplyBroker(driver, driver.profile)
+                broker.assign_role(
+                    channel=channel,
+                    role=ROLE_AC_SUSCEPTIBILITY,
+                    confirmed=True,
+                    voltage_limit_v=voltage_limit_v,
+                    current_limit_a=current_limit_a,
+                )
+                broker.confirm_profile(name="AC Susceptibility auto-started shared HMP broker")
+                server, thread = start_broker_server(broker, host=host, port=port)
+            except Exception as exc:
+                errors.append(self._format_shared_broker_start_error(port_name, exc))
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+                continue
+
+            self._owned_shared_broker_server = server
+            self._owned_shared_broker_thread = thread
+            self._owned_shared_broker_driver = driver
+            self.port_name = port_name
+            self._show_status_message(
+                f"Started shared HMP broker on {host}:{port} for AC susceptibility.",
+                timeout_ms=10000,
+            )
+            return
+
+        detail = "; ".join(errors) if errors else "no HMP ports found"
+        raise RuntimeError(
+            "No existing broker answered, and the detected HMP port could not start an AC broker "
+            f"({detail})."
+        )
+
+    def _ac_shared_broker_current_limit_a(self, config: sweep.AcSweepConfig | None = None) -> float:
+        values: list[float] = []
+        if config is not None:
+            values.extend(abs(float(point.current_a)) for point in config.current_points)
+        else:
+            for name in ("spinBox_ac_current_start", "spinBox_ac_current_stop"):
+                widget = getattr(self, name, None)
+                if isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                    values.append(abs(float(widget.value())) / 1000.0)
+        return max(values or [0.001], default=0.001)
+
+    def _handle_ac_broker_channel_changed(self) -> None:
+        try:
+            channel_combo = getattr(self, "comboBox_ac_broker_channel", None)
+        except RuntimeError:
+            channel_combo = None
+        if isinstance(channel_combo, QtWidgets.QComboBox):
+            channel = int(channel_combo.currentData() or 0)
+        else:
+            channel = AC_DEFAULT_BROKER_CHANNEL
+        self._ac_shared_broker_channel = channel
+        self._ac_shared_broker_channel_confirmed = channel > 0
+        self._sync_ac_psu_from_shared_controls()
+        try:
+            loading_settings = bool(getattr(self, "_ac_loading_settings", False))
+        except RuntimeError:
+            loading_settings = False
+        if not loading_settings:
+            self._store_ac_psu_profile_settings(self._ac_psu_backend)
+
     def _sync_ac_psu_from_shared_controls(self) -> None:
         if self._is_ac_refreshing_psu_ports():
             return
@@ -3388,7 +4521,39 @@ class MainWindow(CurrentAnnealingWindow):
             or (backend != "owon_spe6102" and math.isclose(current_limit, OWON_DEFAULT_VOLTAGE_LIMIT_V))
         ):
             self.spinBox_ac_voltage_limit.setValue(default_limit)
+        self._set_ac_serial_psu_controls_visible(backend != "shared_hmp_broker")
+        self._set_ac_broker_controls_visible(backend == "shared_hmp_broker")
         self._refresh_ac_psu_status()
+
+    def _set_ac_serial_psu_controls_visible(self, visible: bool) -> None:
+        widgets: list[object] = []
+        for name in ("label_ac_psu_port", "label_ac_psu_baud"):
+            try:
+                widgets.append(getattr(self, name, None))
+            except RuntimeError:
+                pass
+        ui = getattr(self, "ui", None)
+        for name in ("comboBox_port", "comboBox_baudrate"):
+            widgets.append(getattr(ui, name, None))
+        for widget in widgets:
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setVisible(bool(visible))
+
+    def _set_ac_broker_controls_visible(self, visible: bool) -> None:
+        for name in (
+            "label_ac_broker_host",
+            "lineEdit_ac_broker_host",
+            "label_ac_broker_port",
+            "spinBox_ac_broker_port",
+            "label_ac_broker_channel",
+            "comboBox_ac_broker_channel",
+        ):
+            try:
+                widget = getattr(self, name, None)
+            except RuntimeError:
+                widget = None
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setVisible(bool(visible))
 
     def _is_ac_refreshing_psu_ports(self) -> bool:
         try:
@@ -3445,10 +4610,44 @@ class MainWindow(CurrentAnnealingWindow):
             backend = "owon_spe6102"
         profile = sweep.POWER_SUPPLY_PROFILES.get(backend, {})
         backend_label = str(profile.get("label", backend))
+        if backend == "shared_hmp_broker":
+            resource = self._ac_broker_resource_display()
+            label.setText(f"AC current supply: {backend_label}, {resource}; broker lease requested at sweep start")
+            self._refresh_ac_broker_status()
+            self._refresh_ac_hardware_status()
+            return
         resource = str(getattr(self, "_ac_psu_resource", "") or "") or "no port selected"
         baudrate = int(getattr(self, "_ac_psu_baudrate", 115200) or 115200)
         label.setText(f"AC current supply: {backend_label}, {resource}, {baudrate} baud")
+        self._refresh_ac_broker_status()
         self._refresh_ac_hardware_status()
+
+    def _refresh_ac_broker_status(self) -> None:
+        try:
+            label = getattr(self, "label_ac_broker_status", None)
+        except RuntimeError:
+            return
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        backend = str(getattr(self, "_ac_psu_backend", "") or "owon_spe6102")
+        if backend != "shared_hmp_broker":
+            label.setText("Broker lease: not used by the selected current-supply profile.")
+            return
+        channel = int(getattr(self, "_ac_shared_broker_channel", 0) or 0)
+        confirmed = bool(getattr(self, "_ac_shared_broker_channel_confirmed", False))
+        resource = self._ac_broker_resource_display()
+        if channel <= 0 or not confirmed:
+            label.setText(
+                "Broker lease: no HMP channel selected; sweep start is blocked until the wired AC channel is confirmed."
+            )
+            return
+        if getattr(self, "_owned_shared_broker_server", None) is not None:
+            label.setText(f"Broker lease: local broker running for AC susceptibility on {resource}.")
+            return
+        if bool(getattr(self, "_ac_sweep_running", False)):
+            label.setText(f"Broker lease: AC susceptibility owns {resource} until the sweep stops or fails.")
+            return
+        label.setText(f"Broker lease: ready to request AC susceptibility ownership of {resource} at sweep start.")
 
     def _set_ac_hardware_details_visible(self, checked: bool) -> None:
         details = getattr(self, "frame_ac_hardware_details", None)
@@ -3466,17 +4665,21 @@ class MainWindow(CurrentAnnealingWindow):
         if not isinstance(label, QtWidgets.QLabel):
             return
         if lcr_connected is None:
-            lcr = getattr(self, "lcr_meter", None)
+            try:
+                lcr = getattr(self, "lcr_meter", None)
+            except RuntimeError:
+                lcr = None
             lcr_connected = bool(lcr is not None and getattr(lcr, "is_open", False))
         backend = str(getattr(self, "_ac_psu_backend", "") or "owon_spe6102")
         if backend not in sweep.POWER_SUPPLY_PROFILES:
             backend = "owon_spe6102"
         profile = sweep.POWER_SUPPLY_PROFILES.get(backend, {})
         backend_label = str(profile.get("label", backend))
-        resource = str(getattr(self, "_ac_psu_resource", "") or "")
+        resource = self._ac_broker_resource_display() if backend == "shared_hmp_broker" else str(getattr(self, "_ac_psu_resource", "") or "")
         psu_text = f"{backend_label} on {resource}" if resource else f"{backend_label}, no port selected"
         lcr_text = "LCR connected" if lcr_connected else "LCR not connected"
         label.setText(f"{lcr_text}; PSU {psu_text}")
+        self._refresh_ac_broker_status()
 
     def _install_ac_wheel_guard(self, control_root: QtWidgets.QWidget) -> None:
         self._ac_lcr_scroll_area = self._find_parent_scroll_area(control_root)
@@ -3549,7 +4752,7 @@ class MainWindow(CurrentAnnealingWindow):
         plan_count = len(self._lcr_plan)
         level_unit = "A" if setting.level_mode == "current" else "V"
         self.label_lcr_status.setText(
-            f"AC setting {index + 1}/{plan_count}: {setting.function}, "
+            f"LCR ready, not sweeping. AC setting {index + 1}/{plan_count}: {setting.function}, "
             f"{setting.frequency_hz:g} Hz, {setting.level_value:g} {level_unit}"
         )
         return True
@@ -3738,6 +4941,7 @@ class MainWindow(CurrentAnnealingWindow):
         *,
         point_duration_s: float | None = None,
         settle_s: float | None = None,
+        lcr_correction: dict[str, Any] | None = None,
     ) -> None:
         fh.write("# AC susceptibility baseline generated from LCR-6200 settings\n")
         fh.write(
@@ -3746,6 +4950,7 @@ class MainWindow(CurrentAnnealingWindow):
                 plan,
                 point_duration_s=point_duration_s,
                 settle_s=settle_s,
+                lcr_correction=lcr_correction,
             )
             + "\n"
         )
@@ -3761,6 +4966,7 @@ class MainWindow(CurrentAnnealingWindow):
         *,
         point_duration_s: float | None = None,
         settle_s: float | None = None,
+        lcr_correction: dict[str, Any] | None = None,
     ) -> str:
         snapshot = {
             "run_type": "empty_coil_baseline",
@@ -3769,6 +4975,12 @@ class MainWindow(CurrentAnnealingWindow):
             "acquisition": {
                 "point_duration_s": None if point_duration_s is None else float(point_duration_s),
                 "settle_s": None if settle_s is None else float(settle_s),
+            },
+            "lcr_correction": lcr_correction or {
+                "open_enabled": None,
+                "short_enabled": None,
+                "checked_utc": "",
+                "source": "not_checked",
             },
             "lcr_settings": [
                 {

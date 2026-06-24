@@ -7,6 +7,7 @@ from typing import Any
 from PyQt6 import QtCore, QtWidgets
 
 from .broker import (
+    ROLE_AC_SUSCEPTIBILITY,
     ROLE_CURRENT_ANNEALING,
     ROLE_MINI_DMA_CURRENT,
     ROLE_MINI_DMA_MOTOR,
@@ -23,6 +24,7 @@ ROLE_LABELS = {
     ROLE_MINI_DMA_MOTOR: "Mini DMA motor supply",
     ROLE_MINI_DMA_CURRENT: "Mini DMA current sweep",
     ROLE_CURRENT_ANNEALING: "Current annealing",
+    ROLE_AC_SUSCEPTIBILITY: "AC susceptibility",
     ROLE_OTHER_MANUAL: "Other/manual",
 }
 

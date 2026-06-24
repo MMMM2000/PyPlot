@@ -4317,6 +4317,12 @@ def _select_pyplot_plugin(window: "PyPlotWorkbench", plugin_name: str) -> None:
 
 
 def _session_registry_dir() -> Path:
+    override = os.environ.get("PYPLOT_SESSION_REGISTRY_DIR")
+    if override:
+        return Path(override).expanduser()
+    temp_root = os.environ.get("TMP") or os.environ.get("TEMP")
+    if temp_root:
+        return Path(temp_root).expanduser() / "pyplot_automation_sessions"
     return Path(tempfile.gettempdir()) / "pyplot_automation_sessions"
 
 

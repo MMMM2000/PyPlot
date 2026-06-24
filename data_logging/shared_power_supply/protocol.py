@@ -39,8 +39,8 @@ class BrokerTcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             profile = BenchProfile.from_dict(dict(request.get("profile") or {}))
             return {"ok": True, "profile": broker.load_profile(profile).to_dict()}
         if action == "save_profile":
-            broker.confirm_profile(name=str(request.get("name") or broker.bench_profile.name))
-            return {"ok": True, "profile": broker.bench_profile.to_dict()}
+            profile = broker.confirm_profile(name=str(request.get("name") or broker.bench_profile.name))
+            return {"ok": True, "profile": profile.to_dict()}
         if action == "assign_role":
             config = broker.assign_role(
                 channel=int(request["channel"]),
@@ -107,26 +107,47 @@ def start_broker_server(
 class BrokerJsonClient:
     """Small JSON-line client for the local shared HMP broker."""
 
-    def __init__(self, *, host: str = "127.0.0.1", port: int) -> None:
+    def __init__(self, *, host: str = "127.0.0.1", port: int, timeout_s: float = 8.0) -> None:
         self.host = str(host or "127.0.0.1")
         self.port = int(port)
+        self.timeout_s = float(timeout_s)
 
     def request(self, action: str, **payload: Any) -> dict[str, Any]:
         request = {"action": action, **payload}
-        with socket.create_connection((self.host, self.port), timeout=2.0) as client:
-            client.sendall((json.dumps(request) + "\n").encode("utf-8"))
-            chunks: list[bytes] = []
-            while True:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                if b"\n" in chunk:
-                    break
-        response = json.loads(b"".join(chunks).decode("utf-8"))
+        try:
+            with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as client:
+                client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                chunks: list[bytes] = []
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    if b"\n" in chunk:
+                        break
+        except OSError as exc:
+            raise BrokerConnectionError(host=self.host, port=self.port, action=action, cause=exc) from exc
+        raw_response = b"".join(chunks)
+        if not raw_response.strip():
+            raise BrokerConnectionError(
+                host=self.host,
+                port=self.port,
+                action=action,
+                cause=RuntimeError("broker closed the connection without a response"),
+            )
+        try:
+            response = json.loads(raw_response.decode("utf-8"))
+        except Exception as exc:
+            raise BrokerConnectionError(host=self.host, port=self.port, action=action, cause=exc) from exc
         if not response.get("ok"):
-            raise RuntimeError(str(response.get("error") or "Shared HMP broker request failed."))
+            raise BrokerRequestError(
+                action=action,
+                message=str(response.get("error") or "Shared HMP broker request failed."),
+            )
         return response
+
+    def snapshot(self) -> dict[str, Any]:
+        return dict(self.request("snapshot")["snapshot"])
 
     def lease(self, *, channel: int, owner: str, role: str) -> dict[str, Any]:
         return dict(self.request("lease", channel=channel, owner=owner, role=role)["lease"])
@@ -164,3 +185,59 @@ class BrokerJsonClient:
 
     def measure_channel(self, *, channel: int) -> dict[str, float | None]:
         return dict(self.request("measure_channel", channel=channel)["readback"])
+
+
+class BrokerConnectionError(RuntimeError):
+    """Raised when a broker endpoint cannot be reached or returns malformed data."""
+
+    def __init__(self, *, host: str, port: int, action: str, cause: Exception) -> None:
+        self.host = str(host)
+        self.port = int(port)
+        self.action = str(action)
+        self.cause = cause
+        detail = str(cause).strip() or cause.__class__.__name__
+        super().__init__(
+            f"Shared HMP broker at {self.host}:{self.port} did not answer during {self.action}: {detail}"
+        )
+
+
+class BrokerRequestError(RuntimeError):
+    """Raised when the broker is reachable but refuses the requested action."""
+
+    def __init__(self, *, action: str, message: str) -> None:
+        self.action = str(action)
+        self.message = str(message)
+        super().__init__(f"Shared HMP broker refused {self.action}: {self.message}")
+
+
+def broker_failure_diagnostic(exc: Exception, *, context: str = "Shared HMP broker") -> str:
+    """Return an operator-facing explanation for common shared-broker failures."""
+
+    text = str(exc).strip() or exc.__class__.__name__
+    lower = text.lower()
+    if isinstance(exc, BrokerConnectionError):
+        return (
+            f"{context}: broker missing or not reachable at {exc.host}:{exc.port} "
+            f"while running {exc.action}. Start the shared HMP broker, check host/port, "
+            "or close stale broker processes before retrying."
+        )
+    if "access is denied" in lower or "permissionerror" in lower or "could not open port" in lower:
+        return (
+            f"{context}: direct HMP serial access was denied. Another app or broker likely owns the "
+            "COM port; keep this logger in shared-broker mode and connect to the broker endpoint instead."
+        )
+    if "already leased" in lower:
+        return f"{context}: channel lease refused because the selected channel is already leased ({text})."
+    if "assigned to" in lower and "not" in lower:
+        return f"{context}: wrong channel or wrong role for the selected broker profile ({text})."
+    if "confirmed role" in lower or "wiring is not confirmed" in lower:
+        return f"{context}: broker profile is missing confirmed wiring for the selected channel ({text})."
+    if "valid lease" in lower or "lease mismatch" in lower:
+        return f"{context}: stale channel lease detected after a broker restart or release ({text})."
+    if "exceeds ch" in lower and "limit" in lower:
+        return f"{context}: channel limit is stale or too low for the requested setpoint ({text})."
+    if "not valid for" in lower and "valid channels" in lower:
+        return f"{context}: wrong HMP model/profile for the requested channel ({text})."
+    if isinstance(exc, BrokerRequestError):
+        return f"{context}: broker request was refused ({exc.message})."
+    return f"{context}: {text}"

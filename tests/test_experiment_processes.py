@@ -8,8 +8,9 @@ import pytest
 
 from plotting.shared.experiment_processes import (
     ExperimentProcessSpec,
-    build_experiment_process_command,
     build_experiment_process_env,
+    build_experiment_process_command,
+    experiment_process_log_path,
     launch_experiment_process,
 )
 
@@ -91,6 +92,7 @@ def test_launch_experiment_process_starts_child_from_repo_root(
             self.pid = 1234
 
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+    monkeypatch.setenv("PYPLOT_EXPERIMENT_LOG_DIR", str(tmp_path / "experiment-logs"))
     monkeypatch.chdir(tmp_path)
 
     process = launch_experiment_process(spec, popen_factory=_FakePopen)
@@ -104,5 +106,26 @@ def test_launch_experiment_process_starts_child_from_repo_root(
     ]
     assert calls[0]["cwd"] == str(Path(__file__).resolve().parents[1])
     assert calls[0]["stdin"] is subprocess.DEVNULL
-    assert calls[0]["stdout"] is subprocess.DEVNULL
-    assert calls[0]["stderr"] is subprocess.DEVNULL
+    stdout = calls[0]["stdout"]
+    assert stdout is not subprocess.DEVNULL
+    assert calls[0]["stderr"] is subprocess.STDOUT
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["PYTHONFAULTHANDLER"] == "1"
+    log_path = Path(env["PYPLOT_EXPERIMENT_LOG_PATH"])
+    assert log_path.parent == tmp_path / "experiment-logs"
+    assert log_path.exists()
+    assert "launching Mini DMA Logger" in log_path.read_text(encoding="utf-8")
+
+
+def test_experiment_process_log_path_uses_ignored_logs_dir() -> None:
+    spec = ExperimentProcessSpec(
+        display_name="Mini DMA Logger",
+        module="data_logging.mini_dma_logger.mini_dma_logger",
+        resource_tag="mini_dma",
+    )
+
+    path = experiment_process_log_path(spec, pid=123)
+
+    assert path.parent == Path(__file__).resolve().parents[1] / "logs" / "experiment_processes"
+    assert path.name.endswith("-123-mini_dma.log")

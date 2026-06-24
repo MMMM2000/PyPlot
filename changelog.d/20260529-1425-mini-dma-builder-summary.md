@@ -1,6 +1,0 @@
-2026-05-29 14:25
-
-- Added Mini DMA Builder summaries for per-stress/load maximum strain values using per-curve `l0` baselines, and wire-break stress/current reporting when a voltage-limit current collapse is detected.
-- Added Mini DMA tangent-intersection transition-current summaries for As/Af on the increasing-current leg and Ms/Mf on the decreasing-current leg.
-- Added tangent-intersection transition estimates so Assemble can fill missing As/Af/Ms/Mf temperatures from saved VSM temperature-scan heating/cooling records.
-- Enabled Builder automation `rebuild_assemble` commands so section-update recipes can refresh saved Assemble rows without opening the Builder UI, including graph-only samples that do not yet have current-annealing records.

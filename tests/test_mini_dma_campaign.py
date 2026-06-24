@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 from data_logging.mini_dma_logger.campaign import load_campaign, validate_campaign
+from scripts.mini_dma_report import generate_report
 
 
-def _write_manifest(path: Path, root: Path) -> None:
+def _write_manifest(path: Path, root: Path, run_dir: Path | None = None) -> None:
     payload = {
         "schema_version": 1,
         "kind": "mini_dma_optimization_campaign",
@@ -60,6 +62,8 @@ def _write_manifest(path: Path, root: Path) -> None:
             "highlight_current_hold": True,
         },
     }
+    if run_dir is not None:
+        payload["runs"] = [{"path": str(run_dir)}]
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -99,6 +103,73 @@ def test_yaml_campaign_template_parses() -> None:
     assert payload["run_plan"]["stages"][0]["id"] == "baseline_0p8"
 
 
+def test_mini_dma_report_generates_standard_outputs(tmp_path: Path) -> None:
+    run_dir = tmp_path / "raw_runs" / "run01"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "stop": {"reason": "completed", "detail": "done"},
+                "source_control": {"branch": "main", "commit": "abc123"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with (run_dir / "measurement.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "elapsed_s",
+                "stress_mpa",
+                "strain_pct",
+                "current_measured_mA",
+                "current_set_mA",
+                "automation_phase",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "elapsed_s": "0",
+                "stress_mpa": "50",
+                "strain_pct": "0",
+                "current_measured_mA": "1",
+                "current_set_mA": "1",
+                "automation_phase": "current",
+            }
+        )
+        writer.writerow(
+            {
+                "elapsed_s": "1",
+                "stress_mpa": "55",
+                "strain_pct": "0.5",
+                "current_measured_mA": "10",
+                "current_set_mA": "10",
+                "automation_phase": "current_hold",
+            }
+        )
+        writer.writerow(
+            {
+                "elapsed_s": "2",
+                "stress_mpa": "51",
+                "strain_pct": "0.8",
+                "current_measured_mA": "20",
+                "current_set_mA": "20",
+                "automation_phase": "current",
+            }
+        )
+    manifest = tmp_path / "campaign.json"
+    _write_manifest(manifest, tmp_path, run_dir)
+
+    summary = generate_report(manifest)
+
+    assert Path(summary["report_path"]).exists()
+    assert (tmp_path / "analysis" / "summary.json").exists()
+    assert len(summary["runs"]) == 1
+    assert Path(summary["runs"][0]["image_path"]).exists()
+    assert summary["runs"][0]["hold_spans"] == 1
+
+
 def test_campaign_check_cli_json(tmp_path: Path) -> None:
     manifest = tmp_path / "campaign.json"
     _write_manifest(manifest, tmp_path)
@@ -119,4 +190,3 @@ def test_campaign_check_cli_json(tmp_path: Path) -> None:
     payload = json.loads(completed.stdout)
     assert payload["ok"] is True
     assert payload["campaign_id"] == "test-campaign"
-
