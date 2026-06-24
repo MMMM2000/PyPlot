@@ -2446,6 +2446,50 @@ def test_mini_dma_transition_review_skips_unsupported_run_modes(tmp_path: Path) 
     assert entries == []
 
 
+def test_dma_transitions_view_lists_run_target_rows() -> None:
+    _ensure_qapp()
+    record = _sample_mini_dma_record()
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+    )
+    assert entries
+    reviewed_entry = entries[0]
+    review_id = builder_ui._mini_dma_review_record_id(reviewed_entry.record, reviewed_entry.target_label)  # noqa: SLF001
+    fake_mini_dma_section = SimpleNamespace(
+        logger=logging.getLogger("test"),
+        _all_mini_dma_records=[record],
+        _refresh_record_groups=lambda: None,
+        transition_reviews_snapshot=lambda: {
+            review_id: {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                "sample": reviewed_entry.sample,
+                "run_label": reviewed_entry.run_label,
+                "target_label": reviewed_entry.target_label,
+                "values": builder_ui._mini_dma_transition_values_from_summary(reviewed_entry.target_summary),  # noqa: SLF001
+            }
+        },
+        _open_transition_review=lambda: None,
+    )
+    section = builder_ui.DmaTransitionsSection(fake_mini_dma_section)
+    try:
+        section.refresh_data()
+        table = section.summary_table
+
+        assert table.rowCount() == len(entries)
+        assert table.item(0, 0).text() == "Ni50Fe27Ga23"
+        assert table.item(0, 1).text() == "12/2"
+        assert table.item(0, 2).text() == record.label
+        assert table.item(0, 3).text() == reviewed_entry.target_label
+        assert table.item(0, 4).text() == "Accepted"
+        assert "total=" in table.item(0, 6).text()
+        assert "DMA target row(s)" in section.status_label.text()
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_mini_dma_transition_review_worker_finishes_for_unsupported_run(
     tmp_path: Path,
 ) -> None:
@@ -2686,7 +2730,73 @@ def test_transition_temps_populates_from_vsm_scan_memory_records(
         assert frame.iloc[0]["Composition"] == "Ni50Fe27Ga23"
         assert frame.iloc[0]["Microwire"] == "12/2"
         assert frame.iloc[0]["_group_key"] == "Ni50Fe27Ga23|12|2"
-        assert section.status_label.text().startswith("0 of 1 sample")
+        assert section.status_label.text().startswith("0 of 1 scan row")
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_temps_uses_one_row_per_vsm_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+
+    def _scan(label: str) -> builder_ui.VsmTemperatureScanRecord:
+        return builder_ui.VsmTemperatureScanRecord(
+            path=tmp_path / f"Ni50Fe27Ga23 12_2 {label}.txt",
+            sample="Ni50Fe27Ga23 12_2",
+            data=pd.DataFrame(
+                {
+                    "temperature": [0.0, 20.0, 40.0],
+                    "field": [10000.0, 10000.0, 10000.0],
+                    "signal": [0.0, 1.0, 2.0],
+                    "section_index": [0, 0, 0],
+                }
+            ),
+            key=("Ni50Fe27Ga23", 12, 2),
+            label=label,
+        )
+
+    scans = [_scan("scan-a"), _scan("scan-b")]
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=scans,
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        section.refresh_data()
+        frame = section.model.frame()
+
+        assert len(frame.index) == 2
+        assert frame["_group_key"].tolist() == ["Ni50Fe27Ga23|12|2", "Ni50Fe27Ga23|12|2"]
+        assert frame["_record_id"].nunique() == 2
+        assert frame["Graph"].tolist() == ["scan-a", "scan-b"]
+        assert "scan row(s)" in section.status_label.text()
+
+        captured: list[list[builder_ui.VsmTemperatureScanRecord]] = []
+        assert section._preview_panel is not None  # noqa: SLF001
+        original_update = section._preview_panel.update_selection  # noqa: SLF001
+
+        def _capture_update(title: str, records: list[builder_ui.VsmTemperatureScanRecord], values: dict[str, float], *args: object, **kwargs: object) -> None:
+            captured.append(list(records))
+            original_update(title, records, values, *args, **kwargs)
+
+        section._preview_panel.update_selection = _capture_update  # type: ignore[method-assign]  # noqa: SLF001
+        proxy_index = section._search_proxy.mapFromSource(section.model.index(1, 0))  # noqa: SLF001
+        section.table_view.setCurrentIndex(proxy_index)
+        section.table_view.selectRow(proxy_index.row())
+        section._update_preview()  # noqa: SLF001
+
+        assert captured[-1] == [scans[1]]
     finally:
         section.close()
         section.deleteLater()
@@ -2863,8 +2973,8 @@ def test_transition_temps_queue_marks_no_transition_and_shows_scan_counts(
         section.table_view.selectRow(proxy_index.row())
 
         frame = section.model.frame()
-        assert len(frame.index) == 1
-        assert frame.iloc[0]["Scans"] == 2
+        assert len(frame.index) == 2
+        assert frame.iloc[0]["Scans"] == 1
         assert frame.iloc[0]["Review status"] == "Auto candidates"
         assert "Total 2" in section._preview_panel.review_counts_label.text()  # noqa: SLF001
 
@@ -2877,8 +2987,10 @@ def test_transition_temps_queue_marks_no_transition_and_shows_scan_counts(
         assert review["included"] is False
         frame = section.model.frame()
         assert frame.iloc[0]["No transition"] == 1
-        assert frame.iloc[0]["Unreviewed"] == 1
-        assert frame.iloc[0]["Review status"] == "Partly reviewed"
+        assert frame.iloc[0]["Unreviewed"] == 0
+        assert frame.iloc[0]["Review status"] == "No transition"
+        assert frame.iloc[1]["Unreviewed"] == 1
+        assert frame.iloc[1]["Review status"] == "Auto candidates"
     finally:
         section.close()
         section.deleteLater()
@@ -7753,6 +7865,79 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         window._dirty = False
         window.hide()
         window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_view_uses_one_row_per_graph() -> None:
+    _ensure_qapp()
+    annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    microscope_section = MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    section = builder_ui.CurrentDensitySection(
+        annealing_section,
+        microscope_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        key_text = "Ni44Fe27Ga23Cu3Co3|1|2"
+
+        def _record(setpoint: int) -> MeasurementRecord:
+            name = f"Ni44Fe27Ga23Cu3Co3 1_2 {setpoint}mA graph.txt"
+            return MeasurementRecord(
+                path=Path(name),
+                metadata=MeasurementMetadata(
+                    composition_token="Ni44Fe27Ga23Cu3Co3",
+                    draw_x=1,
+                    piece_y=2,
+                    setpoint_mA=setpoint,
+                    alt_variant=False,
+                    measurement_id=name,
+                    file_name=name,
+                    relpath=name,
+                    timestamp_mtime_utc="2026-06-24T00:00:00+00:00",
+                ),
+                dataframe=pd.DataFrame({"I_mA": [1.0, float(setpoint)], "R_Ohm": [100.0, 120.0]}),
+                sanity_ok=True,
+                sanity_error=0.0,
+            )
+
+        records = [_record(60), _record(80)]
+        annealing_section._record_groups = {key_text: records}  # noqa: SLF001
+        microscope_section.apply_data(
+            MiniDatabaseData(
+                table=pd.DataFrame(
+                    [
+                        {
+                            "Composition": "Ni44Fe27Ga23Cu3Co3",
+                            "Microwire": "1/2",
+                            builder_ui.MICROSCOPE_D_COLUMN: 20.0,
+                            "_key": key_text,
+                        }
+                    ]
+                )
+            )
+        )
+        section.refresh_data()
+        frame = section.model.frame()
+
+        assert len(frame.index) == 2
+        assert frame["_group_key"].tolist() == [key_text, key_text]
+        assert frame["_record_id"].nunique() == 2
+        assert all("graph" in label for label in frame["Graph"].astype(str))
+
+        captured: list[MeasurementRecord | None] = []
+        assert section._preview_panel is not None  # noqa: SLF001
+        section._preview_panel.update_selection = lambda _key, high, _other, _values: captured.append(high)  # type: ignore[method-assign]  # noqa: SLF001
+        proxy_index = section._search_proxy.mapFromSource(section.model.index(1, 0))  # noqa: SLF001
+        section.table_view.setCurrentIndex(proxy_index)
+        section.table_view.selectRow(proxy_index.row())
+        section._update_preview()  # noqa: SLF001
+
+        assert captured[-1] is records[1]
+    finally:
+        for widget in (section, annealing_section, microscope_section):
+            widget.hide()
+            widget.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 
