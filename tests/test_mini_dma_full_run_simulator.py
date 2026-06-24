@@ -467,6 +467,20 @@ def test_adaptive_cap_growth_requires_observed_response() -> None:
     assert max(event.correction_cap_mm for event in hold_events) > hold_events[0].correction_cap_mm
 
 
+def test_current_resume_target_crossing_is_opt_in_tradeoff() -> None:
+    base = full_run_scenario_by_name("realistic_run32_first_target")
+    default_trace = run_full_mini_dma_simulation(base)
+    crossing_trace = run_full_mini_dma_simulation(replace(base, current_resume_requires_target_crossing=True))
+    default_summary = default_trace.summary()
+    crossing_summary = crossing_trace.summary()
+
+    assert default_summary["current_resume_requires_target_crossing"] is False
+    assert crossing_summary["current_resume_requires_target_crossing"] is True
+    assert crossing_summary["p95_abs_current_sweep_error_mpa"] < default_summary["p95_abs_current_sweep_error_mpa"]
+    assert crossing_summary["current_hold_time_s"] > default_summary["current_hold_time_s"]
+    assert all(crossing_trace.invariants.values())
+
+
 def test_full_run_cli_runs_named_scenario(tmp_path: Path) -> None:
     result = subprocess.run(
         [

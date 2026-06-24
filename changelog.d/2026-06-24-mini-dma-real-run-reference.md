@@ -5,3 +5,4 @@
 - Added a real-vs-simulation comparison tool that overlays real Mini DMA measurements with simulator outputs and reports strain/current/stress/hold similarity metrics.
 - Added a `realistic_run32_first_target` Mini DMA simulator scenario calibrated to the real Ni50Fe27Ga23 12/2 run32 first 50 MPa target segment, including hidden free-strain roughness during transformation so stress fluctuations come from material state rather than fabricated measured strain.
 - Tightened simulator adaptive correction caps so response-gated growth requires observed same-sign improvement after a correction; large processed error alone no longer grants a larger adaptive cap.
+- Added an opt-in simulator experiment for requiring processed-center target crossing before current-hold resume, making the stress-error versus measurement-time tradeoff testable without changing live defaults.

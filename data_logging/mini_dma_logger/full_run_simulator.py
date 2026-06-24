@@ -67,6 +67,7 @@ class FullRunConfig:
     max_ticks: int = 5000
     scale_latency_s: float = 0.2
     zero_compression_stress: bool = False
+    current_resume_requires_target_crossing: bool = False
     max_correction_strain_pct: float | None = None
     adaptive_correction_cap_max_scale: float = 1.0
     adaptive_correction_cap_growth: float = 1.35
@@ -284,6 +285,7 @@ class FullRunTrace:
             "target_ramp_max_lead_fraction": self.config.target_ramp_max_lead_fraction,
             "inter_target_free_length_shift_mm": self.config.inter_target_free_length_shift_mm,
             "scale_latency_s": self.config.scale_latency_s,
+            "current_resume_requires_target_crossing": self.config.current_resume_requires_target_crossing,
             "sample_hz": self.config.sweep.sample_hz,
             "sample_count": len(self.samples),
             "event_count": len(self.events),
@@ -666,6 +668,20 @@ def _current_sweep_ready_to_advance(state: _FullRunState) -> bool:
     return decision.endpoint_recovered
 
 
+def _current_sweep_crossed_target_for_resume(state: _FullRunState, *, rising: bool) -> bool:
+    if not state.config.current_resume_requires_target_crossing:
+        return True
+    feedback = state.feedback_samples()
+    if not feedback:
+        return False
+    controller = state.controller_for_decision(min_recovery_mpa=state.config.controller.tolerance_mpa)
+    signal = processed_control_signal(feedback, controller)
+    if signal.raw_min_mpa <= controller.target_stress_mpa <= signal.raw_max_mpa:
+        return True
+    error = signal.center_mpa - controller.target_stress_mpa
+    return error <= 0.0 if rising else error >= 0.0
+
+
 def _target_ramp_centered_for_move(state: _FullRunState) -> bool:
     feedback = state.feedback_samples()
     if not feedback:
@@ -926,6 +942,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
         current = start_ma
         endpoint_hold_s = 0.0
         current_hold_s = 0.0
+        crossing_required_after_hold = False
         while len(state.events) < config.max_ticks:
             state.current_ma = current
             state.sample(phase_name, rising=rising)
@@ -943,11 +960,14 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
                 state.advance_time()
                 continue
             recovered = _current_sweep_ready_to_advance(state)
+            if recovered and crossing_required_after_hold:
+                recovered = _current_sweep_crossed_target_for_resume(state, rising=rising)
             phase = phase_name
             reason = "current_tracking"
             if not recovered:
                 phase = "current_hold"
                 reason = "endpoint_waiting_for_recovery" if at_endpoint else "processed_recovery"
+                crossing_required_after_hold = True
             move_controller = state.controller_for_decision(min_recovery_mpa=config.controller.tolerance_mpa)
             move_controller = state.controller_for_correction_phase(phase, move_controller)
             correction = 0.0 if recovered else state.correct_toward_target(controller=move_controller)
@@ -964,6 +984,7 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
                 state.advance_time()
                 continue
             current_hold_s = 0.0
+            crossing_required_after_hold = False
             if at_endpoint:
                 if recovered:
                     return None
