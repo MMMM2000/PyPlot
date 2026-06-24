@@ -209,6 +209,7 @@ class FullRunTrace:
         targets = _target_sequence(self.config)
         first_target = targets[0] if targets else self.config.controller.target_stress_mpa
         increasing_targets = max(targets, default=first_target) >= first_target
+        recovery_band = max(self.config.controller.tolerance_mpa, self.config.controller.min_recovery_mpa)
         later_target_ramp_events = [
             event
             for event in target_ramp_events
@@ -218,17 +219,29 @@ class FullRunTrace:
                 else event.target_stress_mpa < first_target - 1e-12
             )
         ]
+        scored_later_target_ramp_events = [
+            event
+            for event in later_target_ramp_events
+            if (
+                event.processed_center_mpa >= first_target - recovery_band
+                if increasing_targets
+                else event.processed_center_mpa <= first_target + recovery_band
+            )
+        ]
         current_events = [
             event
             for event in self.events
             if event.phase in {"current", "current_hold", "current_limit_unwind"}
         ]
-        recovery_band = max(self.config.controller.tolerance_mpa, self.config.controller.min_recovery_mpa)
         max_abs_error = max((abs(event.error_mpa) for event in self.events), default=0.0)
         max_abs_current_error = max((abs(event.error_mpa) for event in current_events), default=0.0)
         max_abs_target_ramp_error = max((abs(event.error_mpa) for event in target_ramp_events), default=0.0)
-        max_abs_later_target_ramp_error = max(
+        max_abs_later_target_ramp_reacquisition_error = max(
             (abs(event.error_mpa) for event in later_target_ramp_events),
+            default=0.0,
+        )
+        max_abs_later_target_ramp_error = max(
+            (abs(event.error_mpa) for event in scored_later_target_ramp_events),
             default=0.0,
         )
         p95_abs_current_error = _percentile(
@@ -236,7 +249,7 @@ class FullRunTrace:
             0.95,
         )
         p95_abs_later_target_ramp_error = _percentile(
-            [abs(event.error_mpa) for event in later_target_ramp_events],
+            [abs(event.error_mpa) for event in scored_later_target_ramp_events],
             0.95,
         )
         recovery_times = _recovery_times_s(self.events, recovery_band)
@@ -300,6 +313,7 @@ class FullRunTrace:
             "max_abs_error_mpa": max_abs_error,
             "max_abs_current_sweep_error_mpa": max_abs_current_error,
             "max_abs_target_ramp_error_mpa": max_abs_target_ramp_error,
+            "max_abs_later_target_ramp_reacquisition_error_mpa": max_abs_later_target_ramp_reacquisition_error,
             "max_abs_later_target_ramp_error_mpa": max_abs_later_target_ramp_error,
             "p95_abs_current_sweep_error_mpa": p95_abs_current_error,
             "p95_abs_later_target_ramp_error_mpa": p95_abs_later_target_ramp_error,
@@ -2358,6 +2372,7 @@ Scenario: `{trace.config.name}`
 - Maximum absolute stress error: {item["max_abs_error_mpa"]:.3f} MPa
 - Maximum current-sweep stress error: {item["max_abs_current_sweep_error_mpa"]:.3f} MPa ({item["max_abs_current_sweep_error_fraction_of_target"]:.4f}x target)
 - P95 current-sweep stress error: {item["p95_abs_current_sweep_error_mpa"]:.3f} MPa ({item["p95_abs_current_sweep_error_fraction_of_target"]:.4f}x target)
+- Maximum later target-ramp reacquisition error: {item["max_abs_later_target_ramp_reacquisition_error_mpa"]:.3f} MPa
 - Maximum later target-ramp stress error: {item["max_abs_later_target_ramp_error_mpa"]:.3f} MPa ({item["max_abs_later_target_ramp_error_fraction_of_target"]:.4f}x target)
 - P95 later target-ramp stress error: {item["p95_abs_later_target_ramp_error_mpa"]:.3f} MPa ({item["p95_abs_later_target_ramp_error_fraction_of_target"]:.4f}x target)
 - Time outside recovery band: {item["time_outside_recovery_band_s"]:.3f} s

@@ -7,3 +7,4 @@
 - Tightened simulator adaptive correction caps so response-gated growth requires observed same-sign improvement after a correction; large processed error alone no longer grants a larger adaptive cap.
 - Added an opt-in simulator experiment for requiring processed-center target crossing before current-hold resume, making the stress-error versus measurement-time tradeoff testable without changing live defaults.
 - Added a Mini DMA control-validation simulation suite that ranks baseline, moderate-response, aggressive-cap, and target-crossing-resume policies across the run32 50 MPa reference plus 0 -> 50 -> 100 MPa stress-ladder wire cases, with JSON/CSV/Markdown summaries and a policy-ranking plot.
+- Split Mini DMA simulator later-ramp scoring from raw post-unwind slack reacquisition, so 50 -> 100 MPa ramp quality is judged after the processed stress has recovered near the previous target while the raw slack excursion remains visible in summaries.
