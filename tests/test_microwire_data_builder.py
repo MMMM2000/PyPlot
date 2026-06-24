@@ -529,6 +529,44 @@ def test_vsm_temperature_section_combines_preview_pixmaps_side_by_side(
         section.close()
 
 
+def test_vsm_temperature_visible_preview_defers_pixmap_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.VsmTemperatureScanSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        pixmap = QtGui.QPixmap(16, 16)
+        pixmap.fill(QtGui.QColor("#2e8b57"))
+        render_calls: list[int] = []
+        monkeypatch.setattr(
+            section,
+            "_render_preview_pixmap",
+            lambda records: render_calls.append(len(records)) or pixmap,
+        )
+        section._record_groups = {"Sample": [object(), object()]}  # type: ignore[list-item]
+        section.show()
+        assert section.table_view is not None
+        section.table_view.show()
+        QtWidgets.QApplication.processEvents()
+
+        result = section._preview_decoration(
+            pd.Series({"_sample": "Sample"}),
+            builder_ui.VSM_TEMPERATURE_SCAN_COLUMN,
+        )
+
+        assert result is None
+        assert render_calls == []
+        assert "Sample|VSM temperature scan graphs" in section._preview_render_pending
+
+        QtWidgets.QApplication.processEvents()
+
+        assert render_calls == [2]
+        assert section._pixmap_cache["Sample|VSM temperature scan graphs"] is pixmap
+    finally:
+        section.close()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_plot_vsm_temperature_scan_figure_can_use_smoothed_preview_mode() -> None:
     processor = VSMTemperatureScanProcessor()
     processor.set_show_smoothed(True)
@@ -5825,6 +5863,65 @@ def test_builder_load_project_preserves_saved_fabrication_and_video_rows(
         QtWidgets.QApplication.processEvents()
 
 
+def test_builder_project_load_runs_single_fabrication_video_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+        sync_calls: list[str] = []
+        monkeypatch.setattr(
+            window.video_section,
+            "sync_with_fabrication",
+            lambda: sync_calls.append("sync"),
+        )
+        project_path = tmp_path / "single_sync_project.pydpj"
+        project_path.write_text(
+            json.dumps(
+                {
+                    "kind": window.PROJECT_KIND,
+                    "version": window.PROJECT_VERSION,
+                    "sections": {
+                        "fabrication": {
+                            "columns": ["Composition", "Microwire"],
+                            "rows": [
+                                {
+                                    "Composition": "Ni50Fe27Ga23",
+                                    "Microwire": "10/1",
+                                }
+                            ],
+                        },
+                        "videos": {
+                            "columns": ["Composition", "Microwire"],
+                            "rows": [
+                                {
+                                    "Composition": "Ni50Fe27Ga23",
+                                    "Microwire": "10/1",
+                                }
+                            ],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        window._load_project_from_path(project_path)
+
+        assert sync_calls == ["sync"]
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_safe_plot_stem_removes_path_separators() -> None:
     stem = _safe_plot_stem("Ni55Fe18Ga27 4/1 s1 1000mA")
     assert "/" not in stem
@@ -9341,6 +9438,41 @@ def test_builder_auto_open_prefers_configured_latest_database(
         QtWidgets.QApplication.processEvents()
 
 
+def test_builder_auto_open_startup_skips_initial_section_store_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    latest.write_text("{}", encoding="utf-8")
+    settings = QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+    settings.setValue("project/auto_open_latest_database", 1)
+    settings.setValue("project/database_dir", str(database_dir))
+    settings.sync()
+    load_calls: list[str] = []
+
+    def _unexpected_load(self: builder_ui.MiniDatabaseStore) -> MiniDatabaseData:
+        load_calls.append(self.section)
+        return MiniDatabaseData()
+
+    monkeypatch.setattr(builder_ui.MiniDatabaseStore, "load", _unexpected_load)
+
+    window = BuilderWindow()
+    try:
+        assert window._startup_auto_open_candidate == latest
+        assert load_calls == []
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_builder_auto_open_skips_reentrant_project_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -9364,6 +9496,51 @@ def test_builder_auto_open_skips_reentrant_project_load(
         assert opened == []
     finally:
         window._project_load_in_progress = False
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_auto_open_load_suppresses_loaded_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    latest = database_dir / "microwire_database_latest.pydpj"
+    settings = QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+    settings.setValue("project/auto_open_latest_database", 1)
+    settings.setValue("project/database_dir", str(database_dir))
+    settings.sync()
+    latest.write_text(
+        json.dumps(
+            {
+                "kind": BuilderWindow.PROJECT_KIND,
+                "version": BuilderWindow.PROJECT_VERSION,
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    information_calls: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, title, *_args, **_kwargs: information_calls.append(str(title)),
+    )
+
+    window = BuilderWindow()
+    try:
+        window._maybe_auto_open_last_project()
+
+        assert information_calls == []
+        assert window._project_path == latest
+    finally:
         window._auto_open_latest_database = False
         window._auto_open_last = False
         window._dirty = False

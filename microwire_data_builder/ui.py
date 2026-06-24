@@ -10657,6 +10657,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
     _project_load_batch_mode: ClassVar[bool] = False
+    _skip_initial_store_load: ClassVar[bool] = False
     _SCROLL_SINGLE_STEP = 12
 
     def __init__(
@@ -10666,10 +10667,30 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        init_started_s = time.perf_counter()
         self.logger = logger
         self._log_callback = log_callback
         self.store = MiniDatabaseStore(self.section_key)
-        self.data = self.store.load()
+        if self._skip_initial_store_load:
+            self.data = MiniDatabaseData()
+            _log_builder_timing(
+                self.logger,
+                "section_init_store_load_skipped",
+                init_started_s,
+                section=self.section_key,
+            )
+        else:
+            load_started_s = time.perf_counter()
+            self.data = self.store.load()
+            _log_builder_timing(
+                self.logger,
+                "section_init_store_load",
+                load_started_s,
+                section=self.section_key,
+                rows=len(self.data.table.index)
+                if isinstance(self.data.table, pd.DataFrame)
+                else 0,
+            )
         self.model = DataFrameModel(self.data.table)
         self._search_proxy = _TableSearchProxyModel(self)
         self.table_view: QtWidgets.QTableView | None = None
@@ -10793,6 +10814,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 self._sanitize_graph_columns()
         except Exception:
             pass
+        _log_builder_timing(
+            self.logger,
+            "section_init_total",
+            init_started_s,
+            section=self.section_key,
+        )
 
     # ------------------------------------------------------------------ UI helpers
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -12506,10 +12533,12 @@ class FabricationSection(MiniDatabaseSection):
             else pd.DataFrame()
         )
         if microscope_table.empty:
-            try:
-                microscope_data = MiniDatabaseStore("microscope").load()
-            except Exception:
-                microscope_data = None
+            microscope_data = None
+            if not MiniDatabaseSection._skip_initial_store_load:
+                try:
+                    microscope_data = MiniDatabaseStore("microscope").load()
+                except Exception:
+                    microscope_data = None
             microscope_table = (
                 microscope_data.table
                 if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
@@ -18667,7 +18696,11 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self._log_callback = log_callback
         self._vsm_temperature_section = vsm_temperature_section
         self.store = MiniDatabaseStore(self.section_key)
-        self.data = self.store.load()
+        self.data = (
+            MiniDatabaseData()
+            if MiniDatabaseSection._skip_initial_store_load
+            else self.store.load()
+        )
         self._transition_points = self._load_transition_points()
         self._transition_reviews = self._load_transition_reviews()
         self._auto_values_cache: Dict[str, Dict[str, float]] = {}
@@ -20216,10 +20249,12 @@ class VideoSection(MiniDatabaseSection):
                 bucket = relevant.setdefault(composition_key, {})
                 piece_bucket = bucket.setdefault(int(draw_value), set())
                 piece_bucket.add(int(piece_value))
-        try:
-            microscope_data = MiniDatabaseStore("microscope").load()
-        except Exception:
-            microscope_data = None
+        microscope_data = None
+        if not MiniDatabaseSection._skip_initial_store_load:
+            try:
+                microscope_data = MiniDatabaseStore("microscope").load()
+            except Exception:
+                microscope_data = None
         microscope_table = (
             microscope_data.table
             if microscope_data is not None and isinstance(microscope_data.table, pd.DataFrame)
@@ -21190,6 +21225,8 @@ class VideoSection(MiniDatabaseSection):
         }
 
     def _fabrication_table(self) -> Optional[pd.DataFrame]:
+        if MiniDatabaseSection._skip_initial_store_load:
+            return None
         try:
             store = MiniDatabaseStore("fabrication")
             data = store.load()
@@ -21759,8 +21796,13 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._all_records: List[VsmHysteresisRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
+        self._preview_render_queue: List[Tuple[str, List[VsmHysteresisRecord]]] = []
+        self._preview_render_pending: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._preview_render_timer = QtCore.QTimer(self)
+        self._preview_render_timer.setSingleShot(True)
+        self._preview_render_timer.timeout.connect(self._render_next_preview)
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
@@ -22053,6 +22095,8 @@ class VsmHysteresisSection(MiniDatabaseSection):
                         pass
         self._preview_group_count = max_groups
         self._update_preview_icon_size()
+        self._preview_render_queue.clear()
+        self._preview_render_pending.clear()
         self._pixmap_cache.clear()
         if isinstance(self.model, DataFrameModel):
             try:
@@ -22168,34 +22212,78 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
-            groups = _group_vsm_hysteresis_plot_groups(records)
-            pixmaps: List[QtGui.QPixmap] = []
-            for group in groups:
-                figure = _plot_vsm_hysteresis_figure(
-                    group.records,
-                    self.logger,
-                    width_px=ANNEALING_GRAPH_WIDTH,
-                    height_px=ANNEALING_GRAPH_HEIGHT,
-                    angle_filter_mode=self._current_angle_filter_mode(),
-                )
-                preview = _figure_to_pixmap(
-                    figure,
-                    self.logger,
-                    width_px=ANNEALING_GRAPH_WIDTH,
-                    height_px=ANNEALING_GRAPH_HEIGHT,
-                )
-                if preview is not None:
-                    pixmaps.append(preview)
-            icon_width = self._preview_icon_width()
-            pixmap = _combine_pixmaps_side_by_side(
-                pixmaps,
-                width_px=icon_width,
-                height_px=self._preview_icon_height(),
-                spacing=self._preview_spacing,
-                scale_to_fit=False,
-            )
+            if self._should_defer_preview_render():
+                self._queue_preview_render(cache_key, records)
+                return None
+            pixmap = self._render_preview_pixmap(records)
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
+
+    def _should_defer_preview_render(self) -> bool:
+        table = self.table_view
+        return bool(
+            isinstance(table, QtWidgets.QTableView)
+            and table.isVisible()
+            and self.isVisible()
+        )
+
+    def _queue_preview_render(
+        self,
+        cache_key: str,
+        records: Sequence[VsmHysteresisRecord],
+    ) -> None:
+        if cache_key in self._preview_render_pending:
+            return
+        self._preview_render_pending.add(cache_key)
+        self._preview_render_queue.append((cache_key, list(records)))
+        if not self._preview_render_timer.isActive():
+            self._preview_render_timer.start(0)
+
+    def _render_next_preview(self) -> None:
+        if not self._preview_render_queue:
+            return
+        cache_key, records = self._preview_render_queue.pop(0)
+        try:
+            self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
+        finally:
+            self._preview_render_pending.discard(cache_key)
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+        if self._preview_render_queue:
+            self._preview_render_timer.start(1)
+
+    def _render_preview_pixmap(
+        self,
+        records: Sequence[VsmHysteresisRecord],
+    ) -> Optional[QtGui.QPixmap]:
+        groups = _group_vsm_hysteresis_plot_groups(records)
+        pixmaps: List[QtGui.QPixmap] = []
+        for group in groups:
+            figure = _plot_vsm_hysteresis_figure(
+                group.records,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+                angle_filter_mode=self._current_angle_filter_mode(),
+            )
+            preview = _figure_to_pixmap(
+                figure,
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            if preview is not None:
+                pixmaps.append(preview)
+        return _combine_pixmaps_side_by_side(
+            pixmaps,
+            width_px=self._preview_icon_width(),
+            height_px=self._preview_icon_height(),
+            spacing=self._preview_spacing,
+            scale_to_fit=False,
+        )
 
     def _selected_records(self) -> List[VsmHysteresisRecord]:
         rows = self._selected_rows()
@@ -22336,8 +22424,13 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         self._all_records: List[VsmTemperatureScanRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
+        self._preview_render_queue: List[Tuple[str, List[VsmTemperatureScanRecord]]] = []
+        self._preview_render_pending: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._preview_render_timer = QtCore.QTimer(self)
+        self._preview_render_timer.setSingleShot(True)
+        self._preview_render_timer.timeout.connect(self._render_next_preview)
         self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
@@ -22527,6 +22620,8 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 max_groups = len(records)
         self._preview_group_count = max_groups
         self._update_preview_icon_size()
+        self._preview_render_queue.clear()
+        self._preview_render_pending.clear()
         self._pixmap_cache.clear()
         if isinstance(self.model, DataFrameModel):
             try:
@@ -22618,6 +22713,55 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
+            if self._should_defer_preview_render():
+                self._queue_preview_render(cache_key, records)
+                return None
+            pixmap = self._render_preview_pixmap(records)
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _should_defer_preview_render(self) -> bool:
+        table = self.table_view
+        return bool(
+            isinstance(table, QtWidgets.QTableView)
+            and table.isVisible()
+            and self.isVisible()
+        )
+
+    def _queue_preview_render(
+        self,
+        cache_key: str,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> None:
+        if cache_key in self._preview_render_pending:
+            return
+        self._preview_render_pending.add(cache_key)
+        self._preview_render_queue.append((cache_key, list(records)))
+        if not self._preview_render_timer.isActive():
+            self._preview_render_timer.start(0)
+
+    def _render_next_preview(self) -> None:
+        if not self._preview_render_queue:
+            return
+        cache_key, records = self._preview_render_queue.pop(0)
+        try:
+            self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
+        finally:
+            self._preview_render_pending.discard(cache_key)
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+        if self._preview_render_queue:
+            self._preview_render_timer.start(1)
+
+    def _render_preview_pixmap(
+        self,
+        records: Sequence[VsmTemperatureScanRecord],
+    ) -> Optional[QtGui.QPixmap]:
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
             # Keep table refresh responsive. The explicit Open graphs action
             # still renders all records; table thumbnails only need a preview.
             records = list(records)[:2]
@@ -22637,7 +22781,6 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                     spacing=self._preview_spacing,
                     scale_to_fit=False,
                 )
-        self._pixmap_cache[cache_key] = pixmap
         return pixmap
 
     def _open_selected_graphs(self) -> None:
@@ -24489,7 +24632,11 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         microscope_frame = (
             self._microscope_snapshot.copy()
             if isinstance(self._microscope_snapshot, pd.DataFrame)
-            else MiniDatabaseStore("microscope").load().table
+            else (
+                pd.DataFrame()
+                if MiniDatabaseSection._skip_initial_store_load
+                else MiniDatabaseStore("microscope").load().table
+            )
         )
         microscope_lookup = _microscope_diameter_lookup(microscope_frame)
         expanded_rows: List[Dict[str, Any]] = []
@@ -25151,7 +25298,11 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         microscope_frame = (
             self._microscope_snapshot.copy()
             if isinstance(self._microscope_snapshot, pd.DataFrame)
-            else MiniDatabaseStore("microscope").load().table
+            else (
+                pd.DataFrame()
+                if MiniDatabaseSection._skip_initial_store_load
+                else MiniDatabaseStore("microscope").load().table
+            )
         )
         microscope_lookup = _microscope_diameter_lookup(microscope_frame)
         for row_index, row in updated.iterrows():
@@ -26946,8 +27097,11 @@ class StrainSection(MiniDatabaseSection):
 
         d_lookup: Dict[MicrowireKey, float] = {}
         try:
-            microscope_data = MiniDatabaseStore("microscope").load()
-            frame = microscope_data.table if isinstance(microscope_data.table, pd.DataFrame) else pd.DataFrame()
+            if MiniDatabaseSection._skip_initial_store_load:
+                frame = pd.DataFrame()
+            else:
+                microscope_data = MiniDatabaseStore("microscope").load()
+                frame = microscope_data.table if isinstance(microscope_data.table, pd.DataFrame) else pd.DataFrame()
         except Exception:
             frame = pd.DataFrame()
         if isinstance(frame, pd.DataFrame) and not frame.empty:
@@ -34651,6 +34805,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        window_init_started_s = time.perf_counter()
         self.logger = logging.getLogger(LOGGER_NAME)
         self._ui_heartbeat: _BuilderUiHeartbeat | None = None
         if _builder_ui_telemetry_enabled():
@@ -34685,6 +34840,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         if stored_database_dir:
             self._database_project_dir = Path(stored_database_dir)
+        self._startup_auto_open_candidate = self._startup_auto_open_project_candidate()
+        self._skip_startup_persisted_section_load = (
+            self._startup_auto_open_candidate is not None
+        )
+        _log_builder_timing(
+            self.logger,
+            "builder_window_settings",
+            window_init_started_s,
+            auto_open_last=self._auto_open_last,
+            auto_open_latest=self._auto_open_latest_database,
+            startup_candidate=self._startup_auto_open_candidate or "",
+            skip_persisted_sections=self._skip_startup_persisted_section_load,
+        )
         self._auto_open_last_action: QtGui.QAction | None = None
         self._auto_open_latest_database_action: QtGui.QAction | None = None
         self._database_project_dir_action: QtGui.QAction | None = None
@@ -34756,92 +34924,99 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-        self.annealing_section = AnnealingSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.annealing_section, "Current annealing")
-        self.sections["annealing"] = self.annealing_section
-        _pump_events()
-
-        self.fabrication_section = FabricationSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.fabrication_section, "Fabrication")
-        self.sections["fabrication"] = self.fabrication_section
-        _pump_events()
-
-        self.microscope_section = MicroscopeSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.microscope_section, "Microscope")
-        self.sections["microscope"] = self.microscope_section
-        _pump_events()
-
-        self.current_density_section = CurrentDensitySection(
-            self.annealing_section,
-            self.microscope_section,
-            self.logger,
-            _append_log,
+        previous_skip_store_load = MiniDatabaseSection._skip_initial_store_load
+        MiniDatabaseSection._skip_initial_store_load = bool(
+            self._skip_startup_persisted_section_load
         )
-        self.sections["current_density"] = self.current_density_section
-        _pump_events()
+        try:
+            self.annealing_section = AnnealingSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.annealing_section, "Current annealing")
+            self.sections["annealing"] = self.annealing_section
+            _pump_events()
 
-        self.video_section = VideoSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.video_section, "Videos")
-        self.sections["videos"] = self.video_section
-        _pump_events()
+            self.fabrication_section = FabricationSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.fabrication_section, "Fabrication")
+            self.sections["fabrication"] = self.fabrication_section
+            _pump_events()
 
-        self.vsm_hysteresis_section = VsmHysteresisSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.vsm_hysteresis_section, "VSM hysteresis")
-        self.sections["vsm_hysteresis"] = self.vsm_hysteresis_section
-        _pump_events()
+            self.microscope_section = MicroscopeSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.microscope_section, "Microscope")
+            self.sections["microscope"] = self.microscope_section
+            _pump_events()
 
-        self.vsm_temperature_section = VsmTemperatureScanSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.vsm_temperature_section, "VSM temp scan")
-        self.sections["vsm_temperature_scan"] = self.vsm_temperature_section
-        self.vsm_temperature_transitions_button = QtWidgets.QPushButton("Transitions...")
-        self.vsm_temperature_transitions_button.setToolTip("Open VSM transitions in the Transitions workspace.")
-        self.vsm_temperature_section.controls_layout.addWidget(self.vsm_temperature_transitions_button)
-        _pump_events()
+            self.current_density_section = CurrentDensitySection(
+                self.annealing_section,
+                self.microscope_section,
+                self.logger,
+                _append_log,
+            )
+            self.sections["current_density"] = self.current_density_section
+            _pump_events()
 
-        self.transition_temps_section = TransitionTempsSection(
-            self.vsm_temperature_section,
-            self.logger,
-            _append_log,
-        )
-        self.sections["transition_temps"] = self.transition_temps_section
-        _pump_events()
+            self.video_section = VideoSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.video_section, "Videos")
+            self.sections["videos"] = self.video_section
+            _pump_events()
 
-        self.dma_iso_stress_section = DmaIsoStressSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.dma_iso_stress_section, "DMA iso-stress")
-        self.sections["dma_iso_stress"] = self.dma_iso_stress_section
-        _pump_events()
+            self.vsm_hysteresis_section = VsmHysteresisSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.vsm_hysteresis_section, "VSM hysteresis")
+            self.sections["vsm_hysteresis"] = self.vsm_hysteresis_section
+            _pump_events()
 
-        self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.mini_dma_section, "Mini DMA")
-        self.sections["mini_dma"] = self.mini_dma_section
-        _pump_events()
+            self.vsm_temperature_section = VsmTemperatureScanSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.vsm_temperature_section, "VSM temp scan")
+            self.sections["vsm_temperature_scan"] = self.vsm_temperature_section
+            self.vsm_temperature_transitions_button = QtWidgets.QPushButton("Transitions...")
+            self.vsm_temperature_transitions_button.setToolTip("Open VSM transitions in the Transitions workspace.")
+            self.vsm_temperature_section.controls_layout.addWidget(self.vsm_temperature_transitions_button)
+            _pump_events()
 
-        self.dma_transitions_section = DmaTransitionsSection(self.mini_dma_section)
-        self.transitions_section = TransitionsSection(
-            self.current_density_section,
-            self.transition_temps_section,
-            self.dma_transitions_section,
-        )
-        self.tab_widget.insertTab(3, self.transitions_section, "Transitions")
-        self._install_transition_shortcuts()
-        _pump_events()
+            self.transition_temps_section = TransitionTempsSection(
+                self.vsm_temperature_section,
+                self.logger,
+                _append_log,
+            )
+            self.sections["transition_temps"] = self.transition_temps_section
+            _pump_events()
 
-        self.shape_memory_stress_strain_section = ShapeMemoryStressStrainSection(
-            self.logger, _append_log
-        )
-        self.tab_widget.addTab(
-            self.shape_memory_stress_strain_section,
-            "Manual stress/strain",
-        )
-        self.sections["shape_memory_stress_strain"] = (
-            self.shape_memory_stress_strain_section
-        )
-        _pump_events()
+            self.dma_iso_stress_section = DmaIsoStressSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.dma_iso_stress_section, "DMA iso-stress")
+            self.sections["dma_iso_stress"] = self.dma_iso_stress_section
+            _pump_events()
 
-        self.fmr_section = FmrSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.fmr_section, "FMR")
-        self.sections["fmr"] = self.fmr_section
-        _pump_events()
+            self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.mini_dma_section, "Mini DMA")
+            self.sections["mini_dma"] = self.mini_dma_section
+            _pump_events()
+
+            self.dma_transitions_section = DmaTransitionsSection(self.mini_dma_section)
+            self.transitions_section = TransitionsSection(
+                self.current_density_section,
+                self.transition_temps_section,
+                self.dma_transitions_section,
+            )
+            self.tab_widget.insertTab(3, self.transitions_section, "Transitions")
+            self._install_transition_shortcuts()
+            _pump_events()
+
+            self.shape_memory_stress_strain_section = ShapeMemoryStressStrainSection(
+                self.logger, _append_log
+            )
+            self.tab_widget.addTab(
+                self.shape_memory_stress_strain_section,
+                "Manual stress/strain",
+            )
+            self.sections["shape_memory_stress_strain"] = (
+                self.shape_memory_stress_strain_section
+            )
+            _pump_events()
+
+            self.fmr_section = FmrSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.fmr_section, "FMR")
+            self.sections["fmr"] = self.fmr_section
+            _pump_events()
+        finally:
+            MiniDatabaseSection._skip_initial_store_load = previous_skip_store_load
 
         self._developer_options = developer_options()
         if hasattr(self._developer_options, "message_log_capture_changed"):
@@ -34857,10 +35032,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 initial_capture = False
             self._handle_log_capture_changed(initial_capture)
 
-        self.strain_section = StrainSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.strain_section, "Strain")
-        self.sections["strain"] = self.strain_section
-        _pump_events()
+        previous_skip_store_load = MiniDatabaseSection._skip_initial_store_load
+        MiniDatabaseSection._skip_initial_store_load = bool(
+            self._skip_startup_persisted_section_load
+        )
+        try:
+            self.strain_section = StrainSection(self.logger, _append_log)
+            self.tab_widget.addTab(self.strain_section, "Strain")
+            self.sections["strain"] = self.strain_section
+            _pump_events()
+        finally:
+            MiniDatabaseSection._skip_initial_store_load = previous_skip_store_load
 
         assembly = AssemblySection(
             self.sections,
@@ -34879,21 +35061,29 @@ class BuilderWindow(QtWidgets.QMainWindow):
             pass
         _pump_events()
 
-        self.compare_section = CompareSection(
-            self.sections,
-            self.logger,
-            _append_log,
+        previous_skip_store_load = MiniDatabaseSection._skip_initial_store_load
+        MiniDatabaseSection._skip_initial_store_load = bool(
+            self._skip_startup_persisted_section_load
         )
-        self.sections["compare"] = self.compare_section
-        self.tab_widget.addTab(self.compare_section, "Compare")
-        _pump_events()
+        try:
+            self.compare_section = CompareSection(
+                self.sections,
+                self.logger,
+                _append_log,
+            )
+            self.sections["compare"] = self.compare_section
+            self.tab_widget.addTab(self.compare_section, "Compare")
+            _pump_events()
+        finally:
+            MiniDatabaseSection._skip_initial_store_load = previous_skip_store_load
         assembly.attach_compare_section(self.compare_section)
 
         self.fabrication_section.sources_changed.connect(
             self._handle_fabrication_sources_changed
         )
-        self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
-        self._sync_microscope_dependent_sections()
+        if not self._skip_startup_persisted_section_load:
+            self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+            self._sync_microscope_dependent_sections()
         try:
             self.microscope_section.data_updated.connect(self._sync_microscope_dependent_sections)
         except Exception:
@@ -34997,15 +35187,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._setup_analysis_menu(menu_bar)
         self._update_project_actions()
         self._suppress_dirty = True
-        for section in self.sections.values():
-            if isinstance(section, MiniDatabaseSection):
-                section.reset_to_blank()
+        if not self._skip_startup_persisted_section_load:
+            for section in self.sections.values():
+                if isinstance(section, MiniDatabaseSection):
+                    section.reset_to_blank()
         self._suppress_dirty = False
         self._dirty = False
         self._update_project_title()
         self._set_initial_geometry()
         self._retabify_primary_docks()
         self._startup_auto_open_scheduled = False
+        _log_builder_timing(self.logger, "builder_window_init_total", window_init_started_s)
 
     def _install_transition_shortcuts(self) -> None:
         shortcuts = (
@@ -35160,6 +35352,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 switcher.set_tab_alert(dock, highlight)
 
     def _handle_fabrication_sources_changed(self, sources: Iterable[str]) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         video = getattr(self, "video_section", None)
         if isinstance(video, MiniDatabaseSection):
             video.set_sources(sources)
@@ -36109,6 +36303,29 @@ class BuilderWindow(QtWidgets.QMainWindow):
             pass
         self._update_database_settings_actions()
 
+    def _startup_auto_open_project_candidate(self) -> Optional[Path]:
+        candidate: Optional[Path] = None
+        if self._auto_open_latest_database and isinstance(self._database_project_dir, Path):
+            candidate = _latest_database_project_in_dir(self._database_project_dir)
+        if candidate is None and self._auto_open_last:
+            last_path = _sanitise_existing_file(
+                self.settings.value(self._project_settings_key("last_path"), "")
+            )
+            if last_path:
+                path_obj = Path(last_path)
+                if path_obj.exists():
+                    candidate = _resolve_latest_database_project(path_obj)
+            else:
+                try:
+                    self.settings.remove(self._project_settings_key("last_path"))
+                except Exception:
+                    pass
+            if candidate is None and self._recent_projects:
+                fallback = Path(self._recent_projects[0])
+                if fallback.exists():
+                    candidate = _resolve_latest_database_project(fallback)
+        return candidate
+
     def _choose_database_project_dir(self) -> None:
         start_dir = self._database_project_dir
         if start_dir is None:
@@ -36153,31 +36370,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self, "_project_load_in_progress", False
         ):
             return
-        candidate: Optional[Path] = None
+        candidate = self._startup_auto_open_project_candidate()
         if self._auto_open_latest_database and isinstance(self._database_project_dir, Path):
-            candidate = _latest_database_project_in_dir(self._database_project_dir)
             if candidate is None:
                 self.logger.warning(
                     "No latest Microwire database project found in %s",
                     self._database_project_dir,
                 )
-        if candidate is None and self._auto_open_last:
-            last_path = _sanitise_existing_file(
-                self.settings.value(self._project_settings_key("last_path"), "")
-            )
-            if last_path:
-                path_obj = Path(last_path)
-                if path_obj.exists():
-                    candidate = _resolve_latest_database_project(path_obj)
-            else:
-                try:
-                    self.settings.remove(self._project_settings_key("last_path"))
-                except Exception:
-                    pass
-            if candidate is None and self._recent_projects:
-                fallback = Path(self._recent_projects[0])
-                if fallback.exists():
-                    candidate = _resolve_latest_database_project(fallback)
         if candidate is None:
             return
         try:
@@ -36314,6 +36513,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         total_steps = max(len(self.sections) + 1, 1)
         last_pump = 0.0
         show_progress_dialog = not _builder_dialogs_suppressed()
+        auto_open_load = bool(getattr(self, "_auto_open_in_progress", False))
 
         def _pump_events(step: int | None = None, label: str | None = None) -> None:
             """Keep the UI responsive while loading a project."""
@@ -36342,7 +36542,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 progress_dialog = QtWidgets.QProgressDialog(
                     "Loading project…", "", 0, total_steps, self
                 )
-                progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+                progress_dialog.setWindowModality(
+                    QtCore.Qt.WindowModality.NonModal
+                    if auto_open_load
+                    else QtCore.Qt.WindowModality.ApplicationModal
+                )
                 progress_dialog.setCancelButton(None)
                 progress_dialog.setMinimumDuration(150)
                 progress_dialog.setAutoClose(False)
@@ -36440,7 +36644,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.logger.info("Project loaded from %s", target)
             _pump_events(total_steps, "Finishing…")
             MiniDatabaseSection._project_load_batch_mode = False
-            if not _builder_dialogs_suppressed():
+            if not auto_open_load and not _builder_dialogs_suppressed():
                 QtWidgets.QMessageBox.information(
                     self,
                     "Open Project",
@@ -36487,11 +36691,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
             if isinstance(section, MiniDatabaseSection):
                 sources = section.data.sources
             self._handle_section_sources_changed(key, sources)
-        self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        batch_mode = MiniDatabaseSection._project_load_batch_mode
+        MiniDatabaseSection._project_load_batch_mode = False
         try:
-            self.video_section.sync_with_fabrication()
-        except Exception:
-            pass
+            self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        finally:
+            MiniDatabaseSection._project_load_batch_mode = batch_mode
 
     def _remember_project_directory(self, directory: Path) -> None:
         try:
