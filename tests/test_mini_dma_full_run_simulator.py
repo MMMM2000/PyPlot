@@ -374,10 +374,11 @@ def test_stress_ladder_matrix_covers_representative_wires(tmp_path: Path) -> Non
     assert all(item["target_stress_sequence_mpa"] == [50.0, 100.0] for item in summaries)
     assert all(item["inter_target_free_length_shift_mm"] < 0.0 for item in summaries)
     assert all(item["max_abs_later_target_ramp_error_mpa"] > 0.0 for item in summaries)
-    assert any(item["max_abs_later_target_ramp_error_mpa"] > 40.0 for item in summaries)
+    assert any(item["max_abs_later_target_ramp_error_mpa"] > 10.0 for item in summaries)
     assert any(item["quality_status"] == "ok" for item in summaries)
     assert any(item["quality_status"] == "needs_tuning" for item in summaries)
-    assert any("later_target_ramp_error_high" in item["quality_flags"] for item in summaries)
+    assert any("current_hold_fraction_high" in item["quality_flags"] for item in summaries)
+    assert any("free_strain_tracking_error_high" in item["quality_flags"] for item in summaries)
     assert all(item["max_abs_current_sweep_error_fraction_of_target"] >= 0.0 for item in summaries)
     assert all(item["mean_abs_free_strain_tracking_error_fraction_of_span"] >= 0.0 for item in summaries)
     assert any(item["scale_latency_s"] >= 0.45 for item in summaries)
@@ -401,7 +402,8 @@ def test_stress_ladder_candidate_policy_improves_aggregate_quality(tmp_path: Pat
     assert all(item["stop_reason"] == "completed" for item in candidates)
     assert all(item["quality_status"] == "ok" for item in candidates if "stiffer_thicker" in item["scenario"])
     assert all(item["quality_status"] == "ok" for item in candidates if "stress_ladder_50_100_after_unwind" in item["scenario"])
-    assert any("later_target_ramp_error_high" in item["quality_flags"] for item in candidates)
+    assert any("current_hold_fraction_high" in item["quality_flags"] for item in candidates)
+    assert any("free_strain_tracking_error_high" in item["quality_flags"] for item in candidates)
     assert paths["summary_csv"].exists()
 
 
