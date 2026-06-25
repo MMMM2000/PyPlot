@@ -24404,6 +24404,290 @@ class DmaTransitionsSection(QtWidgets.QWidget):
         self.refresh_data()
 
 
+class _EmbeddedTransitionReviewWorkspace(QtWidgets.QWidget):
+    """Embed an existing transition-review dialog as an in-tab workspace."""
+
+    def __init__(
+        self,
+        title: str,
+        dialog_factory: Callable[[QtWidgets.QWidget], QtWidgets.QDialog],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._dialog_factory = dialog_factory
+        self._dialog: QtWidgets.QDialog | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        controls = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.refresh_workspace)
+        controls.addWidget(self.refresh_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+        self._host = QtWidgets.QWidget(self)
+        self._host_layout = QtWidgets.QVBoxLayout(self._host)
+        self._host_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._host, 1)
+        self.refresh_workspace()
+
+    def refresh_workspace(self) -> None:
+        if self._dialog is not None:
+            self._host_layout.removeWidget(self._dialog)
+            self._dialog.setParent(None)
+            self._dialog.deleteLater()
+            self._dialog = None
+        dialog = self._dialog_factory(self._host)
+        dialog.setWindowTitle(self._title)
+        dialog.setWindowFlags(QtCore.Qt.WindowType.Widget)
+        for button_box in dialog.findChildren(QtWidgets.QDialogButtonBox):
+            button_box.hide()
+        self._host_layout.addWidget(dialog, 1)
+        dialog.show()
+        self._dialog = dialog
+
+
+class _AnnealingTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
+    def __init__(
+        self,
+        current_density_section: CurrentDensitySection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._current_density_section = current_density_section
+        super().__init__("Annealing transition review", self._create_dialog, parent)
+
+    def _create_dialog(self, parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
+        annealing_section = getattr(self._current_density_section, "_annealing_section", None)
+        records_getter = getattr(annealing_section, "_transition_review_records", None)
+        records = records_getter() if callable(records_getter) else []
+        snapshot_provider = getattr(annealing_section, "transition_reviews_snapshot", None)
+        review_setter = getattr(annealing_section, "set_transition_review_for_record", None)
+        dialog = _AnnealingTransitionReviewDialog(
+            records,
+            self._current_density_section.logger,
+            parent,
+            transition_reviews_provider=snapshot_provider,
+            transition_reviews_setter=review_setter,
+        )
+        if not records:
+            dialog._summary_label.setText("No current annealing graphs are available yet.")  # noqa: SLF001
+        return dialog
+
+
+class _MiniDmaTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
+    def __init__(
+        self,
+        mini_dma_section: MiniDmaSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._mini_dma_section = mini_dma_section
+        super().__init__("DMA transition review", self._create_dialog, parent)
+
+    def _create_dialog(self, parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
+        records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        if not records:
+            try:
+                self._mini_dma_section._refresh_record_groups()
+            except Exception:
+                pass
+            records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
+        return _MiniDmaTransitionReviewDialog(
+            records,
+            getattr(self._mini_dma_section, "logger", logging.getLogger(__name__)),
+            parent,
+            review_provider=self._mini_dma_section.transition_reviews_snapshot,
+            review_setter=self._mini_dma_section.set_transition_review_for_target,
+        )
+
+
+class _VsmTransitionWorkspace(QtWidgets.QWidget):
+    def __init__(
+        self,
+        transition_temps_section: TransitionTempsSection,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._section = transition_temps_section
+        self._refs: List[Tuple[str, str]] = []
+        self._items: Dict[Tuple[str, str], QtWidgets.QTreeWidgetItem] = {}
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        controls = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.refresh_workspace)
+        controls.addWidget(self.refresh_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        self.tree = QtWidgets.QTreeWidget(splitter)
+        self.tree.setHeaderLabels(["VSM scan", "Status"])
+        self.tree.setUniformRowHeights(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setColumnWidth(0, 280)
+        self.tree.setColumnWidth(1, 120)
+        self.preview_panel = _TransitionTempPreviewPanel(
+            getattr(self._section, "logger", logging.getLogger(__name__)),
+            splitter,
+        )
+        self.preview_panel.acceptNextRequested.connect(self._accept_current_and_refresh)
+        self.preview_panel.noTransitionRequested.connect(self._no_transition_current_and_refresh)
+        self.preview_panel.excludeRequested.connect(self._exclude_current_and_refresh)
+        self.preview_panel.previousRequested.connect(self._previous_current_and_refresh)
+        self.preview_panel.nextUnreviewedRequested.connect(self._next_unreviewed_and_refresh)
+        self.preview_panel.valuePicked.connect(self._picked_value_and_refresh)
+        self.preview_panel.valueCleared.connect(self._clear_value_and_refresh)
+        self.preview_panel.scanChanged.connect(self._sync_selected_from_panel)
+        splitter.addWidget(self.tree)
+        splitter.addWidget(self.preview_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+        self.tree.currentItemChanged.connect(self._handle_selection_changed)
+        try:
+            object.__setattr__(self._section, "_preview_panel", self.preview_panel)
+        except Exception:
+            pass
+        self.refresh_workspace()
+
+    def refresh_workspace(self) -> None:
+        try:
+            self._section._refresh_record_groups()
+            self._section.refresh_data()
+        except Exception:
+            pass
+        self.tree.clear()
+        self._items.clear()
+        self._refs = []
+        for group_key in sorted(getattr(self._section, "_record_groups", {}).keys()):
+            key_tuple = self._section._parse_group_key(group_key)
+            if key_tuple is None:
+                composition = ""
+                microwire = group_key
+            else:
+                composition, microwire = _microwire_info_from_key(key_tuple)
+            records = sorted(self._section._record_groups.get(group_key, []), key=_record_label_for_display)
+            for record in records:
+                record_id = _vsm_transition_review_record_id(record)
+                status = self._section._status_for_record(record)
+                label = " | ".join(
+                    part
+                    for part in (
+                        composition,
+                        microwire,
+                        _record_label_for_display(record),
+                    )
+                    if part
+                )
+                item = QtWidgets.QTreeWidgetItem([label or "VSM scan", status])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, (group_key, record_id))
+                _apply_transition_status_color(item, status)
+                self.tree.addTopLevelItem(item)
+                ref = (group_key, record_id)
+                self._refs.append(ref)
+                self._items[ref] = item
+        self.tree.setColumnWidth(0, 280)
+        self.tree.setColumnWidth(1, 120)
+        if self.tree.topLevelItemCount():
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        else:
+            self.preview_panel.update_selection("No VSM temperature scans are available yet.", [], {})
+
+    def _handle_selection_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            self.preview_panel.update_selection("Select a VSM scan to review.", [], {})
+            return
+        ref = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(ref, tuple) or len(ref) != 2:
+            return
+        group_key, record_id = str(ref[0]), str(ref[1])
+        try:
+            self._section._select_scan_ref(group_key, record_id)
+        except Exception:
+            pass
+        self._refresh_current_item()
+
+    def _current_ref(self) -> Optional[Tuple[str, str]]:
+        item = self.tree.currentItem()
+        if item is None:
+            return None
+        ref = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(ref, tuple) and len(ref) == 2:
+            return (str(ref[0]), str(ref[1]))
+        return None
+
+    def _refresh_current_item(self) -> None:
+        ref = self._current_ref()
+        if ref is None:
+            return
+        group_key, record_id = ref
+        record = next(
+            (
+                candidate
+                for candidate in self._section._record_groups.get(group_key, [])
+                if _vsm_transition_review_record_id(candidate) == record_id
+            ),
+            None,
+        )
+        item = self._items.get(ref)
+        if record is not None and item is not None:
+            status = self._section._status_for_record(record)
+            item.setText(1, status)
+            _apply_transition_status_color(item, status)
+
+    def _select_ref(self, ref: Tuple[str, str]) -> None:
+        item = self._items.get(ref)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+
+    def _sync_selected_from_panel(self) -> None:
+        current = self._section._current_preview_record()
+        if current is None:
+            return
+        group_key, record = current
+        self._select_ref((group_key, _vsm_transition_review_record_id(record)))
+
+    def _accept_current_and_refresh(self) -> None:
+        self._section._accept_current_scan_and_next()
+        self._sync_selected_from_panel()
+        self._refresh_current_item()
+
+    def _no_transition_current_and_refresh(self) -> None:
+        self._section._mark_current_scan_no_transition()
+        self._sync_selected_from_panel()
+        self._refresh_current_item()
+
+    def _exclude_current_and_refresh(self) -> None:
+        self._section._exclude_current_scan()
+        self._sync_selected_from_panel()
+        self._refresh_current_item()
+
+    def _previous_current_and_refresh(self) -> None:
+        self._section._select_previous_scan()
+        self._sync_selected_from_panel()
+
+    def _next_unreviewed_and_refresh(self) -> None:
+        self._section._select_next_unreviewed_scan(fallback_next=True)
+        self._sync_selected_from_panel()
+
+    def _picked_value_and_refresh(self, label: str, value: float) -> None:
+        self._section._apply_picked_value(label, value)
+        self._refresh_current_item()
+
+    def _clear_value_and_refresh(self, label: str) -> None:
+        self._section._clear_picked_value(label)
+        self._refresh_current_item()
+
+
 class TransitionsSection(QtWidgets.QWidget):
     section_title = "Transitions"
 
@@ -24426,9 +24710,12 @@ class TransitionsSection(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tab_widget = QtWidgets.QTabWidget(self)
-        self.tab_widget.addTab(annealing_transitions, "Annealing")
-        self.tab_widget.addTab(vsm_transitions, "VSM")
-        self.tab_widget.addTab(dma_transitions, "DMA")
+        self.annealing_workspace = _AnnealingTransitionWorkspace(annealing_transitions, self)
+        self.vsm_workspace = _VsmTransitionWorkspace(vsm_transitions, self)
+        self.dma_workspace = _MiniDmaTransitionWorkspace(dma_transitions._mini_dma_section, self)
+        self.tab_widget.addTab(self.annealing_workspace, "Annealing")
+        self.tab_widget.addTab(self.vsm_workspace, "VSM")
+        self.tab_widget.addTab(self.dma_workspace, "DMA")
         layout.addWidget(self.tab_widget, 1)
 
     def show_view(self, view: str) -> None:
