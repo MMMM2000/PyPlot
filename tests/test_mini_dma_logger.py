@@ -10955,7 +10955,7 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         plateau_index=1,
     )
     seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
-    window._seek_last_value_by_key[seek_key] = 50.0
+    window._seek_last_value_by_key[seek_key] = 40.0
     window._seek_last_effective_position_by_key[seek_key] = 0.0
     window._current_position_mm = 0.1
     window._effective_position_mm = 0.1
@@ -10964,7 +10964,7 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         window._update_current_sweep_hold_response_stiffness(
             seek_key,
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            40.0,
+            35.0,
         )
 
         assert seek_key not in window._current_sweep_hold_response_stiffness_by_key
@@ -10973,10 +10973,42 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         window._update_current_sweep_hold_response_stiffness(
             seek_key,
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            60.0,
+            45.0,
         )
 
         assert window._current_sweep_hold_response_count_by_key[seek_key] == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_response_stiffness_requires_target_improvement(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_value_by_key[seek_key] = 55.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._current_position_mm = 0.1
+    window._effective_position_mm = 0.1
+
+    try:
+        window._update_current_sweep_hold_response_stiffness(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            60.0,
+        )
+
+        assert seek_key not in window._current_sweep_hold_response_stiffness_by_key
+        assert window._current_sweep_hold_response_count_by_key.get(seek_key, 0) == 0
     finally:
         _close_test_window(window)
 
@@ -18690,8 +18722,8 @@ def test_current_sweep_hold_volatile_containment_clamps_improving_recovery(
         assert effective_mm is not None
         correction_mm = abs(float(effective_mm) - current_position_mm)
         assert correction_mm == pytest.approx(window._motor_step_mm())
-        assert trace_rows[-1]["reason"] == "gated;current_hold_volatile_single_step"
-        assert "containing recovery to one motor step" in window.log_output.toPlainText()
+        assert trace_rows[-1]["reason"] == "gated;current_hold_volatile_capped"
+        assert "capping the next correction" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -19635,7 +19667,42 @@ def test_current_sweep_hold_uses_smooth_dynamic_stress_cap(tmp_path: Path, qtbot
         )
 
         assert correction_mm is not None
-        assert correction_mm * 200.0 == pytest.approx(20.64, abs=0.01)
+        assert correction_mm == pytest.approx(window._current_sweep_hold_base_command_cap_mm())
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_large_error_without_response_uses_geometry_base_cap(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_initial_length.setValue(58.0)
+        window.spin_current_sweep_max_correction_strain_pct.setValue(5.0)
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(100.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            plateau_index=1,
+        )
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+
+        correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=10.0,
+            error_value=80.0,
+            seek_key=seek_key,
+        )
+
+        assert correction_mm is not None
+        assert correction_mm == pytest.approx(
+            58.0 * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT / 100.0
+        )
     finally:
         _close_test_window(window)
 
@@ -20556,7 +20623,7 @@ def test_iso_current_stress_ramp_target_uses_larger_dynamic_step_cap(
         )
 
         assert correction_mm > window.spin_current_sweep_nudge_mm.value()
-        assert correction_mm == pytest.approx(50.0 * 0.0008)
+        assert correction_mm == pytest.approx(50.0 * 0.0012)
     finally:
         _close_test_window(window)
 
@@ -22262,7 +22329,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "adaptive-current-hold-recovery"
+        assert first_logic["profile"] == "processed-center-response-gated-hold"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
@@ -22273,6 +22340,9 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "conservative_current_hold_response_stiffness" in first_logic["features"]
         assert "current_hold_unstable_response_damps_to_single_motor_steps" in first_logic["features"]
         assert "current_hold_improving_recovery_scales_cautiously" in first_logic["features"]
+        assert "current_hold_large_error_uses_geometry_base_cap_before_response" in first_logic["features"]
+        assert "current_hold_response_stiffness_requires_error_improvement" in first_logic["features"]
+        assert "current_hold_adaptive_cap_growth_is_response_earned" in first_logic["features"]
         assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
