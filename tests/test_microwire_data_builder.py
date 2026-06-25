@@ -7925,9 +7925,17 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.tab_widget.tabText(0) == "Annealing"
         assert transitions.tab_widget.tabText(1) == "VSM"
         assert transitions.tab_widget.tabText(2) == "DMA"
-        assert transitions.tab_widget.widget(0) is window.current_density_section
-        assert transitions.tab_widget.widget(1) is window.transition_temps_section
-        assert transitions.tab_widget.widget(2) is window.dma_transitions_section
+        assert isinstance(transitions.tab_widget.widget(0), builder_ui._AnnealingTransitionWorkspace)  # noqa: SLF001
+        assert isinstance(transitions.tab_widget.widget(1), builder_ui._VsmTransitionWorkspace)  # noqa: SLF001
+        assert isinstance(transitions.tab_widget.widget(2), builder_ui._MiniDmaTransitionWorkspace)  # noqa: SLF001
+        assert transitions.tab_widget.widget(0) is not window.current_density_section
+        assert transitions.tab_widget.widget(1) is not window.transition_temps_section
+        assert transitions.tab_widget.widget(2) is not window.dma_transitions_section
+        assert transitions.annealing_workspace._dialog is not None  # noqa: SLF001
+        assert transitions.annealing_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
+        assert transitions.vsm_workspace.tree.headerItem().text(0) == "VSM scan"
+        assert transitions.dma_workspace._dialog is not None  # noqa: SLF001
+        assert transitions.dma_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
         assert window.current_density_section.section_key == "current_density"
         assert window.transition_temps_section.section_key == "transition_temps"
 
