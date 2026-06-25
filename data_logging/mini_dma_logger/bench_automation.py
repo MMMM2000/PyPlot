@@ -412,6 +412,14 @@ def _apply_bench_guardrails(window: Any, guardrails: MiniDmaBenchGuardrails) -> 
     setattr(window, "_bench_mechanical_slack_max_seek_mm", guardrails.mechanical_slack_max_seek_mm)
 
 
+def _ensure_measurement_logging_session(window: Any) -> None:
+    if bool(getattr(window, "_session_active", False)):
+        return
+    start_session = getattr(window, "_start_session", None)
+    if callable(start_session):
+        start_session(enable_logging=True, record_initial_point=False)
+
+
 def _set_text_if_present(window: Any, attr_name: str, value: str | None) -> None:
     if value is None:
         return
@@ -753,6 +761,7 @@ def _execute_run(
     _apply_length_setup_automation(window, run)
     _apply_bench_guardrails(window, guardrails)
     _prefer_next_output_run(window)
+    _ensure_measurement_logging_session(window)
     window._start_auto_ramp()
     app.processEvents()
     if not _window_active(window):

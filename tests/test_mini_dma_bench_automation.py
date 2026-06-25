@@ -228,6 +228,9 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
         def set_bench_mechanical_slack_takeup(self, *, allow: bool, max_seek_mm: float | None) -> None:
             events.append(("slack_takeup", (allow, max_seek_mm)))
 
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            events.append(("session", (enable_logging, record_initial_point)))
+
         def _start_auto_ramp(self) -> None:
             events.append(("start", None))
 
@@ -246,6 +249,8 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert ("lengths", (20.0, 20.4)) in events
     assert ("recipe", "iso-strain.recipe.json") in events
     assert ("slack_takeup", (True, 10.0)) in events
+    assert ("session", (True, False)) in events
+    assert events.index(("session", (True, False))) < events.index(("start", None))
     assert ("start", None) in events
 
 
