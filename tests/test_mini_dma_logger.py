@@ -6075,11 +6075,12 @@ def test_microwire_field_ui_typing_reports_bad_fabrication_data_without_crashing
 def test_fabrication_completer_activation_applies_sample_without_rebuilding_popup(
     tmp_path: Path,
     qtbot,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
+        window.show()
+        qtbot.wait(20)
         window._fabrication_records_by_composition = {
             "Ni50Fe27Ga23": [
                 mini_dma_mod.FabricationSampleRecord(
@@ -6105,16 +6106,15 @@ def test_fabrication_completer_activation_applies_sample_without_rebuilding_popu
         assert composition_completer is not None
         assert wire_completer is not None
         popup = wire_completer.popup()
-        hide_calls: list[bool] = []
-
-        def _record_popup_hide() -> None:
-            hide_calls.append(True)
-
-        monkeypatch.setattr(popup, "hide", _record_popup_hide)
+        assert popup is not None
 
         composition_completer.activated.emit("Ni50Fe27Ga23")
         assert window.edit_name_composition.text() == "Ni50Fe27Ga23"
         assert window.edit_name_wire.completer() is wire_completer
+
+        window.edit_name_wire._show_available_completions()
+        qtbot.wait(20)
+        assert popup.isVisible()
 
         wire_completer.activated.emit("10/4")
         qtbot.wait(20)
@@ -6124,7 +6124,52 @@ def test_fabrication_completer_activation_applies_sample_without_rebuilding_popu
         assert window.spin_diameter.value() == pytest.approx(0.0136)
         assert "fabrication diameter 13.6 um" in window.label_fabrication_status.text()
         assert window.edit_name_wire.completer() is wire_completer
-        assert hide_calls == [True]
+        assert not popup.isVisible()
+
+        window.edit_name_wire._show_available_completions()
+        qtbot.wait(20)
+        assert not popup.isVisible()
+    finally:
+        _close_test_window(window)
+
+
+def test_fabrication_completer_popup_hides_when_application_deactivates(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.show()
+        qtbot.wait(20)
+        window._fabrication_records_by_composition = {
+            "Ni51Fe25Ga24": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni51Fe25Ga24",
+                    draw=1,
+                    piece=1,
+                    label="1/1",
+                    diameter_mm=0.0112,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_name_composition.setText("Ni51Fe25Ga24")
+        wire_completer = window.edit_name_wire.completer()
+        assert wire_completer is not None
+        popup = wire_completer.popup()
+        assert popup is not None
+
+        window.edit_name_wire._show_available_completions()
+        qtbot.wait(20)
+        assert popup.isVisible()
+
+        app = QtWidgets.QApplication.instance()
+        assert app is not None
+        app.sendEvent(app, QtCore.QEvent(QtCore.QEvent.Type.ApplicationDeactivate))
+        qtbot.wait(20)
+
+        assert not popup.isVisible()
     finally:
         _close_test_window(window)
 

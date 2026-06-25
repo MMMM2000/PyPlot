@@ -1980,10 +1980,29 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._normalizing = False
+        self._completion_popup_blocked = False
         self.setPlaceholderText("e.g. 156/2")
         self.textEdited.connect(self._normalize_on_edit)
 
+    def _clear_completion_popup_block(self) -> None:
+        self._completion_popup_blocked = False
+
+    def dismiss_available_completions(self, *, suppress_ms: int = 300) -> None:
+        if suppress_ms > 0:
+            self._completion_popup_blocked = True
+            QtCore.QTimer.singleShot(suppress_ms, self._clear_completion_popup_block)
+        completer = self.completer()
+        if completer is None:
+            return
+        popup = completer.popup()
+        if popup is None:
+            return
+        popup.hide()
+        popup.close()
+
     def _show_available_completions(self) -> None:
+        if self._completion_popup_blocked:
+            return
         completer = self.completer()
         if completer is None:
             return
@@ -2003,6 +2022,11 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         super().mousePressEvent(event)
         QtCore.QTimer.singleShot(0, self._show_available_completions)
+
+    def focusOutEvent(self, event: QtGui.QFocusEvent) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        if event.reason() != QtCore.Qt.FocusReason.PopupFocusReason:
+            self.dismiss_available_completions(suppress_ms=150)
 
     @staticmethod
     def _split_parts(value: object) -> tuple[str, str]:
@@ -5433,6 +5457,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_microwire_model: QtCore.QStringListModel | None = None
         self._fabrication_composition_completer: QtWidgets.QCompleter | None = None
         self._fabrication_microwire_completer: QtWidgets.QCompleter | None = None
+        self._app_event_filter_installed = False
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._app_event_filter_installed = True
         self._fabrication_loaded_compositions: set[str] = set()
         self._fabrication_loading_composition: str | None = None
         self._fabrication_pending_composition_load: tuple[Path, str] | None = None
@@ -11063,6 +11092,28 @@ class MainWindow(QtWidgets.QMainWindow):
             return "" if data is None else str(data)
         return str(value or "")
 
+    def _hide_fabrication_completer_popups(self) -> None:
+        for completer in (
+            self._fabrication_composition_completer,
+            self._fabrication_microwire_completer,
+        ):
+            if completer is None:
+                continue
+            popup = completer.popup()
+            if popup is None:
+                continue
+            popup.hide()
+            popup.close()
+        self.edit_name_wire.dismiss_available_completions(suppress_ms=250)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        if (
+            watched is QtWidgets.QApplication.instance()
+            and event.type() == QtCore.QEvent.Type.ApplicationDeactivate
+        ):
+            self._hide_fabrication_completer_popups()
+        return super().eventFilter(watched, event)
+
     def _handle_fabrication_composition_activated(self, value: object) -> None:
         text = self._completion_text_from_value(value).strip()
         if not text:
@@ -11076,11 +11127,7 @@ class MainWindow(QtWidgets.QMainWindow):
         display_text = MicrowireLineEdit.to_display_text(text) or text.strip()
         if not display_text:
             return
-        completer = self.edit_name_wire.completer()
-        if completer is not None:
-            popup = completer.popup()
-            if popup is not None:
-                popup.hide()
+        self.edit_name_wire.dismiss_available_completions(suppress_ms=350)
         with QtCore.QSignalBlocker(self.edit_name_wire):
             self.edit_name_wire.setText(display_text)
         self._sync_auto_name_fields()
@@ -28846,6 +28893,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
+        self._hide_fabrication_completer_popups()
+        app = QtWidgets.QApplication.instance()
+        if self._app_event_filter_installed and app is not None:
+            app.removeEventFilter(self)
+            self._app_event_filter_installed = False
         self._close_transient_child_windows()
         self._settings_save_timer.stop()
         self._fabrication_composition_load_timer.stop()
