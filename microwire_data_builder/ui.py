@@ -992,6 +992,89 @@ def _decode_project_payload(payload: Any) -> Any:
         return None
 
 
+PROJECT_DECODED_PAYLOADS_KEY = "__decoded_payloads"
+
+
+@dataclass
+class _PreparedProjectLoad:
+    target: Path
+    payload: Dict[str, Any]
+    byte_count: int
+    decoded_payload_count: int
+    read_ms: float
+    json_ms: float
+    decode_ms: float
+
+
+def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
+    """Read, parse, and decode data-only project payloads away from Qt widgets."""
+
+    read_started_s = time.perf_counter()
+    text = target.read_text(encoding="utf-8")
+    read_ms = (time.perf_counter() - read_started_s) * 1000.0
+    byte_count = len(text.encode("utf-8", errors="replace"))
+
+    json_started_s = time.perf_counter()
+    raw_payload = json.loads(text)
+    json_ms = (time.perf_counter() - json_started_s) * 1000.0
+    if not isinstance(raw_payload, dict):
+        raw_payload = {}
+
+    decode_started_s = time.perf_counter()
+    payload: Dict[str, Any] = dict(raw_payload)
+    sections_payload = payload.get("sections")
+    decoded_payload_count = 0
+    if isinstance(sections_payload, Mapping):
+        prepared_sections: Dict[str, Any] = {}
+        for section_key, section_payload in sections_payload.items():
+            if not isinstance(section_payload, Mapping):
+                prepared_sections[str(section_key)] = section_payload
+                continue
+            prepared_section = dict(section_payload)
+            encoded_payloads = prepared_section.get("payloads")
+            decoded_payloads: Dict[str, Any] = {}
+            if isinstance(encoded_payloads, Mapping):
+                for name, encoded in encoded_payloads.items():
+                    if not isinstance(name, str) or not name.strip():
+                        continue
+                    decoded = _decode_project_payload(encoded)
+                    if decoded is None:
+                        continue
+                    decoded_payloads[name.strip()] = decoded
+                    decoded_payload_count += 1
+            if decoded_payloads:
+                prepared_section[PROJECT_DECODED_PAYLOADS_KEY] = decoded_payloads
+            prepared_sections[str(section_key)] = prepared_section
+        payload["sections"] = prepared_sections
+    decode_ms = (time.perf_counter() - decode_started_s) * 1000.0
+
+    return _PreparedProjectLoad(
+        target=target,
+        payload=payload,
+        byte_count=byte_count,
+        decoded_payload_count=decoded_payload_count,
+        read_ms=read_ms,
+        json_ms=json_ms,
+        decode_ms=decode_ms,
+    )
+
+
+class _ProjectLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(self, target: Path) -> None:
+        super().__init__()
+        self._target = target
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            self.finished.emit(_prepare_project_payload_for_gui(self._target))
+        except Exception as exc:
+            self.failed.emit(exc)
+
+
 def _normalise_import_header(text: str) -> str:
     cleaned = str(text or "").strip().lower()
     if not cleaned:
@@ -11914,8 +11997,31 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             section=self.section_key,
             rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
         )
+        decoded_project_payloads = payload.get(PROJECT_DECODED_PAYLOADS_KEY)
+        if isinstance(decoded_project_payloads, Mapping):
+            for name, decoded in decoded_project_payloads.items():
+                if not isinstance(name, str) or not name.strip() or decoded is None:
+                    continue
+                payload_started_s = time.perf_counter()
+                try:
+                    self.store.save_payload(name.strip(), decoded)
+                    decoded_payload_count += 1
+                    _log_builder_timing(
+                        self.logger,
+                        "section_import_payload",
+                        payload_started_s,
+                        section=self.section_key,
+                        payload=name.strip(),
+                        predecoded=True,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "Failed to restore predecoded project payload %s for section %s",
+                        name,
+                        self.section_key,
+                    )
         project_payloads = payload.get("payloads")
-        if isinstance(project_payloads, Mapping):
+        if not isinstance(decoded_project_payloads, Mapping) and isinstance(project_payloads, Mapping):
             for name, encoded in project_payloads.items():
                 if not isinstance(name, str) or not name.strip():
                     continue
@@ -35301,6 +35407,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._suppress_dirty = False
         self._project_load_in_progress = False
         self._auto_open_in_progress = False
+        self._project_load_thread: QtCore.QThread | None = None
+        self._project_load_worker: _ProjectLoadWorker | None = None
+        self._project_load_started_s: float = 0.0
+        self._project_load_auto_open = False
 
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
@@ -36928,11 +37038,125 @@ class BuilderWindow(QtWidgets.QMainWindow):
             return
         load_started_s = time.perf_counter()
         self._project_load_in_progress = True
+        auto_open_load = bool(getattr(self, "_auto_open_in_progress", False))
+        if auto_open_load:
+            self._begin_project_load_prepare_worker(target, load_started_s, auto_open_load=True)
+            return
+        try:
+            prepared = _prepare_project_payload_for_gui(target)
+            _log_builder_timing(
+                self.logger,
+                "project_load_prepare_sync",
+                load_started_s,
+                path=target,
+                bytes=prepared.byte_count,
+                decoded_payloads=prepared.decoded_payload_count,
+                read_ms=f"{prepared.read_ms:.1f}",
+                json_ms=f"{prepared.json_ms:.1f}",
+                decode_ms=f"{prepared.decode_ms:.1f}",
+            )
+            self._apply_prepared_project_load(
+                prepared,
+                load_started_s=load_started_s,
+                auto_open_load=False,
+                staged=False,
+            )
+        except Exception as exc:
+            self._handle_project_load_failed(target, exc, load_started_s)
+
+    def _begin_project_load_prepare_worker(
+        self,
+        target: Path,
+        load_started_s: float,
+        *,
+        auto_open_load: bool,
+    ) -> None:
+        self._project_load_started_s = load_started_s
+        self._project_load_auto_open = bool(auto_open_load)
+        self.logger.info("Preparing project load in background: %s", target)
+        thread = QtCore.QThread(self)
+        worker = _ProjectLoadWorker(target)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._handle_project_load_prepared)
+        worker.failed.connect(partial(self._handle_project_load_worker_failed, target))
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_project_load_worker)
+        self._project_load_thread = thread
+        self._project_load_worker = worker
+        thread.start()
+
+    def _cleanup_project_load_worker(self) -> None:
+        self._project_load_thread = None
+        self._project_load_worker = None
+
+    def _handle_project_load_prepared(self, prepared_obj: object) -> None:
+        if not isinstance(prepared_obj, _PreparedProjectLoad):
+            self._handle_project_load_worker_failed(
+                Path("<unknown>"),
+                RuntimeError("Project load worker returned an invalid result."),
+            )
+            return
+        load_started_s = self._project_load_started_s or time.perf_counter()
+        _log_builder_timing(
+            self.logger,
+            "project_load_prepare_worker",
+            load_started_s,
+            path=prepared_obj.target,
+            bytes=prepared_obj.byte_count,
+            decoded_payloads=prepared_obj.decoded_payload_count,
+            read_ms=f"{prepared_obj.read_ms:.1f}",
+            json_ms=f"{prepared_obj.json_ms:.1f}",
+            decode_ms=f"{prepared_obj.decode_ms:.1f}",
+        )
+        self._apply_prepared_project_load(
+            prepared_obj,
+            load_started_s=load_started_s,
+            auto_open_load=self._project_load_auto_open,
+            staged=True,
+        )
+
+    def _handle_project_load_worker_failed(self, target: Path, exc: object) -> None:
+        load_started_s = self._project_load_started_s or time.perf_counter()
+        error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+        self._handle_project_load_failed(target, error, load_started_s)
+
+    def _handle_project_load_failed(
+        self,
+        target: Path,
+        exc: Exception,
+        load_started_s: float,
+    ) -> None:
+        self.logger.exception("Failed to load project %s", target, exc_info=exc)
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Open Project",
+            f"Failed to load project file:\n{exc}",
+        )
+        _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
+        self._project_load_in_progress = False
+        self._project_load_auto_open = False
+        MiniDatabaseSection._project_load_batch_mode = False
+        self._suppress_dirty = False
+
+    def _apply_prepared_project_load(
+        self,
+        prepared: _PreparedProjectLoad,
+        *,
+        load_started_s: float,
+        auto_open_load: bool,
+        staged: bool,
+    ) -> None:
+        target = prepared.target
+        payload = prepared.payload
         progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         total_steps = max(len(self.sections) + 1, 1)
         last_pump = 0.0
         show_progress_dialog = not _builder_dialogs_suppressed()
-        auto_open_load = bool(getattr(self, "_auto_open_in_progress", False))
 
         def _pump_events(step: int | None = None, label: str | None = None) -> None:
             """Keep the UI responsive while loading a project."""
@@ -36977,22 +37201,37 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         self._suppress_dirty = True
         try:
-            read_started_s = time.perf_counter()
-            payload = json.loads(target.read_text(encoding="utf-8"))
-            _log_builder_timing(self.logger, "project_load_read", read_started_s, path=target)
-            _pump_events(0)
-
             if payload.get("kind") != self.PROJECT_KIND:
                 QtWidgets.QMessageBox.critical(
                     self,
                     "Open Project",
                     "The selected file is not a Microwire Data Builder project.",
                 )
+                self._project_load_in_progress = False
+                self._project_load_auto_open = False
+                self._suppress_dirty = False
+                if progress_dialog is not None:
+                    try:
+                        progress_dialog.close()
+                    except Exception:
+                        pass
                 return
 
             sections_payload = payload.get("sections", {})
             if not isinstance(sections_payload, Mapping):
                 sections_payload = {}
+
+            if staged:
+                self._restore_project_sections_staged(
+                    target=target,
+                    sections_payload=sections_payload,
+                    progress_dialog=progress_dialog,
+                    total_steps=total_steps,
+                    load_started_s=load_started_s,
+                    auto_open_load=auto_open_load,
+                    pump_events=_pump_events,
+                )
+                return
 
             MiniDatabaseSection._project_load_batch_mode = True
             with MiniDatabaseStore.suspend_disk_writes():
@@ -37070,16 +37309,99 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     f"Loaded project from {target}",
                 )
         except Exception as exc:
-            self.logger.exception("Failed to load project %s", target, exc_info=exc)
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Open Project",
-                f"Failed to load project file:\n{exc}",
-            )
+            if staged:
+                self._handle_project_load_failed(target, exc, load_started_s)
+                if progress_dialog is not None:
+                    try:
+                        progress_dialog.close()
+                    except Exception:
+                        pass
+            else:
+                self.logger.exception("Failed to load project %s", target, exc_info=exc)
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Open Project",
+                    f"Failed to load project file:\n{exc}",
+                )
         finally:
+            if not staged:
+                _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
+                self._project_load_in_progress = False
+                MiniDatabaseSection._project_load_batch_mode = False
+                self._suppress_dirty = False
+                if progress_dialog is not None:
+                    try:
+                        progress_dialog.close()
+                    except Exception:
+                        try:
+                            progress_dialog.cancel()
+                        except Exception:
+                            pass
+
+    def _restore_project_sections_staged(
+        self,
+        *,
+        target: Path,
+        sections_payload: Mapping[str, Any],
+        progress_dialog: QtWidgets.QProgressDialog | None,
+        total_steps: int,
+        load_started_s: float,
+        auto_open_load: bool,
+        pump_events: Callable[[int | None, str | None], None],
+    ) -> None:
+        items = list(self.sections.items())
+        state = {
+            "index": 0,
+            "assembly_done": False,
+            "disk_context": MiniDatabaseStore.suspend_disk_writes(),
+        }
+        MiniDatabaseSection._project_load_batch_mode = True
+        state["disk_context"].__enter__()
+
+        def _finish() -> None:
+            try:
+                state["disk_context"].__exit__(None, None, None)
+            except Exception:
+                pass
+            assembly = getattr(self, "assembly_section", None)
+            self._update_imported_data_item()
+            if isinstance(assembly, AssemblySection):
+                show_imported = getattr(assembly, "_show_imported", True)
+                if self._show_imported_action is not None:
+                    self._show_imported_action.setChecked(bool(show_imported))
+            if self._separate_imported_action is not None:
+                separate = bool(
+                    self.settings.value(self._project_settings_key("separate_imported"), False)
+                )
+                self._separate_imported_action.setChecked(separate)
+                fabrication = getattr(self, "fabrication_section", None)
+                if isinstance(fabrication, FabricationSection):
+                    fabrication.set_import_separation(separate)
+            self._project_path = target
+            self._remember_project_directory(target.parent)
+            self._remember_recent_project(target)
+            try:
+                self.settings.setValue(self._project_settings_key("last_path"), str(target))
+            except Exception:
+                pass
+            self._update_project_title()
+            refresh_started_s = time.perf_counter()
+            self._refresh_sections_after_project_load()
+            _log_builder_timing(self.logger, "project_load_post_refresh", refresh_started_s)
+            self._update_project_actions()
+            self._dirty = False
+            self.logger.info("Project loaded from %s", target)
+            pump_events(total_steps, "Finishing...")
+            MiniDatabaseSection._project_load_batch_mode = False
+            if not auto_open_load and not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Open Project",
+                    f"Loaded project from {target}",
+                )
             _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
             self._project_load_in_progress = False
-            MiniDatabaseSection._project_load_batch_mode = False
+            self._project_load_auto_open = False
             self._suppress_dirty = False
             if progress_dialog is not None:
                 try:
@@ -37089,6 +37411,70 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         progress_dialog.cancel()
                     except Exception:
                         pass
+
+        def _step() -> None:
+            try:
+                index = int(state["index"])
+                if index < len(items):
+                    key, section = items[index]
+                    label = getattr(section, "section_title", key)
+                    pump_events(index, f"Loading {label}...")
+                    importer = getattr(section, "import_project_payload", None)
+                    if callable(importer):
+                        if isinstance(section, MiniDatabaseSection):
+                            section.reset_to_blank()
+                        section_payload = sections_payload.get(key)
+                        try:
+                            section_started_s = time.perf_counter()
+                            importer(section_payload or {})
+                            _log_builder_timing(
+                                self.logger,
+                                "project_load_section",
+                                section_started_s,
+                                section=key,
+                                staged=True,
+                            )
+                        except Exception as exc:
+                            self.logger.error("Failed to load section %s from project: %s", key, exc)
+                    state["index"] = index + 1
+                    pump_events(index + 1, f"Loaded {label}")
+                    QtCore.QTimer.singleShot(0, _step)
+                    return
+
+                if not state["assembly_done"]:
+                    state["assembly_done"] = True
+                    assembly_payload = sections_payload.get("assemble")
+                    assembly = getattr(self, "assembly_section", None)
+                    importer = getattr(assembly, "import_project_payload", None)
+                    if callable(importer):
+                        try:
+                            assembly_started_s = time.perf_counter()
+                            importer(assembly_payload or {})
+                            _log_builder_timing(
+                                self.logger,
+                                "project_load_section",
+                                assembly_started_s,
+                                section="assemble",
+                                staged=True,
+                            )
+                        except Exception as exc:
+                            self.logger.error("Failed to load section assemble: %s", exc)
+                    pump_events(total_steps, "Finishing...")
+                    QtCore.QTimer.singleShot(0, _finish)
+                    return
+            except Exception as exc:
+                try:
+                    state["disk_context"].__exit__(type(exc), exc, exc.__traceback__)
+                except Exception:
+                    pass
+                self._handle_project_load_failed(target, exc, load_started_s)
+                if progress_dialog is not None:
+                    try:
+                        progress_dialog.close()
+                    except Exception:
+                        pass
+
+        QtCore.QTimer.singleShot(0, _step)
 
     def _refresh_sections_after_project_load(self) -> None:
         self._sync_microscope_dependent_sections()
