@@ -206,6 +206,7 @@ MICROSCOPE_TABLE_COLUMNS = [
     MICROSCOPE_CAP_D_COLUMN,
     "d/D",
     MICROSCOPE_STATUS_COLUMN,
+    "Source label",
     BRITTLE_COLUMN,
     MICROSCOPE_IMAGE_COLUMNS[0],
     MICROSCOPE_IMAGE_COLUMNS[1],
@@ -479,6 +480,18 @@ def _microscope_expected_suffix_from_path(path: Path) -> Optional[str]:
     return None
 
 
+def _source_label_from_path_family(value: object) -> Optional[str]:
+    folded = _fold_source_text(value)
+    if not folded:
+        return None
+    if (
+        "shape memory database" in folded
+        or "databaza mikrodrotov" in folded
+    ):
+        return "Ko\u0161ice"
+    return None
+
+
 def _source_labels_from_row(row: Mapping[str, Any] | pd.Series) -> List[str]:
     labels: List[str] = []
 
@@ -498,7 +511,11 @@ def _source_labels_from_row(row: Mapping[str, Any] | pd.Series) -> List[str]:
         except Exception:
             value = None
         for item in _iter_source_text_values(value):
-            add(_source_label_from_text(item))
+            family_label = _source_label_from_path_family(item)
+            add(family_label)
+            text_label = _source_label_from_text(item)
+            if text_label != "Other" or family_label is None:
+                add(text_label)
     return labels
 
 
@@ -14728,7 +14745,14 @@ class MicroscopeSection(MiniDatabaseSection):
         self._pending_advance_review: bool = False
         self._pending_partial_rows: List[dict] = []
         self._pending_partial_flush = False
+        self._expected_key_source_labels: Dict[str, str] = {}
+        self._pending_state_save_timer: QtCore.QTimer | None = None
+        self._suppress_model_edit_handler = False
         super().__init__(logger, log_callback, parent)
+        self._pending_state_save_timer = QtCore.QTimer(self)
+        self._pending_state_save_timer.setSingleShot(True)
+        self._pending_state_save_timer.setInterval(350)
+        self._pending_state_save_timer.timeout.connect(self._persist_review_state)
         self._show_other_ends = bool(self.data.extra.get("show_other_ends", True))
 
         # Removed the missing-items list UI; missing values are visible in the table.
@@ -15034,6 +15058,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._validated.clear()
         self._prepopulated_keys.clear()
         self._expected_keys_current = set()
+        self._expected_key_source_labels.clear()
         self._pixmap_cache.clear()
         self._show_other_ends = True
         if hasattr(self, "other_end_checkbox"):
@@ -15134,6 +15159,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def _expected_microwire_keys(self) -> Set[MicrowireKey]:
         keys: Set[MicrowireKey] = set()
+        source_labels: Dict[str, str] = {}
         try:
             annealing_records = MiniDatabaseStore("annealing").load_payload(
                 "annealing_records"
@@ -15141,6 +15167,7 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             annealing_records = None
         if not isinstance(annealing_records, list):
+            self._expected_key_source_labels = {}
             return keys
         for record in annealing_records:
             metadata = getattr(record, "metadata", None)
@@ -15156,10 +15183,16 @@ class MicroscopeSection(MiniDatabaseSection):
             if isinstance(path, Path):
                 suffix = _microscope_expected_suffix_from_path(path)
             try:
-                keys.add((str(composition), int(draw), int(piece), suffix))
+                key_tuple = (str(composition), int(draw), int(piece), suffix)
             except (TypeError, ValueError):
                 continue
+            keys.add(key_tuple)
+            if path is not None:
+                label = _source_label_from_path_family(path) or _source_label_from_text(path)
+                if label:
+                    source_labels[_microwire_key_to_str(key_tuple)] = label
         keys.update(self._extra_expected_keys())
+        self._expected_key_source_labels = source_labels
         return keys
 
     def _extra_expected_keys(self) -> Set[MicrowireKey]:
@@ -15213,6 +15246,15 @@ class MicroscopeSection(MiniDatabaseSection):
         for column in MICROSCOPE_TABLE_COLUMNS:
             if column not in frame.columns:
                 frame[column] = pd.Series([None] * len(frame))
+        if SOURCE_LABEL_COLUMN in frame.columns and self._expected_key_source_labels:
+            for idx, row in frame.iterrows():
+                key_text = str(row.get("_key") or "").strip()
+                if not key_text:
+                    continue
+                current_label = str(row.get(SOURCE_LABEL_COLUMN) or "").strip()
+                expected_label = self._expected_key_source_labels.get(key_text)
+                if expected_label and not current_label:
+                    frame.at[idx, SOURCE_LABEL_COLUMN] = expected_label
         existing_keys = set(str(key) for key in frame.get("_key", []))
         new_rows: List[Dict[str, object]] = []
         for composition, draw, piece, suffix in sorted(
@@ -15235,6 +15277,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
                     MICROSCOPE_STATUS_COLUMN: None,
+                    SOURCE_LABEL_COLUMN: self._expected_key_source_labels.get(key_str),
                     BRITTLE_COLUMN: None,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
@@ -15404,6 +15447,7 @@ class MicroscopeSection(MiniDatabaseSection):
             existing_d = existing_row.get(MICROSCOPE_D_COLUMN)
             existing_D = existing_row.get(MICROSCOPE_CAP_D_COLUMN)
             existing_ratio = existing_row.get("d/D")
+            existing_source_label = existing_row.get(SOURCE_LABEL_COLUMN)
             existing_brittle = existing_row.get(BRITTLE_COLUMN)
             existing_core_image = existing_row.get("_core_image")
             existing_glass_image = existing_row.get("_glass_image")
@@ -15421,6 +15465,12 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_CAP_D_COLUMN: existing_D,
                     "d/D": existing_ratio,
                     MICROSCOPE_STATUS_COLUMN: None,
+                    SOURCE_LABEL_COLUMN: (
+                        existing_source_label
+                        or _source_label_from_path_family(merged_images)
+                        or _source_label_from_text(merged_images)
+                        or self._expected_key_source_labels.get(key)
+                    ),
                     BRITTLE_COLUMN: (
                         existing_brittle
                         if existing_brittle
@@ -15551,6 +15601,11 @@ class MicroscopeSection(MiniDatabaseSection):
             MICROSCOPE_CAP_D_COLUMN: D_value,
             "d/D": ratio,
             MICROSCOPE_STATUS_COLUMN: None,
+            SOURCE_LABEL_COLUMN: (
+                _source_label_from_path_family(image_paths)
+                or _source_label_from_text(image_paths)
+                or self._expected_key_source_labels.get(key_str)
+            ),
             MICROSCOPE_IMAGE_COLUMNS[0]: None,
             MICROSCOPE_IMAGE_COLUMNS[1]: None,
             "_key": key_str,
@@ -15764,7 +15819,7 @@ class MicroscopeSection(MiniDatabaseSection):
             self._select_row_for_key(key_text, column_label=column_label)
             self._selected_key = key_text
             if self._is_valid_diameter(row.get(column_label)):
-                self._mark_reviewed(auto=True, columns={column_label})
+                self._mark_reviewed(auto=True, columns={column_label}, fast=True)
             self._advance_to_next_pending(column_label)
 
         QtCore.QTimer.singleShot(75, _advance)
@@ -15981,6 +16036,8 @@ class MicroscopeSection(MiniDatabaseSection):
         images = row.get("_images")
         has_any_image = bool(images) if isinstance(images, (list, tuple, set)) else False
         if not core_present and not glass_present and not has_any_image:
+            if self._row_is_expected_unlinked(row):
+                return f"{prefix}Expected from annealing; no microscope image linked"
             return f"{prefix}Missing image"
         missing_labeled: List[str] = []
         if not brittle and not core_present:
@@ -16005,6 +16062,23 @@ class MicroscopeSection(MiniDatabaseSection):
         if not d_reviewed or not D_reviewed:
             return f"{prefix}Values need review"
         return f"{prefix}Reviewed"
+
+    def _row_is_expected_unlinked(self, row: pd.Series) -> bool:
+        key = str(row.get("_key") or "").strip()
+        if not key:
+            return False
+        parsed = _microwire_key_from_string(key)
+        if parsed is None:
+            return False
+        if parsed not in self._expected_keys_current:
+            return False
+        images = row.get("_images")
+        has_any_image = bool(images) if isinstance(images, (list, tuple, set)) else False
+        return not (
+            self._has_image_value(row.get("_core_image"))
+            or self._has_image_value(row.get("_glass_image"))
+            or has_any_image
+        )
 
     @staticmethod
     def _has_image_value(value: object) -> bool:
@@ -16033,6 +16107,85 @@ class MicroscopeSection(MiniDatabaseSection):
             updated.at[index, MICROSCOPE_STATUS_COLUMN] = self._status_for_row(row)
         return updated.loc[:, MICROSCOPE_TABLE_COLUMNS]
 
+    def _source_row_for_key(self, key: str) -> Optional[int]:
+        frame = self.model.frame()
+        if frame.empty or "_key" not in frame.columns:
+            return None
+        try:
+            matches = frame.index[frame["_key"].astype(str) == str(key)].tolist()
+        except Exception:
+            return None
+        if not matches:
+            return None
+        try:
+            return int(matches[0])
+        except Exception:
+            return None
+
+    def _refresh_row_for_key(self, key: str) -> None:
+        row_idx = self._source_row_for_key(key)
+        if row_idx is None:
+            return
+        frame = self.model.frame()
+        try:
+            row = frame.iloc[row_idx]
+        except Exception:
+            return
+        if "d/D" in frame.columns:
+            d_value = row.get(MICROSCOPE_D_COLUMN)
+            D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
+            ratio = None
+            if self._is_valid_diameter(d_value) and self._is_valid_diameter(D_value):
+                try:
+                    ratio = float(d_value) / float(D_value)
+                except ZeroDivisionError:
+                    ratio = None
+            frame.at[row_idx, "d/D"] = round(ratio, 3) if ratio is not None else None
+        if MICROSCOPE_STATUS_COLUMN in frame.columns:
+            frame.at[row_idx, MICROSCOPE_STATUS_COLUMN] = self._status_for_row(frame.iloc[row_idx])
+        self.data.table = frame.copy()
+        try:
+            self.model._row_series_cache.pop(int(row_idx), None)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            left = self.model.index(row_idx, 0)
+            right = self.model.index(row_idx, max(0, self.model.columnCount() - 1))
+            self._suppress_model_edit_handler = True
+            try:
+                self.model.dataChanged.emit(
+                    left,
+                    right,
+                    [
+                        QtCore.Qt.ItemDataRole.DisplayRole,
+                        QtCore.Qt.ItemDataRole.BackgroundRole,
+                        QtCore.Qt.ItemDataRole.ForegroundRole,
+                        QtCore.Qt.ItemDataRole.ToolTipRole,
+                    ],
+                )
+            finally:
+                self._suppress_model_edit_handler = False
+        except Exception:
+            self._suppress_model_edit_handler = False
+            pass
+
+    def _schedule_review_state_save(self) -> None:
+        self.data.extra["overrides"] = self._overrides
+        self.data.extra["validated"] = self._validated
+        timer = self._pending_state_save_timer
+        if timer is None:
+            self._persist_review_state()
+            return
+        timer.start()
+
+    def _persist_review_state(self) -> None:
+        self.data.extra["overrides"] = self._overrides
+        self.data.extra["validated"] = self._validated
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to save microscope review state")
+
     def _refresh_status_column(self) -> None:
         selected_key = self._selected_key
         active_column = self._active_column
@@ -16055,6 +16208,8 @@ class MicroscopeSection(MiniDatabaseSection):
         return self._reviewed_for_row(key, column, row)
 
     def _row_missing_images(self, row: pd.Series) -> bool:
+        if self._row_is_expected_unlinked(row):
+            return False
         brittle = bool(row.get(BRITTLE_COLUMN))
         core_present = self._has_image_value(row.get("_core_image"))
         glass_present = self._has_image_value(row.get("_glass_image"))
@@ -16115,6 +16270,8 @@ class MicroscopeSection(MiniDatabaseSection):
         bottom_right: QtCore.QModelIndex,
         roles: list[int] | None = None,
     ) -> None:
+        if self._suppress_model_edit_handler:
+            return
         if roles and QtCore.Qt.ItemDataRole.EditRole not in roles and QtCore.Qt.ItemDataRole.DisplayRole not in roles:
             return
         frame = self.model.frame()
@@ -16170,7 +16327,7 @@ class MicroscopeSection(MiniDatabaseSection):
             key, column_label = advance_request
             self._select_row_for_key(key, column_label)
             self._selected_key = key
-            self._mark_reviewed(auto=True, columns={column_label})
+            self._mark_reviewed(auto=True, columns={column_label}, fast=True)
             self._advance_to_next_pending(column_label)
 
     def _queue_advance_after_restore(
@@ -16201,7 +16358,7 @@ class MicroscopeSection(MiniDatabaseSection):
             if self._pending_advance_column:
                 column_label = self._pending_advance_column
                 if self._pending_advance_review:
-                    self._mark_reviewed(auto=True, columns={column_label})
+                    self._mark_reviewed(auto=True, columns={column_label}, fast=True)
                 self._advance_to_next_pending(column_label)
                 self._pending_advance_key = None
                 self._pending_advance_column = None
@@ -16599,7 +16756,19 @@ class MicroscopeSection(MiniDatabaseSection):
             self._overrides[selected_key] = override
         else:
             self._overrides.pop(selected_key, None)
-        self._store_overrides(restore_selection=False, autosize=False)
+        frame = self.model.frame()
+        row_idx = self._source_row_for_key(selected_key)
+        if row_idx is not None:
+            if MICROSCOPE_D_COLUMN in frame.columns:
+                frame.at[row_idx, MICROSCOPE_D_COLUMN] = override.get("d")
+            if MICROSCOPE_CAP_D_COLUMN in frame.columns:
+                frame.at[row_idx, MICROSCOPE_CAP_D_COLUMN] = override.get("D")
+            self._refresh_row_for_key(selected_key)
+        self._schedule_review_state_save()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
         self._select_row_for_key(selected_key, advance_column or MICROSCOPE_D_COLUMN)
         self._selected_key = selected_key
         columns: set[str] = set()
@@ -16608,7 +16777,7 @@ class MicroscopeSection(MiniDatabaseSection):
         if "D" in override:
             columns.add(MICROSCOPE_CAP_D_COLUMN)
         if columns:
-            self._mark_reviewed(auto=True, columns=columns)
+            self._mark_reviewed(auto=True, columns=columns, fast=True)
         if advance_column:
             self._advance_to_next_pending(advance_column)
 
@@ -16630,6 +16799,7 @@ class MicroscopeSection(MiniDatabaseSection):
         auto: bool = False,
         columns: set[str] | None = None,
         allow_without_sources: bool = True,
+        fast: bool = False,
     ) -> None:
         if not self._selected_key:
             return
@@ -16695,7 +16865,6 @@ class MicroscopeSection(MiniDatabaseSection):
 
         entry["timestamp"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         self._validated[key] = entry
-        self._store_validation()
         override_changed = False
         override_entry = dict(self._overrides.get(key, {}))
         if MICROSCOPE_D_COLUMN in columns_to_mark and self._is_valid_diameter(d_value):
@@ -16708,6 +16877,17 @@ class MicroscopeSection(MiniDatabaseSection):
                 override_changed = True
         if override_changed:
             self._overrides[key] = override_entry
+        if fast:
+            self._refresh_row_for_key(key)
+            self._update_review_buttons()
+            self._schedule_review_state_save()
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+            return
+        self._store_validation()
+        if override_changed:
             self._store_overrides()
 
     def _clear_review(self) -> None:

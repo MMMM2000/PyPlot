@@ -1244,6 +1244,22 @@ def test_assemble_preview_filters_by_source_label() -> None:
         assembly.close()
 
 
+def test_source_label_detection_recognizes_kosice_path_families() -> None:
+    frame = pd.DataFrame(
+        [
+            {"_sources": ["G:/data/Kosice/Ni44Fe27Ga23Cu3Co3_1-1.dat"]},
+            {"_sources": ["G:/data/Ko\u0161ice/Ni44Fe27Ga23Cu3Co3_1-2.dat"]},
+            {"_sources": ["G:/Shared/shape memory database/run01"]},
+            {"_sources": ["G:/Shared/databaza mikrodrotov/run02"]},
+        ]
+    )
+
+    with_labels = builder_ui._with_source_label_column(frame)
+
+    assert builder_ui.SOURCE_LABEL_COLUMN in with_labels.columns
+    assert set(with_labels[builder_ui.SOURCE_LABEL_COLUMN].tolist()) == {"Ko\u0161ice"}
+
+
 def test_annealing_section_migrates_low_graph_column_to_other_annealing() -> None:
     _ensure_qapp()
     section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
@@ -3963,18 +3979,28 @@ def test_microscope_apply_override_skips_autosize_for_enter(
         QtWidgets.QApplication.processEvents()
         section.d_edit.setText("31")
 
-        captured: list[tuple[bool, bool]] = []
+        full_resets: list[bool] = []
+        saves: list[bool] = []
+        original_set_frame = section.model.set_frame
 
-        def _fake_store_overrides(*, restore_selection: bool = True, autosize: bool = True) -> None:
-            captured.append((restore_selection, autosize))
+        def _count_set_frame(frame: pd.DataFrame | None) -> None:
+            full_resets.append(True)
+            original_set_frame(frame)
 
-        monkeypatch.setattr(section, "_store_overrides", _fake_store_overrides)
-        monkeypatch.setattr(section, "_mark_reviewed", lambda *args, **kwargs: None)
+        monkeypatch.setattr(section.model, "set_frame", _count_set_frame)
+        monkeypatch.setattr(section.store, "save", lambda data: saves.append(True))
         monkeypatch.setattr(section, "_advance_to_next_pending", lambda column: None)
 
         section._apply_override(builder_ui.MICROSCOPE_D_COLUMN)
 
-        assert captured == [(False, False)]
+        updated = section.model.frame()
+        assert full_resets == []
+        assert saves == []
+        assert updated.at[0, builder_ui.MICROSCOPE_D_COLUMN] == pytest.approx(31.0)
+        assert section._validated["Ni50Fe27Ga23|2|4"]["d_reviewed"] is True
+
+        section._persist_review_state()
+        assert saves == [True]
     finally:
         section._shutdown_background_threads()
         section.close()
@@ -4368,6 +4394,44 @@ def test_microscope_status_distinguishes_missing_images_and_other_ends(tmp_path:
         assert updated.at[0, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Missing image"
         assert updated.at[1, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Image found; missing glass label"
         assert updated.at[2, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Other end - Values need review"
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_expected_rows_show_unlinked_status_and_source_label() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        key = ("Ni44Fe27Ga23Cu3Co3", 1, 1, None)
+        key_text = "Ni44Fe27Ga23Cu3Co3|1|1"
+        section._expected_keys_current = {key}
+        section._expected_key_source_labels = {key_text: "Ko\u0161ice"}
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni44Fe27Ga23Cu3Co3",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: None,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    builder_ui.SOURCE_LABEL_COLUMN: "Ko\u0161ice",
+                    "_key": key_text,
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                }
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        updated = section.model.frame()
+
+        assert updated.at[0, builder_ui.MICROSCOPE_STATUS_COLUMN] == (
+            "Expected from annealing; no microscope image linked"
+        )
+        assert updated.at[0, builder_ui.SOURCE_LABEL_COLUMN] == "Ko\u0161ice"
+        assert section._row_missing_images(updated.iloc[0]) is False
     finally:
         section._shutdown_background_threads()
         section.close()
