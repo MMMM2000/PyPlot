@@ -4616,11 +4616,19 @@ class SharedBrokerSupplyController:
         return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
 
     def set_current_limit_mA(self, current_limit_mA: float) -> None:
+        requested_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
         previous_limit_a = self.current_limit_a
-        self.current_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
         channel = self.selected_channel()
         if channel <= 0:
+            self.current_limit_a = requested_limit_a
             return
+        if (
+            channel in self._leases
+            and previous_limit_a is not None
+            and requested_limit_a <= float(previous_limit_a) + 1e-12
+        ):
+            return
+        self.current_limit_a = requested_limit_a
         try:
             self._ensure_confirmed_role(channel)
         except Exception:
@@ -10159,8 +10167,17 @@ class MainWindow(QtWidgets.QMainWindow):
         limit_mA = self._planned_current_sweep_limit_mA() if limit_mA is None else float(limit_mA)
         channel = self._current_sweep_supply_channel()
         checked = self._current_sweep_channel_limit_checked
-        if checked is not None and checked[0] == channel and math.isclose(checked[1], limit_mA, abs_tol=1e-9):
+        if checked is not None and checked[0] == channel and float(checked[1]) + 1e-9 >= float(limit_mA):
             return True
+        controller_limit_a = getattr(self._supply_controller, "current_limit_a", None)
+        if controller_limit_a is not None:
+            try:
+                controller_limit_mA = float(controller_limit_a) * 1000.0
+            except (TypeError, ValueError):
+                controller_limit_mA = math.nan
+            if math.isfinite(controller_limit_mA) and controller_limit_mA + 1e-9 >= float(limit_mA):
+                self._current_sweep_channel_limit_checked = (channel, controller_limit_mA)
+                return True
         try:
             method(limit_mA)
         except Exception as exc:

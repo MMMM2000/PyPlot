@@ -5100,6 +5100,67 @@ def test_recipe_current_command_uses_active_recipe_limit_not_visible_edits(
         _close_test_window(window)
 
 
+def test_recipe_current_command_accepts_higher_checked_limit_after_runtime_lowering(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.1}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            raise PermissionError(f"Cannot change CH4 role while it is leased ({value}).")
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    lowered_first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=35.0,
+        current_ramp_rate_mA_s=0.4,
+        note="first_overheating",
+    )
+
+    supply = _FakeSupply()
+    try:
+        window._supply_controller = supply  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._current_sweep_channel_limit_checked = (4, 40.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [lowered_first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._supply_output_enabled = True
+
+        assert window._set_recipe_current_mA(30.0) is True
+
+        assert supply.commands == pytest.approx([30.0])
+        assert window._current_sweep_channel_limit_checked == (4, 40.0)
+        assert "Current-sweep channel limit update failed" not in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_recipe_current_command_retries_when_current_output_readback_is_off(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -12728,6 +12789,66 @@ def test_shared_broker_supply_controller_rolls_back_refused_current_limit(
         controller.set_current_limit_mA(32.0)
 
     assert controller.current_limit_a == pytest.approx(0.03)
+
+
+def test_shared_broker_supply_controller_does_not_lower_limit_while_leased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "snapshot":
+                return {
+                    "snapshot": {
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.04,
+                                }
+                            }
+                        }
+                    }
+                }
+            if action == "assign_role":
+                raise PermissionError("Cannot change CH4 role while it is leased.")
+            return {"ok": True}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": "lease-4"}
+
+        def configure_channel(self, **payload: object) -> dict[str, object]:
+            self.calls.append(("configure_channel", dict(payload)))
+            return {"ok": True}
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=0.04,
+    )
+
+    controller.connect()
+    controller.configure_channel(channel=4, voltage_v=32.05, current_a=0.001, output_on=True)
+    controller.set_current_limit_mA(35.0)
+
+    assert controller.current_limit_a == pytest.approx(0.04)
+    assert [call for call in clients[0].calls if call[0] == "assign_role"] == []
 
 
 def test_shared_broker_supply_controller_retries_after_stale_current_lease(
