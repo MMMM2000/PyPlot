@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import importlib.util
 import logging
 import sys
+import time
 
 import pandas as pd
 import numpy as np
@@ -155,6 +156,18 @@ def _ensure_qapp() -> QtWidgets.QApplication:
         app = QtWidgets.QApplication(sys.argv[:1])
     _APP_REF = app
     return app
+
+
+def _wait_for_qt(predicate, *, timeout_ms: int = 3000) -> None:
+    app = _ensure_qapp()
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        QtTest.QTest.qWait(10)
+    app.processEvents()
+    assert predicate()
 
 
 def test_dataframe_model_sort_invalidates_cached_decoration_rows() -> None:
@@ -9884,6 +9897,7 @@ def test_builder_auto_open_load_suppresses_loaded_dialog(
     window = BuilderWindow()
     try:
         window._maybe_auto_open_last_project()
+        _wait_for_qt(lambda: window._project_path == latest)
 
         assert information_calls == []
         assert window._project_path == latest
@@ -9894,6 +9908,106 @@ def test_builder_auto_open_load_suppresses_loaded_dialog(
         window.hide()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_builder_auto_open_prepares_project_off_gui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    latest = tmp_path / "large_auto_open.pydpj"
+    latest.write_text(
+        json.dumps(
+            {
+                "kind": BuilderWindow.PROJECT_KIND,
+                "version": BuilderWindow.PROJECT_VERSION,
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    main_thread = app.thread()
+    prepare_threads: list[QtCore.QThread] = []
+
+    def _fake_prepare(path: Path) -> builder_ui._PreparedProjectLoad:
+        prepare_threads.append(QtCore.QThread.currentThread())
+        QtCore.QThread.msleep(50)
+        return builder_ui._PreparedProjectLoad(
+            target=path,
+            payload={
+                "kind": BuilderWindow.PROJECT_KIND,
+                "version": BuilderWindow.PROJECT_VERSION,
+                "sections": {},
+            },
+            byte_count=10_000_000,
+            decoded_payload_count=0,
+            read_ms=45.0,
+            json_ms=55.0,
+            decode_ms=0.0,
+        )
+
+    monkeypatch.setattr(builder_ui, "_prepare_project_payload_for_gui", _fake_prepare)
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+    )
+
+    window = BuilderWindow()
+    try:
+        window._auto_open_in_progress = True
+        window._load_project_from_path(latest)
+        window._auto_open_in_progress = False
+
+        assert window._project_path is None
+        assert window._project_load_in_progress is True
+        assert prepare_threads == [] or all(thread is not main_thread for thread in prepare_threads)
+
+        _wait_for_qt(lambda: window._project_path == latest)
+
+        assert prepare_threads
+        assert all(thread is not main_thread for thread in prepare_threads)
+        assert window._project_load_in_progress is False
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._auto_open_in_progress = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_project_payload_prepare_predecodes_section_payloads(tmp_path: Path) -> None:
+    project_path = tmp_path / "payload_project.pydpj"
+    stored_payload = {"records": [1, 2, 3]}
+    encoded = builder_ui._encode_project_payload(stored_payload)
+    assert encoded is not None
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": BuilderWindow.PROJECT_KIND,
+                "version": BuilderWindow.PROJECT_VERSION,
+                "sections": {
+                    "annealing": {
+                        "columns": [],
+                        "rows": [],
+                        "payloads": {"annealing_payload": encoded},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prepared = builder_ui._prepare_project_payload_for_gui(project_path)
+    annealing_payload = prepared.payload["sections"]["annealing"]
+
+    assert prepared.decoded_payload_count == 1
+    assert annealing_payload[builder_ui.PROJECT_DECODED_PAYLOADS_KEY] == {
+        "annealing_payload": stored_payload
+    }
 
 
 def test_builder_startup_auto_open_scheduler_no_env_gate(
