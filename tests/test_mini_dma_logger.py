@@ -5030,6 +5030,76 @@ def test_recipe_current_command_clamps_zero_to_continuity_floor(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_recipe_current_command_uses_active_recipe_limit_not_visible_edits(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.1}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            raise PermissionError(f"Cannot change CH4 role while it is leased ({value}).")
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(current_mA)
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=0.4,
+        note="first_overheating",
+    )
+
+    supply = _FakeSupply()
+    try:
+        window._supply_controller = supply  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._current_sweep_channel_limit_checked = (4, 40.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._supply_output_enabled = True
+
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(35.0)
+
+        assert window._set_recipe_current_mA(28.0) is True
+
+        assert supply.commands == pytest.approx([28.0])
+        assert window._automation_active is True
+        assert window._current_sweep_channel_limit_checked == (4, 40.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_recipe_current_command_retries_when_current_output_readback_is_off(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -5081,7 +5151,7 @@ def test_recipe_current_command_retries_when_current_output_readback_is_off(tmp_
         _close_test_window(window)
 
 
-def test_recipe_current_command_refreshes_current_sweep_limit_before_setting_ch4(
+def test_recipe_current_command_uses_active_sweep_limit_before_setting_ch4(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -5118,6 +5188,14 @@ def test_recipe_current_command_refreshes_current_sweep_limit_before_setting_ch4
     window.spin_current_sweep_end_mA.setValue(85.0)
     window._supply_output_enabled = True
     window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            current_start_mA=1.0,
+            current_end_mA=85.0,
+        )
+    ]
 
     try:
         assert window._set_recipe_current_mA(50.0) is True
@@ -5129,10 +5207,9 @@ def test_recipe_current_command_refreshes_current_sweep_limit_before_setting_ch4
             "limit",
             "current",
             "current",
-            "limit",
             "current",
         ]
-        assert [value for _name, value in supply.commands] == pytest.approx([85.0, 50.0, 51.0, 90.0, 52.0])
+        assert [value for _name, value in supply.commands] == pytest.approx([85.0, 50.0, 51.0, 52.0])
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -15390,6 +15467,66 @@ def test_first_overheating_runtime_update_refreshes_channel_limit_for_raise(
 
         assert limits == pytest.approx([60.0])
         assert window._automation_steps[0].current_end_mA == pytest.approx(60.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_lowers_without_refreshing_leased_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            raise PermissionError(f"Cannot change CH4 role while it is leased ({value}).")
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+    first_reverse = dataclasses.replace(first_sweep, current_start_mA=40.0, current_end_mA=1.0)
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._current_sweep_channel_limit_checked = (4, 40.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep, first_reverse]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 25.0
+
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(35.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0].current_end_mA == pytest.approx(35.0)
+        assert window._automation_steps[1].current_start_mA == pytest.approx(35.0)
+        assert window._current_sweep_channel_limit_checked == (4, 40.0)
+        assert "Current-sweep channel limit update failed" not in window.log_output.toPlainText()
     finally:
         window._automation_active = False
         _close_test_window(window)

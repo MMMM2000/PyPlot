@@ -9708,6 +9708,36 @@ class MainWindow(QtWidgets.QMainWindow):
             1.0,
         )
 
+    def _current_sweep_steps_limit_mA(
+        self,
+        steps: Sequence[AutomationStep] | None = None,
+        *,
+        fallback_current_mA: float | None = None,
+    ) -> float:
+        currents: list[float] = [1.0]
+        if fallback_current_mA is not None:
+            currents.append(float(fallback_current_mA))
+        for step in steps if steps is not None else self._automation_steps:
+            if step.current_mA is not None:
+                currents.append(float(step.current_mA))
+            if step.current_start_mA is not None:
+                currents.append(float(step.current_start_mA))
+            if step.current_end_mA is not None:
+                currents.append(float(step.current_end_mA))
+        return max(
+            0.0,
+            *(abs(float(value)) for value in currents if math.isfinite(float(value))),
+        )
+
+    def _current_sweep_channel_limit_is_sufficient(self, limit_mA: float) -> bool:
+        checked = self._current_sweep_channel_limit_checked
+        channel = self._current_sweep_supply_channel()
+        return (
+            checked is not None
+            and checked[0] == channel
+            and float(checked[1]) + 1e-9 >= float(limit_mA)
+        )
+
     def _build_supply_controller(self) -> PowerSupplyController:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         if self._using_shared_broker_supply():
@@ -10115,13 +10145,18 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
-    def _ensure_current_sweep_channel_limit(self, *, log: bool = True) -> bool:
+    def _ensure_current_sweep_channel_limit(
+        self,
+        *,
+        log: bool = True,
+        limit_mA: float | None = None,
+    ) -> bool:
         if self._supply_controller is None:
             return False
         method = getattr(self._supply_controller, "set_current_limit_mA", None)
         if not callable(method):
             return True
-        limit_mA = self._planned_current_sweep_limit_mA()
+        limit_mA = self._planned_current_sweep_limit_mA() if limit_mA is None else float(limit_mA)
         channel = self._current_sweep_supply_channel()
         checked = self._current_sweep_channel_limit_checked
         if checked is not None and checked[0] == channel and math.isclose(checked[1], limit_mA, abs_tol=1e-9):
@@ -10350,8 +10385,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_active or self._session_active:
             current_mA = max(self._minimum_recipe_current_mA(), current_mA)
         try:
-            if self._current_sweep_supply_channel() is not None and not self._ensure_current_sweep_channel_limit(log=False):
-                return False
+            if self._current_sweep_supply_channel() is not None:
+                active_limit_mA = self._current_sweep_steps_limit_mA(
+                    fallback_current_mA=max(
+                        current_mA,
+                        self._supply_last_setpoint_mA or 0.0,
+                        self._heating_program_current_mA or 0.0,
+                    )
+                )
+                if not self._ensure_current_sweep_channel_limit(log=False, limit_mA=active_limit_mA):
+                    return False
             if not self._supply_output_enabled:
                 self._supply_controller.initialize_output(
                     current_mA=current_mA,
@@ -23364,7 +23407,20 @@ class MainWindow(QtWidgets.QMainWindow):
         old_active_step = self._automation_steps[active_index] if 0 <= active_index < len(self._automation_steps) else None
         new_active_step = updated_steps[active_index] if 0 <= active_index < len(updated_steps) else None
         old_limit_checked = self._current_sweep_channel_limit_checked
-        if self._supply_controller is not None and not self._ensure_current_sweep_channel_limit(log=True):
+        updated_limit_mA = self._current_sweep_steps_limit_mA(
+            updated_steps,
+            fallback_current_mA=max(
+                self._active_current_sweep_last_setpoint_mA or 0.0,
+                self._supply_last_setpoint_mA or 0.0,
+                self._heating_program_current_mA or 0.0,
+            ),
+        )
+        needs_limit_refresh = not self._current_sweep_channel_limit_is_sufficient(updated_limit_mA)
+        if (
+            self._supply_controller is not None
+            and needs_limit_refresh
+            and not self._ensure_current_sweep_channel_limit(log=True, limit_mA=updated_limit_mA)
+        ):
             self._current_sweep_channel_limit_checked = old_limit_checked
             payload: dict[str, object] = {
                 "timestamp_utc": _utc_timestamp(),
