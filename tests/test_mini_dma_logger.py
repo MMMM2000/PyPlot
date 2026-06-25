@@ -14687,6 +14687,46 @@ def test_session_control_trace_accepts_row_local_task_text(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_control_trace_write_failure_disables_trace_without_stopping(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    rows: list[dict[str, object]] = []
+
+    class _FailingTraceWriter:
+        def writerow(self, row: dict[str, object]) -> None:
+            rows.append(row)
+
+    class _FailingTraceHandle:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def flush(self) -> None:
+            raise OSError(22, "Invalid argument")
+
+        def close(self) -> None:
+            self.closed = True
+
+    handle = _FailingTraceHandle()
+
+    try:
+        window._session_active = True
+        window._session_start_monotonic = time.monotonic()
+        window._session_control_trace_writer = _FailingTraceWriter()  # type: ignore[assignment]
+        window._session_control_trace_handle = handle
+
+        window._write_control_trace(decision="wait", basis=mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        window._write_control_trace(decision="wait", basis=mini_dma_mod.HSW_BASIS_STRESS_MPA)
+
+        assert len(rows) == 1
+        assert handle.closed is True
+        assert window._session_control_trace_writer is None
+        assert window._session_control_trace_handle is None
+        assert window._session_active is True
+        assert "Control trace disabled after write failure" in window.log_output.toPlainText()
+    finally:
+        window._session_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
     tmp_path: Path,
     qtbot,
@@ -22307,6 +22347,37 @@ def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) ->
         assert window._session_base_path is not None
         assert requested == [window._session_base_path.parent]
     finally:
+        _close_test_window(window)
+
+
+def test_control_worker_error_finalizes_session_and_summary(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_worker_error")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._run_on_ui_thread = lambda callback: callback()  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+    requested: list[Path] = []
+    window._start_run_summary_generation = lambda run_dir: requested.append(run_dir)  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("record", note="test")]
+        window._automation_index = 0
+
+        window._handle_automation_control_loop_error(OSError(22, "Invalid argument"))
+
+        assert window._automation_active is False
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_control_worker_error"
+        assert payload["stop"]["category"] == "fault"
+        assert "Invalid argument" in payload["stop"]["detail"]
+        assert window._session_base_path is not None
+        assert requested == [window._session_base_path.parent]
+    finally:
+        window._automation_active = False
         _close_test_window(window)
 
 

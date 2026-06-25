@@ -20143,6 +20143,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "correction_travel_limit": ("fault", "Correction travel limit"),
             "automation_timeout": ("fault", "Bench automation timeout"),
             "recipe_control_stop": ("fault", "Recipe stopped by control/error condition"),
+            "recipe_control_worker_error": ("fault", "Recipe control worker error"),
             "app_closed": ("operator", "Application closed while session was active"),
         }
         return labels.get(str(reason or ""), ("unknown", "Unknown stop reason"))
@@ -20884,49 +20885,60 @@ class MainWindow(QtWidgets.QMainWindow):
             voltage_limit_v = float(self.spin_supply_voltage_limit.value())
         except (AttributeError, RuntimeError, TypeError, ValueError):
             voltage_limit_v = None
-        self._session_control_trace_writer.writerow(
-            {
-                "elapsed_s": f"{elapsed_s:.6f}",
-                "timestamp_utc": _utc_timestamp(),
-                "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
-                "task_text": self._current_task_summary() if task_text is None else task_text,
-                "automation_phase": self._automation_phase,
-                "automation_basis": "" if basis is None else basis,
-                "automation_target_value": _number(target_value),
-                "plateau_index": "" if self._automation_plateau_index is None else self._automation_plateau_index,
-                "decision": decision,
-                "current_value": _number(current_value),
-                "error_value": _number(error_value),
-                "tolerance": _number(tolerance),
-                "filtered_slope_per_s": _number(
-                    None if filtered_signal is None else filtered_signal.slope_per_s
-                ),
-                "filtered_noise": _number(None if filtered_signal is None else filtered_signal.noise),
-                "filtered_sample_count": (
-                    "" if filtered_signal is None else int(filtered_signal.sample_count)
-                ),
-                "sensitivity_per_mm": _number(sensitivity_per_mm),
-                "motor_step_mm": _number(self._motor_step_mm()),
-                "correction_mm": _number(correction_mm),
-                "backlash_mm": _number(backlash_mm),
-                "command_speed_mm_s": _number(command_speed_mm_s),
-                "required_fresh_samples": "" if required_fresh_samples is None else int(required_fresh_samples),
-                "post_move_sample_count": "" if post_move_sample_count is None else int(post_move_sample_count),
-                "target_mm": _number(target_mm),
-                "effective_target_mm": _number(effective_target_mm),
-                "supply_output_enabled": int(bool(getattr(self, "_supply_output_enabled", False))),
-                "supply_setpoint_mA": _number(getattr(self, "_supply_last_setpoint_mA", None)),
-                "supply_measured_current_mA": _number(supply_snapshot.get("current_mA")),
-                "supply_voltage_V": _number(supply_snapshot.get("voltage_V")),
-                "supply_voltage_limit_V": _number(voltage_limit_v),
-                "supply_resistance_ohm": _number(supply_snapshot.get("resistance_ohm")),
-                "supply_power_W": _number(supply_snapshot.get("power_W")),
-                "supply_snapshot_age_s": _number(supply_snapshot_age_s),
-                "result": result,
-                "reason": reason,
-            }
-        )
-        self._session_control_trace_handle.flush()
+        try:
+            self._session_control_trace_writer.writerow(
+                {
+                    "elapsed_s": f"{elapsed_s:.6f}",
+                    "timestamp_utc": _utc_timestamp(),
+                    "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
+                    "task_text": self._current_task_summary() if task_text is None else task_text,
+                    "automation_phase": self._automation_phase,
+                    "automation_basis": "" if basis is None else basis,
+                    "automation_target_value": _number(target_value),
+                    "plateau_index": "" if self._automation_plateau_index is None else self._automation_plateau_index,
+                    "decision": decision,
+                    "current_value": _number(current_value),
+                    "error_value": _number(error_value),
+                    "tolerance": _number(tolerance),
+                    "filtered_slope_per_s": _number(
+                        None if filtered_signal is None else filtered_signal.slope_per_s
+                    ),
+                    "filtered_noise": _number(None if filtered_signal is None else filtered_signal.noise),
+                    "filtered_sample_count": (
+                        "" if filtered_signal is None else int(filtered_signal.sample_count)
+                    ),
+                    "sensitivity_per_mm": _number(sensitivity_per_mm),
+                    "motor_step_mm": _number(self._motor_step_mm()),
+                    "correction_mm": _number(correction_mm),
+                    "backlash_mm": _number(backlash_mm),
+                    "command_speed_mm_s": _number(command_speed_mm_s),
+                    "required_fresh_samples": "" if required_fresh_samples is None else int(required_fresh_samples),
+                    "post_move_sample_count": "" if post_move_sample_count is None else int(post_move_sample_count),
+                    "target_mm": _number(target_mm),
+                    "effective_target_mm": _number(effective_target_mm),
+                    "supply_output_enabled": int(bool(getattr(self, "_supply_output_enabled", False))),
+                    "supply_setpoint_mA": _number(getattr(self, "_supply_last_setpoint_mA", None)),
+                    "supply_measured_current_mA": _number(supply_snapshot.get("current_mA")),
+                    "supply_voltage_V": _number(supply_snapshot.get("voltage_V")),
+                    "supply_voltage_limit_V": _number(voltage_limit_v),
+                    "supply_resistance_ohm": _number(supply_snapshot.get("resistance_ohm")),
+                    "supply_power_W": _number(supply_snapshot.get("power_W")),
+                    "supply_snapshot_age_s": _number(supply_snapshot_age_s),
+                    "result": result,
+                    "reason": reason,
+                }
+            )
+            self._session_control_trace_handle.flush()
+        except (OSError, ValueError) as exc:
+            handle = self._session_control_trace_handle
+            self._session_control_trace_writer = None
+            self._session_control_trace_handle = None
+            try:
+                if handle is not None:
+                    handle.close()
+            except Exception:
+                pass
+            self._log(f"Control trace disabled after write failure; recipe will continue: {exc}")
 
     def _write_raw_scale_sample(self, sample: ScaleSample) -> None:
         if (
@@ -23804,7 +23816,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _handle_automation_control_loop_error(self, exc: BaseException) -> None:
         self._automation_control_error = str(exc) or exc.__class__.__name__
-        self._run_on_ui_thread(lambda: self._log(f"Recipe control worker stopped: {self._automation_control_error}"))
+
+        def _finalize_worker_error() -> None:
+            detail = f"Recipe control worker stopped: {self._automation_control_error}"
+            self._log(detail)
+            if self._automation_active:
+                self._stop_auto_ramp(
+                    log_completion=False,
+                    offer_recovery=True,
+                    stop_reason="recipe_control_worker_error",
+                    stop_detail=detail,
+                )
+            elif self._session_active:
+                self._stop_session(reason="recipe_control_worker_error", detail=detail)
+
+        self._run_on_ui_thread(_finalize_worker_error)
 
     def _start_automation_control_loop(self, interval_ms: int) -> None:
         self._automation_control_error = None
