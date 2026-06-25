@@ -1466,6 +1466,83 @@ def test_microscope_section_can_hide_other_ends() -> None:
         section.close()
 
 
+def test_microscope_expected_keys_ignore_annealing_filename_notes(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    annealing_store = builder_ui.MiniDatabaseStore("annealing")
+    original_records = annealing_store.load_payload("annealing_records")
+
+    def _record(file_name: str) -> MeasurementRecord:
+        return MeasurementRecord(
+            path=tmp_path / file_name,
+            metadata=core.MeasurementMetadata(
+                composition_token="Ni46Fe27Ga23Cu2Co2",
+                draw_x=2,
+                piece_y=1,
+                setpoint_mA=1000,
+                alt_variant=False,
+                measurement_id=file_name,
+                file_name=file_name,
+                relpath=file_name,
+                timestamp_mtime_utc="2026-06-25T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0]}),
+            sanity_ok=True,
+            sanity_error=None,
+        )
+
+    try:
+        annealing_store.save_payload(
+            "annealing_records",
+            [
+                _record("Ni46Fe27Ga23Cu2Co2-2_1-No1.dat"),
+                _record("Ni46Fe27Ga23Cu2Co2_2-1_noload.dat"),
+            ],
+        )
+
+        expected = section._expected_microwire_keys()
+
+        assert ("Ni46Fe27Ga23Cu2Co2", 2, 1, None) in expected
+        assert ("Ni46Fe27Ga23Cu2Co2", 2, 1, "No1") not in expected
+        assert ("Ni46Fe27Ga23Cu2Co2", 2, 1, "noload") not in expected
+    finally:
+        annealing_store.save_payload("annealing_records", original_records)
+        section._shutdown_background_threads()
+        section.close()
+
+
+def test_microscope_expected_keys_preserve_other_end_suffix(tmp_path: Path) -> None:
+    _ensure_qapp()
+    section = builder_ui.MicroscopeSection(logging.getLogger("test"), lambda *_args: None)
+    annealing_store = builder_ui.MiniDatabaseStore("annealing")
+    original_records = annealing_store.load_payload("annealing_records")
+    try:
+        record = MeasurementRecord(
+            path=tmp_path / "Ni50Fe27Ga23 10-5oe.txt",
+            metadata=core.MeasurementMetadata(
+                composition_token="Ni50Fe27Ga23",
+                draw_x=10,
+                piece_y=5,
+                setpoint_mA=1000,
+                alt_variant=False,
+                measurement_id="other-end",
+                file_name="Ni50Fe27Ga23 10-5oe.txt",
+                relpath="Ni50Fe27Ga23 10-5oe.txt",
+                timestamp_mtime_utc="2026-06-25T00:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_A": [0.1], "V_V": [0.2], "R_ohm": [2.0]}),
+            sanity_ok=True,
+            sanity_error=None,
+        )
+        annealing_store.save_payload("annealing_records", [record])
+
+        assert ("Ni50Fe27Ga23", 10, 5, "oe") in section._expected_microwire_keys()
+    finally:
+        annealing_store.save_payload("annealing_records", original_records)
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_shape_memory_preview_panel_double_click_updates_picked_values() -> None:
     _ensure_qapp()
     panel = builder_ui._ShapeMemoryPreviewPanel(logging.getLogger("test"))

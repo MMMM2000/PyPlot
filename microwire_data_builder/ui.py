@@ -467,6 +467,18 @@ def _source_label_from_text(value: object) -> Optional[str]:
     return None
 
 
+def _microscope_expected_suffix_from_path(path: Path) -> Optional[str]:
+    """Return only suffixes that are meaningful microscope row identities."""
+
+    parsed_key = _microscope_key(path)
+    if parsed_key is None:
+        return None
+    suffix = str(parsed_key[3] or "").strip()
+    if suffix.casefold() == "oe":
+        return "oe"
+    return None
+
+
 def _source_labels_from_row(row: Mapping[str, Any] | pd.Series) -> List[str]:
     labels: List[str] = []
 
@@ -15142,9 +15154,7 @@ class MicroscopeSection(MiniDatabaseSection):
             suffix = None
             path = getattr(record, "path", None)
             if isinstance(path, Path):
-                parsed_key = _microscope_key(path)
-                if parsed_key is not None:
-                    _, _, _, suffix = parsed_key
+                suffix = _microscope_expected_suffix_from_path(path)
             try:
                 keys.add((str(composition), int(draw), int(piece), suffix))
             except (TypeError, ValueError):
