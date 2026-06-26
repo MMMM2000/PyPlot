@@ -1,4 +1,4 @@
-"""Command-line wrapper for Mini DMA fatigue/current-sweep learning summaries."""
+﻿"""Command-line wrapper for TMA fatigue/current-sweep learning summaries."""
 
 from __future__ import annotations
 

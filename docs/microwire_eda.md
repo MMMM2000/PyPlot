@@ -1,4 +1,4 @@
-# Microwire EDA Overview
+﻿# Microwire EDA Overview
 
 Microwire EDA is the exploratory analysis layer for assembled Microwire Data Builder datasets. Its job is not just to list correlations, but to help us reason toward the best possible microwire recipe while staying honest about sparsity, confounding, and repeated measurements.
 

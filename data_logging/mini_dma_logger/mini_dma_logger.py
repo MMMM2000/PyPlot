@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import ctypes
@@ -66,7 +66,7 @@ except Exception:  # pragma: no cover - import guard
     list_ports = None  # type: ignore[assignment]
 
 
-APP_NAME = "Mini DMA Logger"
+APP_NAME = "TMA Logger"
 DEFAULT_LOG_BASENAME = "mini_dma"
 DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_SHARED_BROKER_HOST = "127.0.0.1"
@@ -656,7 +656,7 @@ RECIPE_FILENAME_TOKENS = {
     ELASTOCALORIC_EFFECT: "elastocaloric",
 }
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
-PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
+PROJECT_ROW_DIAMETER_KEYS = ("d (Âµm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
 PROJECT_ROW_CURRENT_KEYS = (
     "Stress/strain current (mA)",
     "Current (mA)",
@@ -955,7 +955,7 @@ def _normalized_microwire_token(text: Any) -> str:
 
 def _normalized_column_key(text: Any) -> str:
     token = str(text or "").strip().lower()
-    token = token.replace("µ", "u").replace("μ", "u").replace("?", "u")
+    token = token.replace("Âµ", "u").replace("Î¼", "u").replace("?", "u")
     return re.sub(r"[^a-z0-9]+", "", token)
 
 
@@ -2884,7 +2884,7 @@ class Mlx90614Worker(QtCore.QObject):
             if b"FRAME_BEGIN" in chunk and b"FRAME_BEGIN" not in text_status_tokens_reported:
                 self.status_changed.emit(
                     "Nucleo is streaming MLX90640 text frames, not Cube raw packets; flash/select the "
-                    "Cube raw MLX90640 firmware for Mini DMA live camera logging."
+                    "Cube raw MLX90640 firmware for TMA live camera logging."
                 )
                 text_status_tokens_reported.add(b"FRAME_BEGIN")
             if b"MLX90640_CUBE_ERROR" in chunk and b"MLX90640_CUBE_ERROR" not in text_status_tokens_reported:
@@ -4456,7 +4456,7 @@ class SharedBrokerSupplyController:
             self._client.request("snapshot")
         except Exception as exc:
             raise RuntimeError(
-                broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                broker_failure_diagnostic(exc, context="TMA shared HMP broker")
             ) from exc
         self._connected = True
 
@@ -4614,7 +4614,7 @@ class SharedBrokerSupplyController:
             except Exception as exc:
                 if not self._looks_like_stale_lease(exc):
                     raise RuntimeError(
-                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                        broker_failure_diagnostic(exc, context="TMA shared HMP broker")
                     ) from exc
                 self._forget_lease(channel)
                 self._require_client().configure_channel(
@@ -4656,7 +4656,7 @@ class SharedBrokerSupplyController:
             except Exception as exc:
                 if not self._looks_like_stale_lease(exc):
                     raise RuntimeError(
-                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                        broker_failure_diagnostic(exc, context="TMA shared HMP broker")
                     ) from exc
                 self._forget_lease(channel)
                 self._require_client().set_current(
@@ -4679,7 +4679,7 @@ class SharedBrokerSupplyController:
             except Exception as exc:
                 if not self._looks_like_stale_lease(exc):
                     raise RuntimeError(
-                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                        broker_failure_diagnostic(exc, context="TMA shared HMP broker")
                     ) from exc
                 self._forget_lease(channel)
                 self._require_client().set_output(
@@ -4701,7 +4701,7 @@ class SharedBrokerSupplyController:
             except Exception as exc:
                 if not self._looks_like_stale_lease(exc):
                     raise RuntimeError(
-                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                        broker_failure_diagnostic(exc, context="TMA shared HMP broker")
                     ) from exc
                 self._forget_lease(channel)
                 self._require_client().set_output(
@@ -4735,7 +4735,7 @@ class SharedBrokerSupplyController:
             except Exception as exc:
                 if not self._looks_like_stale_lease(exc):
                     raise RuntimeError(
-                        broker_failure_diagnostic(exc, context="Mini DMA shared HMP broker")
+                        broker_failure_diagnostic(exc, context="TMA shared HMP broker")
                     ) from exc
                 self._forget_lease(channel)
                 lease_id = self._lease_channel(channel)
@@ -4789,11 +4789,11 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
         self._candidate_by_row: dict[int, MiniDmaRunCleanupCandidate] = {}
         self._preview_canvas: Any | None = None
         self._preview_label: QtWidgets.QLabel | None = None
-        self.setWindowTitle("Review Mini DMA Runs")
+        self.setWindowTitle("Review TMA Runs")
         self.resize(1320, 720)
 
         layout = QtWidgets.QVBoxLayout(self)
-        heading = QtWidgets.QLabel("Related Mini DMA run folders")
+        heading = QtWidgets.QLabel("Related TMA run folders")
         heading.setStyleSheet("font-weight: 600; font-size: 15px;")
         layout.addWidget(heading)
 
@@ -5102,7 +5102,7 @@ class RunCleanupReviewDialog(QtWidgets.QDialog):
 
 
 class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
-    """Passive MLX90640 view fed by the Mini DMA IR logger."""
+    """Passive MLX90640 view fed by the TMA IR logger."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(
@@ -5114,7 +5114,7 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
             | QtCore.Qt.WindowType.WindowMaximizeButtonHint
             | QtCore.Qt.WindowType.WindowCloseButtonHint,
         )
-        self.setWindowTitle("Mini DMA Thermal Camera")
+        self.setWindowTitle("TMA Thermal Camera")
         self.setMinimumSize(430, 360)
         self.resize(620, 520)
         self._latest_frame: object | None = None
@@ -5177,7 +5177,7 @@ class MiniDmaThermalCameraDialog(QtWidgets.QDialog):
         controls.addStretch(1)
         layout.addLayout(controls)
 
-        self.stats_label = QtWidgets.QLabel("Waiting for MLX90640 frames from Mini DMA IR logging.", self)
+        self.stats_label = QtWidgets.QLabel("Waiting for MLX90640 frames from TMA IR logging.", self)
         self.stats_label.setWordWrap(True)
         layout.addWidget(self.stats_label)
 
@@ -5706,11 +5706,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             developer_menu.setObjectName("mw_shared_developer")
         developer_menu.addSeparator()
-        self.action_mirror_run_log = developer_menu.addAction("Mirror Mini DMA Run Log to File")
+        self.action_mirror_run_log = developer_menu.addAction("Mirror TMA Run Log to File")
         if self.action_mirror_run_log is not None:
             self.action_mirror_run_log.setCheckable(True)
             self.action_mirror_run_log.toggled.connect(self._set_run_log_mirror_enabled)
-        choose_action = developer_menu.addAction("Choose Mini DMA Run Log File...")
+        choose_action = developer_menu.addAction("Choose TMA Run Log File...")
         if choose_action is not None:
             choose_action.triggered.connect(self._choose_run_log_mirror_file)
         benchmark_action = developer_menu.addAction("Benchmark Tic Transports")
@@ -5862,7 +5862,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_timing_settings_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Mini DMA Timing")
+        dialog.setWindowTitle("TMA Timing")
         layout = QtWidgets.QVBoxLayout(dialog)
         form = QtWidgets.QFormLayout()
         control_interval = QtWidgets.QSpinBox(dialog)
@@ -5965,7 +5965,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _choose_run_log_mirror_file(self) -> None:
         path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Select Mini DMA run-log mirror file",
+            "Select TMA run-log mirror file",
             str(self._run_log_mirror_path),
             "Text files (*.txt);;All files (*)",
         )
@@ -6174,7 +6174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_scale_hardware_tare = QtWidgets.QPushButton("Tare scale", scale_box)
         self.button_scale_hardware_tare.setToolTip(
             "Occasional use. Sends the physical tare command to the balance. "
-            "Use Capture zero-load to change Mini DMA's zero-load reference."
+            "Use Capture zero-load to change TMA's zero-load reference."
         )
         self.button_scale_hardware_tare.clicked.connect(self._tare_scale_hardware)
         scale_zero_row.addWidget(self.button_scale_hardware_tare)
@@ -6228,11 +6228,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_motion_speed_mm_s.setToolTip("Linear stage speed for held manual movement.")
 
         jog_buttons = QtWidgets.QHBoxLayout()
-        jog_negative = QtWidgets.QPushButton("▲ Move up / increase tension", motion_box)
+        jog_negative = QtWidgets.QPushButton("â–² Move up / increase tension", motion_box)
         jog_negative.setObjectName("hardware_jog_tension_button")
         self._configure_manual_jog_button(jog_negative, lambda: self._tension_motion_sign())
         jog_buttons.addWidget(jog_negative)
-        jog_positive = QtWidgets.QPushButton("▼ Move down / relax", motion_box)
+        jog_positive = QtWidgets.QPushButton("â–¼ Move down / relax", motion_box)
         jog_positive.setObjectName("hardware_jog_relax_button")
         self._configure_manual_jog_button(jog_positive, lambda: -self._tension_motion_sign())
         jog_buttons.addWidget(jog_positive)
@@ -6315,7 +6315,7 @@ class MainWindow(QtWidgets.QMainWindow):
         probe_button.clicked.connect(self._probe_scale_port)
         remote_tare_button = QtWidgets.QPushButton("Diagnostic remote tare scale", scale_advanced_box)
         remote_tare_button.setToolTip(
-            "Advanced only. Sends the physical scale tare command without changing Mini DMA's zero-load reference."
+            "Advanced only. Sends the physical scale tare command without changing TMA's zero-load reference."
         )
         remote_tare_button.clicked.connect(self._tare_scale_hardware)
         self.button_advanced_software_tare = QtWidgets.QPushButton(
@@ -6323,7 +6323,7 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_advanced_box,
         )
         self.button_advanced_software_tare.setToolTip(
-            "Advanced fallback for diagnostics only: offsets Mini DMA without changing the physical scale display."
+            "Advanced fallback for diagnostics only: offsets TMA without changing the physical scale display."
         )
         self.button_advanced_software_tare.clicked.connect(self._tare_scale)
         scale_advanced_form.addRow("", self.label_scale_raw)
@@ -6452,7 +6452,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_motor_step_calibration_speed_mm_s.setValue(MOTOR_STEP_CALIBRATION_DEFAULT_SPEED_MM_S)
         self.spin_motor_step_calibration_speed_mm_s.setSuffix(" mm/s")
         self.spin_motor_step_calibration_speed_mm_s.setToolTip(
-            "Expected linear calibration speed. Mini DMA converts this to raw Tic units/s using the calibration move size."
+            "Expected linear calibration speed. TMA converts this to raw Tic units/s using the calibration move size."
         )
         motion_advanced_form.addRow("Calibration speed", self.spin_motor_step_calibration_speed_mm_s)
 
@@ -6527,7 +6527,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_raw_scale_limit_g.setValue(RAW_SCALE_DISPLAY_LIMIT_DEFAULT_G)
         self.spin_raw_scale_limit_g.setSuffix(" g")
         self.spin_raw_scale_limit_g.setToolTip(
-            "Maximum allowed raw balance display. If the balance reaches this value, Mini DMA halts automation "
+            "Maximum allowed raw balance display. If the balance reaches this value, TMA halts automation "
             "and blocks ordinary motor moves until the display is below the limit again."
         )
         safety_form.addRow("Raw scale display limit", self.spin_raw_scale_limit_g)
@@ -6548,8 +6548,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.check_positive_motion_is_tension.setChecked(False)
         self.check_positive_motion_is_tension.setToolTip(
-            "Leave unchecked for the current Mini DMA rig: pulling up makes the raw Tic position negative, "
-            "while Mini DMA displays and logs that tensile displacement as positive."
+            "Leave unchecked for the current TMA rig: pulling up makes the raw Tic position negative, "
+            "while TMA displays and logs that tensile displacement as positive."
         )
         self.check_positive_motion_is_tension.toggled.connect(lambda _checked: self._refresh_live_labels())
         safety_form.addRow("", self.check_positive_motion_is_tension)
@@ -6736,7 +6736,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_ir_enabled = QtWidgets.QCheckBox("Enable optional IR camera/thermometer", ir_box)
         self.check_ir_enabled.setChecked(True)
         self.check_ir_enabled.setToolTip(
-            "When disabled, Mini DMA skips IR auto-connect and leaves temperature fields blank."
+            "When disabled, TMA skips IR auto-connect and leaves temperature fields blank."
         )
         self.check_ir_enabled.toggled.connect(self._handle_ir_enabled_changed)
         ir_form.addRow("", self.check_ir_enabled)
@@ -7102,7 +7102,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_setup_preload_duration_s.setValue(SETUP_PRELOAD_DEFAULT_DURATION_S)
         self.spin_setup_preload_duration_s.setSuffix(" s")
         self.spin_setup_preload_duration_s.setToolTip(
-            "Desired time for the setup preload ramp after the wire is engaged; Mini DMA derives the MPa/s rate."
+            "Desired time for the setup preload ramp after the wire is engaged; TMA derives the MPa/s rate."
         )
         setup_ramp_row, self.label_setup_preload_ramp_equiv = self._spin_with_equivalent_label(
             self.setup_details_panel,
@@ -7373,7 +7373,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.check_distribution_return_sweep.setChecked(True)
         distribution_form.addRow("", self.check_distribution_return_sweep)
         distribution_hint = QtWidgets.QLabel(
-            "Closed-loop in Mini DMA terms: the stage corrects until load, stress, or strain is within tolerance, "
+            "Closed-loop in TMA terms: the stage corrects until load, stress, or strain is within tolerance, "
             "then records the requested point count before moving to the next plateau.",
             distribution_page,
         )
@@ -7759,7 +7759,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_step_mA.setValue(0.8)
         self.spin_current_sweep_step_mA.setSuffix(" mA/s")
         self.spin_current_sweep_step_mA.setToolTip(
-            "Current ramp rate. Mini DMA converts this to smaller setpoint updates using the control interval."
+            "Current ramp rate. TMA converts this to smaller setpoint updates using the control interval."
         )
         current_rate_mA_row, self.label_current_rate_density = self._spin_with_equivalent_label(
             automation_box,
@@ -8245,13 +8245,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_manual_auto_connect.setToolTip("Auto-detect/connect the motor and scale for manual setup.")
         self.button_manual_auto_connect.clicked.connect(self._auto_connect_manual_hardware)
         manual_motion_row.addWidget(self.button_manual_auto_connect)
-        manual_up = QtWidgets.QPushButton("▲ Move up", manual_box)
+        manual_up = QtWidgets.QPushButton("â–² Move up", manual_box)
         manual_up.setObjectName("manual_jog_tension_button")
         manual_up.setToolTip("Move the stage in the tension-increasing direction by the jog step.")
         manual_up.setMinimumHeight(42)
         self._configure_manual_jog_button(manual_up, lambda: self._tension_motion_sign())
         manual_motion_row.addWidget(manual_up)
-        manual_down = QtWidgets.QPushButton("▼ Move down", manual_box)
+        manual_down = QtWidgets.QPushButton("â–¼ Move down", manual_box)
         manual_down.setObjectName("manual_jog_relax_button")
         manual_down.setToolTip("Move the stage in the relaxing direction by the jog step.")
         manual_down.setMinimumHeight(42)
@@ -8322,7 +8322,7 @@ class MainWindow(QtWidgets.QMainWindow):
         hero_layout = QtWidgets.QHBoxLayout(hero_box)
         hero_layout.setContentsMargins(12, 10, 12, 10)
         hero_layout.setSpacing(18)
-        hero_title = QtWidgets.QLabel("Mini DMA Dashboard", hero_box)
+        hero_title = QtWidgets.QLabel("TMA Dashboard", hero_box)
         hero_font = hero_title.font()
         hero_font.setPointSize(max(hero_font.pointSize(), 13))
         hero_font.setBold(True)
@@ -8526,7 +8526,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_output.setMaximumBlockCount(1000)
         self.log_output.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.log_output.setPlaceholderText("Mini DMA log output")
+        self.log_output.setPlaceholderText("TMA log output")
         log_layout.addWidget(self.log_output, stretch=1)
         self.statusBar().hide()
         plot_splitter.setStretchFactor(0, 8)
@@ -9753,7 +9753,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         message = (
                             f"Shared HMP broker at {DEFAULT_SHARED_BROKER_HOST}:{DEFAULT_SHARED_BROKER_PORT} "
                             f"is not reachable: {default_exc}. Start the shared broker or check its port; "
-                            "Mini DMA will not open the HMP serial port while using the shared-broker profile."
+                            "TMA will not open the HMP serial port while using the shared-broker profile."
                         )
                         if show_errors:
                             QtWidgets.QMessageBox.warning(
@@ -9781,7 +9781,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not allow_start_owned_broker:
                     message = (
                         f"Shared HMP broker at {controller.port_name} is not reachable: {exc}. "
-                        "Start or select the existing shared broker; Mini DMA will not open the HMP serial port "
+                        "Start or select the existing shared broker; TMA will not open the HMP serial port "
                         "while using the shared-broker profile."
                     )
                     if show_errors:
@@ -9859,7 +9859,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
                     current_limit_a=float(self.spin_motor_supply_current_limit.value()),
                 )
-            broker.confirm_profile(name="Mini DMA auto-started shared HMP broker")
+            broker.confirm_profile(name="TMA auto-started shared HMP broker")
             server, thread = start_broker_server(
                 broker,
                 host=self.edit_shared_broker_host.text().strip() or "127.0.0.1",
@@ -9963,7 +9963,7 @@ class MainWindow(QtWidgets.QMainWindow):
             changed.append("motor supply enabled")
         if changed:
             self._log(
-                "Shared HMP Mini DMA bench defaults applied for Tic preflight: "
+                "Shared HMP TMA bench defaults applied for Tic preflight: "
                 + ", ".join(changed)
                 + "."
             )
@@ -10560,14 +10560,14 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             candidates = discover_cleanup_candidates_for_run(current_run)
         except Exception as exc:
-            self._log(f"Mini DMA run cleanup scan skipped: {exc}")
+            self._log(f"TMA run cleanup scan skipped: {exc}")
             return
         if len(candidates) < 2:
             return
         box = QtWidgets.QMessageBox(self)
         box.setWindowTitle(APP_NAME)
         box.setIcon(QtWidgets.QMessageBox.Icon.Question)
-        box.setText("Related Mini DMA runs were found for this sample and recipe.")
+        box.setText("Related TMA runs were found for this sample and recipe.")
         box.setInformativeText(
             f"{cleanup_summary_text(candidates)}\n\n"
             "Review older run folders for optional archiving now?"
@@ -10577,15 +10577,15 @@ class MainWindow(QtWidgets.QMainWindow):
         box.setDefaultButton(skip_button)
         box.exec()
         if box.clickedButton() is not review_button:
-            self._log("Mini DMA run cleanup skipped by operator.")
+            self._log("TMA run cleanup skipped by operator.")
             return
         dialog = RunCleanupReviewDialog(candidates, parent=self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            self._log("Mini DMA run cleanup review closed without archiving.")
+            self._log("TMA run cleanup review closed without archiving.")
             return
         selected_paths = dialog.selected_archive_paths()
         if not selected_paths:
-            self._log("Mini DMA run cleanup review had no folders selected for archive.")
+            self._log("TMA run cleanup review had no folders selected for archive.")
             return
         try:
             moves = archive_cleanup_candidates(
@@ -10597,14 +10597,14 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to archive selected run folders: {exc}")
             return
         if not moves:
-            self._log("Mini DMA run cleanup did not move any folders.")
+            self._log("TMA run cleanup did not move any folders.")
             return
         moved_lines = "\n".join(f"{move.source.name} -> {move.destination}" for move in moves)
-        self._log(f"Mini DMA run cleanup archived {len(moves)} folder(s):\n{moved_lines}")
+        self._log(f"TMA run cleanup archived {len(moves)} folder(s):\n{moved_lines}")
         QtWidgets.QMessageBox.information(
             self,
             APP_NAME,
-            f"Archived {len(moves)} older Mini DMA run folder(s).\n\n{moved_lines}",
+            f"Archived {len(moves)} older TMA run folder(s).\n\n{moved_lines}",
         )
 
     def _mark_current_sweep_voltage_limit(
@@ -12069,7 +12069,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_ir_wiring_help(self) -> None:
         QtWidgets.QMessageBox.information(
             self,
-            "Mini DMA IR wiring",
+            "TMA IR wiring",
             (
                 "NUCLEO-H753ZI wiring for both thermal modules:\n\n"
                 "MLX90614ESF-DCI spot thermometer (0x5A):\n"
@@ -12087,9 +12087,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "The same Nucleo hardware and pins can work with either module, but the "
                 "checked-in firmware is sensor-specific: flash the MLX90614 probe firmware "
                 "for the spot thermometer, or the MLX90640 firmware/bridge for the camera.\n\n"
-                "Mini DMA logging accepts MLX90614 probe lines or MLX90640 Cube raw "
+                "TMA logging accepts MLX90614 probe lines or MLX90640 Cube raw "
                 "camera frames. Use Live camera for a passive heatmap popup fed by "
-                "the same Mini DMA camera stream."
+                "the same TMA camera stream."
             ),
         )
 
@@ -12119,9 +12119,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if latest_frame is not None:
             dialog.update_frame(latest_frame)
         elif self._ir_thread is None:
-            dialog.stats_label.setText("Connect Mini DMA IR logging to the MLX90640 camera to see live frames.")
+            dialog.stats_label.setText("Connect TMA IR logging to the MLX90640 camera to see live frames.")
         else:
-            dialog.stats_label.setText("Waiting for calibrated MLX90640 frames from Mini DMA IR logging.")
+            dialog.stats_label.setText("Waiting for calibrated MLX90640 frames from TMA IR logging.")
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -12988,7 +12988,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 APP_NAME,
                 (
                     f"Apply Tic step mode {_tic_step_mode_label(new_step_mode)}?\n\n"
-                    f"Mini DMA will halt the motor, set the controller step mode, and rewrite the Tic "
+                    f"TMA will halt the motor, set the controller step mode, and rewrite the Tic "
                     f"current-position register from {current_steps} to {new_position_steps} so the "
                     "physical mm position remains continuous. This does not command a move."
                 ),
@@ -13164,7 +13164,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._motor_step_calibration_stop_requested = True
         if self._motor_step_calibration_status_label is not None:
             self._motor_step_calibration_status_label.setText(
-                "Stop requested. Mini DMA will stop after the current prompt or move."
+                "Stop requested. TMA will stop after the current prompt or move."
             )
         self._log("Motor step calibration stop requested.")
 
@@ -13178,7 +13178,7 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog = self._motor_step_calibration_dialog
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
-            dialog.setWindowTitle("Mini DMA Motor Step Calibration")
+            dialog.setWindowTitle("TMA Motor Step Calibration")
             dialog.resize(620, 420)
             layout = QtWidgets.QVBoxLayout(dialog)
             status_label = QtWidgets.QLabel("Preparing motor step calibration baseline...", dialog)
@@ -13312,7 +13312,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Max residual: {residual:.6f} mm\n\n"
             f"CSV: {csv_path}\n"
             f"JSON: {json_path}\n\n"
-            "The default choice keeps the log and does not change Mini DMA settings."
+            "The default choice keeps the log and does not change TMA settings."
         )
         apply_button = box.addButton("Apply result", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         save_only_button = box.addButton("Save only", QtWidgets.QMessageBox.ButtonRole.RejectRole)
@@ -18068,7 +18068,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if mode == "cycle":
             summary = (
                 f"Plan: cyclic displacement, {self.spin_cycle_count.value()} cycle(s), "
-                f"with ±{abs(self.spin_cycle_amplitude.value()):.4f} mm amplitude."
+                f"with Â±{abs(self.spin_cycle_amplitude.value()):.4f} mm amplitude."
             )
             banner = "Cyclic displacement"
             summary = (
@@ -20794,7 +20794,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             except Exception as exc:
                 self._run_on_ui_thread(
-                    lambda exc=exc: self._log(f"Mini DMA run summary generation failed for {run_dir}: {exc}")
+                    lambda exc=exc: self._log(f"TMA run summary generation failed for {run_dir}: {exc}")
                 )
 
         Thread(target=_worker, name="MiniDmaRunSummary", daemon=True).start()
@@ -20803,9 +20803,9 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             if self._sleep_guard is not None:
                 return
-            self._sleep_guard = create_experiment_sleep_guard("Mini DMA experiment")
+            self._sleep_guard = create_experiment_sleep_guard("TMA experiment")
             self._sleep_guard.acquire()
-            self._log("Sleep prevention active while the Mini DMA session is running.")
+            self._log("Sleep prevention active while the TMA session is running.")
         except Exception as exc:
             self._sleep_guard = None
             self._log(f"Could not enable sleep prevention: {exc}")
@@ -21582,7 +21582,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_manual_auto_connect_progress("Checking motor controller...", 2, preflight_steps)
             if self._recipe_requires_tic(steps) and not self.check_tic_native_usb.isChecked():
                 issues.append(
-                    "Mini DMA recipes require native USB Tic control. "
+                    "TMA recipes require native USB Tic control. "
                     "Enable 'Prefer native USB commands when available' and run Check motor again. "
                     "ticcmd remains available for diagnostics only."
                 )
@@ -21592,7 +21592,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     issues.append(
                         "Motor controller status could not be read "
                         f"({self._last_tic_status_error}). "
-                        "Close other Mini DMA/test processes that may be using the Tic USB device, "
+                        "Close other TMA/test processes that may be using the Tic USB device, "
                         "then run Check motor again."
                     )
                 else:
@@ -22315,9 +22315,9 @@ class MainWindow(QtWidgets.QMainWindow):
         start_dir = Path(self.edit_log_dir.text().strip() or _default_download_dir())
         path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
-            "Save Mini DMA recipe",
+            "Save TMA recipe",
             str(start_dir / self._suggest_recipe_filename()),
-            "Mini DMA recipe (*.recipe.json);;JSON files (*.json);;All files (*)",
+            "TMA recipe (*.recipe.json);;JSON files (*.json);;All files (*)",
         )
         if not path:
             return
@@ -22330,9 +22330,9 @@ class MainWindow(QtWidgets.QMainWindow):
         start_dir = self.edit_log_dir.text().strip() or _default_download_dir()
         path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Load Mini DMA recipe",
+            "Load TMA recipe",
             start_dir,
-            "Mini DMA recipe (*.recipe.json);;JSON files (*.json);;All files (*)",
+            "TMA recipe (*.recipe.json);;JSON files (*.json);;All files (*)",
         )
         if not path:
             return
@@ -23101,7 +23101,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.information(
                     self,
                     APP_NAME,
-                    "Start a Mini DMA current-sweep recipe before updating remaining sweeps.",
+                    "Start a TMA current-sweep recipe before updating remaining sweeps.",
                 )
             return False
         if not self._automation_steps:
@@ -23946,7 +23946,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         dialog = self._length_setup_dialog
         title_sample = self.edit_sample_name.text().strip() or self.edit_log_name.text().strip() or "unnamed sample"
-        title = f"Mini DMA Length Setup - {title_sample}"
+        title = f"TMA Length Setup - {title_sample}"
         if dialog is None or dialog.isHidden():
             dialog = QtWidgets.QDialog(self)
             dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
@@ -24479,7 +24479,7 @@ class MainWindow(QtWidgets.QMainWindow):
         steps.append(AutomationStep("record", note=label))
         if not self._preflight_recipe_hardware(steps):
             return
-        self._show_recovery_plot_dialog(f"Mini DMA Recovery: {label}")
+        self._show_recovery_plot_dialog(f"TMA Recovery: {label}")
         self._automation_steps = steps
         self._automation_index = 0
         _, tick_count = self._estimate_recipe_points_and_ticks(steps, interval_ms)
@@ -24520,7 +24520,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         if not self._preflight_recipe_hardware(steps):
             return
-        self._show_recovery_plot_dialog("Mini DMA Recovery: load to zero")
+        self._show_recovery_plot_dialog("TMA Recovery: load to zero")
         self._automation_steps = steps
         self._automation_index = 0
         self._automation_interval_ms = self._control_interval_ms()
@@ -24573,7 +24573,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         if not self._preflight_recipe_hardware(steps):
             return False
-        self._show_recovery_plot_dialog("Mini DMA Recovery: bench stress guard")
+        self._show_recovery_plot_dialog("TMA Recovery: bench stress guard")
         self._automation_steps = steps
         self._automation_index = 0
         self._automation_interval_ms = self._control_interval_ms()

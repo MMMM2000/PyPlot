@@ -1,4 +1,4 @@
-"""Offline Mini DMA stiff-sample recovery guard."""
+﻿"""Offline TMA stiff-sample recovery guard."""
 
 from __future__ import annotations
 
@@ -403,7 +403,7 @@ def write_markdown_report(path: Path | str, result: Mapping[str, Any]) -> None:
     )
     control = result.get("control_source") if isinstance(result.get("control_source"), Mapping) else {}
     lines = [
-        "# Mini DMA Stiff-Sample Guard",
+        "# TMA Stiff-Sample Guard",
         "",
         (
             f"Control: `{control.get('branch') or ''}` "
@@ -494,7 +494,7 @@ def run_guard(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run an offline Mini DMA stiff-sample current-hold guard.")
+    parser = argparse.ArgumentParser(description="Run an offline TMA stiff-sample current-hold guard.")
     parser.add_argument("plan", help="Path to a mini_dma_offline_stiff_sample_guard JSON plan.")
     parser.add_argument("--out-json", type=Path, default=None, help="Write machine-readable guard result.")
     parser.add_argument("--out-md", type=Path, default=None, help="Write a Markdown guard report.")

@@ -1,25 +1,25 @@
-# Mini DMA Target-Acquisition Handoff: Ni46Fe27Ga23Co2Cu2 2/8
+﻿# TMA Target-Acquisition Handoff: Ni46Fe27Ga23Co2Cu2 2/8
 
 Date: 2026-06-09
 Worker branch: `codex/mini-dma-live-opt-12-2-12e8`
-Pushed head at handoff: `3861932` (`Revert "Probe Mini DMA held-current recovery"`)
+Pushed head at handoff: `3861932` (`Revert "Probe TMA held-current recovery"`)
 
 ## Scope
 
 This handoff captures the hardware-backed target-acquisition investigation for the
-`Ni46Fe27Ga23Co2Cu2` `2/8` Mini DMA wire. The objective was robust target settling
+`Ni46Fe27Ga23Co2Cu2` `2/8` TMA wire. The objective was robust target settling
 across wires with different composition, diameter, length, and stiffness while
 preserving the shared HMP channel model:
 
 - CH1: reserved for AC susceptibility; this worker did not control CH1.
-- CH3: Mini DMA motor rail, preserved on when required.
-- CH4: Mini DMA current sweep, safe-off after supervised runs.
+- CH3: TMA motor rail, preserved on when required.
+- CH4: TMA current sweep, safe-off after supervised runs.
 
 ## Selected Control State
 
 The selected code state is the target-acquisition trust-region fix:
 
-- `9cc71af` fixed stale auto-generated Mini DMA sample headers when the Sample tab
+- `9cc71af` fixed stale auto-generated TMA sample headers when the Sample tab
   composition/wire fields identify a new sample.
 - `d01a4c0` added target-ramp trust-region behavior. It preserves the fast
   `5 mm/s` stage speed for large monotonic target errors, but limits correction

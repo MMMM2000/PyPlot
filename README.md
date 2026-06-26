@@ -1,4 +1,4 @@
-# Microwire Data Plotting & Logging
+﻿# Microwire Data Plotting & Logging
 
 A compact toolkit for logging, visualising, and post-processing microwire
 experiments. The launcher keeps the utilities together so you can jump between
@@ -50,7 +50,7 @@ before choosing the Origin backend.
   optional continuous sweeps, then export to Origin or TXT directly from PyPlot.
 - Serial Data Logger - capture instrument output with live plots and flexible
   filename templates.
-- Mini DMA Logger - drive a small stepper stage, serial scale, and current-annealing
+- TMA Logger - drive a small stepper stage, serial scale, and current-annealing
   supply with preload-aware strain zeroing, `.pydpj` specimen import, configurable
   multi-axis plot tiles, named TXT/CSV/JSON sessions, displacement-controlled
   ramp/cycle/hold recipes, and early Hsw distribution plateau sweeps in load,

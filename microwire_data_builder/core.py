@@ -29,7 +29,7 @@ from plotting.shared.transition_analysis import estimate_temperature_transition_
 
 try:
     from plotting.plugins.mini_dma import core as mini_dma_core
-except Exception:  # pragma: no cover - Mini DMA support is optional in minimal installs.
+except Exception:  # pragma: no cover - TMA support is optional in minimal installs.
     mini_dma_core = None  # type: ignore[assignment]
 
 try:
@@ -207,8 +207,15 @@ CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN = "Current annealing transition statu
 CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN = "Current annealing transition review counts"
 VSM_TRANSITION_TEMP_STATUS_COLUMN = "VSM transition temp status"
 VSM_TRANSITION_TEMP_COUNTS_COLUMN = "VSM transition temp review counts"
-MINI_DMA_TRANSITION_STATUS_COLUMN = "Mini DMA transition status"
-MINI_DMA_TRANSITION_COUNTS_COLUMN = "Mini DMA transition review counts"
+LEGACY_MINI_DMA_COLUMN = "Mini DMA graphs"
+LEGACY_MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
+LEGACY_MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
+LEGACY_MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
+LEGACY_MINI_DMA_TRANSITION_STATUS_COLUMN = "Mini DMA transition status"
+LEGACY_MINI_DMA_TRANSITION_COUNTS_COLUMN = "Mini DMA transition review counts"
+LEGACY_MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
+MINI_DMA_TRANSITION_STATUS_COLUMN = "TMA transition status"
+MINI_DMA_TRANSITION_COUNTS_COLUMN = "TMA transition review counts"
 
 OUTPUT_COLUMNS = [
     "Composition",
@@ -252,7 +259,7 @@ OUTPUT_COLUMNS = [
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
-    "Mini DMA graphs",
+    "TMA graphs",
     "Manual stress/strain graphs",
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
@@ -277,16 +284,16 @@ FIGURE_COLUMNS = (
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
-MINI_DMA_COLUMN = "Mini DMA graphs"
-MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
-MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
-MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
+MINI_DMA_COLUMN = "TMA graphs"
+MINI_DMA_STRAIN_COLUMN = "TMA strain by stress/load"
+MINI_DMA_TRANSITION_COLUMN = "TMA transition currents by stress/load"
+MINI_DMA_BREAK_COLUMN = "TMA break point"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Manual stress/strain graphs"
 LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Shape memory stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
 VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
 DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
-MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
+MINI_DMA_ORIGIN_COLUMN = "TMA graphs (Origin)"
 SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Manual stress/strain graphs (Origin)"
 LEGACY_SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Shape memory stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
@@ -1031,7 +1038,7 @@ class DmaIsoStressRecord:
 
 @dataclass
 class MiniDmaRecord:
-    """Parsed Mini DMA run for a single measurement folder."""
+    """Parsed TMA run for a single measurement folder."""
 
     path: Path
     sample: str
@@ -1056,7 +1063,7 @@ def _mini_dma_core_module() -> Any:
 
 
 def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
-    """Return current Mini DMA peak-strain summary, falling back to cached text."""
+    """Return current TMA peak-strain summary, falling back to cached text."""
     cached = tuple(str(line) for line in getattr(record, "strain_summary", ()) or ())
     module = _mini_dma_core_module()
     if module is None:
@@ -1076,7 +1083,7 @@ def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
         data = getattr(record, "data", None)
         if not isinstance(data, pd.DataFrame) or data.empty:
             return cached
-        sample_name = str(getattr(record, "sample", "") or getattr(record, "label", "") or "Mini DMA")
+        sample_name = str(getattr(record, "sample", "") or getattr(record, "label", "") or "TMA")
         path = Path(path_value) if isinstance(path_value, (str, Path)) else Path(sample_name)
         try:
             run = module.MiniDmaRun(
@@ -5152,7 +5159,7 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN: "VSM temperature scan graphs (Origin)",
     VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
     DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
-    MINI_DMA_ORIGIN_COLUMN: "Mini DMA graphs (Origin)",
+    MINI_DMA_ORIGIN_COLUMN: "TMA graphs (Origin)",
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Manual stress/strain graphs (Origin)",
     FMR_ORIGIN_COLUMN: "FMR graphs (Origin)",
     RVT_POINT_COUNT_COLUMN: "R vs T points",
@@ -5234,6 +5241,8 @@ _WORD_GRAPH_COLUMNS: Tuple[str, ...] = (
     DMA_ISOSTRESS_ORIGIN_COLUMN,
     MINI_DMA_COLUMN,
     MINI_DMA_ORIGIN_COLUMN,
+    LEGACY_MINI_DMA_COLUMN,
+    LEGACY_MINI_DMA_ORIGIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,
     LEGACY_SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
@@ -5253,7 +5262,7 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("VSM temperature scan", (VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,), (VSM_TEMPERATURE_SCAN_COLUMN,)),
     ("VSM hysteresis loops", (VSM_HYSTERESIS_ORIGIN_COLUMN,), (VSM_HYSTERESIS_COLUMN,)),
     ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
-    ("Mini DMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
+    ("TMA", (MINI_DMA_ORIGIN_COLUMN, LEGACY_MINI_DMA_ORIGIN_COLUMN), (MINI_DMA_COLUMN, LEGACY_MINI_DMA_COLUMN)),
     (
         "Manual stress/strain",
         (
@@ -8587,8 +8596,8 @@ def build_database(
                 row,
                 records=mini_dma_entries,
                 origin_column=MINI_DMA_ORIGIN_COLUMN,
-                plugin_name="Mini DMA",
-                display_prefix="Mini DMA Origin graph",
+                plugin_name="TMA",
+                display_prefix="TMA Origin graph",
                 section_token="mini_dma",
             )
         else:

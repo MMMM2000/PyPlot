@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -328,7 +328,7 @@ def test_release_child_lock_allows_owner_purpose_match_with_pid_mismatch(tmp_pat
             {
                 "pid": 13920,
                 "owner": "codex-mini-dma-live-opt-recovery-2658",
-                "purpose": "Mini DMA 12/2 48 mm 80 mA optimization recovery run 5 at 0.8 mA/s",
+                "purpose": "TMA 12/2 48 mm 80 mA optimization recovery run 5 at 0.8 mA/s",
             }
         ),
         encoding="utf-8",
@@ -338,7 +338,7 @@ def test_release_child_lock_allows_owner_purpose_match_with_pid_mismatch(tmp_pat
         lock_path,
         56228,
         owner="codex-mini-dma-live-opt-recovery-2658",
-        purpose="Mini DMA 12/2 48 mm 80 mA optimization recovery run 5 at 0.8 mA/s",
+        purpose="TMA 12/2 48 mm 80 mA optimization recovery run 5 at 0.8 mA/s",
     )
 
     assert not lock_path.exists()
@@ -360,7 +360,7 @@ def test_supervisor_main_prints_ascii_json_for_windows_console(monkeypatch, caps
         return {
             "state": "completed",
             "child_returncode": 0,
-            "path": "C:/Users/Martin Eliáš/PyPlot",
+            "path": "C:/Users/Martin EliÃ¡Å¡/PyPlot",
             "tail": "bad char \ufffd",
         }
 

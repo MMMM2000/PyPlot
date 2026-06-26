@@ -1,4 +1,4 @@
-# MW Builder Process Jobs
+﻿# MW Builder Process Jobs
 
 This note defines the first process-separation boundary for Microwire Data Builder
 and PyPlot automation. The goal is to keep the manual UI responsive while giving
@@ -11,7 +11,7 @@ Heavy flows currently fall into five groups:
 - Section refreshes over large folders: Builder sections already use `QThread`
   workers for scan/import work, but they still share the UI process, memory,
   logging, and cancellation model.
-- Mini DMA previews and transition review: recent work moved transition review
+- TMA previews and transition review: recent work moved transition review
   to lazy selected-run loading with a background worker. This should remain
   in-process for interactive review, while expensive pack generation can later
   become a job.
@@ -39,7 +39,7 @@ Heavy flows currently fall into five groups:
    status schema.
 
 3. **Third: heavy graph preview and review-pack generation.**
-   Mini DMA transition review should keep its interactive dialog in-process,
+   TMA transition review should keep its interactive dialog in-process,
    but precomputing thumbnails, candidate packs, and diagnostic figures can
    move to cacheable subprocess jobs.
 

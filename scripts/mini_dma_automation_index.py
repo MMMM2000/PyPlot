@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import csv
@@ -229,7 +229,7 @@ def _parse_source(value: str) -> SourceRoot:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build a Mini DMA automation run index.")
+    parser = argparse.ArgumentParser(description="Build a TMA automation run index.")
     parser.add_argument(
         "--source",
         action="append",
@@ -251,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     sources = [_parse_source(value) for value in args.source]
     rows = discover_runs(sources, exclude_names=args.exclude_name)
     write_index(rows, Path(args.output_dir).expanduser())
-    print(f"Indexed {len(rows)} Mini DMA automation runs into {Path(args.output_dir).expanduser()}")
+    print(f"Indexed {len(rows)} TMA automation runs into {Path(args.output_dir).expanduser()}")
     return 0
 
 

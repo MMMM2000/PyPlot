@@ -1,4 +1,4 @@
-# Current Annealing Reference
+﻿# Current Annealing Reference
 
 This note records the current Builder model for current annealing and the reasoning behind it.
 
@@ -36,10 +36,10 @@ The user-facing rule is:
 
 The Builder groups multiple annealing files per microwire and keeps extra records. The main table exposes the shape we currently need:
 
-- `Graph — 1000 mA`
-- `Graph — other annealing`
+- `Graph â€” 1000 mA`
+- `Graph â€” other annealing`
 
-Legacy saved projects may still contain `Graph — low mA` or `Graph — other mA`, but those fields are migrated into `Graph — other annealing` when projects are loaded.
+Legacy saved projects may still contain `Graph â€” low mA` or `Graph â€” other mA`, but those fields are migrated into `Graph â€” other annealing` when projects are loaded.
 
 ## Target Behavior
 
@@ -86,10 +86,10 @@ Ordering inside that bucket should be stable:
 
 Replace the current two-secondary-column model with:
 
-- `Graph — 1000 mA`
-- `Graph — other annealing`
+- `Graph â€” 1000 mA`
+- `Graph â€” other annealing`
 
-The section table should no longer require a dedicated `Graph — low mA` column.
+The section table should no longer require a dedicated `Graph â€” low mA` column.
 
 ### 5. Preview Behavior
 
@@ -113,9 +113,9 @@ The assembled database should not try to flatten all follow-up measurements into
 Preferred output fields:
 
 - `File 1000 mA`
-- `Figure — 1000 mA`
+- `Figure â€” 1000 mA`
 - `Other annealing files`
-- `Figure — other annealing`
+- `Figure â€” other annealing`
 - `Setpoints (mA)`
 - `Sources`
 
@@ -162,6 +162,6 @@ Concrete examples previously observed in Praha include samples shaped like:
 
 Persisted builder state can still contain old column names:
 
-- old projects may still contain `Graph — low mA`
+- old projects may still contain `Graph â€” low mA`
 - old exports and hidden-column preferences may reference the previous column names
 - migration should preserve existing payloads where possible and silently map legacy fields forward

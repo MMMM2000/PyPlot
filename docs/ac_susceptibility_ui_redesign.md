@@ -1,4 +1,4 @@
-# AC Susceptibility UI Redesign Notes
+﻿# AC Susceptibility UI Redesign Notes
 
 This note captures the stabilization-campaign audit for the AC susceptibility logger. It is not a release checklist and should not block bench testing of the current branch.
 
@@ -16,7 +16,7 @@ This note captures the stabilization-campaign audit for the AC susceptibility lo
 - Explicit run-status sidecar and local fallback paths.
 - Shared-broker channel confirmation instead of silently trusting legacy CH values.
 - Sweep-start and baseline-start cleanup that resets the UI if worker setup fails.
-- Operator-facing shared-HMP diagnostics shared with Mini DMA and Current Annealing.
+- Operator-facing shared-HMP diagnostics shared with TMA and Current Annealing.
 
 ## Proposed First-Viewport Layout
 

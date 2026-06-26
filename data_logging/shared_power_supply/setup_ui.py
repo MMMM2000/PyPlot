@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -21,8 +21,8 @@ from .profiles import HMP_PROFILES, SupplyProfile
 
 ROLE_LABELS = {
     ROLE_UNUSED: "Unused",
-    ROLE_MINI_DMA_MOTOR: "Mini DMA motor supply",
-    ROLE_MINI_DMA_CURRENT: "Mini DMA current sweep",
+    ROLE_MINI_DMA_MOTOR: "TMA motor supply",
+    ROLE_MINI_DMA_CURRENT: "TMA current sweep",
     ROLE_CURRENT_ANNEALING: "Current annealing",
     ROLE_AC_SUSCEPTIBILITY: "AC susceptibility",
     ROLE_OTHER_MANUAL: "Other/manual",

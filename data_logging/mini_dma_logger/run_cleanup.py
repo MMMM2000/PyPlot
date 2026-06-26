@@ -1,4 +1,4 @@
-"""Safe Mini DMA sibling-run cleanup helpers."""
+﻿"""Safe TMA sibling-run cleanup helpers."""
 
 from __future__ import annotations
 
@@ -262,7 +262,7 @@ def archive_cleanup_candidates(
         return moves
     roots = {candidate.path.parent.resolve() for candidate in candidates}
     if len(roots) != 1:
-        raise ValueError("Cleanup candidates must share one Mini DMA data root.")
+        raise ValueError("Cleanup candidates must share one TMA data root.")
     root = next(iter(roots))
     archive_root = root / "archive" / (archive_name or _archive_batch_name())
 

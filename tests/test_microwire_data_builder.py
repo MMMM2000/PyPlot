@@ -6741,7 +6741,7 @@ def test_word_report_skips_empty_measurement_sections() -> None:
     assert "Microwire data" in xml
     assert "Microscope and dimensions" in xml
     assert "Current annealing" not in xml
-    assert "Mini DMA" not in xml
+    assert "TMA" not in xml
     assert "Not measured yet." in xml
     assert origin_insertions == []
 
@@ -6760,7 +6760,7 @@ def test_word_report_includes_reference_only_measurement_section() -> None:
         {},
     )
 
-    assert "Mini DMA" in xml
+    assert "TMA" in xml
     assert "Graphs in Assemble" in xml
     assert "Ni50Fe27Ga23 12_2 iso-current" in xml
     assert "Current annealing" not in xml
@@ -6876,8 +6876,8 @@ def test_word_export_manifest_records_skipped_and_invalid_sections(
 
     payload = json.loads(manifest_json.read_text(encoding="utf-8"))
     report = payload["reports"][0]
-    assert report["graph_sections"] == ["Mini DMA"]
-    assert "Mini DMA" in report["included_sections"]
+    assert report["graph_sections"] == ["TMA"]
+    assert "TMA" in report["included_sections"]
     assert "Current annealing" in report["invalid_sections"]
     assert "R vs T" in report["skipped_sections"]
     assert report["sections"]["Current annealing"]["status"] == "invalid"
@@ -8045,7 +8045,7 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         assert core.VSM_TRANSITION_TEMP_STATUS_COLUMN in vsm_group
         assert core.VSM_TRANSITION_TEMP_COUNTS_COLUMN in vsm_group
         assert "Transition temps" not in groups
-        mini_dma_group = groups.get("Mini DMA")
+        mini_dma_group = groups.get("TMA")
         assert isinstance(mini_dma_group, list)
         assert core.MINI_DMA_COLUMN in mini_dma_group
         assert core.MINI_DMA_ORIGIN_COLUMN in mini_dma_group

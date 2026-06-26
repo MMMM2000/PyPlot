@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import sys
@@ -78,19 +78,19 @@ def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin(
         monkeypatch.setattr(window, "_confirm_close_with_unsaved_data", lambda: True)
         fig = Figure(figsize=(4, 3))
         ax = fig.add_subplot(111)
-        line, = ax.plot([0.0, 1.0], [0.0, 1.0], label="0°")
+        line, = ax.plot([0.0, 1.0], [0.0, 1.0], label="0Â°")
         canvas = FigureCanvas(fig)
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(canvas)
-        window.tab_widget.addTab(tab, "120 °C")
+        window.tab_widget.addTab(tab, "120 Â°C")
         window.tab_widget.setCurrentWidget(tab)
 
         descriptor = TabDescriptor(
             kind="temperature",
-            title="120 °C",
-            root_label="120 °C",
+            title="120 Â°C",
+            root_label="120 Â°C",
             x_label="Field [Oe]",
             y_label="Moment [emu]",
             canvas=canvas,
@@ -98,7 +98,7 @@ def test_vsm_hysteresis_register_plot_tab_enables_shared_open_origin(
             lines={
                 ("angle", 0.0): GraphLineState(
                     key=("angle", 0.0),
-                    label="0°",
+                    label="0Â°",
                     line=line,
                     base_x=[0.0, 1.0],
                     base_y=[0.0, 1.0],
@@ -129,19 +129,19 @@ def test_vsm_hysteresis_register_plot_tab_respects_shared_grid_default(
 
         fig = Figure(figsize=(4, 3))
         ax = fig.add_subplot(111)
-        line, = ax.plot([0.0, 1.0], [0.0, 1.0], label="0Â°")
+        line, = ax.plot([0.0, 1.0], [0.0, 1.0], label="0Ã‚Â°")
         canvas = FigureCanvas(fig)
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(canvas)
-        window.tab_widget.addTab(tab, "120 Â°C")
+        window.tab_widget.addTab(tab, "120 Ã‚Â°C")
         window.tab_widget.setCurrentWidget(tab)
 
         descriptor = TabDescriptor(
             kind="temperature",
-            title="120 Â°C",
-            root_label="120 Â°C",
+            title="120 Ã‚Â°C",
+            root_label="120 Ã‚Â°C",
             x_label="Field [Oe]",
             y_label="Moment [emu]",
             canvas=canvas,
@@ -149,7 +149,7 @@ def test_vsm_hysteresis_register_plot_tab_respects_shared_grid_default(
             lines={
                 ("angle", 0.0): GraphLineState(
                     key=("angle", 0.0),
-                    label="0Â°",
+                    label="0Ã‚Â°",
                     line=line,
                     base_x=[0.0, 1.0],
                     base_y=[0.0, 1.0],
@@ -609,7 +609,7 @@ def test_mini_dma_folder_import_skips_generic_sidecar_workbook_import(
         plugin = window._current_plugin  # noqa: SLF001 - test hook
         runs = getattr(plugin, "_runs")
         assert [run.path for run in runs] == [run_folder.resolve()]
-        assert window._workbooks == {}  # noqa: SLF001 - Mini DMA folders are plugin data
+        assert window._workbooks == {}  # noqa: SLF001 - TMA folders are plugin data
         assert information_calls == []
         assert warning_calls == []
     finally:

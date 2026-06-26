@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 import json
@@ -120,14 +120,14 @@ def resolve_measurement_path(path: Path) -> Path:
     if candidate.is_dir():
         candidate = candidate / MEASUREMENT_FILE
     if candidate.name.casefold() != MEASUREMENT_FILE.casefold():
-        raise ValueError("Select a Mini DMA run folder or measurement.csv file.")
+        raise ValueError("Select a TMA run folder or measurement.csv file.")
     if not candidate.exists() or not candidate.is_file():
-        raise ValueError(f"Mini DMA measurement file not found: {candidate}")
+        raise ValueError(f"TMA measurement file not found: {candidate}")
     return candidate
 
 
 def looks_like_measurement_file(path: Path) -> bool:
-    """Return true for CSV files with the required Mini DMA measurement shape."""
+    """Return true for CSV files with the required TMA measurement shape."""
     candidate = Path(path)
     if candidate.name.casefold() != MEASUREMENT_FILE.casefold():
         return False
@@ -149,7 +149,7 @@ def load_run(path: Path) -> MiniDmaRun:
     frame = pd.read_csv(measurement_path)
     missing = sorted(REQUIRED_COLUMNS.difference(frame.columns))
     if missing:
-        raise ValueError("Missing Mini DMA columns: " + ", ".join(missing))
+        raise ValueError("Missing TMA columns: " + ", ".join(missing))
     current_column = _choose_current_column(frame)
     if current_column is None:
         raise ValueError("Missing usable current column.")
@@ -178,7 +178,7 @@ def load_run(path: Path) -> MiniDmaRun:
         subset=["current_mA", "automation_target_value", "strain_pct", "resistance_ohm"]
     )
     if cleaned.empty:
-        raise ValueError("No usable Mini DMA current-sweep rows found.")
+        raise ValueError("No usable TMA current-sweep rows found.")
 
     metadata = _metadata_for_run(measurement_path)
     sample_name = _sample_name_for_run(measurement_path)
@@ -194,7 +194,7 @@ def load_run(path: Path) -> MiniDmaRun:
 
 
 def is_iso_current_run(run: MiniDmaRun) -> bool:
-    """Return true for constant-current stress/strain Mini DMA recipes."""
+    """Return true for constant-current stress/strain TMA recipes."""
     modes = _run_recipe_mode_values(run)
     if modes.intersection(ISO_CURRENT_RECIPE_MODES):
         return True
@@ -755,11 +755,11 @@ def _strain_axis_label(
     global_l0_mm: float | None = None,
 ) -> str:
     if mode == STRAIN_BASELINE_PER_TARGET_MINIMUM:
-        return "Strain [%] (per-curve l₀)"
+        return "Strain [%] (per-curve lâ‚€)"
     l0_mm = global_l0_mm if mode == STRAIN_BASELINE_GLOBAL_MINIMUM else run.initial_length_mm
     if l0_mm is None or not pd.notna(l0_mm) or l0_mm <= 0.0:
         return "Strain [%]"
-    return f"Strain [%] (l₀ = {_format_compact_number(l0_mm, max_decimals=1)} mm)"
+    return f"Strain [%] (lâ‚€ = {_format_compact_number(l0_mm, max_decimals=1)} mm)"
 
 
 def _metadata_recipe_mode_values(payload: dict[str, object]) -> set[str]:
@@ -1152,8 +1152,8 @@ def _current_axis_label(run: MiniDmaRun, groups: Iterable[pd.DataFrame]) -> str:
     return (
         "Current [mA] "
         f"({_format_compact_number(max_current_mA, max_decimals=0)} mA = "
-        f"{_format_compact_number(current_density, max_decimals=0)} A/mm², "
-        f"d = {_format_compact_number(diameter_um)} µm)"
+        f"{_format_compact_number(current_density, max_decimals=0)} A/mmÂ², "
+        f"d = {_format_compact_number(diameter_um)} Âµm)"
     )
 
 

@@ -1,4 +1,4 @@
-"""Validate a Mini DMA optimization campaign before live hardware work."""
+﻿"""Validate a TMA optimization campaign before live hardware work."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from data_logging.mini_dma_logger.campaign import check_result_to_json, validate
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate a Mini DMA optimization campaign manifest.")
+    parser = argparse.ArgumentParser(description="Validate a TMA optimization campaign manifest.")
     parser.add_argument("manifest", help="Path to campaign.yaml or campaign.json.")
     parser.add_argument("--repo-root", default=".", help="Repository root for git checks.")
     parser.add_argument("--skip-git", action="store_true", help="Skip branch/commit/clean-worktree checks.")
@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
         print(check_result_to_json(result))
     else:
         status = "OK" if result.ok else "FAILED"
-        print(f"Mini DMA campaign check: {status}")
+        print(f"TMA campaign check: {status}")
         print(f"Campaign: {result.campaign_id}")
         print(f"Root: {result.campaign_root}")
         if result.derived.get("max_correction_travel_mm") is not None:

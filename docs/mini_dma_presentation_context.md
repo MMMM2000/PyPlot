@@ -1,8 +1,8 @@
-# Mini DMA Presentation Context
+﻿# TMA Presentation Context
 
 Prepared for a presentation on Wednesday, 2026-05-13.
 
-This document is a presentation-prep source, not a replacement for the operator docs. It collects the system context, the current implementation model, and a suggested story arc for explaining Mini DMA clearly to people who have not followed the whole development process.
+This document is a presentation-prep source, not a replacement for the operator docs. It collects the system context, the current implementation model, and a suggested story arc for explaining TMA clearly to people who have not followed the whole development process.
 
 Primary source files:
 
@@ -18,7 +18,7 @@ Primary source files:
 
 Core message:
 
-Mini DMA is a compact, experiment-specific system for measuring shape-memory microwires while controlling tensile load, stress, strain, and electrical heating in one synchronized workflow.
+TMA is a compact, experiment-specific system for measuring shape-memory microwires while controlling tensile load, stress, strain, and electrical heating in one synchronized workflow.
 
 Good slide points:
 
@@ -48,7 +48,7 @@ Presentation framing:
 
 The system intentionally trades high bandwidth for high-resolution force feedback and detailed logging. The balance is excellent for grams, but it is not a fast load cell.
 
-### 3. What Mini DMA Measures
+### 3. What TMA Measures
 
 The main logged quantities are:
 
@@ -120,9 +120,9 @@ How to explain it:
 Recipes normally start with length setup before the main recipe log begins:
 
 1. Operator enters the measured mounted wire length.
-2. Mini DMA ramps to the configured setup preload stress if the wire is below it.
-3. If the wire is already above setup preload, Mini DMA skips the preload ramp.
-4. Mini DMA returns toward 0 g applied load.
+2. TMA ramps to the configured setup preload stress if the wire is below it.
+3. If the wire is already above setup preload, TMA skips the preload ramp.
+4. TMA returns toward 0 g applied load.
 5. The app computes unloaded gauge length `l0`.
 6. The main recipe starts with strain zero and stress conversion tied to that setup.
 
@@ -154,7 +154,7 @@ The presentation should probably focus on calibration and iso-stress current swe
 
 ### 8. How Load And Stress Control Works
 
-For load/stress/strain targets, Mini DMA uses closed-loop seeking:
+For load/stress/strain targets, TMA uses closed-loop seeking:
 
 1. Read the latest valid feedback value.
 2. Compute target error.
@@ -194,7 +194,7 @@ There are several speeds:
 - Correction speed: how fast the stage moves during feedback correction.
 - Achieved average correction speed: motor move time plus dead time waiting for settling and scale response.
 
-Near target, Mini DMA may command a higher instantaneous motor speed than the desired average speed. This compensates for dead time:
+Near target, TMA may command a higher instantaneous motor speed than the desired average speed. This compensates for dead time:
 
 ```text
 near_target_period =
@@ -288,7 +288,7 @@ Raw scale ceiling vs applied load limit:
 
 Voltage limit behavior:
 
-- If a current sweep reaches the voltage limit before reaching the requested current, Mini DMA ramps recipe current back to that sweep's start current and advances instead of blindly continuing.
+- If a current sweep reaches the voltage limit before reaching the requested current, TMA ramps recipe current back to that sweep's start current and advances instead of blindly continuing.
 - If current collapses near zero at a meaningful setpoint while voltage is near the limit, the app treats this as an open-circuit/wire-break condition and stops safely.
 
 ### 13. What The System Is Good At
@@ -329,7 +329,7 @@ Recent debugging lessons:
 
 ## Possible Slide Outline
 
-1. Title: Mini DMA for Shape-Memory Microwires
+1. Title: TMA for Shape-Memory Microwires
 2. Measurement Problem: tiny wires, grams-to-MPa sensitivity, heating changes mechanics
 3. Hardware Overview: balance, linear actuator, Tic controller, power supply
 4. Software Overview: one PyQt app, recipe engine, hardware workers, logging
@@ -349,7 +349,7 @@ Recent debugging lessons:
 
 ```mermaid
 flowchart LR
-    Operator[Operator setup] --> App[Mini DMA Logger]
+    Operator[Operator setup] --> App[TMA Logger]
     App --> Recipe[Recipe engine]
     Recipe --> Tic[Tic T500 motor controller]
     Recipe --> Supply[SCPI power supply]
@@ -399,5 +399,5 @@ flowchart TD
 
 ## One-Sentence Summary
 
-Mini DMA is a calibrated, audit-friendly, quasi-static microwire measurement rig that uses a stepper stage to servo load, stress, or strain while electrical current is ramped, with the control strategy explicitly shaped around the real 5 Hz balance feedback limit.
+TMA is a calibrated, audit-friendly, quasi-static microwire measurement rig that uses a stepper stage to servo load, stress, or strain while electrical current is ramped, with the control strategy explicitly shaped around the real 5 Hz balance feedback limit.
 

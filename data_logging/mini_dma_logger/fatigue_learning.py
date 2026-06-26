@@ -1,4 +1,4 @@
-"""Offline Mini DMA fatigue/current-sweep learning summaries.
+﻿"""Offline TMA fatigue/current-sweep learning summaries.
 
 This module deliberately does not feed values back into live control. It turns
 saved run folders into reviewable priors for future repeated iso-stress sweeps.
@@ -544,7 +544,7 @@ def build_report(
     run_features: Sequence[FatigueRunFeatures],
     groups: Sequence[FatigueGroupSummary],
     *,
-    title: str = "Mini DMA Fatigue Learning Report",
+    title: str = "TMA Fatigue Learning Report",
 ) -> str:
     analyzed_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
@@ -556,7 +556,7 @@ def build_report(
         f"- Included runs: `{sum(1 for feature in run_features if feature.included)}`",
         f"- Groups: `{len(groups)}`",
         "",
-        "The suggested priors are review-only. They are not applied to live Mini DMA control.",
+        "The suggested priors are review-only. They are not applied to live TMA control.",
         "",
     ]
     for group in groups:
@@ -651,7 +651,7 @@ def write_outputs(payload: Mapping[str, Any], output_dir: Path | str) -> dict[st
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Learn review-only Mini DMA fatigue/current-sweep priors from saved run folders."
+        description="Learn review-only TMA fatigue/current-sweep priors from saved run folders."
     )
     parser.add_argument("paths", nargs="+", help="Run folders, metadata/measurement files, or parent folders.")
     parser.add_argument(
@@ -691,7 +691,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(
-            f"Analyzed {payload['run_count']} Mini DMA run(s), "
+            f"Analyzed {payload['run_count']} TMA run(s), "
             f"included {payload['included_run_count']}, wrote {output_paths['report_md']}"
         )
     return 0
