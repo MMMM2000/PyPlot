@@ -1,6 +1,6 @@
-# Mini DMA Optimization Campaigns
+# TMA Optimization Campaigns
 
-Mini DMA optimization runs must be treated as campaigns, not one-off hardware attempts. The goal is repeatability: a future worker should be able to inspect the campaign folder, branch, manifest, reports, and run artifacts without needing chat memory.
+TMA optimization runs must be treated as campaigns, not one-off hardware attempts. The goal is repeatability: a future worker should be able to inspect the campaign folder, branch, manifest, reports, and run artifacts without needing chat memory.
 
 ## Storage Model
 
@@ -31,7 +31,7 @@ Keep only reusable tools, templates, schemas, recipes, and report generators in 
 
 1. Create or select a campaign folder under `automation_history/campaigns/`.
 2. Copy `docs/automation_templates/mini_dma_campaign.yaml` to `campaign.yaml` and fill in the sample, control source, hardware, safety, run stages, and reporting paths.
-3. Start the worker from the latest approved control branch, normally `origin/main` or the current Mini DMA integration branch.
+3. Start the worker from the latest approved control branch, normally `origin/main` or the current TMA integration branch.
 4. Run the campaign checker before any live hardware command:
 
    ```powershell
@@ -50,7 +50,7 @@ Keep only reusable tools, templates, schemas, recipes, and report generators in 
 
 ## Campaign Gates
 
-A worker must not start live Mini DMA optimization if any of these are unknown:
+A worker must not start live TMA optimization if any of these are unknown:
 
 - the optimization objective and success metrics
 - sample composition, microwire, gauge length, and diameter source

@@ -1,4 +1,4 @@
-"""Software-only Mini DMA full-run controller simulation.
+"""Software-only TMA full-run controller simulation.
 
 This harness is intentionally deterministic and hardware-free. It models a
 first-overheating style run with target acquisition, current rise, endpoint
@@ -51,7 +51,7 @@ FULL_RUN_SCENARIOS = (
 @dataclass(frozen=True)
 class FullRunConfig:
     name: str = "baseline_first_overheating"
-    description: str = "Nominal software-only first-overheating Mini DMA run."
+    description: str = "Nominal software-only first-overheating TMA run."
     wire: VirtualWireConfig = field(default_factory=VirtualWireConfig)
     controller: RobustControllerConfig = field(default_factory=RobustControllerConfig)
     sweep: CurrentSweepConfig = field(
@@ -1387,7 +1387,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
         return scenarios[name]
     except KeyError as exc:
         known = ", ".join(sorted(scenarios))
-        raise ValueError(f"unknown full-run Mini DMA simulator scenario {name!r}; known: {known}") from exc
+        raise ValueError(f"unknown full-run TMA simulator scenario {name!r}; known: {known}") from exc
 
 
 def run_parameter_sweep() -> list[FullRunTrace]:
@@ -1497,7 +1497,7 @@ def run_free_strain_stress_matrix() -> list[FullRunTrace]:
                 base,
                 name=f"matrix_{family['name']}_{perturbation['name']}",
                 description=(
-                    "Free-strain matrix case based on measured Mini DMA wire behavior: "
+                    "Free-strain matrix case based on measured TMA wire behavior: "
                     f"{family['name']} with {perturbation['name']} perturbation."
                 ),
                 wire=replace(
@@ -1836,7 +1836,7 @@ def run_control_validation_suite(
     for policy_index, policy in enumerate(policies, start=1):
         if policy not in CONTROL_VALIDATION_POLICIES:
             known = ", ".join(CONTROL_VALIDATION_POLICIES)
-            raise ValueError(f"unknown Mini DMA validation policy {policy!r}; known: {known}")
+            raise ValueError(f"unknown TMA validation policy {policy!r}; known: {known}")
         for case_index, config in enumerate(base_configs, start=1):
             traces.append(run_full_mini_dma_simulation(_control_validation_config(config, policy, policy_index, case_index)))
     return traces
@@ -2062,7 +2062,7 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     _write_csv(csv_path, summary["runs"])
     lines = [
-        "# Mini DMA full-run parameter sweep",
+        "# TMA full-run parameter sweep",
         "",
         "| Scenario | Quality | Stop | Current events | Later ramp error | Sweep error | Hold time | Measured strain span % | Mean tracking error | Adaptive scale | Max cap mm | Invariants |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
@@ -2229,7 +2229,7 @@ def _write_validation_policy_rank_plot(path: Path, rankings: list[dict[str, Any]
     fig, axes = plt.subplots(4, 1, figsize=(max(9, len(rankings) * 1.6), 11), constrained_layout=True)
     axes[0].bar(x, [item["quality_score_sum"] for item in rankings], color="#1f77b4")
     axes[0].set_ylabel("aggregate score")
-    axes[0].set_title("Mini DMA control-validation policy ranking")
+    axes[0].set_title("TMA control-validation policy ranking")
     axes[1].bar(x, [item["hold_time_sum_s"] / 60.0 for item in rankings], color="#f59e0b")
     axes[1].set_ylabel("hold time (min)")
     axes[2].bar(x, [item["current_error_fraction_sum"] for item in rankings], color="#dc2626", label="current sweep")
@@ -2287,7 +2287,7 @@ def _write_combined_policy_rank_plot(path: Path, rankings: list[dict[str, Any]])
     fig, axes = plt.subplots(3, 1, figsize=(max(10, len(top) * 0.65), 10), constrained_layout=True)
     axes[0].bar(x, [item["quality_score_sum"] for item in top], color="#1f77b4")
     axes[0].set_ylabel("aggregate quality score")
-    axes[0].set_title("Mini DMA stress-ladder policy grid: top candidates")
+    axes[0].set_title("TMA stress-ladder policy grid: top candidates")
     axes[1].bar(x, [item["hold_time_sum_s"] / 60.0 for item in top], color="#f59e0b")
     axes[1].set_ylabel("total hold time (min)")
     ok = [item["ok"] for item in top]
@@ -2341,7 +2341,7 @@ def _write_sweep_metrics_plot(path: Path, traces: list[FullRunTrace]) -> bool:
     axes[2].set_xticklabels(labels, rotation=65, ha="right", fontsize=7)
     for ax in axes:
         ax.grid(True, axis="y", alpha=0.25)
-    fig.suptitle("Mini DMA full-run simulation matrix")
+    fig.suptitle("TMA full-run simulation matrix")
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -2355,7 +2355,7 @@ def _write_full_run_report(path: Path, trace: FullRunTrace) -> None:
         for name, passed in trace.invariants.items()
     )
     quality_flags = ", ".join(item["quality_flags"]) if item["quality_flags"] else "none"
-    text = f"""# Mini DMA full-run simulation
+    text = f"""# TMA full-run simulation
 
 Scenario: `{trace.config.name}`
 
@@ -2491,7 +2491,7 @@ def _stdout_summary(trace: FullRunTrace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run software-only full Mini DMA first-overheating simulations.")
+    parser = argparse.ArgumentParser(description="Run software-only full TMA first-overheating simulations.")
     parser.add_argument("--scenario", action="append", choices=FULL_RUN_SCENARIOS)
     parser.add_argument("--sweep", action="store_true", help="Run the built-in parameter sweep.")
     parser.add_argument("--free-strain-matrix", action="store_true", help="Run the broad free-strain stress-test matrix.")

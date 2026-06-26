@@ -2,7 +2,7 @@ schema_version: 1
 kind: mini_dma_optimization_campaign
 campaign:
   id: 2026-06-02_Ni50Fe27Ga23_12-2_48mm_80ma_live_recovery
-  title: Ni50Fe27Ga23 12/2 48 mm 80 mA live Mini DMA recovery
+  title: Ni50Fe27Ga23 12/2 48 mm 80 mA live TMA recovery
   root: G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-02_Ni50Fe27Ga23_12-2_48mm_80ma_live
   owner_thread: codex/mini-dma-live-opt-recovery-2658
 objective:

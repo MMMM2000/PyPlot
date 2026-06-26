@@ -1,4 +1,4 @@
-"""Deterministic Mini DMA virtual wire simulator and replay harness."""
+"""Deterministic TMA virtual wire simulator and replay harness."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _median_absolute_deviation(values: list[float], center: float) -> float:
 
 @dataclass(frozen=True)
 class VirtualWireConfig:
-    """Physical-ish parameters for a virtual Mini DMA wire."""
+    """Physical-ish parameters for a virtual TMA wire."""
 
     length_mm: float = 30.0
     diameter_mm: float = 0.0125
@@ -301,7 +301,7 @@ class SimulationTrace:
 
 @dataclass(frozen=True)
 class ProcessedControlSignal:
-    """Official processed Mini DMA load/stress signal for software decisions."""
+    """Official processed TMA load/stress signal for software decisions."""
 
     center_mpa: float
     noise_mpa: float
@@ -636,7 +636,7 @@ def scenario_by_name(name: str) -> VirtualWireScenario:
         return scenarios[name]
     except KeyError as exc:
         known = ", ".join(sorted(scenarios))
-        raise ValueError(f"unknown Mini DMA wire simulator scenario {name!r}; known: {known}") from exc
+        raise ValueError(f"unknown TMA wire simulator scenario {name!r}; known: {known}") from exc
 
 
 def _scenario_map() -> dict[str, VirtualWireScenario]:
@@ -952,7 +952,7 @@ def write_scenario_matrix_report(traces: list[SimulationTrace], output_dir: Path
     summaries = [trace.summary() for trace in traces]
     summary_path.write_text(json.dumps({"scenarios": summaries}, indent=2), encoding="utf-8")
     lines = [
-        "# Mini DMA processed-center control simulation matrix",
+        "# TMA processed-center control simulation matrix",
         "",
         "| Scenario | Stop | Final decision | Center MPa | Error MPa | Raw MPa | Motor step mm |",
         "| --- | --- | --- | ---: | ---: | --- | ---: |",
@@ -1022,7 +1022,7 @@ def write_scenario_matrix_report(traces: list[SimulationTrace], output_dir: Path
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run deterministic Mini DMA virtual wire scenarios.")
+    parser = argparse.ArgumentParser(description="Run deterministic TMA virtual wire scenarios.")
     parser.add_argument(
         "--scenario",
         action="append",

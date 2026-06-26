@@ -1,4 +1,4 @@
-"""Mini DMA per-run summary image generation.
+"""TMA per-run summary image generation.
 
 The generated images are derived caches. Raw CSV/JSON files remain the source of
 truth and summaries can be regenerated when plotting improves.
@@ -640,12 +640,12 @@ def generate_core_run_plot(
     detail_image_path: Path | str | None = None,
     write_quality: bool = True,
 ) -> dict[str, Any]:
-    """Generate phone and detail Mini DMA run-summary images."""
+    """Generate phone and detail TMA run-summary images."""
 
     run_path = Path(run_dir)
     missing = [name for name in ("measurement.csv",) if not (run_path / name).exists()]
     if missing:
-        raise FileNotFoundError(f"Mini DMA run folder is missing required file(s): {', '.join(missing)} in {run_path}")
+        raise FileNotFoundError(f"TMA run folder is missing required file(s): {', '.join(missing)} in {run_path}")
     rows = _read_csv_rows(run_path / "measurement.csv")
     df = _read_csv_frame(run_path / "measurement.csv")
     trace = _read_csv_frame(run_path / "control_trace.csv")
@@ -696,8 +696,8 @@ def generate_core_run_plot(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate Mini DMA per-run summary images.")
-    parser.add_argument("run_dir", help="Mini DMA run folder containing measurement.csv and metadata.json.")
+    parser = argparse.ArgumentParser(description="Generate TMA per-run summary images.")
+    parser.add_argument("run_dir", help="TMA run folder containing measurement.csv and metadata.json.")
     parser.add_argument("--out", help="Phone summary PNG output path. Defaults to run_summary.png in the run folder.")
     parser.add_argument("--detail-out", help="Detail summary PNG output path. Defaults to run_summary_detail.png in the run folder.")
     parser.add_argument("--summary", help="JSON summary output path. Defaults to run_summary.json in the run folder.")
@@ -718,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, indent=2, ensure_ascii=False))
     else:
-        print(f"Generated Mini DMA run summaries: {summary['image_path']} and {summary['detail_image_path']}")
+        print(f"Generated TMA run summaries: {summary['image_path']} and {summary['detail_image_path']}")
     return 0
 
 

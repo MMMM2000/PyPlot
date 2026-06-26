@@ -309,7 +309,7 @@ def test_parameter_sweep_runs_and_writes_summary(tmp_path: Path) -> None:
     assert len(traces) == 18
     assert paths["summary"].exists()
     assert paths["summary_csv"].exists()
-    assert "Mini DMA full-run parameter sweep" in paths["report"].read_text(encoding="utf-8")
+    assert "TMA full-run parameter sweep" in paths["report"].read_text(encoding="utf-8")
     assert all(trace.invariants["corrections_bounded"] for trace in traces)
 
 

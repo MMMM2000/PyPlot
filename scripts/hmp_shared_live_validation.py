@@ -438,7 +438,7 @@ def run_validation(args: argparse.Namespace) -> dict[str, Any]:
     metadata = {
         "kind": "shared_hmp_live_validation",
         "validation_scope": (
-            "electrical_shared_broker_validation; this harness does not run a full Mini DMA saved recipe "
+            "electrical_shared_broker_validation; this harness does not run a full TMA saved recipe "
             "or prove mechanical iso-stress/iso-strain control"
         ),
         "idn": idn,
@@ -489,7 +489,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run electrical live shared-HMP broker validation for Current Annealing plus a "
-            "Mini DMA current-sweep channel client. This does not execute a full Mini DMA saved recipe."
+            "TMA current-sweep channel client. This does not execute a full TMA saved recipe."
         )
     )
     parser.add_argument("--port", default="COM3")

@@ -1,27 +1,27 @@
 # Shared HMP Bench Validation Runbook
 
-Use this runbook when validating that Current Annealing Logger and Mini DMA Logger can safely share the same HMP4040. It is written for the current bench wiring and is meant to be executed only when no real Mini DMA measurement is running.
+Use this runbook when validating that Current Annealing Logger and TMA Logger can safely share the same HMP4040. It is written for the current bench wiring and is meant to be executed only when no real TMA measurement is running.
 
 ## Current Bench Wiring
 
 | HMP channel | Role | Expected connection |
 | --- | --- | --- |
 | CH1 | Current Annealing Logger | Current annealing wire |
-| CH3 | Mini DMA motor supply | Tic VIN rail, normally `12 V` with `0.4 A` rail-current limit on this bench |
-| CH4 | Mini DMA current sweep | Mini DMA sample/current path, or open circuit for no-wire checks |
+| CH3 | TMA motor supply | Tic VIN rail, normally `12 V` with `0.4 A` rail-current limit on this bench |
+| CH4 | TMA current sweep | TMA sample/current path, or open circuit for no-wire checks |
 
 The shared broker profile must confirm CH1 as `current_annealing`, CH3 as `mini_dma_motor_supply`, and CH4 as `mini_dma_current_sweep` before any output is enabled.
 
-Mini DMA intentionally has no profile-default output channel. Before using supply controls, set **Current-sweep channel** to the wired Mini DMA current channel, normally CH4 on this bench. If motor supply is enabled, set **Motor supply** to the wired motor rail channel, normally CH3. Auto-detecting or changing the supply profile leaves both selectors unselected until the operator chooses them.
+TMA intentionally has no profile-default output channel. Before using supply controls, set **Current-sweep channel** to the wired TMA current channel, normally CH4 on this bench. If motor supply is enabled, set **Motor supply** to the wired motor rail channel, normally CH3. Auto-detecting or changing the supply profile leaves both selectors unselected until the operator chooses them.
 
 ## Preconditions
 
-- Confirm no Mini DMA recipe or Current Annealing process is already running.
-- Coordinate Codex/hardware automation threads with the shared bench guard before touching the HMP. Use `python scripts/hmp_bench_guard.py status --probe` to inspect the default shared lock at `C:\tmp\pyplot_hmp_bench.lock` and the HMP readback state. Use `python scripts/hmp_bench_guard.py acquire --owner <thread-or-user> --purpose "<test>" --timeout <seconds>` when a script needs a short exclusive hardware window. Mini DMA bench automation takes this lock automatically for execute-mode plans unless the plan explicitly sets `"bench_lock": {"enabled": false}`.
+- Confirm no TMA recipe or Current Annealing process is already running.
+- Coordinate Codex/hardware automation threads with the shared bench guard before touching the HMP. Use `python scripts/hmp_bench_guard.py status --probe` to inspect the default shared lock at `C:\tmp\pyplot_hmp_bench.lock` and the HMP readback state. Use `python scripts/hmp_bench_guard.py acquire --owner <thread-or-user> --purpose "<test>" --timeout <seconds>` when a script needs a short exclusive hardware window. TMA bench automation takes this lock automatically for execute-mode plans unless the plan explicitly sets `"bench_lock": {"enabled": false}`.
 - Confirm HMP4040 is on `COM3` at `115200` baud.
 - Confirm the Current Annealing wire is connected to CH1 before any CH1 current test.
-- Confirm whether the Mini DMA current path is connected to CH4. If no wire/sample is connected, keep CH4 at a low voltage limit and treat the expected result as open-circuit behavior.
-- Confirm whether the Mini DMA motor can safely be powered. CH3 motor-supply tests should energize the Tic rail but should not move the stage unless the operator explicitly wants the small motion smoke.
+- Confirm whether the TMA current path is connected to CH4. If no wire/sample is connected, keep CH4 at a low voltage limit and treat the expected result as open-circuit behavior.
+- Confirm whether the TMA motor can safely be powered. CH3 motor-supply tests should energize the Tic rail but should not move the stage unless the operator explicitly wants the small motion smoke.
 - Keep a direct safety-off check ready:
 
 ```powershell
@@ -53,9 +53,9 @@ Steps:
 
 - Start a broker on `COM3`.
 - Assign and confirm CH1, CH3, and CH4 roles.
-- In Mini DMA, explicitly select CH4 for the current-sweep channel and CH3 for motor supply before preparing outputs.
-- Lease CH1 as Current Annealing, CH3 as Mini DMA motor supply, and CH4 as Mini DMA current sweep.
-- Attempt one intentional wrong-role lease, such as CH1 as Mini DMA current sweep, and expect rejection.
+- In TMA, explicitly select CH4 for the current-sweep channel and CH3 for motor supply before preparing outputs.
+- Lease CH1 as Current Annealing, CH3 as TMA motor supply, and CH4 as TMA current sweep.
+- Attempt one intentional wrong-role lease, such as CH1 as TMA current sweep, and expect rejection.
 - Configure CH3 and CH4 output off.
 
 Pass criteria:
@@ -82,9 +82,9 @@ Pass criteria:
 - Resistance is finite and plausible for the wire/contact.
 - CH1 is off and lease-free after stop.
 
-### 3. Mini DMA CH4 No-Wire Logging
+### 3. TMA CH4 No-Wire Logging
 
-Goal: prove Mini DMA shared-broker logging works even with CH4 open circuit.
+Goal: prove TMA shared-broker logging works even with CH4 open circuit.
 
 Recommended open-circuit settings:
 
@@ -105,9 +105,9 @@ Pass criteria:
 - `measurement.csv` contains rows with voltage/resistance/power fields present.
 - CH4 is off and lease-free after stop.
 
-### 4. Mini DMA CH3 Motor-Supply Path
+### 4. TMA CH3 Motor-Supply Path
 
-Goal: prove Mini DMA can control the motor supply rail through the broker.
+Goal: prove TMA can control the motor supply rail through the broker.
 
 Recommended settings:
 
@@ -117,11 +117,11 @@ Recommended settings:
 
 Pass criteria:
 
-- Mini DMA can enable CH3 without taking over CH1 or CH4.
+- TMA can enable CH3 without taking over CH1 or CH4.
 - Manual hardware auto-connect reports completion only after CH3 is enabled and Tic VIN is rechecked.
 - HMP CH3 readback shows approximately `12 V` and a plausible Tic rail current.
-- Mini DMA metadata records motor supply enabled, channel `3`, and shared broker profile.
-- Mini DMA can disable CH3 cleanly, and direct readback confirms `OUTP=0`.
+- TMA metadata records motor supply enabled, channel `3`, and shared broker profile.
+- TMA can disable CH3 cleanly, and direct readback confirms `OUTP=0`.
 
 ### 5. Small Tic Motion Smoke
 
@@ -144,9 +144,9 @@ Pass criteria:
 
 ### 6. Connected CH4 Current Smoke
 
-Goal: prove Mini DMA can deliver current through a connected CH4 sample in shared mode.
+Goal: prove TMA can deliver current through a connected CH4 sample in shared mode.
 
-Only run this when the Mini DMA current path is connected.
+Only run this when the TMA current path is connected.
 
 Recommended settings:
 
@@ -170,15 +170,15 @@ Only run this after steps 1-6 pass.
 Recommended recipe:
 
 - Current Annealing CH1: low-current short run.
-- Mini DMA: one target only, small current range, conservative voltage limit.
+- TMA: one target only, small current range, conservative voltage limit.
 - CH3 motor supply enabled.
-- CH4 connected to the Mini DMA current path.
+- CH4 connected to the TMA current path.
 
 Pass criteria:
 
 - Current Annealing log contains CH1 rows.
-- Mini DMA `measurement.csv`, `metadata.json`, and `control_trace.csv` are written.
-- Mini DMA metadata records shared broker, CH3 motor supply, and CH4 current sweep.
+- TMA `measurement.csv`, `metadata.json`, and `control_trace.csv` are written.
+- TMA metadata records shared broker, CH3 motor supply, and CH4 current sweep.
 - Final direct HMP readback confirms expected output state, normally all relevant outputs off after cleanup.
 
 ## Failure Cleanup
@@ -197,7 +197,7 @@ Current Annealing:
 - Output file path and row count.
 - Current, voltage, and resistance ranges.
 
-Mini DMA:
+TMA:
 
 - `metadata.json`: `heating.profile`, current channel, motor channel, motor supply enabled flag, voltage limit, session state, point count.
 - `measurement.csv`: row count, current setpoint, measured current, voltage, resistance, power.

@@ -385,7 +385,7 @@ def run_supervised_mini_dma_bench(
         plan.bench_lock.lock_path,
         child_pid,
         owner=plan.bench_lock.owner,
-        purpose=plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+        purpose=plan.bench_lock.purpose or f"TMA bench plan {plan.path.name}",
     )
     final_payload = _status_payload(
         state="completed" if _finished_metadata_is_normal(supervisor_recovery) else state,
@@ -407,8 +407,8 @@ def run_supervised_mini_dma_bench(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Supervise a Mini DMA bench plan and leave CH4 safe on exit.")
-    parser.add_argument("plan_path", help="Mini DMA bench plan JSON path.")
+    parser = argparse.ArgumentParser(description="Supervise a TMA bench plan and leave CH4 safe on exit.")
+    parser.add_argument("plan_path", help="TMA bench plan JSON path.")
     parser.add_argument("--python", dest="python_executable", default=None, help="Python executable for launcher.py.")
     parser.add_argument("--launcher", default="launcher.py", help="Launcher entrypoint path.")
     parser.add_argument("--status-path", default=None, help="Status JSON path.")

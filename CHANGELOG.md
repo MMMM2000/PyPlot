@@ -2,7 +2,7 @@
 
 ## 2026-06-19 07:20 UTC
 
-- Record a final Mini DMA measurement point when a normally completed very short recipe would otherwise save a header-only measurement file.
+- Record a final TMA measurement point when a normally completed very short recipe would otherwise save a header-only measurement file.
 
 ## 2026-06-19 00:10 UTC
 
@@ -16,7 +16,7 @@
 
 - Hardened the shared HMP broker so active channel leases cannot be overwritten by role or profile changes, and so same-owner reconnects reuse the existing lease instead of replacing it.
 - Added AC susceptibility to the shared-HMP setup role list and capped HMP-backed AC voltage limits to the physical HMP range.
-- Made Mini DMA shared-broker disconnect explicitly switch leased current and motor channels off before releasing them.
+- Made TMA shared-broker disconnect explicitly switch leased current and motor channels off before releasing them.
 - Kept Iso-stress fatigue recipes on the expected up-and-back current sweep even if a stale hidden one-way optimization setting is present.
 - Preserved the Current Annealing shared-broker port setting when reopening the app and removed duplicate UI signal connections found during release review.
 
@@ -41,104 +41,104 @@
 
 ## 2026-06-18 09:55 UTC
 
-- Contain Mini DMA current-hold adaptive recovery to one motor Tic during high-error volatile/unstable stress excursions, while preserving larger adaptive corrections for quiet monotonic recovery.
+- Contain TMA current-hold adaptive recovery to one motor Tic during high-error volatile/unstable stress excursions, while preserving larger adaptive corrections for quiet monotonic recovery.
 
 ## 2026-06-18 08:20 UTC
 
-- Added fluctuation-gated delayed-feedback waiting for Mini DMA current-hold recovery so quiet samples keep fast adaptive corrections while bursty stiff-wire responses wait for extra scale samples before compounding another motor move.
+- Added fluctuation-gated delayed-feedback waiting for TMA current-hold recovery so quiet samples keep fast adaptive corrections while bursty stiff-wire responses wait for extra scale samples before compounding another motor move.
 
 ## 2026-06-18 00:00 UTC
 
-- Mini DMA now writes post-run summary images for remote review: a phone-friendly `run_summary.png`, a diagnostic `run_summary_detail.png`, and `run_summary.json` in each run folder.
-- The Mini DMA summary plots show stress/load legends, sample diameter and initial length, resistance instead of voltage on electrical diagnostics, temperature when available, and hide obvious wire-break tail points from curve scaling while preserving the stop reason.
+- TMA now writes post-run summary images for remote review: a phone-friendly `run_summary.png`, a diagnostic `run_summary_detail.png`, and `run_summary.json` in each run folder.
+- The TMA summary plots show stress/load legends, sample diameter and initial length, resistance instead of voltage on electrical diagnostics, temperature when available, and hide obvious wire-break tail points from curve scaling while preserving the stop reason.
 
 ## 2026-06-17 15:23 UTC
 
-- Let Mini DMA current-hold recovery cautiously grow above one motor Tic when an unstable hold is still showing persistent same-sign improvement, while keeping one-Tic damping for reversals and worsening responses.
+- Let TMA current-hold recovery cautiously grow above one motor Tic when an unstable hold is still showing persistent same-sign improvement, while keeping one-Tic damping for reversals and worsening responses.
 - Treat same-sign current-hold stress drift away from target as bounded dynamic recovery instead of oscillation, record filtered slope/noise in the control trace, and show active current-sweep progress from the current fraction rather than an exhausted nominal tick count.
 - Add an optional bench-plan current-hold quality watchdog for optimization runs so clearly bad candidates can stop early with explicit stop metadata.
-- Honor the Mini DMA current-sweep `reverse_current` recipe flag so optimization recipes can run a one-way current ramp while keeping the default sweep-back behavior and voltage-limit unwind safety.
-- Add a reusable Mini DMA stiff-sample guard CLI that regenerates offline evidence for stiffness-scaled current-hold drift recovery and historical oscillation clamps before stiff-wire hardware validation.
+- Honor the TMA current-sweep `reverse_current` recipe flag so optimization recipes can run a one-way current ramp while keeping the default sweep-back behavior and voltage-limit unwind safety.
+- Add a reusable TMA stiff-sample guard CLI that regenerates offline evidence for stiffness-scaled current-hold drift recovery and historical oscillation clamps before stiff-wire hardware validation.
 
 ## 2026-06-17 09:55 UTC
 
-- Added a Mini DMA hardware option to disable the optional IR camera/thermometer so hardware auto-connect skips it and temperature fields stay blank.
+- Added a TMA hardware option to disable the optional IR camera/thermometer so hardware auto-connect skips it and temperature fields stay blank.
 - Collapsed first-overheating child settings when the first-overheating sweep is disabled.
 
 ## 2026-06-17 09:15 UTC
 
-- Mini DMA current-sweep corrections no longer stop a recipe just because accumulated closed-loop correction travel exceeds the legacy hidden travel counter; direct load, stress, wire/contact, current, voltage, and per-step correction caps remain active.
+- TMA current-sweep corrections no longer stop a recipe just because accumulated closed-loop correction travel exceeds the legacy hidden travel counter; direct load, stress, wire/contact, current, voltage, and per-step correction caps remain active.
 
 ## 2026-06-17 00:00 UTC
 
-- Added a Mini DMA `Iso-stress fatigue` recipe for repeated fixed-stress current up/down cycles, with optional first-overheating preheat support, finite cycle count, descriptive recipe filenames, saved JSON/settings support, and cycle-numbered recipe steps for later drift/wire-break analysis.
+- Added a TMA `Iso-stress fatigue` recipe for repeated fixed-stress current up/down cycles, with optional first-overheating preheat support, finite cycle count, descriptive recipe filenames, saved JSON/settings support, and cycle-numbered recipe steps for later drift/wire-break analysis.
 - Added an offline `mini_dma_fatigue_learning.py` report tool that groups saved repeated iso-stress runs, excludes non-comparable or too-short data, estimates transformation-current shifts from resistance/strain slopes, and emits review-only JSON/CSV/Markdown priors for future fatigue measurements.
 
 ## 2026-06-16 21:35 UTC
 
 - Reorganized the AC susceptibility logger setup panel into clearer output, hardware, LCR, measurement-plan, and run-status sections with passive output-path and shared-broker lease status text.
 - Added clearer shared HMP broker diagnostics for unreachable brokers, refused leases, stale leases, direct-serial access denial, wrong channel/profile, and stale channel-limit failures.
-- Made Mini DMA shared-broker control retry once after stale lease errors and report broker connection failures with operator-facing diagnostics.
-- Added cached Mini DMA Builder project sample suggestions for faster sample naming/autofill refreshes during background project imports.
-- Expanded Mini DMA run-quality and core-plot summaries with stop classification, metadata warnings, current-hold recovery windows, voltage/current compliance events, and richer plot annotations.
-- Made Mini DMA trace replay tolerate missing/invalid metadata or trace files and report warnings instead of failing before analysis.
-- Stopped Mini DMA current-sweep voltage-limit unwinds immediately when the supply indicates open circuit or wire contact loss, before any mechanical recovery seek is attempted.
-- Scoped Mini DMA predictive seek control to active controlled phases while still honoring explicit calibrated or live stiffness for ordinary load/stress seeks.
-- Made Mini DMA IR thread disconnect/close cleanup tolerate naturally finished Qt threads that have already been deleted.
-- Made Mini DMA saved Builder project import cancellation clear pending retry state and tolerate already-deleted Qt thread wrappers.
+- Made TMA shared-broker control retry once after stale lease errors and report broker connection failures with operator-facing diagnostics.
+- Added cached TMA Builder project sample suggestions for faster sample naming/autofill refreshes during background project imports.
+- Expanded TMA run-quality and core-plot summaries with stop classification, metadata warnings, current-hold recovery windows, voltage/current compliance events, and richer plot annotations.
+- Made TMA trace replay tolerate missing/invalid metadata or trace files and report warnings instead of failing before analysis.
+- Stopped TMA current-sweep voltage-limit unwinds immediately when the supply indicates open circuit or wire contact loss, before any mechanical recovery seek is attempted.
+- Scoped TMA predictive seek control to active controlled phases while still honoring explicit calibrated or live stiffness for ordinary load/stress seeks.
+- Made TMA IR thread disconnect/close cleanup tolerate naturally finished Qt threads that have already been deleted.
+- Made TMA saved Builder project import cancellation clear pending retry state and tolerate already-deleted Qt thread wrappers.
 - Cleaned up Current Annealing fabrication-folder background-load completion so the UI resets promptly when the worker has already finished.
-- Added Mini DMA elastocaloric recipe JSON round-trip coverage and offscreen UI screenshot evidence for the fast strain-jump workflow.
+- Added TMA elastocaloric recipe JSON round-trip coverage and offscreen UI screenshot evidence for the fast strain-jump workflow.
 - Made AC run failures show run-status sidecar/fallback details in the status label and warning dialog, including rows written and local fallback status path when the primary output path disappears.
 - Made AC completed/stopped sweep messages show run-status sidecar details, including rows written and the status-file path.
 - Made the AC output section show the planned run-status sidecar and local fallback paths before a sweep starts.
 - Routed AC shared-HMP broker current-source failures through the shared operator-facing broker diagnostics.
-- Reused fresh Mini DMA Builder project cache entries for immediate sample/microwire suggestions while background exact-match imports continue.
-- Added a Mini DMA run-quality CLI option to generate the standard core PNG/JSON plot artifacts while writing `run_quality.json`.
-- Made Mini DMA batch core-plot generation continue past incomplete run folders while reporting per-run plot errors.
+- Reused fresh TMA Builder project cache entries for immediate sample/microwire suggestions while background exact-match imports continue.
+- Added a TMA run-quality CLI option to generate the standard core PNG/JSON plot artifacts while writing `run_quality.json`.
+- Made TMA batch core-plot generation continue past incomplete run folders while reporting per-run plot errors.
 - Kept AC sweep-start failures from leaving the UI stuck in a running state when PSU preparation or worker startup fails.
-- Avoided redundant Mini DMA Builder project auto-imports and trusted-diameter flicker for condition-only sample-name edits.
+- Avoided redundant TMA Builder project auto-imports and trusted-diameter flicker for condition-only sample-name edits.
 - Reset AC baseline UI state if empty-coil baseline worker startup fails after the run has been marked active.
-- Added cached power-supply setpoint/readback columns to Mini DMA control traces for easier electrical/mechanical fault forensics.
+- Added cached power-supply setpoint/readback columns to TMA control traces for easier electrical/mechanical fault forensics.
 - Added an AC susceptibility UI redesign note that separates safe stabilization work from the larger post-bench-test refactor.
 
 ## 2026-06-16 14:05 UTC
 
-- Made Mini DMA current-hold recovery scale cautiously above one motor Tic after same-sign corrections measurably improve load/stress error, while immediately damping back to one Tic when recovery worsens or becomes unstable.
+- Made TMA current-hold recovery scale cautiously above one motor Tic after same-sign corrections measurably improve load/stress error, while immediately damping back to one Tic when recovery worsens or becomes unstable.
 - Added control-trace reasons and control-logic metadata for adaptive current-hold recovery decisions.
 
 ## 2026-06-16 13:21 UTC
 
-- Let Mini DMA current-sweep target ramps use their phase-local stiffness estimate once learned, while keeping conservative stiffness damping for current-hold recovery.
+- Let TMA current-sweep target ramps use their phase-local stiffness estimate once learned, while keeping conservative stiffness damping for current-hold recovery.
 
 ## 2026-06-16 12:58 UTC
 
-- Refresh shared HMP broker channel limits even when Mini DMA already owns a confirmed CH4 role.
+- Refresh shared HMP broker channel limits even when TMA already owns a confirmed CH4 role.
 
 ## 2026-06-16 12:31 UTC
 
-- Include independent Mini DMA first-overheating current maxima when checking the shared HMP CH4 recipe current limit.
+- Include independent TMA first-overheating current maxima when checking the shared HMP CH4 recipe current limit.
 
 ## 2026-06-16 12:13 UTC
 
-- Dampen Mini DMA iso-stress current-hold corrections to single motor steps when the load/stress response becomes unstable or repeatedly overshoots the target, and only accept learned current-hold stiffness updates when they shrink future correction steps.
+- Dampen TMA iso-stress current-hold corrections to single motor steps when the load/stress response becomes unstable or repeatedly overshoots the target, and only accept learned current-hold stiffness updates when they shrink future correction steps.
 
 ## 2026-06-16 11:58 UTC
 
-- Hide the Mini DMA first-overheating "First max" current row whenever it is using the normal current-sweep max current.
+- Hide the TMA first-overheating "First max" current row whenever it is using the normal current-sweep max current.
 
 ## 2026-06-16 11:44 UTC
 
-- Let Mini DMA recipe and manual hardware preflight auto-start the local shared HMP broker when the shared-broker endpoint is down, including automatic HMP COM-port selection for broker startup.
+- Let TMA recipe and manual hardware preflight auto-start the local shared HMP broker when the shared-broker endpoint is down, including automatic HMP COM-port selection for broker startup.
 
 ## 2026-06-16 11:35 UTC
 
-- Improved Mini DMA Sample-tab responsiveness by coalescing settings saves and delaying automatic fabrication workbook reads after sample-name edits.
+- Improved TMA Sample-tab responsiveness by coalescing settings saves and delaying automatic fabrication workbook reads after sample-name edits.
 - Added an optional independent first-overheating maximum current for iso-load, iso-stress, and iso-strain current-sweep recipes while keeping the current ramp speed shared with the normal sweep.
 
 ## 2026-06-16 09:10 UTC
 
-- Hide the legacy Mini DMA open-loop displacement/Hsw recipe types from the recipe dropdown.
-- Add a Mini DMA `Elastocaloric effect` recipe that reuses the iso-current transition, waits for temperature stabilization, then applies and releases a configured strain in single fast steps for thermal-camera transformation measurements.
+- Hide the legacy TMA open-loop displacement/Hsw recipe types from the recipe dropdown.
+- Add a TMA `Elastocaloric effect` recipe that reuses the iso-current transition, waits for temperature stabilization, then applies and releases a configured strain in single fast steps for thermal-camera transformation measurements.
 
 ## 2026-06-16 00:00 UTC
 
@@ -146,20 +146,20 @@
 
 ## 2026-06-15 15:30 UTC
 
-- Added a Mini DMA `Iso-current stress ramp` recipe that reuses the low-stress current transition flow and ramps stress up/down at a configured `MPa/s` rate for each current.
+- Added a TMA `Iso-current stress ramp` recipe that reuses the low-stress current transition flow and ramps stress up/down at a configured `MPa/s` rate for each current.
 - Saved and restored the new stress-ramp settings in recipe files and logger settings.
 
 ## 2026-06-15 14:20 UTC
 
-- Improved Mini DMA `Iso-current stress ramp` tracking by allowing larger bounded stress-ramp corrections and adding feed-forward motion while the measured stress lags the moving `MPa/s` target.
+- Improved TMA `Iso-current stress ramp` tracking by allowing larger bounded stress-ramp corrections and adding feed-forward motion while the measured stress lags the moving `MPa/s` target.
 
 ## 2026-06-15 13:02 UTC
 
-- Improved Mini DMA MLX90640 Cube raw status reporting when the selected camera port is silent, running thermometer firmware, or streaming bytes that are not valid `MLXE`/`MLXR` camera packets.
+- Improved TMA MLX90640 Cube raw status reporting when the selected camera port is silent, running thermometer firmware, or streaming bytes that are not valid `MLXE`/`MLXR` camera packets.
 
 ## 2026-06-15 10:30 UTC
 
-- Rename the Mini DMA constant-current stress-strain recipe UI to iso-current stress-strain.
+- Rename the TMA constant-current stress-strain recipe UI to iso-current stress-strain.
 - Add an iso-current current-transition ramp that holds a low stress target while ramping to each current level before the stress-strain scan.
 - Rework the iso-current recipe page into target, mechanical scan, current level, and collapsible current-transition sections with current-density/load equivalents.
 - Always scan iso-current legs up and back to the start target, and default fixed-step motion to 0.2 mm/s while still waiting for fresh scale feedback.
@@ -177,21 +177,21 @@
 
 - Added in-app NUCLEO-H753ZI wiring guidance for the MLX90614 spot thermometer
   and MLX90640 thermal camera modules in both the Thermal Camera Viewer and
-  Mini DMA Logger.
-- Enabled Mini DMA Logger help and added an explicit IR sensor selector for
+  TMA Logger.
+- Enabled TMA Logger help and added an explicit IR sensor selector for
   MLX90614 spot-thermometer firmware or MLX90640 Cube raw camera firmware.
-- Added a Mini DMA IR-panel Live camera button that opens a passive embedded
-  MLX90640 heatmap popup fed by the active Mini DMA IR stream, so it can be used
+- Added a TMA IR-panel Live camera button that opens a passive embedded
+  MLX90640 heatmap popup fed by the active TMA IR stream, so it can be used
   during a measurement without taking over the serial port.
-- Added a Mini DMA IR-panel Flash firmware button that builds and flashes the
+- Added a TMA IR-panel Flash firmware button that builds and flashes the
   selected MLX90614 or MLX90640 STM32Cube firmware with STM32CubeProgrammer.
-- Added MLX90640 Cube raw parsing to Mini DMA IR logging, with live max/mean/min,
+- Added MLX90640 Cube raw parsing to TMA IR logging, with live max/mean/min,
   center, hotspot, ambient, age, and rate summaries when calibrated Celsius frames
   are received.
 
 ## 2026-06-12 14:45 UTC
 
-- Fixed Mini DMA MLX90640 Cube camera reconnects so pending camera packets are not discarded before calibration/frame parsing, and prevented duplicate IR reader startup when IR logging is already connected.
+- Fixed TMA MLX90640 Cube camera reconnects so pending camera packets are not discarded before calibration/frame parsing, and prevented duplicate IR reader startup when IR logging is already connected.
 
 ## 2026-06-12 14:31 UTC
 
@@ -200,77 +200,77 @@
 
 ## 2026-06-12 12:44 UTC
 
-- Made the Mini DMA thermal-camera popup behave as a normal minimizable window on Windows, with a narrower layout and a 1 fps display option.
-- Added IR camera/thermometer connection to Mini DMA manual hardware auto-connect when an IR port is selected.
+- Made the TMA thermal-camera popup behave as a normal minimizable window on Windows, with a narrower layout and a 1 fps display option.
+- Added IR camera/thermometer connection to TMA manual hardware auto-connect when an IR port is selected.
 - Simplified dashboard temperature plotting to a single Temperature (C) channel backed by coalesced IR values while preserving full-rate IR sidecar logging.
-- Closed Mini DMA recipe sessions on control-stop recovery paths and snapshot-locked live buffers to prevent post-stop time-plot tails and deque mutation errors during refresh.
+- Closed TMA recipe sessions on control-stop recovery paths and snapshot-locked live buffers to prevent post-stop time-plot tails and deque mutation errors during refresh.
 
 ## 2026-06-12 11:55 UTC
 
-- Added Mini DMA embedded thermal-camera view pause/resume and display-rate controls.
+- Added TMA embedded thermal-camera view pause/resume and display-rate controls.
 - Stopped recipe session temperature, telemetry, and live plot sampling while recipes are paused or stopped.
 - Refreshed the current-sweep supply current limit before recipe current updates to guard stale CH4 limits after runtime changes.
 
 ## 2026-06-12 08:33 UTC
 
-- Moved Mini DMA recipe control ticks off the Qt UI timer so long measurements keep controlling even when the dashboard is visually busy.
-- Batched live run-log updates and coalesced worker-triggered progress/label refreshes to reduce UI stutter during active Mini DMA runs.
+- Moved TMA recipe control ticks off the Qt UI timer so long measurements keep controlling even when the dashboard is visually busy.
+- Batched live run-log updates and coalesced worker-triggered progress/label refreshes to reduce UI stutter during active TMA runs.
 - Kept live average-speed sampling independent from recipe timing so the speed display can update without disturbing control-loop timing.
 
 ## 2026-06-11 14:42 UTC
 
-- Let Mini DMA passively log MLX90640 text-frame thermal camera streams by recording frame max/min/mean/center and hotspot coordinates in the IR sidecar while using frame max as the plotted apparent temperature.
+- Let TMA passively log MLX90640 text-frame thermal camera streams by recording frame max/min/mean/center and hotspot coordinates in the IR sidecar while using frame max as the plotted apparent temperature.
 
 ## 2026-06-11 14:15 UTC
 
-- Mini DMA current-hold recovery now downgrades correction trust after repeated overshoot or worsening stress/load response, shrinking subsequent correction caps until the response stabilizes.
+- TMA current-hold recovery now downgrades correction trust after repeated overshoot or worsening stress/load response, shrinking subsequent correction caps until the response stabilizes.
 
 ## 2026-06-11 09:15 UTC
 
-- Changed Mini DMA standard motor move log entries to lead with signed commanded micrometers and tension/relax direction, while keeping target position and Tic-unit count for diagnostics.
+- Changed TMA standard motor move log entries to lead with signed commanded micrometers and tension/relax direction, while keeping target position and Tic-unit count for diagnostics.
 
 ## 2026-06-11 08:37 UTC
 
-- Mini DMA Logger now opens loaded microwire suggestions when the microwire field receives focus or is clicked, without rebuilding suggestion data.
-- Mini DMA Builder-project diameter imports now retry automatically after sample fields change during an active background import, so valid microwire diameter updates are not dropped until another sample switch.
+- TMA Logger now opens loaded microwire suggestions when the microwire field receives focus or is clicked, without rebuilding suggestion data.
+- TMA Builder-project diameter imports now retry automatically after sample fields change during an active background import, so valid microwire diameter updates are not dropped until another sample switch.
 
 ## 2026-06-10 13:35 UTC
 
-- Mini DMA replacing an existing run now moves the old output to Trash/Recycling Bin when possible, with a timestamped preserved-folder fallback instead of silently overwriting the previous measurement.
-- Mini DMA runtime recipe updates now preserve the active plateau's paired reverse current sweep before moving to the next stress target.
+- TMA replacing an existing run now moves the old output to Trash/Recycling Bin when possible, with a timestamped preserved-folder fallback instead of silently overwriting the previous measurement.
+- TMA runtime recipe updates now preserve the active plateau's paired reverse current sweep before moving to the next stress target.
 
 ## 2026-06-10 11:23 UTC
 
-- Show missing or stale Mini DMA scale readings explicitly in the dashboard load/stress header instead of displaying misleading zero values.
+- Show missing or stale TMA scale readings explicitly in the dashboard load/stress header instead of displaying misleading zero values.
 
 ## 2026-06-10 11:15 UTC
 
-- Allow Mini DMA current-sweep runtime recipe updates to apply hold and ramp settings to the active sweep step when safe.
+- Allow TMA current-sweep runtime recipe updates to apply hold and ramp settings to the active sweep step when safe.
 
 ## 2026-06-10 10:14 UTC
 
-- Refresh the shared-HMP Mini DMA CH4 current limit from the active recipe maximum before preflight and current-channel preparation, preventing long sweeps from stopping when the broker still has an older lower limit.
+- Refresh the shared-HMP TMA CH4 current limit from the active recipe maximum before preflight and current-channel preparation, preventing long sweeps from stopping when the broker still has an older lower limit.
 
 ## 2026-06-10 09:20 UTC
 
-- Added an opt-in Mini DMA wire-break cleanup review that groups sibling runs by metadata-derived sample and recipe mode, then lets operators archive selected older run folders without deleting data.
+- Added an opt-in TMA wire-break cleanup review that groups sibling runs by metadata-derived sample and recipe mode, then lets operators archive selected older run folders without deleting data.
 
 ## 2026-06-10 08:17 UTC
 
-- Mark Mini DMA wire diameter as stale immediately when the sample naming fields change, and show a green imported state only after the current sample's diameter has actually been imported.
+- Mark TMA wire diameter as stale immediately when the sample naming fields change, and show a green imported state only after the current sample's diameter has actually been imported.
 
 ## 2026-06-09 15:02 UTC
 
-- Verify Mini DMA current-sweep channel output after recipe current commands and retry output enable once when CH4 readback reports OFF.
+- Verify TMA current-sweep channel output after recipe current commands and retry output enable once when CH4 readback reports OFF.
 
 ## 2026-06-09 14:48 UTC
 
-- Move Mini DMA recipe step dispatch behind a dedicated automation controller boundary so the Qt window no longer owns the active control-loop dispatcher directly.
+- Move TMA recipe step dispatch behind a dedicated automation controller boundary so the Qt window no longer owns the active control-loop dispatcher directly.
 
 ## 2026-06-09 09:17 UTC
 
-- Fixed Mini DMA sample headers so stale auto-generated sample names from a previous wire are replaced when the Sample tab composition/wire fields identify a new sample.
-- Smoothed Mini DMA current-sweep target acquisition by switching to small probing corrections after a load/stress reversal, while preserving fast stage-speed moves for large monotonic target errors.
+- Fixed TMA sample headers so stale auto-generated sample names from a previous wire are replaced when the Sample tab composition/wire fields identify a new sample.
+- Smoothed TMA current-sweep target acquisition by switching to small probing corrections after a load/stress reversal, while preserving fast stage-speed moves for large monotonic target errors.
 
 ## 2026-06-05 15:45 UTC
 
@@ -309,19 +309,19 @@
 
 ## 2026-06-05 11:35 UTC
 
-- Forward-ported the Current Annealing pyqtgraph dashboard and expanded shared-HMP broker hardware panel into the Mini DMA integration branch.
+- Forward-ported the Current Annealing pyqtgraph dashboard and expanded shared-HMP broker hardware panel into the TMA integration branch.
 - Added HMP current-floor normalization used by shared-broker/current-annealing setpoint handling.
 
 ## 2026-06-04 14:55 UTC
 
-- Added a Mini DMA mounted-wire campaign manifest for the Ni50Fe27Ga23 12/2 heat-shield 33.68 mm, 80 mA optimization run, with explicit operator confirmations for mounted sample identity, length, CH3 motor rail, CH4 current path, and broker lease state before live execution.
-- Mini DMA shared-HMP auto-connect now applies the current bench CH3/CH4 defaults when entering Tic motor-power preflight and can confirm unused broker CH3/CH4 roles before leasing them, without taking over conflicting broker roles.
-- Added reusable 0.6, 0.4, and 0.3 mA/s Mini DMA iso-stress comparison recipes and recorded the campaign run folders used for the 0.8 mA/s baseline, rejected fast-recovery experiment, 0.6 mA/s repeat, selected 0.4 mA/s repeats, and rejected 0.3 mA/s boundary probe.
-- Recorded rejected late-stage Mini DMA optimization experiments for adaptive hold gain, current-hold slope lookahead, and 1.0 s hold confirmation; the selected 0.4 mA/s baseline logic remains the best time/precision tradeoff from the campaign evidence.
+- Added a TMA mounted-wire campaign manifest for the Ni50Fe27Ga23 12/2 heat-shield 33.68 mm, 80 mA optimization run, with explicit operator confirmations for mounted sample identity, length, CH3 motor rail, CH4 current path, and broker lease state before live execution.
+- TMA shared-HMP auto-connect now applies the current bench CH3/CH4 defaults when entering Tic motor-power preflight and can confirm unused broker CH3/CH4 roles before leasing them, without taking over conflicting broker roles.
+- Added reusable 0.6, 0.4, and 0.3 mA/s TMA iso-stress comparison recipes and recorded the campaign run folders used for the 0.8 mA/s baseline, rejected fast-recovery experiment, 0.6 mA/s repeat, selected 0.4 mA/s repeats, and rejected 0.3 mA/s boundary probe.
+- Recorded rejected late-stage TMA optimization experiments for adaptive hold gain, current-hold slope lookahead, and 1.0 s hold confirmation; the selected 0.4 mA/s baseline logic remains the best time/precision tradeoff from the campaign evidence.
 
 ## 2026-06-04 12:39 UTC
 
-- Added master/worker coordination guidance, reusable worker-ledger and Mini DMA campaign templates, and a campaign manifest checker for pre-hardware validation.
+- Added master/worker coordination guidance, reusable worker-ledger and TMA campaign templates, and a campaign manifest checker for pre-hardware validation.
 
 ## 2026-06-04 00:00 UTC
 
@@ -339,9 +339,9 @@
 
 ## 2026-06-03 09:27 UTC
 
-- Improved Mini DMA imports so selected run folders, parent folders containing multiple run folders, and multiple folder selections load without requiring a separate placeholder import file.
-- Changed Mini DMA power top axes to default to length-normalized `Power/cm [mW/cm]` when initial-length metadata is available, with absolute `Power [mW]` still available from the Mini DMA plot settings.
-- Marked Mini DMA first-overheating preheat sweeps as separate dashed diamond traces with compact `1st:` legend labels when run metadata identifies the first-overheating target.
+- Improved TMA imports so selected run folders, parent folders containing multiple run folders, and multiple folder selections load without requiring a separate placeholder import file.
+- Changed TMA power top axes to default to length-normalized `Power/cm [mW/cm]` when initial-length metadata is available, with absolute `Power [mW]` still available from the TMA plot settings.
+- Marked TMA first-overheating preheat sweeps as separate dashed diamond traces with compact `1st:` legend labels when run metadata identifies the first-overheating target.
 
 ## 2026-06-03 08:30 UTC
 
@@ -351,25 +351,25 @@
 
 ## 2026-06-02 18:35 UTC
 
-- Added an electrical live shared-HMP validation CLI that coordinates Current Annealing and Mini DMA current-sweep broker clients, records readback artifacts, classifies voltage-limited/open-circuit current paths, checks channel isolation guardrails, and leaves CH1/CH4 safe-off while preserving the Mini DMA motor rail state.
+- Added an electrical live shared-HMP validation CLI that coordinates Current Annealing and TMA current-sweep broker clients, records readback artifacts, classifies voltage-limited/open-circuit current paths, checks channel isolation guardrails, and leaves CH1/CH4 safe-off while preserving the TMA motor rail state.
 
 ## 2026-06-02 16:15 UTC
 
-- Set the default Mini DMA iso-stress current-sweep ramp rate to 0.8 mA/s based on the 12/2 live optimization results, and treat 0.8 mA/s as the baseline in the optimization campaign template.
+- Set the default TMA iso-stress current-sweep ramp rate to 0.8 mA/s based on the 12/2 live optimization results, and treat 0.8 mA/s as the baseline in the optimization campaign template.
 
 ## 2026-06-02 15:15 UTC
 
-- Made Mini DMA bench automation reapply explicit plan sample identity immediately before run start, so saved Builder/project autofill cannot overwrite a campaign diameter.
-- Added a reusable Mini DMA per-run core plot command for phone-readable stress-time and strain-current artifacts with current-hold highlighting and stress-error metrics.
-- Cleared child-owned Mini DMA bench locks from the supervisor after finished-metadata recovery, so completed supervised runs do not leave stale lock files.
+- Made TMA bench automation reapply explicit plan sample identity immediately before run start, so saved Builder/project autofill cannot overwrite a campaign diameter.
+- Added a reusable TMA per-run core plot command for phone-readable stress-time and strain-current artifacts with current-hold highlighting and stress-error metrics.
+- Cleared child-owned TMA bench locks from the supervisor after finished-metadata recovery, so completed supervised runs do not leave stale lock files.
 
 ## 2026-06-02 14:45 UTC
 
-- Stabilized Mini DMA fabrication composition and microwire autofill so completer selections keep the popup/model alive, reuse cached suggestion models, and apply diameters without laggy rebuilds during rapid sample changes.
+- Stabilized TMA fabrication composition and microwire autofill so completer selections keep the popup/model alive, reuse cached suggestion models, and apply diameters without laggy rebuilds during rapid sample changes.
 
 ## 2026-06-02 12:50 UTC
 
-- Avoid drawing duplicate Mini DMA dashboard curves when the secondary Y axis is only an equivalent unit conversion, while keeping the secondary axis labels and scale visible.
+- Avoid drawing duplicate TMA dashboard curves when the secondary Y axis is only an equivalent unit conversion, while keeping the secondary axis labels and scale visible.
 
 ## 2026-06-02 12:38 UTC
 
@@ -377,7 +377,7 @@
 
 ## 2026-06-02 12:15 UTC
 
-- Mini DMA voltage-limit current unwind now waits for the mechanical target to recover before advancing to the next stress/load ramp, preventing a post-unwind zero-load state from immediately tripping the mechanical load-loss guard.
+- TMA voltage-limit current unwind now waits for the mechanical target to recover before advancing to the next stress/load ramp, preventing a post-unwind zero-load state from immediately tripping the mechanical load-loss guard.
 
 ## 2026-06-02 12:05 UTC
 
@@ -390,20 +390,20 @@
 
 ## 2026-06-02 08:30 UTC
 
-- Added a repeatable Mini DMA optimization campaign template, preflight checker, and standard report generator scaffold.
+- Added a repeatable TMA optimization campaign template, preflight checker, and standard report generator scaffold.
 - Documented the campaign workflow so optimization runs start from an approved control source and produce consistent stress/time plus strain/current reports with current-hold highlighting.
 
 ## 2026-06-02 04:40 UTC
 
-- Mini DMA bench supervisor now prints ASCII-safe JSON summaries on Windows consoles while still writing full status files.
+- TMA bench supervisor now prints ASCII-safe JSON summaries on Windows consoles while still writing full status files.
 
 ## 2026-06-01 21:34 UTC
 
-- Added a supervised Mini DMA bench-plan launcher that records child PID/status/log paths and turns the current-sweep HMP channel off when the child exits.
+- Added a supervised TMA bench-plan launcher that records child PID/status/log paths and turns the current-sweep HMP channel off when the child exits.
 
 ## 2026-06-01 21:17 UTC
 
-- Mini DMA current-sweep sessions now record `correction_travel_limit` as a specific fault stop reason with travel-limit detail in session metadata.
+- TMA current-sweep sessions now record `correction_travel_limit` as a specific fault stop reason with travel-limit detail in session metadata.
 
 ## 2026-06-01 17:10 UTC
 
@@ -412,63 +412,63 @@
 
 ## 2026-06-01 15:34 UTC
 
-- Mini DMA current-sweep runtime updates now show the Update remaining sweeps button only when visible recipe edits would change the active or remaining current-sweep plan.
+- TMA current-sweep runtime updates now show the Update remaining sweeps button only when visible recipe edits would change the active or remaining current-sweep plan.
 - Edited-but-not-applied current-sweep fields are subtly highlighted until the runtime update is applied.
 
 ## 2026-06-01 14:41 UTC
 
-- Mini DMA equivalent-unit labels now preserve significant trailing zeros for integer values such as 800, 750, and 80.
-- Mini DMA project sample import now recognizes `Imax (mA)` rows as current-limit values, and microwire field edits report bad project or fabrication data without crashing.
-- Mini DMA dashboard speed now reports effective average linear motion in `um/s`, with commanded speed retained as secondary context.
-- Mini DMA current-sweep advanced speed/cap controls now live in a Settings menu dialog instead of the inline recipe panel.
+- TMA equivalent-unit labels now preserve significant trailing zeros for integer values such as 800, 750, and 80.
+- TMA project sample import now recognizes `Imax (mA)` rows as current-limit values, and microwire field edits report bad project or fabrication data without crashing.
+- TMA dashboard speed now reports effective average linear motion in `um/s`, with commanded speed retained as secondary context.
+- TMA current-sweep advanced speed/cap controls now live in a Settings menu dialog instead of the inline recipe panel.
 
 ## 2026-06-01 14:39 UTC
 
-- Mini DMA experiment child processes now write stdout, stderr, and Python faulthandler output to ignored logs under `logs/experiment_processes/`.
-- Mini DMA saved Builder project auto-import now runs in the background during startup so a large saved `.pydpj` cannot freeze the initial UI.
-- Mini DMA setup plots reserve right-axis space to avoid clipping the load axis in the length setup dialog.
-- Mini DMA task summaries now prefer the active long-running recipe step so stress target ramps do not flicker to the next step.
-- Mini DMA mid-run current-sweep updates now extend the active current ramp when the edited end current is still safely ahead of the live setpoint, while reporting conservative future-only updates when it is not.
+- TMA experiment child processes now write stdout, stderr, and Python faulthandler output to ignored logs under `logs/experiment_processes/`.
+- TMA saved Builder project auto-import now runs in the background during startup so a large saved `.pydpj` cannot freeze the initial UI.
+- TMA setup plots reserve right-axis space to avoid clipping the load axis in the length setup dialog.
+- TMA task summaries now prefer the active long-running recipe step so stress target ramps do not flicker to the next step.
+- TMA mid-run current-sweep updates now extend the active current ramp when the edited end current is still safely ahead of the live setpoint, while reporting conservative future-only updates when it is not.
 
 ## 2026-06-01 12:35 UTC
 
-- Mini DMA current-sweep recipe inputs now use narrower fixed widths so labels and equivalent-unit text stay readable in the normal recipe column.
-- Mini DMA sample-name auto-import now reports project/fabrication lookup failures without crashing while editing composition or microwire fields.
+- TMA current-sweep recipe inputs now use narrower fixed widths so labels and equivalent-unit text stay readable in the normal recipe column.
+- TMA sample-name auto-import now reports project/fabrication lookup failures without crashing while editing composition or microwire fields.
 
 ## 2026-06-01 11:35 UTC
 
-- Mini DMA current-sweep recipes can now apply visible current-sweep edits to remaining, not-yet-started sweeps while leaving the active sweep frozen and logging the runtime override.
+- TMA current-sweep recipes can now apply visible current-sweep edits to remaining, not-yet-started sweeps while leaving the active sweep frozen and logging the runtime override.
 - Runtime updates can re-plan future iso-load, iso-stress, or iso-strain target plateaus when target start/end/step changes are made mid-run.
 - Current-sweep fields that cannot safely modify the active recipe are shown in a gray read-only state during a run, while runtime-editable fields remain normal.
 
 ## 2026-06-01 10:55 UTC
 
-- Mini DMA length setup now commits the run-specific zero-load scale reference when applying the setup L0 baseline, preventing the recipe from starting with residual stress after setup.
+- TMA length setup now commits the run-specific zero-load scale reference when applying the setup L0 baseline, preventing the recipe from starting with residual stress after setup.
 
 ## 2026-06-01 10:30 UTC
 
-- Made Mini DMA Logger startup width adjustments avoid fragile internal Qt child widgets, improving startup stability in long GUI sessions.
+- Made TMA Logger startup width adjustments avoid fragile internal Qt child widgets, improving startup stability in long GUI sessions.
 - Guarded PyPlot subwindow state handling against non-state-change Qt events that can arrive during window close in full-suite runs.
 
 ## 2026-06-01 10:05 UTC
 
-- Mini DMA current-sweep recipe fields now use stable widths, show current-density ramp rate, use a 0.2 mA/s current-ramp step, and format current-density equivalents with compact precision.
+- TMA current-sweep recipe fields now use stable widths, show current-density ramp rate, use a 0.2 mA/s current-ramp step, and format current-density equivalents with compact precision.
 
 ## 2026-06-01 09:45 UTC
 
-- Corrected Mini DMA Builder strain summaries so each stress/load row reports the strain measured at the maximum current point after per-curve l0 recalculation.
+- Corrected TMA Builder strain summaries so each stress/load row reports the strain measured at the maximum current point after per-curve l0 recalculation.
 
 ## 2026-06-01 09:35 UTC
 
-- Mini DMA length setup plots now draw setup samples in elapsed-time order and keep displacement markers, avoiding backward line segments when setup samples arrive out of order.
+- TMA length setup plots now draw setup samples in elapsed-time order and keep displacement markers, avoiding backward line segments when setup samples arrive out of order.
 
 ## 2026-06-01 09:10 UTC
 
-- Mini DMA voltage-limit current unwind now obeys the current-hold recovery logic, so a transforming wire that loses load during current decrease holds current and pulls back to target instead of continuing to unwind to the start current.
+- TMA voltage-limit current unwind now obeys the current-hold recovery logic, so a transforming wire that loses load during current decrease holds current and pulls back to target instead of continuing to unwind to the start current.
 
 ## 2026-06-01 08:30 UTC
 
-- Mini DMA length setup displacement plots now draw the displacement trace without per-sample markers, reducing visual duplicate-dot clutter while retaining the recorded setup samples.
+- TMA length setup displacement plots now draw the displacement trace without per-sample markers, reducing visual duplicate-dot clutter while retaining the recorded setup samples.
 
 ## 2026-05-29 22:16 UTC
 
@@ -481,7 +481,7 @@
 
 ## 2026-05-29 21:38 UTC
 
-- Skipped no-op Mini DMA displacement recovery when a completed recipe is already at the return target, avoiding unnecessary hardware preflight and keeping headless verification from hanging.
+- Skipped no-op TMA displacement recovery when a completed recipe is already at the return target, avoiding unnecessary hardware preflight and keeping headless verification from hanging.
 
 ## 2026-05-29 21:15 UTC
 
@@ -497,7 +497,7 @@
 
 ## 2026-05-29 18:32 UTC
 
-- Preserved Mini DMA current-density and l0 axis-label context when exporting shared PyPlot graphs to Origin, and covered line+symbol marker export behavior.
+- Preserved TMA current-density and l0 axis-label context when exporting shared PyPlot graphs to Origin, and covered line+symbol marker export behavior.
 
 ## 2026-05-29 18:18 UTC
 
@@ -521,7 +521,7 @@
 ## 2026-05-29 17:12 UTC
 
 - Reduced false positive As/Af/Ms/Mf estimates by rejecting tangent-transition fits with too little slope contrast or an unrealistically narrow transition window.
-- Preserved Mini DMA current-sweep return-leg points when they match earlier heating-leg values, so cooling-side transition-current estimates are not lost during duplicate cleanup.
+- Preserved TMA current-sweep return-leg points when they match earlier heating-leg values, so cooling-side transition-current estimates are not lost during duplicate cleanup.
 
 ## 2026-05-29 16:48 UTC
 
@@ -529,7 +529,7 @@
 
 ## 2026-05-29 15:30 UTC
 
-- Mini DMA bench automation can now take the shared HMP bench lock before execute-mode runs, with optional plan-level owner, purpose, timeout, and lock-path settings.
+- TMA bench automation can now take the shared HMP bench lock before execute-mode runs, with optional plan-level owner, purpose, timeout, and lock-path settings.
 
 ## 2026-05-29 15:05 UTC
 
@@ -537,8 +537,8 @@
 
 ## 2026-05-29 14:25 UTC
 
-- Added Mini DMA Builder summaries for per-stress/load maximum strain values using per-curve `l0` baselines, and wire-break stress/current reporting when a voltage-limit current collapse is detected.
-- Added Mini DMA tangent-intersection transition-current summaries for As/Af on the increasing-current leg and Ms/Mf on the decreasing-current leg.
+- Added TMA Builder summaries for per-stress/load maximum strain values using per-curve `l0` baselines, and wire-break stress/current reporting when a voltage-limit current collapse is detected.
+- Added TMA tangent-intersection transition-current summaries for As/Af on the increasing-current leg and Ms/Mf on the decreasing-current leg.
 - Added tangent-intersection transition estimates so Assemble can fill missing As/Af/Ms/Mf temperatures from saved VSM temperature-scan heating/cooling records.
 - Enabled Builder automation `rebuild_assemble` commands so section-update recipes can refresh saved Assemble rows without opening the Builder UI, including graph-only samples that do not yet have current-annealing records.
 
@@ -551,36 +551,36 @@
 
 ## 2026-05-29 13:25 UTC
 
-- Mini DMA current sweeps now keep the nominal reverse-current leg rate-limited when the supply remains near the voltage limit, avoiding an abrupt current drop or premature plateau transition.
-- Mini DMA current-hold recovery now bypasses the persistence wait when filtered stress/load is moving rapidly away from the target, so transformation runaways get an immediate mechanical correction.
-- Mini DMA current-hold recovery now keeps predictive multi-step corrections during rapidly moving-away transformations instead of throttling to motor-step corrections just because the previous feedback worsened.
-- Mini DMA current-hold recovery now treats large off-target stress/load errors as actionable even when the filtered balance window is noisy.
-- Mini DMA current-sweep recipe files now round-trip the disabled "return to start target" setting instead of forcing it back on during save/load.
-- Mini DMA settings persistence no longer silently re-enables "return to start target" while closing or saving app settings.
-- Mini DMA session metadata now preserves an earlier fault stop reason when the app closes afterward.
-- Mini DMA control trace rows can record row-local task text so diagnostic traces do not inherit stale current-sweep task labels.
+- TMA current sweeps now keep the nominal reverse-current leg rate-limited when the supply remains near the voltage limit, avoiding an abrupt current drop or premature plateau transition.
+- TMA current-hold recovery now bypasses the persistence wait when filtered stress/load is moving rapidly away from the target, so transformation runaways get an immediate mechanical correction.
+- TMA current-hold recovery now keeps predictive multi-step corrections during rapidly moving-away transformations instead of throttling to motor-step corrections just because the previous feedback worsened.
+- TMA current-hold recovery now treats large off-target stress/load errors as actionable even when the filtered balance window is noisy.
+- TMA current-sweep recipe files now round-trip the disabled "return to start target" setting instead of forcing it back on during save/load.
+- TMA settings persistence no longer silently re-enables "return to start target" while closing or saving app settings.
+- TMA session metadata now preserves an earlier fault stop reason when the app closes afterward.
+- TMA control trace rows can record row-local task text so diagnostic traces do not inherit stale current-sweep task labels.
 
 ## 2026-05-29 12:35 UTC
 
-- Mini DMA Logger Sample tab now opens scrollable, vertically stacked current-annealing previews from the connected `.pydpj`, reusing the selected composition/microwire when possible.
+- TMA Logger Sample tab now opens scrollable, vertically stacked current-annealing previews from the connected `.pydpj`, reusing the selected composition/microwire when possible.
 - Replaced the manual `Import sample info` button with `Show annealing` because sample import already runs automatically from the connected Builder project.
-- The Mini DMA wire diameter field now displays micrometers while preserving millimeters internally for recipe and stress calculations.
+- The TMA wire diameter field now displays micrometers while preserving millimeters internally for recipe and stress calculations.
 
 ## 2026-05-29 10:18 UTC
 
-- Prevent voltage-limited Mini DMA current sweeps from jumping back to the nominal maximum current after the unwind leg; the unwind is kept as the shortened return leg and logged explicitly.
+- Prevent voltage-limited TMA current sweeps from jumping back to the nominal maximum current after the unwind leg; the unwind is kept as the shortened return leg and logged explicitly.
 - Let fast moving-away current-sweep stress/load errors enter current hold immediately instead of waiting through the normal confirmation delay.
 - Let clearly large current-hold recovery errors bypass the persistence timer, while keeping persistence gating for smaller filtered errors.
 
 ## 2026-05-29 09:55 UTC
 
-- Mini DMA Logger Sample tab can now connect a fabrication-data folder, index it without blocking the UI, suggest compositions and microwires while typing, and use fabrication diameters as a fallback when the connected `.pydpj` project has no diameter for the selected sample.
-- Large fabrication database roots are staged: Mini DMA loads top-level composition folders first, then reads only the selected composition subtree for microwire/diameter suggestions.
+- TMA Logger Sample tab can now connect a fabrication-data folder, index it without blocking the UI, suggest compositions and microwires while typing, and use fabrication diameters as a fallback when the connected `.pydpj` project has no diameter for the selected sample.
+- Large fabrication database roots are staged: TMA loads top-level composition folders first, then reads only the selected composition subtree for microwire/diameter suggestions.
 - `.pydpj` sample import remains the preferred diameter source when both project and fabrication data are available.
 
 ## 2026-05-29 09:53 UTC
 
-- Log the Mini DMA dashboard task text in both UI telemetry and control-trace CSV files so recipe phase flicker can be diagnosed from saved runs.
+- Log the TMA dashboard task text in both UI telemetry and control-trace CSV files so recipe phase flicker can be diagnosed from saved runs.
 
 ## 2026-05-29 09:03 UTC
 
@@ -590,10 +590,10 @@
 
 ## 2026-05-28 15:59 UTC
 
-- Prevented Mini DMA current-hold recovery from treating one-sided transformation scatter as target recovery; the noise band now only accepts/restarts the current ramp when the recent load/stress window overlaps the target.
+- Prevented TMA current-hold recovery from treating one-sided transformation scatter as target recovery; the noise band now only accepts/restarts the current ramp when the recent load/stress window overlaps the target.
 - Kept current-sweep target acceptance tied to the requested/noise tolerance instead of the motor-step physical floor, so short or stiff wires no longer treat very large stress errors as "reached" while the ramp keeps heating.
-- Added a Mini DMA control-trace replay diagnostic script for identifying current-sweep accept decisions that were only accepted because of the motor-step physical floor.
-- Added automatic control-trace replay diagnostics to unattended Mini DMA bench summaries after each saved run.
+- Added a TMA control-trace replay diagnostic script for identifying current-sweep accept decisions that were only accepted because of the motor-step physical floor.
+- Added automatic control-trace replay diagnostics to unattended TMA bench summaries after each saved run.
 - Added 30 MPa current-ramp speed-ladder recipes, a guarded bench-plan example, and a ramp-speed comparison script for choosing the precision/time tradeoff from saved run folders.
 
 ## 2026-05-28 11:39 UTC
@@ -602,7 +602,7 @@
 
 ## 2026-05-28 11:19 UTC
 
-- Added a Mini DMA automation indexer script for building CSV/JSONL manifests from run metadata folders.
+- Added a TMA automation indexer script for building CSV/JSONL manifests from run metadata folders.
 - Added regression coverage for extracting automation run metadata and writing the manifest files.
 
 ## 2026-05-28 10:42 UTC
@@ -613,36 +613,36 @@
 
 ## 2026-05-28 10:25 UTC
 
-- Polished the Mini DMA recipe UI by hiding recipe save/load controls behind a Settings toggle, moving uncommon setup/manual-action controls into collapsed detail panels, and adding restore-defaults buttons for setup, current-sweep advanced caps, and manual actions.
+- Polished the TMA recipe UI by hiding recipe save/load controls behind a Settings toggle, moving uncommon setup/manual-action controls into collapsed detail panels, and adding restore-defaults buttons for setup, current-sweep advanced caps, and manual actions.
 - Changed current-sweep first overheating from repeating the first normal target to running one configurable fixed-stress preheat sweep before the normal target sequence.
 - Separated first-overheating, target, and current-sweep controls into compact recipe sections; first-overheating shows the load equivalent beside its stress target, and return-to-start is implicit instead of a visible checkbox.
-- Displayed Mini DMA sample diameters in micrometers in operator-facing recipe/project labels.
+- Displayed TMA sample diameters in micrometers in operator-facing recipe/project labels.
 
 ## 2026-05-28 07:47 UTC
 
-- Updated Mini DMA PyPlot current-sweep graphs to show stress/load legend labels, compact whole-mA current-density plus wire-diameter hints in the X axis label, and compact `l₀` context in strain Y-axis labels.
+- Updated TMA PyPlot current-sweep graphs to show stress/load legend labels, compact whole-mA current-density plus wire-diameter hints in the X axis label, and compact `l₀` context in strain Y-axis labels.
 
 ## 2026-05-27 16:58 UTC
 
-- Polished the Mini DMA recipe panel with a collapsed length-setup summary, a recipe-level setup enable switch, and saved/unsaved recipe-file status.
+- Polished the TMA recipe panel with a collapsed length-setup summary, a recipe-level setup enable switch, and saved/unsaved recipe-file status.
 - Rounded load-equivalent labels to 3 decimal places and rendered current-density units with a superscript 2.
 - Documented that setup is normally enabled but can be disabled in saved recipes for controlled automation or diagnostics.
 
 ## 2026-05-27 14:58 UTC
 
-- Mini DMA paused-current recovery no longer stops only because held-current transformation corrections exceed the per-target no-response travel counter.
-- Mini DMA paused-current recovery now uses the configured fast current-sweep stage-speed cap while stress/load is far outside the held-current recovery band, and avoids forcing those large-error transformations down to one motor step after a worsening feedback sample.
-- Mini DMA paused-current recovery no longer waits a full filter window for an unchanged filtered signal while stress/load is still far outside the held-current recovery band.
-- Mini DMA paused-current recovery now keeps the current ramp held after a single accepted recovery seek until either the filtered resume band or repeated accepted recovery seeks confirm stable recovery.
-- Mini DMA current-hold entry now confirms transformation onset faster using an automatic tolerance-scaled sustained-error band, so current ramping pauses closer to the first target departure without a fixed MPa entry floor.
-- Mini DMA large-error held-current recovery keeps the fast recovery trigger tied to the default 30 MPa band even when the per-move held-current correction cap is raised for a specific recipe.
-- Mini DMA current sweeps now throttle the increasing-current ramp clock briefly after held-current recovery so the next thermal step does not immediately outrun stress recovery.
-- Mini DMA current-sweep target ramps now stop as mechanical load loss/slack if the stage travels after l0 while measured load/stress remains near zero; this guard does not infer electrical contact loss because current may still be flowing.
+- TMA paused-current recovery no longer stops only because held-current transformation corrections exceed the per-target no-response travel counter.
+- TMA paused-current recovery now uses the configured fast current-sweep stage-speed cap while stress/load is far outside the held-current recovery band, and avoids forcing those large-error transformations down to one motor step after a worsening feedback sample.
+- TMA paused-current recovery no longer waits a full filter window for an unchanged filtered signal while stress/load is still far outside the held-current recovery band.
+- TMA paused-current recovery now keeps the current ramp held after a single accepted recovery seek until either the filtered resume band or repeated accepted recovery seeks confirm stable recovery.
+- TMA current-hold entry now confirms transformation onset faster using an automatic tolerance-scaled sustained-error band, so current ramping pauses closer to the first target departure without a fixed MPa entry floor.
+- TMA large-error held-current recovery keeps the fast recovery trigger tied to the default 30 MPa band even when the per-move held-current correction cap is raised for a specific recipe.
+- TMA current sweeps now throttle the increasing-current ramp clock briefly after held-current recovery so the next thermal step does not immediately outrun stress recovery.
+- TMA current-sweep target ramps now stop as mechanical load loss/slack if the stage travels after l0 while measured load/stress remains near zero; this guard does not infer electrical contact loss because current may still be flowing.
 - Added a 50 MPa iso-stress current-sweep recipe for 1 mA to 50 mA and back.
 
 ## 2026-05-27 12:45 UTC
 
-- Fixed packaged launcher builds so Current Annealing Logger and Mini DMA Logger open from their separate child processes instead of starting a second launcher window.
+- Fixed packaged launcher builds so Current Annealing Logger and TMA Logger open from their separate child processes instead of starting a second launcher window.
 
 ## 2026-05-27 09:50 UTC
 
@@ -655,22 +655,22 @@
 
 ## 2026-05-27 09:28 UTC
 
-- Mini DMA dashboard plots now reserve AC-dashboard-style tile margins, spacing, and minimum plot sizes so lower-row axes are not clipped by the run log area.
+- TMA dashboard plots now reserve AC-dashboard-style tile margins, spacing, and minimum plot sizes so lower-row axes are not clipped by the run log area.
 
 ## 2026-05-27 09:25 UTC
 
-- Mini DMA now treats native USB Tic control as required for recipes; `ticcmd` stays available for explicit diagnostics instead of silent recipe fallback.
-- Mini DMA hides source-control metadata subprocesses on Windows so recipe startup does not flash transient console windows.
+- TMA now treats native USB Tic control as required for recipes; `ticcmd` stays available for explicit diagnostics instead of silent recipe fallback.
+- TMA hides source-control metadata subprocesses on Windows so recipe startup does not flash transient console windows.
 
 ## 2026-05-27 09:21 UTC
 
-- Launch the AC Susceptibility Logger as a separate experiment process from the PyPlot launcher, matching Mini DMA and Current Annealing.
+- Launch the AC Susceptibility Logger as a separate experiment process from the PyPlot launcher, matching TMA and Current Annealing.
 - Hide the detached AC PSU watchdog console window when starting a hardware sweep on Windows.
 
 ## 2026-05-27 08:55 UTC
 
-- Mini DMA recipe preflight now reports Tic status read failures as a busy/unreadable controller instead of mislabeling unknown VIN as motor power off.
-- Mini DMA unit tests now block accidental real Tic USB access unless a test installs an explicit fake backend.
+- TMA recipe preflight now reports Tic status read failures as a busy/unreadable controller instead of mislabeling unknown VIN as motor power off.
+- TMA unit tests now block accidental real Tic USB access unless a test installs an explicit fake backend.
 
 ## 2026-05-27 08:53 UTC
 
@@ -689,16 +689,16 @@
 
 ## 2026-05-26 13:46 UTC
 
-- Changed Mini DMA supply setup so current-sweep and motor-supply channels start unselected instead of using profile defaults.
-- Added a shared-broker connection health check before Mini DMA reports the broker supply as connected.
-- Let Mini DMA manual auto-connect start a local shared HMP broker when the broker endpoint is down and the operator has explicitly selected the HMP COM port plus supply channels.
-- Reordered Mini DMA manual auto-connect so the HMP motor-supply rail is enabled before checking Tic VIN.
-- Improved Mini DMA guardrails so current output and motor power cannot be prepared until the operator explicitly selects the wired HMP channels.
-- Added the bundled 64-bit `libusb` wheel and updated the Tic native USB backend loader so Mini DMA can prefer native PyUSB Tic commands before falling back to `ticcmd`.
-- Let Mini DMA native Tic USB accept a single visible Tic when Windows/libusb cannot read USB string descriptors, while still rejecting ambiguous multi-Tic scans.
+- Changed TMA supply setup so current-sweep and motor-supply channels start unselected instead of using profile defaults.
+- Added a shared-broker connection health check before TMA reports the broker supply as connected.
+- Let TMA manual auto-connect start a local shared HMP broker when the broker endpoint is down and the operator has explicitly selected the HMP COM port plus supply channels.
+- Reordered TMA manual auto-connect so the HMP motor-supply rail is enabled before checking Tic VIN.
+- Improved TMA guardrails so current output and motor power cannot be prepared until the operator explicitly selects the wired HMP channels.
+- Added the bundled 64-bit `libusb` wheel and updated the Tic native USB backend loader so TMA can prefer native PyUSB Tic commands before falling back to `ticcmd`.
+- Let TMA native Tic USB accept a single visible Tic when Windows/libusb cannot read USB string descriptors, while still rejecting ambiguous multi-Tic scans.
 - Made preferred-native Tic control fall back to `ticcmd` if an individual native USB status or move command is denied.
-- Tightened Mini DMA Tic status handling so device-list output can no longer be treated as motor status; status must include parseable VIN before motor power is verified.
-- Logged Tic transport use so native USB activation and every `ticcmd` fallback reason are visible in Mini DMA run logs.
+- Tightened TMA Tic status handling so device-list output can no longer be treated as motor status; status must include parseable VIN before motor power is verified.
+- Logged Tic transport use so native USB activation and every `ticcmd` fallback reason are visible in TMA run logs.
 - Serialized native Tic USB status and motion/keepalive commands so status refreshes cannot race motion commands and incorrectly mark motor VIN as unavailable.
 - Hid Windows console windows for rare `ticcmd` fallback commands.
 - Showed the hardware auto-connect progress dialog during Start recipe preflight when required hardware is not already ready.
@@ -706,29 +706,29 @@
 
 ## 2026-05-26 13:37 UTC
 
-- Mini DMA length setup now asks for the mounted wire length once at the beginning, then computes unloaded `l0` from the return-to-zero motion.
-- If setup starts above the configured preload, Mini DMA skips the preload ramp and settle instead of asking for a second length entry.
+- TMA length setup now asks for the mounted wire length once at the beginning, then computes unloaded `l0` from the return-to-zero motion.
+- If setup starts above the configured preload, TMA skips the preload ramp and settle instead of asking for a second length entry.
 
 ## 2026-05-26 13:10 UTC
 
-- Expanded Microwire Data Builder automation recipes so copied projects can update graph-backed sections such as Mini DMA, VSM, DMA iso-stress, manual stress/strain, and FMR without opening the Builder UI.
+- Expanded Microwire Data Builder automation recipes so copied projects can update graph-backed sections such as TMA, VSM, DMA iso-stress, manual stress/strain, and FMR without opening the Builder UI.
 - Reduced copied-project load stalls by skipping expensive hidden-table autosizing and thumbnail rendering during project import.
 - Renamed the shape-memory stress/strain workflow labels to Manual Stress/Strain while preserving saved project payload keys and column names for compatibility.
 
 ## 2026-05-26 12:35 UTC
 
-- Fixed Mini DMA current-sweep voltage-limit recovery so unwind ramps back from the measured supply current if internal setpoint state is missing, preventing an instant jump back to the sweep start current.
+- Fixed TMA current-sweep voltage-limit recovery so unwind ramps back from the measured supply current if internal setpoint state is missing, preventing an instant jump back to the sweep start current.
 - When a current sweep is already paused for target recovery, voltage-limit detection now keeps the held current instead of overriding the hold with unwind.
-- Moved Mini DMA wire-break stop/recovery prompts onto the UI thread so a wire break cannot freeze the app by opening recovery UI from the control worker.
+- Moved TMA wire-break stop/recovery prompts onto the UI thread so a wire break cannot freeze the app by opening recovery UI from the control worker.
 
 ## 2026-05-26 11:18 UTC
 
 - Fixed shared-HMP Current Annealing runs so broker-mode measurements are written to the log file as well as the live graph.
-- Normalized Mini DMA shared-broker supply readbacks to include resistance and power fields required by logging and live status updates.
+- Normalized TMA shared-broker supply readbacks to include resistance and power fields required by logging and live status updates.
 
 ## 2026-05-26 09:45 UTC
 
-- Added Mini DMA emergency session recovery when final metadata writes fail because the output folder was moved or temporarily unavailable.
+- Added TMA emergency session recovery when final metadata writes fail because the output folder was moved or temporarily unavailable.
 - Removed the current-sweep "Settle after current" setting and post-sweep settle step; current recovery remains handled by the current-ramp hold controller.
 
 ## 2026-05-26 07:52 UTC
@@ -738,20 +738,20 @@
 
 ## 2026-05-25 16:45 UTC
 
-- PyPlot Launcher now starts Mini DMA Logger and Current Annealing Logger as separate experiment processes.
+- PyPlot Launcher now starts TMA Logger and Current Annealing Logger as separate experiment processes.
 - Child experiment processes are tagged with experiment metadata and scrub inherited headless Qt environment variables before launching.
 - Documented the launcher-level process separation for hardware experiment windows.
 
 ## 2026-05-25 15:58 UTC
 
 - Added a shared Windows sleep-prevention guard for active experiments.
-- Mini DMA Logger now keeps the PC awake while a session is running and releases the guard when the session stops or the window closes.
+- TMA Logger now keeps the PC awake while a session is running and releases the guard when the session stops or the window closes.
 - Current Annealing Logger now keeps the PC awake while an annealing process is running and releases the guard during safe shutdown or window close.
 
 ## 2026-05-25 10:42 UTC
 
-- Changed Mini DMA current-sweep plots to use line+symbol curves by default.
-- Changed Mini DMA PyPlot defaults to recalculate strain-current curves against one shared global-minimum baseline and show the top power axis, with a setting for per-target baselines or raw measured strain.
+- Changed TMA current-sweep plots to use line+symbol curves by default.
+- Changed TMA PyPlot defaults to recalculate strain-current curves against one shared global-minimum baseline and show the top power axis, with a setting for per-target baselines or raw measured strain.
 - Kept PyPlot-style titles, axis labels, and legends in the Microwire Data Builder current annealing graph display.
 - Embedded parsed graph payloads in Microwire Data Builder `.pydpj` project saves so copied projects can restore graph records without depending on the global Builder cache.
 - Added the first copy-safe Microwire Builder automation recipe path for updating VSM temperature scan sections in copied `.pydpj` projects.
@@ -759,8 +759,8 @@
 
 ## 2026-05-25 10:25 UTC
 
-- Added optional Shared HMP broker mode to Mini DMA Logger so it can use channel-scoped broker leases for current-sweep and motor-supply HMP channels while preserving direct serial supply profiles.
-- Added Mini DMA broker host/port settings and preflight behavior that keeps shared-broker mode from silently switching back to serial auto-detect.
+- Added optional Shared HMP broker mode to TMA Logger so it can use channel-scoped broker leases for current-sweep and motor-supply HMP channels while preserving direct serial supply profiles.
+- Added TMA broker host/port settings and preflight behavior that keeps shared-broker mode from silently switching back to serial auto-detect.
 
 ## 2026-05-25 10:04 UTC
 
@@ -792,10 +792,10 @@
 - Added a Microwire Data Builder storage-root override for tests so automated runs can isolate mini-database state away from user app-data folders.
 - Tightened Windows Codex setup so it checks for Python 3.14 with the `py` launcher before running `uv sync`.
 - Shortened Windows pytest temp paths when needed so deep Google Drive fixture paths do not exceed Windows path limits.
-- Kept Mini DMA recipe-completion tests headless on Windows by stubbing recovery hardware preflight.
+- Kept TMA recipe-completion tests headless on Windows by stubbing recovery hardware preflight.
 - Sanitized serial logger output filenames as well as subfolder names so Windows-invalid characters do not trigger blocking error dialogs.
 - Waited for the Microwire EDA worker thread cleanup in its progress-dialog test to avoid Windows QThread teardown crashes.
-- Ordered the Windows test collection so the Mini DMA logger tests run before Microwire Builder/EDA GUI tests, avoiding an order-dependent native Qt teardown crash.
+- Ordered the Windows test collection so the TMA logger tests run before Microwire Builder/EDA GUI tests, avoiding an order-dependent native Qt teardown crash.
 
 ## 2026-05-22 13:47 UTC
 
@@ -822,28 +822,28 @@
 
 ## 2026-05-22 09:33 UTC
 
-- Mini DMA adds HMP4040 support with auto-detect, 115200 baud defaults, current-sweep CH4, and motor-supply CH3 while keeping channels user-configurable.
-- Mini DMA dashboard graphs now default to a 500 ms refresh interval and cache older downsampled history so long runs avoid rescanning the full run on each redraw.
-- Mini DMA pyqtgraph tiles now keep the run log compact, leave right-edge breathing room, use less dense/thinner major gridlines, and color Y axes to match their plotted curves.
-- Mini DMA pyqtgraph tiles now keep empty top/right axes visible as plain frame lines without tick marks or labels when no data axis is assigned there.
-- Mini DMA manual setup now shows a modal progress dialog while Auto-connect hardware probes the motor, scale, and optional motor-supply channel.
-- Mini DMA manual Auto-connect hardware now prepares the current-sweep supply channel with the configured voltage limit and starting current while keeping that channel output off, so HMP4040 CH4 does not retain stale front-panel settings.
-- Mini DMA dashboard plot widgets now shrink correctly in the available panel height and keep the run log shorter so the lower-right graph stays inside the visible window.
-- Mini DMA recovery-to-zero now keeps correcting when the measured load is still above the true zero-load tolerance instead of accepting a backlash-limited residual load.
-- Mini DMA pyqtgraph tiles now remove gridlines, disable SI-prefix axis scaling for fixed engineering units, and use thin line+symbol traces.
-- Mini DMA recovery/setup plots now reuse the same per-quantity colors as the dashboard, and current-hold resume no longer expands its resume band from noisy transformation data.
-- Mini DMA dashboard plot tiles now re-cap their maximum height after window resizes so the lower-right graph cannot spill below the visible panel.
-- Mini DMA dashboard plot tiles now use a stricter 240 px height cap so all four plots and the run log fit comfortably in a 1080p maximized window.
-- Mini DMA migrates saved 1000 ms graph refresh settings to the new 500 ms default so older local settings do not silently keep setup/recovery graphs slow.
-- Mini DMA load/stress seeking now waits for the filtered scale-control signal to change after a correction before repeating another load/stress move, reducing chatter from stale median/MAD windows.
-- Mini DMA zero-load plateau recovery now accepts the current stable zero-load position instead of driving back through the plateau before finishing.
-- Mini DMA current-hold stress recovery now requires a same-direction out-of-band filtered error to persist briefly before moving, so noisy one-window excursions do not immediately become motor corrections.
-- Mini DMA metadata now records the app source-control snapshot, including branch, commit, dirty state, short status, and origin URL when git is available.
-- Mini DMA metadata now records a control-logic version/profile and a SHA-256 fingerprint over decision-relevant control constants and settings, so runs can be compared by control semantics independent of branch names.
-- Mini DMA pyqtgraph dashboard tiles now expand with the available panel height again, keep extra right-edge breathing room for colored axes, and draw unused right axes as neutral frame lines.
-- Mini DMA removes the old recipe/session-start zero-load capture checkbox; mandatory setup remains the single source of truth for the zero-load baseline.
-- Mini DMA current-hold entry now requires a sustained filtered load/stress error beyond a transformation-sized band, so ordinary target fluctuations keep the current ramp moving.
-- Mini DMA current-hold adaptive recovery caps are now expressed through strain/recipe limits rather than a fixed millimeter command cap.
+- TMA adds HMP4040 support with auto-detect, 115200 baud defaults, current-sweep CH4, and motor-supply CH3 while keeping channels user-configurable.
+- TMA dashboard graphs now default to a 500 ms refresh interval and cache older downsampled history so long runs avoid rescanning the full run on each redraw.
+- TMA pyqtgraph tiles now keep the run log compact, leave right-edge breathing room, use less dense/thinner major gridlines, and color Y axes to match their plotted curves.
+- TMA pyqtgraph tiles now keep empty top/right axes visible as plain frame lines without tick marks or labels when no data axis is assigned there.
+- TMA manual setup now shows a modal progress dialog while Auto-connect hardware probes the motor, scale, and optional motor-supply channel.
+- TMA manual Auto-connect hardware now prepares the current-sweep supply channel with the configured voltage limit and starting current while keeping that channel output off, so HMP4040 CH4 does not retain stale front-panel settings.
+- TMA dashboard plot widgets now shrink correctly in the available panel height and keep the run log shorter so the lower-right graph stays inside the visible window.
+- TMA recovery-to-zero now keeps correcting when the measured load is still above the true zero-load tolerance instead of accepting a backlash-limited residual load.
+- TMA pyqtgraph tiles now remove gridlines, disable SI-prefix axis scaling for fixed engineering units, and use thin line+symbol traces.
+- TMA recovery/setup plots now reuse the same per-quantity colors as the dashboard, and current-hold resume no longer expands its resume band from noisy transformation data.
+- TMA dashboard plot tiles now re-cap their maximum height after window resizes so the lower-right graph cannot spill below the visible panel.
+- TMA dashboard plot tiles now use a stricter 240 px height cap so all four plots and the run log fit comfortably in a 1080p maximized window.
+- TMA migrates saved 1000 ms graph refresh settings to the new 500 ms default so older local settings do not silently keep setup/recovery graphs slow.
+- TMA load/stress seeking now waits for the filtered scale-control signal to change after a correction before repeating another load/stress move, reducing chatter from stale median/MAD windows.
+- TMA zero-load plateau recovery now accepts the current stable zero-load position instead of driving back through the plateau before finishing.
+- TMA current-hold stress recovery now requires a same-direction out-of-band filtered error to persist briefly before moving, so noisy one-window excursions do not immediately become motor corrections.
+- TMA metadata now records the app source-control snapshot, including branch, commit, dirty state, short status, and origin URL when git is available.
+- TMA metadata now records a control-logic version/profile and a SHA-256 fingerprint over decision-relevant control constants and settings, so runs can be compared by control semantics independent of branch names.
+- TMA pyqtgraph dashboard tiles now expand with the available panel height again, keep extra right-edge breathing room for colored axes, and draw unused right axes as neutral frame lines.
+- TMA removes the old recipe/session-start zero-load capture checkbox; mandatory setup remains the single source of truth for the zero-load baseline.
+- TMA current-hold entry now requires a sustained filtered load/stress error beyond a transformation-sized band, so ordinary target fluctuations keep the current ramp moving.
+- TMA current-hold adaptive recovery caps are now expressed through strain/recipe limits rather than a fixed millimeter command cap.
 
 ## 2026-05-21 09:37 UTC
 
@@ -851,16 +851,16 @@
 
 ## 2026-05-21 07:27 UTC
 
-- Restored the stronger Mini DMA colloquium deck as the main revised presentation, removed the redundant iso-stress comparison slide, repaired distorted image aspect ratios, replotted key graphs with PyPlot logic, and replaced the next-step slide image with a thermal-camera frame.
+- Restored the stronger TMA colloquium deck as the main revised presentation, removed the redundant iso-stress comparison slide, repaired distorted image aspect ratios, replotted key graphs with PyPlot logic, and replaced the next-step slide image with a thermal-camera frame.
 
 ## 2026-05-21 07:04 UTC
 
-- Mini DMA live dashboard, setup, and recovery graphs now use persistent pyqtgraph widgets instead of redrawing Matplotlib figures for each refresh.
-- Mini DMA dashboard plots keep left/right channel axes while updating existing curve data, reducing redraw work during long logged runs.
+- TMA live dashboard, setup, and recovery graphs now use persistent pyqtgraph widgets instead of redrawing Matplotlib figures for each refresh.
+- TMA dashboard plots keep left/right channel axes while updating existing curve data, reducing redraw work during long logged runs.
 
 ## 2026-05-20 19:20 UTC
 
-- Added a revised Mini DMA colloquium deck with simpler slide titles, larger text, page numbers, speaker notes, a clearer iso-stress workflow explanation, reduced-clutter result plots, commercial DMA comparison, thermal-camera next steps, and AI-assisted build framing.
+- Added a revised TMA colloquium deck with simpler slide titles, larger text, page numbers, speaker notes, a clearer iso-stress workflow explanation, reduced-clutter result plots, commercial DMA comparison, thermal-camera next steps, and AI-assisted build framing.
 
 ## 2026-05-20 17:36 UTC
 
@@ -868,7 +868,7 @@
 
 ## 2026-05-20 14:17 UTC
 
-- Added the Mini DMA colloquium presentation deck for the 2026-05-21 Ni-Fe-Ga meeting.
+- Added the TMA colloquium presentation deck for the 2026-05-21 Ni-Fe-Ga meeting.
 
 ## 2026-05-20 13:36 UTC
 
@@ -882,29 +882,29 @@
 
 ## 2026-05-20 09:56 UTC
 
-- Mini DMA setup preload now derives the active ramp rate from the live starting load/stress to the requested preload target, so relaxing from a high preload uses the configured setup duration instead of the nominal zero-to-target ramp.
-- Mini DMA length-setup progress now reports the active setup phase and phase percent instead of unstable global recipe tick counts.
-- Mini DMA setup stable-time holds now reset when the preload or zero-load target is not actually reached, so the measured-length prompt waits for a continuous stable target during current-sweep setup.
-- Mini DMA current-sweep load/stress correction now uses a robust recent scale signal for servo decisions, ignores single-sample balance spikes inside the noise band, and waits for a confirmed filtered reversal before sending the first opposite correction.
-- Mini DMA current-hold resume now uses a separate automatic recovery tolerance band, so the current ramp continues once filtered stress is practically recovered instead of chasing final-tolerance fluctuations.
-- Mini DMA current-hold recovery now retries after a full fresh filter window even when the median signal is unchanged, avoiding indefinite waits during held-current transformations.
-- Mini DMA migrates overlarge saved current-hold correction caps back to the safer default and records the setup linear-unload baseline as the run zero-load scale reference.
-- Mini DMA current-hold recovery now resumes the current ramp when the recovery seek accepts the target, waits instead of moving when filtered stress is already returning quickly toward target, and only learns hold-response stiffness from motor moves whose measured load/stress changes in the commanded direction.
-- Mini DMA setup now keeps length-setup progress monotonic within each phase, lets the dashboard plot grid shrink to the available window, and breaks plotted lines across hidden/downsampled history gaps instead of drawing diagonal bridges.
-- Mini DMA dashboard plots now also break the line between downsampled history and the recent live tail, avoiding misleading diagonal connectors while long measurements are still running.
-- Mini DMA now has an explicitly armed `--mini-dma-bench-plan` automation path for unattended recipe sequences, with dry-run validation, setup-length automation, per-run timeouts, summary JSON, and modal-warning suppression so failed preflights do not block overnight control.
-- Mini DMA session metadata, status text, and run log now record explicit stop outcomes such as normal recipe completion, manual recipe/session stop, emergency stop, wire break/contact loss, app close, or bench automation timeout.
-- Mini DMA now treats changed specimen/condition text as part of the auto-generated output filename identity, so a stale base filename is refreshed before existing-output checks prompt to save as the next run.
-- Mini DMA now restores the default `21.200 g` hanging-weight zero-load reference when the current bench sign convention sees real positive balance grams while a saved `0 g` reference would otherwise clamp applied load to zero and drive setup in the wrong direction.
-- Mini DMA setup slack take-up now exposes a configurable stiffness-prior step cap and defaults it to `50 MPa`, making pre-contact slack removal much faster while keeping feedback-gated moves bounded.
-- Mini DMA mandatory length setup now refreshes the frozen control config after accepted starting length and computed `l0`, so strain logging and subsequent control use the measured setup length instead of a stale recipe-start value.
-- Mini DMA setup progress now tracks live preload target error instead of elapsed ramp time, and setup no longer performs a timed zero-load settle after the return-to-zero target is accepted.
-- Mini DMA dashboard plots now bridge cached downsampled history into the recent live tail instead of leaving an empty middle gap during long measurements.
-- Mini DMA dashboard plots now add view-box data-edge padding so right-edge points are not clipped, and the current-sweep task label stays on the active current/hold phase instead of flickering through short settle steps.
-- Mini DMA bench automation plans now support high-stress and wire-break guardrails for unattended current-sweep testing, including current shutdown, stress-target recovery, summary guard events, and stopping later trials after contact loss.
-- Mini DMA setup return-to-zero now applies a small strain-based speed floor for tiny residual loads, avoiding very slow one-step unloads near baseline.
-- Mini DMA length-setup plotting now snapshots setup samples before drawing, preventing live plot refresh crashes from concurrent sample updates.
-- Mini DMA paused-current recovery can now use a local hold-only response stiffness after several confirmed correction samples, allowing faster load/stress recovery during transformations while keeping the frozen current-sweep stiffness and displacement/strain safety rails intact.
+- TMA setup preload now derives the active ramp rate from the live starting load/stress to the requested preload target, so relaxing from a high preload uses the configured setup duration instead of the nominal zero-to-target ramp.
+- TMA length-setup progress now reports the active setup phase and phase percent instead of unstable global recipe tick counts.
+- TMA setup stable-time holds now reset when the preload or zero-load target is not actually reached, so the measured-length prompt waits for a continuous stable target during current-sweep setup.
+- TMA current-sweep load/stress correction now uses a robust recent scale signal for servo decisions, ignores single-sample balance spikes inside the noise band, and waits for a confirmed filtered reversal before sending the first opposite correction.
+- TMA current-hold resume now uses a separate automatic recovery tolerance band, so the current ramp continues once filtered stress is practically recovered instead of chasing final-tolerance fluctuations.
+- TMA current-hold recovery now retries after a full fresh filter window even when the median signal is unchanged, avoiding indefinite waits during held-current transformations.
+- TMA migrates overlarge saved current-hold correction caps back to the safer default and records the setup linear-unload baseline as the run zero-load scale reference.
+- TMA current-hold recovery now resumes the current ramp when the recovery seek accepts the target, waits instead of moving when filtered stress is already returning quickly toward target, and only learns hold-response stiffness from motor moves whose measured load/stress changes in the commanded direction.
+- TMA setup now keeps length-setup progress monotonic within each phase, lets the dashboard plot grid shrink to the available window, and breaks plotted lines across hidden/downsampled history gaps instead of drawing diagonal bridges.
+- TMA dashboard plots now also break the line between downsampled history and the recent live tail, avoiding misleading diagonal connectors while long measurements are still running.
+- TMA now has an explicitly armed `--mini-dma-bench-plan` automation path for unattended recipe sequences, with dry-run validation, setup-length automation, per-run timeouts, summary JSON, and modal-warning suppression so failed preflights do not block overnight control.
+- TMA session metadata, status text, and run log now record explicit stop outcomes such as normal recipe completion, manual recipe/session stop, emergency stop, wire break/contact loss, app close, or bench automation timeout.
+- TMA now treats changed specimen/condition text as part of the auto-generated output filename identity, so a stale base filename is refreshed before existing-output checks prompt to save as the next run.
+- TMA now restores the default `21.200 g` hanging-weight zero-load reference when the current bench sign convention sees real positive balance grams while a saved `0 g` reference would otherwise clamp applied load to zero and drive setup in the wrong direction.
+- TMA setup slack take-up now exposes a configurable stiffness-prior step cap and defaults it to `50 MPa`, making pre-contact slack removal much faster while keeping feedback-gated moves bounded.
+- TMA mandatory length setup now refreshes the frozen control config after accepted starting length and computed `l0`, so strain logging and subsequent control use the measured setup length instead of a stale recipe-start value.
+- TMA setup progress now tracks live preload target error instead of elapsed ramp time, and setup no longer performs a timed zero-load settle after the return-to-zero target is accepted.
+- TMA dashboard plots now bridge cached downsampled history into the recent live tail instead of leaving an empty middle gap during long measurements.
+- TMA dashboard plots now add view-box data-edge padding so right-edge points are not clipped, and the current-sweep task label stays on the active current/hold phase instead of flickering through short settle steps.
+- TMA bench automation plans now support high-stress and wire-break guardrails for unattended current-sweep testing, including current shutdown, stress-target recovery, summary guard events, and stopping later trials after contact loss.
+- TMA setup return-to-zero now applies a small strain-based speed floor for tiny residual loads, avoiding very slow one-step unloads near baseline.
+- TMA length-setup plotting now snapshots setup samples before drawing, preventing live plot refresh crashes from concurrent sample updates.
+- TMA paused-current recovery can now use a local hold-only response stiffness after several confirmed correction samples, allowing faster load/stress recovery during transformations while keeping the frozen current-sweep stiffness and displacement/strain safety rails intact.
 
 ## 2026-05-20 08:49 UTC
 
@@ -915,7 +915,7 @@
 
 - Added graph-only batch filtering for Microwire Word report CLI exports; the filter now requires generated Origin graph descriptors so source-only Assemble labels do not create placeholder-only reports.
 - Added DOCX export manifest JSON/CSV files that record exported microwires, graph sections, source paths, source mtimes/sizes, and the copied project used for the run.
-- Extended project-backed Word report discovery to include Mini DMA run folders under the Praha measurement root.
+- Extended project-backed Word report discovery to include TMA run folders under the Praha measurement root.
 - Improved VSM temperature scan Origin export with separate low/high-field Y-axis scaling and cycle-specific colors/labels.
 
 ## 2026-05-19 16:10 UTC
@@ -994,16 +994,16 @@
 
 ## 2026-05-15 13:23 UTC
 
-- Move Mini DMA recipe/control ticks onto a worker scheduler with frozen run-start settings so Qt repaint lag and Matplotlib redraws do not pace hardware control or CSV/control-trace logging.
-- Serialize Mini DMA PSU serial access between worker current commands and UI readbacks, correctly parse scientific-notation current replies, add a current-sweep channel selector, and reset the current channel to output off at `1 V` / `1 mA` whenever automation stops.
-- Tighten the Mini DMA dashboard header so the current task uses a fixed single-line row, remove the redundant scale-rate cell, lighten live-plot markers/lines, keep older downsampled plot points visually stable, and remember current-sweep target ranges separately for iso-load, iso-stress, and iso-strain modes.
-- Include the current-sweep recipe type in auto-generated Mini DMA output base filenames, for example `iso-stress` or `iso-strain`.
-- Let Mini DMA setup finish from a stable near-zero plateau during linear-unload fallback instead of waiting indefinitely for an unreachable fitted zero-stress position.
-- Stabilize Mini DMA current-sweep task text during worker ticks and keep scheduled CSV rows flowing while iso-strain current sweeps are already inside target tolerance.
-- Close/delete Mini DMA setup and recovery child dialogs cleanly and suppress recovery prompts during window shutdown so a completed run cannot leave the main window trapped behind stale dialog ownership.
+- Move TMA recipe/control ticks onto a worker scheduler with frozen run-start settings so Qt repaint lag and Matplotlib redraws do not pace hardware control or CSV/control-trace logging.
+- Serialize TMA PSU serial access between worker current commands and UI readbacks, correctly parse scientific-notation current replies, add a current-sweep channel selector, and reset the current channel to output off at `1 V` / `1 mA` whenever automation stops.
+- Tighten the TMA dashboard header so the current task uses a fixed single-line row, remove the redundant scale-rate cell, lighten live-plot markers/lines, keep older downsampled plot points visually stable, and remember current-sweep target ranges separately for iso-load, iso-stress, and iso-strain modes.
+- Include the current-sweep recipe type in auto-generated TMA output base filenames, for example `iso-stress` or `iso-strain`.
+- Let TMA setup finish from a stable near-zero plateau during linear-unload fallback instead of waiting indefinitely for an unreachable fitted zero-stress position.
+- Stabilize TMA current-sweep task text during worker ticks and keep scheduled CSV rows flowing while iso-strain current sweeps are already inside target tolerance.
+- Close/delete TMA setup and recovery child dialogs cleanly and suppress recovery prompts during window shutdown so a completed run cannot leave the main window trapped behind stale dialog ownership.
 - Add a constant-current stress-strain recipe that seeks a chosen load/stress/strain start target, then applies fixed open-loop displacement or strain steps up to a target and optionally back down at each configured current, holding/logging after every step without correcting load fluctuations away.
-- Remember Mini DMA dashboard plot channel choices separately per recipe type, using the existing global dashboard layout as the fallback for recipes that have not been customized yet.
-- Name constant-current Mini DMA output folders with an `iso-current` token, clamp the fixed step-back leg at its remembered mechanical start position, and avoid hidden post-completion origin recovery for that recipe.
+- Remember TMA dashboard plot channel choices separately per recipe type, using the existing global dashboard layout as the fallback for recipes that have not been customized yet.
+- Name constant-current TMA output folders with an `iso-current` token, clamp the fixed step-back leg at its remembered mechanical start position, and avoid hidden post-completion origin recovery for that recipe.
 - Remove the constant-current stress-strain max-step cap setting and clamp active recipe current commands to at least `1 mA` so continuity/wire-break diagnostics remain powered even when recipe fields are set to `0 mA`.
 - Re-zero the constant-current stress-strain scan after each current change, log current-specific zero position, `l0`, and current-relative displacement/strain columns, and use that zero as the step-back origin for the current leg.
 - Start setup-preload ramps from the live load/stress value instead of forcing the target clock through zero when the sample is already partly loaded.
@@ -1021,9 +1021,9 @@
 
 ## 2026-05-15 11:37 UTC
 
-- Split Mini DMA live label/telemetry cadence from dashboard graph redraw cadence, defaulting dashboard Matplotlib refresh to 1000 ms while keeping live samples and hardware acquisition independent.
-- Added Mini DMA UI heartbeat and graph-refresh fields to `ui_telemetry.csv` so event-loop responsiveness can be inspected separately from plot redraw timing.
-- Mini DMA dashboard plots now downsample older displayed points during long runs, preserving recent samples and all logged CSV data while reducing Matplotlib redraw cost.
+- Split TMA live label/telemetry cadence from dashboard graph redraw cadence, defaulting dashboard Matplotlib refresh to 1000 ms while keeping live samples and hardware acquisition independent.
+- Added TMA UI heartbeat and graph-refresh fields to `ui_telemetry.csv` so event-loop responsiveness can be inspected separately from plot redraw timing.
+- TMA dashboard plots now downsample older displayed points during long runs, preserving recent samples and all logged CSV data while reducing Matplotlib redraw cost.
 
 ## 2026-05-15 11:33 UTC
 
@@ -1089,17 +1089,17 @@
 
 ## 2026-05-13 13:15 UTC
 
-- Added optional top power axes for current annealing and Mini DMA resistance-current plots, calculated from plotted current and resistance values as `P = I^2R` in mW.
+- Added optional top power axes for current annealing and TMA resistance-current plots, calculated from plotted current and resistance values as `P = I^2R` in mW.
 
 ## 2026-05-13 13:00 UTC
 
-- Add Mini DMA measurements to Microwire Data Builder sections and Word report graph exports.
+- Add TMA measurements to Microwire Data Builder sections and Word report graph exports.
 - Pack the Word report Microwire data table top-to-bottom across compact columns.
 - Keep VSM temperature scan Word/Origin exports on native dual Y axes with black tick labels on both sides.
 
 ## 2026-05-12 16:11 UTC
 
-- Improved Mini DMA current-sweep ETA estimates by adding a conservative hold-time allowance before start and projecting learned hold/correction overhead from completed current-sweep legs during the run.
+- Improved TMA current-sweep ETA estimates by adding a conservative hold-time allowance before start and projecting learned hold/correction overhead from completed current-sweep legs during the run.
 
 ## 2026-05-12 15:48 UTC
 
@@ -1114,19 +1114,19 @@
 
 ## 2026-05-12 10:43 UTC
 
-- Mini DMA adds recipe JSON save/load with descriptive generated filenames for current-sweep recipes.
-- Mini DMA adds bench provisioning for copied setups, including HMP motor-supply setup, Tic current-limit application, and pass/fail hardware status reporting.
-- Mini DMA updates the HMP4030 current-sweep voltage limit to 32.05 V and defaults the copied-bench motor supply to CH2 at 12 V / 0.5 A while keeping current annealing on CH3.
-- Mini DMA keeps the copied-bench Tic motor current limit at the cooler bench-proven 343 mA default and makes emergency stop disable the motor-supply channel as well as the current-sweep output.
+- TMA adds recipe JSON save/load with descriptive generated filenames for current-sweep recipes.
+- TMA adds bench provisioning for copied setups, including HMP motor-supply setup, Tic current-limit application, and pass/fail hardware status reporting.
+- TMA updates the HMP4030 current-sweep voltage limit to 32.05 V and defaults the copied-bench motor supply to CH2 at 12 V / 0.5 A while keeping current annealing on CH3.
+- TMA keeps the copied-bench Tic motor current limit at the cooler bench-proven 343 mA default and makes emergency stop disable the motor-supply channel as well as the current-sweep output.
 
 ## 2026-05-12 00:00 UTC
 
-- Added a Mini DMA PyPlot option to recalculate each strain-current trace with its shortest measured length as `l0`, so its minimum point is displayed as physically zero strain for DMA-style visual comparison.
+- Added a TMA PyPlot option to recalculate each strain-current trace with its shortest measured length as `l0`, so its minimum point is displayed as physically zero strain for DMA-style visual comparison.
 
 ## 2026-05-11 13:35 UTC
 
-- Added a native `Mini DMA` PyPlot plugin for logger run folders and `measurement.csv` files, plotting strain-current and resistance-current sweeps with one curve per target MPa plateau.
-- Mini DMA graph tabs now use shared PyPlot save/popout/formatting behavior and shared Origin export routing.
+- Added a native `TMA` PyPlot plugin for logger run folders and `measurement.csv` files, plotting strain-current and resistance-current sweeps with one curve per target MPa plateau.
+- TMA graph tabs now use shared PyPlot save/popout/formatting behavior and shared Origin export routing.
 
 ## 2026-05-11 10:46 UTC
 
@@ -1159,96 +1159,96 @@
 
 ## 2026-04-29 09:44 UTC
 
-- Split Mini DMA recipe scheduling into global control, data-log, and UI-refresh intervals instead of per-recipe frequencies.
+- Split TMA recipe scheduling into global control, data-log, and UI-refresh intervals instead of per-recipe frequencies.
 - Updated displacement, hold, calibration, Hsw, and current-sweep recipes to use timed steps and the global log cadence while keeping hardware polling/readback timers separate.
 - Moved global timing controls into `Settings -> Timing...` and let target-ramp seeking advance planned motion between scale updates for smoother setup preload/current target ramps.
 - Defaulted G&G request-mode scale acquisition to a 250 ms interval with a longer read timeout so the measured roughly 5 Hz balance response is treated as the hardware limit instead of a fast timeout.
-- Documented the verified G&G balance cadence in the Mini DMA hardware profile and refreshed stale scale-communication bring-up notes.
+- Documented the verified G&G balance cadence in the TMA hardware profile and refreshed stale scale-communication bring-up notes.
 - Added explicit timing settings for Tic status, Tic command-timeout keepalive, and power-supply readbacks as the first Phase 3 hardware-cadence step.
 
 ## 2026-04-29 09:34 UTC
 
-- Mini DMA review/test windows can now opt out of saving settings, preventing temporary screenshot or diagnostic values from overwriting the user's saved sample, project, output, and dashboard plot selections.
-- Mini DMA load/stress target ramps now wait for fresh scale feedback after each motor correction instead of stacking planned motion between balance samples, and setup preload completion now honors the displayed setup tolerance.
-- Mini DMA Phase 3 control keeps Tic command state separate from slower status polling, so calibration micro-moves chain from the last commanded target and data logging no longer blocks on a Tic status subprocess for every row.
-- Mini DMA Tic move, halt, zero-position, and keepalive commands now run through a persistent in-app command dispatcher that coalesces stale target-position commands, while retaining `ticcmd` as the command transport.
-- Mini DMA now depends on `pyusb` and `libusb-package`, prefers native USB control transfers for Tic commands/status when available, and falls back to `ticcmd`; Developer -> Benchmark Tic Transports can compare both paths without moving the motor.
-- Mini DMA load/stress seeking now continues from the last commanded motor target after fresh scale feedback even when Tic status has not refreshed yet, avoiding repeated `Move skipped` loops during setup preload corrections.
-- Mini DMA treats backlash-limited near-target reversals as a practical target hold for non-current seeks instead of looping forever on repeated skipped reverse corrections at the end of a recipe step.
-- Mini DMA calibration now waits for a fresh post-move scale sample before recording forward/reverse points and writes an `insufficient_data` calibration report when a calibration session is stopped before a full report can be computed.
-- Mini DMA completed calibrations now seed backlash, stiffness, and noise for closed-loop load/stress seeking; stiffness is rescaled for the current gauge length, target corrections use the estimated load-path sensitivity, and too-small tolerances are raised to the motor/noise resolution floor.
-- Mini DMA backlash take-up is tracked separately from specimen displacement, so raw motor travel remains in `raw_position_mm` while logged tensile displacement and strain exclude reversal take-up.
-- Mini DMA load/stress seek speed limits now use the scale feedback interval instead of the faster control-timer interval, and setup preload slack take-up can use the configured slack `%/s` speed instead of being capped by the fine preload correction step.
-- Mini DMA setup preload ramps now convert the derived `MPa/s` rate through the stiffness estimate after force starts responding, while slack take-up before force response can use the configured slack `%/s` speed.
-- Mini DMA setup zero-load tolerance is now automatic from the `0.005 g` load floor plus motor-step/noise limits, and the old manual zero-load tolerance row is hidden.
-- Mini DMA length setup now detects a stable near-zero raw-balance plateau during the post-preload return, uses it as the run's corrected zero-load reference, and returns to the first plateau position before computing unloaded `l0`.
-- Mini DMA final current-sweep zero return and manual load-zero recovery now use the same stable near-zero plateau fallback, updating the run zero-load reference and returning to the first plateau position instead of relaxing indefinitely when the balance stops changing.
-- Mini DMA scheduled CSV logging now defers while load/stress control is waiting for fresh post-move scale feedback instead of stopping a current-sweep recipe on a delayed log row.
-- Mini DMA current-sweep settle steps now keep correcting until the requested load/stress/strain target is reached before advancing to the next plateau.
-- Mini DMA load/stress target-ramp and hold corrections in current-sweep recipes now use the target-ramp stage speed as the dynamic ceiling, with actual speed chosen from target error, measured trend, stiffness, backlash state, and scale-feedback cadence.
-- Mini DMA current sweeps now detect open-circuit wire breaks when measured current collapses near zero while voltage is at the configured limit, then disable current, stop/save the measurement, and offer displacement recovery instead of continuing the voltage-limit unwind.
-- Mini DMA sample/project/output and dashboard plot selections are saved when they change or when a session starts, and restored custom sample/base filenames are no longer overwritten by auto-naming during startup.
-- Mini DMA manual move buttons now use true press-and-hold jog control instead of Qt auto-repeat clicks, so held motion follows the configured manual `mm/s` speed more closely even when a jog tick is delayed.
-- Mini DMA Manual Actions now include an auto-connect hardware button for setup moves before starting a recipe.
-- Mini DMA pytest coverage now isolates the app's `QSettings` backend from the user's real saved Mini DMA settings, and constructor-supplied test output folders no longer replace the saved output folder on a normal close.
-- Mini DMA current-sweep balancing now uses the target ramp stage speed as the dynamic `mm/s` ceiling and hides the old correction step/speed controls as legacy settings, so annealing corrections are not artificially capped by stale fine-correction fields.
-- Mini DMA length setup now prompts for an approximate starting wire length before preload, uses it to scale the stiffness prior, and writes setup-only `setup.txt` / `setup.csv` logs alongside the normal measurement data.
-- Mini DMA now writes every run into a dedicated output folder with stable file names: `measurement.txt`, `measurement.csv`, `metadata.json`, `scale_raw.csv`, `setup.txt`, and `setup.csv`; repeated runs use `_run02`, `_run03`, and later folders without chaining existing run suffixes.
-- Mini DMA now cleans repeated `_runNN` suffix chains from restored/typed base filenames, adds an `Open` button next to the output-folder `Browse` button, and treats small load/stress target crossings inside the physical reversal band as a practical hold instead of immediately reversing into backlash-driven hunting.
-- Added a detailed Mini DMA speed-control reference with diagrams covering ramp units, sample-driven force feedback, live stiffness scaling, predictive correction distance, dynamic servo hold, and backlash/reversal handling.
-- Mini DMA load/stress seeking now waits for expected motor completion before accepting post-move scale feedback, keeps a run-level live stiffness estimate during ramps, uses a wider automatic motor-step tolerance floor, slows to the minimum motor speed near target, and displays live speed equivalents in `mm/s`, `g/s`, `MPa/s`, and `%/s`.
-- Mini DMA load/stress tolerances are now automatic from a `0.005 g` starting floor plus motor-step/noise limits, and the old left-panel Overview is replaced by fixed-width dashboard cells for live speed and hardware state.
-- Mini DMA live speed/hardware cells now live inside the dashboard header, setup preload slack take-up treats tiny near-zero residual loads as slack so it can use the configured slack `%/s` speed, and zero-load plateau fallback uses the center of the stable raw-balance band before returning to the first plateau position.
-- Mini DMA current-sweep servo corrections now cap predicted move distance by specimen strain percentage, defaulting to `5%`, and cap correction speed by both `%/s` and a hard `mm/s` motor ceiling so long and short wires scale more consistently.
-- Mini DMA current sweeps keep the requested current ramp static during ordinary servo error; operators should lower the fixed current-ramp rate when thermal-history control matters instead of relying on automatic current pauses or stress-triggered unwind.
-- Mini DMA setup/final zero-load return no longer accepts a high residual load as zero just because the ordinary stiffness/backlash tolerance band is wide; the stable near-zero plateau fallback remains the baseline update path.
-- Mini DMA load/stress seeking now uses a hybrid far/near controller: far from target it can keep the motor moving and revise the prediction on each fresh scale sample, while near target or suspicious feedback still uses conservative post-move scale gating.
-- Mini DMA speed-control docs now distinguish the 4-5 Hz scale reply rate from the slower near-target correction frequency and include diagrams for hybrid far/near servo behavior.
-- Mini DMA gated load/stress corrections now treat recipe/dynamic speed as desired average speed over the full correction cycle and raise the instantaneous motor command speed to compensate for settle plus scale-response dead time, while still respecting the hard `mm/s` and `%/s` caps.
-- Mini DMA motor displacement calibration now uses a provisional `800 steps/mm` default for the expected 1/8-microstep configuration, migrates only old saved `100 steps/mm` defaults, and adds an external-gauge motor step calibration workflow that moves by raw Tic units, writes CSV/JSON logs, reports fit quality, and does not apply the result by default.
-- Mini DMA motor step calibration now keeps a progress window visible for the whole calibration, including slow move waits and accepted external-gauge readings.
-- Mini DMA motor step calibration now keeps the Tic command-timeout keepalive active during slow raw-step calibration moves, preventing the controller from stopping after only a few steps.
-- Mini DMA motor settings and docs now distinguish mechanical full steps/mm from Tic controller units/mm, documenting the verified `100 full steps/mm * 8 microsteps = 800 Tic units/mm` relationship.
-- Mini DMA advanced motor settings now expose mechanical full steps/mm, Tic step mode, and derived Tic units/mm; applying a new Tic step mode updates the controller through `ticcmd` and rewrites the current-position register so physical mm values stay continuous.
-- Mini DMA now has a continuity-current monitor for automated measurements, logs raw scale samples during mandatory setup, applies directional load-limit checks during setup preload, and makes setup preload wait for post-move force feedback before issuing the next correction.
-- Mini DMA output-collision and setup windows now show the active sample/output identity, and calibration ignores the saved backlash compensation while measuring new stiffness/backlash.
-- Mini DMA now replaces stale output base filenames when the current sample identity changes, and setup preload starts by relaxing toward the final preload target if the wire is already above it.
-- Mini DMA setup zero-load plateau fallback now uses a run-level corrected zero reference without changing the configured/default `21.200 g` baseline unless the operator explicitly edits or captures a new zero-load value.
-- Mini DMA setup preload no longer treats an already-over-target sample as an immediate overload stop when the next control action can relax toward the requested preload.
-- Mini DMA setup preload relaxation from above target now stays under the setup-time preload ramp cap instead of using cruise feedback or the global motion-speed ceiling.
-- Mini DMA calibration now caps the load-equivalent plateau acceptance band so an inflated live stiffness estimate cannot mark a preload target reached while the measured load is still far away.
-- Mini DMA setup now derives the engaged-wire preload ramp from setup time, uses a separate `%/s` slack take-up speed before force response, relies on the global motion speed as the hard stage-speed ceiling, and quantizes applied calibration backlash to achievable Tic units.
-- Mini DMA setup return-to-zero and automatic post-calibration return-to-start now use a setup return-time-derived speed instead of the global motion speed directly.
-- Mini DMA now exposes the shared return-time setting in Manual Actions, uses it for manual displacement recovery and post-recipe return-to-start, keeps setup/recovery popups plotting fresh UI-refresh samples during waits, shows a throttled ETA in recipe progress, and keeps raw-scale elapsed time continuous across setup and recipe logging.
-- Mini DMA now uses live Tic acceleration/deceleration settings in move-duration and correction-travel estimates, keeping target-position commands unchanged while making post-move feedback waits and cruise/near decisions less optimistic for short moves.
-- Mini DMA recovery now restarts the live UI-refresh timer after a stopped session, and setup zero-load fallback now uses a hybrid stable-plateau gate based on elapsed time plus strain-scaled return travel.
-- Mini DMA setup preload now leaves slack `%/s` take-up permanently after the first real load response for that preload target, then uses conservative one-move-at-a-time ramp-capped corrections in both tensioning and relaxation directions.
-- Mini DMA setup preload now interprets setup time as the live current-to-target preload span, setup return-to-zero holds its initial time-based unload speed instead of shrinking every near-zero sample, and current-sweep load/stress target ramps start in gated feedback.
-- Mini DMA setup preload now treats the first slack-to-taut load jump as engagement rather than trusted stiffness and caps setup preload acceptance so backlash/reversal logic cannot accept a multi-MPa overshoot as the preload target.
-- Mini DMA current-sweep load/stress corrections now use the stiffest safe stiffness estimate and cap each planned correction to `10 MPa` as well as the strain limit, reducing aggressive first-approach jumps after setup.
-- Mini DMA now treats the applied-load limit as a directional control boundary that blocks or halts only tension-increasing motion, and treats the raw scale display limit, defaulting to `30 g`, as a hard balance-protection interlock that halts automation and blocks ordinary moves until the live display is back below the limit.
-- Mini DMA current sweeps can optionally pause the current ramp when load/stress/strain error exceeds a configured band, keep displacement correction active, and resume without a wall-clock current jump once the target recovers.
-- Mini DMA current sweeps now freeze mechanical stiffness after setup/calibration, treat backlash as reversal take-up instead of large-error target acceptance, and ramp setup-preload overshoots down from the live overshot load/stress over the configured setup time.
-- Mini DMA current-sweep dynamic speed control now controls correction distance as the primary average-speed mechanism: load/stress corrections shrink from coarse target-space caps toward `1 MPa` equivalent and then single motor steps near target while keeping the Tic command speed practical for short moves.
-- Mini DMA runs now include `control_trace.csv`, a per-decision seek trace with target, feedback, error, stiffness, correction distance, backlash take-up, command speed, wait reason, and move result for diagnosing closed-loop behavior.
-- Mini DMA current-sweep load/stress holds now use conservative gated force feedback with `1 MPa`-equivalent correction caps, avoiding stale cruise corrections that could stack around the target.
-- Mini DMA setup slack take-up now caps each pre-contact move by a `5 MPa` stiffness-prior equivalent step, the zero-load plateau fallback accepts a stable baseline sooner, and live plots hide zero-current current/resistance points.
-- Mini DMA setup preload and current-sweep load/stress fine correction now shrink to single motor-step moves near target, avoid predictive backlash injection in that fine band, and require extra fresh balance confirmation before repeating very-near-target corrections; `control_trace.csv` now includes motor-step and post-move sample-count diagnostics.
-- Mini DMA length setup now computes unloaded `l0` from a fitted linear unload intercept during the post-preload 20 MPa -> 0 MPa return when the taut elastic segment is available, using slack/plateau detection as confirmation instead of the baseline source.
-- Mini DMA setup return-to-zero now treats collapse of the linear unload slope as slack onset, commits the fitted zero-stress intercept for `l0`, and returns there instead of continuing to drive the wire farther into slack.
-- Mini DMA current-sweep load/stress reversals no longer perform predictive full-backlash take-up, so dynamic correction steps around targets are not dominated by the saved backlash distance.
-- Mini DMA zero-load plateau fallback now accepts a stable flat balance after `0.05%` of `l0` or `4` motor units of return travel, and the recovery load-to-zero graph now labels load and displacement with a legend.
-- Mini DMA recovery graphs now use more distinct load/displacement colors and keep the x-axis label readable in dark mode.
-- Mini DMA setup now keeps the continuity current active before current-sweep recipes, and length setup reuses the committed slack-onset zero position when applying `l0` instead of refitting the baseline after additional low-slope samples.
-- Mini DMA current-ramp hold now uses a filtered, noise-adaptive high-side load/stress error so annealing fluctuations do not hold current indefinitely, and large current-sweep stress errors can use faster `10 MPa`/`5 MPa` correction caps before shrinking near target.
-- Mini DMA current-sweep settle after each current ramp is now time-bounded instead of waiting forever for noisy annealing feedback, current hold uses the same absolute load/stress error on current-up and current-down ramps, and paused-current recovery can use a larger `20 MPa` equivalent correction cap while the current ramp is held.
-- Mini DMA current-sweep recipes now expose the stress correction caps and current-hold filter/noise bands in the UI, show a concise current-task summary, and use a more compact dashboard header with native-font live values.
-- Mini DMA current hold no longer has a maximum pause-time stop, and the dashboard header now uses a tighter 3-column live-value grid so the plot area fits better on narrower screens.
-- Mini DMA current-sweep recipes now include a `First overheating` option that repeats the first target's current sweep once before continuing to later targets.
-- Mini DMA current-sweep load/stress corrections now use a smooth dynamic error-fraction cap with visible sweep/hold hard rails, and current sweeps always include the return-to-start-current leg at each target.
-- Mini DMA now exposes an occasional-use `Tare scale` button in the normal Hardware scale controls for balances whose front-panel tare is unavailable while connected.
-- Mini DMA current-sweep advanced caps, hold bands, and filter settings are now collapsed behind an expander by default, the hold hard cap default migrates from `20 MPa` to `30 MPa`, and manual jog presses resync from the live motor position when no move is pending so stale targets cannot flip a down jog upward.
-- Mini DMA dashboard graphs now append live UI-refresh samples between logged CSV rows, using already-known scale/motor/supply state so plots update smoothly without adding hardware reads.
+- TMA review/test windows can now opt out of saving settings, preventing temporary screenshot or diagnostic values from overwriting the user's saved sample, project, output, and dashboard plot selections.
+- TMA load/stress target ramps now wait for fresh scale feedback after each motor correction instead of stacking planned motion between balance samples, and setup preload completion now honors the displayed setup tolerance.
+- TMA Phase 3 control keeps Tic command state separate from slower status polling, so calibration micro-moves chain from the last commanded target and data logging no longer blocks on a Tic status subprocess for every row.
+- TMA Tic move, halt, zero-position, and keepalive commands now run through a persistent in-app command dispatcher that coalesces stale target-position commands, while retaining `ticcmd` as the command transport.
+- TMA now depends on `pyusb` and `libusb-package`, prefers native USB control transfers for Tic commands/status when available, and falls back to `ticcmd`; Developer -> Benchmark Tic Transports can compare both paths without moving the motor.
+- TMA load/stress seeking now continues from the last commanded motor target after fresh scale feedback even when Tic status has not refreshed yet, avoiding repeated `Move skipped` loops during setup preload corrections.
+- TMA treats backlash-limited near-target reversals as a practical target hold for non-current seeks instead of looping forever on repeated skipped reverse corrections at the end of a recipe step.
+- TMA calibration now waits for a fresh post-move scale sample before recording forward/reverse points and writes an `insufficient_data` calibration report when a calibration session is stopped before a full report can be computed.
+- TMA completed calibrations now seed backlash, stiffness, and noise for closed-loop load/stress seeking; stiffness is rescaled for the current gauge length, target corrections use the estimated load-path sensitivity, and too-small tolerances are raised to the motor/noise resolution floor.
+- TMA backlash take-up is tracked separately from specimen displacement, so raw motor travel remains in `raw_position_mm` while logged tensile displacement and strain exclude reversal take-up.
+- TMA load/stress seek speed limits now use the scale feedback interval instead of the faster control-timer interval, and setup preload slack take-up can use the configured slack `%/s` speed instead of being capped by the fine preload correction step.
+- TMA setup preload ramps now convert the derived `MPa/s` rate through the stiffness estimate after force starts responding, while slack take-up before force response can use the configured slack `%/s` speed.
+- TMA setup zero-load tolerance is now automatic from the `0.005 g` load floor plus motor-step/noise limits, and the old manual zero-load tolerance row is hidden.
+- TMA length setup now detects a stable near-zero raw-balance plateau during the post-preload return, uses it as the run's corrected zero-load reference, and returns to the first plateau position before computing unloaded `l0`.
+- TMA final current-sweep zero return and manual load-zero recovery now use the same stable near-zero plateau fallback, updating the run zero-load reference and returning to the first plateau position instead of relaxing indefinitely when the balance stops changing.
+- TMA scheduled CSV logging now defers while load/stress control is waiting for fresh post-move scale feedback instead of stopping a current-sweep recipe on a delayed log row.
+- TMA current-sweep settle steps now keep correcting until the requested load/stress/strain target is reached before advancing to the next plateau.
+- TMA load/stress target-ramp and hold corrections in current-sweep recipes now use the target-ramp stage speed as the dynamic ceiling, with actual speed chosen from target error, measured trend, stiffness, backlash state, and scale-feedback cadence.
+- TMA current sweeps now detect open-circuit wire breaks when measured current collapses near zero while voltage is at the configured limit, then disable current, stop/save the measurement, and offer displacement recovery instead of continuing the voltage-limit unwind.
+- TMA sample/project/output and dashboard plot selections are saved when they change or when a session starts, and restored custom sample/base filenames are no longer overwritten by auto-naming during startup.
+- TMA manual move buttons now use true press-and-hold jog control instead of Qt auto-repeat clicks, so held motion follows the configured manual `mm/s` speed more closely even when a jog tick is delayed.
+- TMA Manual Actions now include an auto-connect hardware button for setup moves before starting a recipe.
+- TMA pytest coverage now isolates the app's `QSettings` backend from the user's real saved TMA settings, and constructor-supplied test output folders no longer replace the saved output folder on a normal close.
+- TMA current-sweep balancing now uses the target ramp stage speed as the dynamic `mm/s` ceiling and hides the old correction step/speed controls as legacy settings, so annealing corrections are not artificially capped by stale fine-correction fields.
+- TMA length setup now prompts for an approximate starting wire length before preload, uses it to scale the stiffness prior, and writes setup-only `setup.txt` / `setup.csv` logs alongside the normal measurement data.
+- TMA now writes every run into a dedicated output folder with stable file names: `measurement.txt`, `measurement.csv`, `metadata.json`, `scale_raw.csv`, `setup.txt`, and `setup.csv`; repeated runs use `_run02`, `_run03`, and later folders without chaining existing run suffixes.
+- TMA now cleans repeated `_runNN` suffix chains from restored/typed base filenames, adds an `Open` button next to the output-folder `Browse` button, and treats small load/stress target crossings inside the physical reversal band as a practical hold instead of immediately reversing into backlash-driven hunting.
+- Added a detailed TMA speed-control reference with diagrams covering ramp units, sample-driven force feedback, live stiffness scaling, predictive correction distance, dynamic servo hold, and backlash/reversal handling.
+- TMA load/stress seeking now waits for expected motor completion before accepting post-move scale feedback, keeps a run-level live stiffness estimate during ramps, uses a wider automatic motor-step tolerance floor, slows to the minimum motor speed near target, and displays live speed equivalents in `mm/s`, `g/s`, `MPa/s`, and `%/s`.
+- TMA load/stress tolerances are now automatic from a `0.005 g` starting floor plus motor-step/noise limits, and the old left-panel Overview is replaced by fixed-width dashboard cells for live speed and hardware state.
+- TMA live speed/hardware cells now live inside the dashboard header, setup preload slack take-up treats tiny near-zero residual loads as slack so it can use the configured slack `%/s` speed, and zero-load plateau fallback uses the center of the stable raw-balance band before returning to the first plateau position.
+- TMA current-sweep servo corrections now cap predicted move distance by specimen strain percentage, defaulting to `5%`, and cap correction speed by both `%/s` and a hard `mm/s` motor ceiling so long and short wires scale more consistently.
+- TMA current sweeps keep the requested current ramp static during ordinary servo error; operators should lower the fixed current-ramp rate when thermal-history control matters instead of relying on automatic current pauses or stress-triggered unwind.
+- TMA setup/final zero-load return no longer accepts a high residual load as zero just because the ordinary stiffness/backlash tolerance band is wide; the stable near-zero plateau fallback remains the baseline update path.
+- TMA load/stress seeking now uses a hybrid far/near controller: far from target it can keep the motor moving and revise the prediction on each fresh scale sample, while near target or suspicious feedback still uses conservative post-move scale gating.
+- TMA speed-control docs now distinguish the 4-5 Hz scale reply rate from the slower near-target correction frequency and include diagrams for hybrid far/near servo behavior.
+- TMA gated load/stress corrections now treat recipe/dynamic speed as desired average speed over the full correction cycle and raise the instantaneous motor command speed to compensate for settle plus scale-response dead time, while still respecting the hard `mm/s` and `%/s` caps.
+- TMA motor displacement calibration now uses a provisional `800 steps/mm` default for the expected 1/8-microstep configuration, migrates only old saved `100 steps/mm` defaults, and adds an external-gauge motor step calibration workflow that moves by raw Tic units, writes CSV/JSON logs, reports fit quality, and does not apply the result by default.
+- TMA motor step calibration now keeps a progress window visible for the whole calibration, including slow move waits and accepted external-gauge readings.
+- TMA motor step calibration now keeps the Tic command-timeout keepalive active during slow raw-step calibration moves, preventing the controller from stopping after only a few steps.
+- TMA motor settings and docs now distinguish mechanical full steps/mm from Tic controller units/mm, documenting the verified `100 full steps/mm * 8 microsteps = 800 Tic units/mm` relationship.
+- TMA advanced motor settings now expose mechanical full steps/mm, Tic step mode, and derived Tic units/mm; applying a new Tic step mode updates the controller through `ticcmd` and rewrites the current-position register so physical mm values stay continuous.
+- TMA now has a continuity-current monitor for automated measurements, logs raw scale samples during mandatory setup, applies directional load-limit checks during setup preload, and makes setup preload wait for post-move force feedback before issuing the next correction.
+- TMA output-collision and setup windows now show the active sample/output identity, and calibration ignores the saved backlash compensation while measuring new stiffness/backlash.
+- TMA now replaces stale output base filenames when the current sample identity changes, and setup preload starts by relaxing toward the final preload target if the wire is already above it.
+- TMA setup zero-load plateau fallback now uses a run-level corrected zero reference without changing the configured/default `21.200 g` baseline unless the operator explicitly edits or captures a new zero-load value.
+- TMA setup preload no longer treats an already-over-target sample as an immediate overload stop when the next control action can relax toward the requested preload.
+- TMA setup preload relaxation from above target now stays under the setup-time preload ramp cap instead of using cruise feedback or the global motion-speed ceiling.
+- TMA calibration now caps the load-equivalent plateau acceptance band so an inflated live stiffness estimate cannot mark a preload target reached while the measured load is still far away.
+- TMA setup now derives the engaged-wire preload ramp from setup time, uses a separate `%/s` slack take-up speed before force response, relies on the global motion speed as the hard stage-speed ceiling, and quantizes applied calibration backlash to achievable Tic units.
+- TMA setup return-to-zero and automatic post-calibration return-to-start now use a setup return-time-derived speed instead of the global motion speed directly.
+- TMA now exposes the shared return-time setting in Manual Actions, uses it for manual displacement recovery and post-recipe return-to-start, keeps setup/recovery popups plotting fresh UI-refresh samples during waits, shows a throttled ETA in recipe progress, and keeps raw-scale elapsed time continuous across setup and recipe logging.
+- TMA now uses live Tic acceleration/deceleration settings in move-duration and correction-travel estimates, keeping target-position commands unchanged while making post-move feedback waits and cruise/near decisions less optimistic for short moves.
+- TMA recovery now restarts the live UI-refresh timer after a stopped session, and setup zero-load fallback now uses a hybrid stable-plateau gate based on elapsed time plus strain-scaled return travel.
+- TMA setup preload now leaves slack `%/s` take-up permanently after the first real load response for that preload target, then uses conservative one-move-at-a-time ramp-capped corrections in both tensioning and relaxation directions.
+- TMA setup preload now interprets setup time as the live current-to-target preload span, setup return-to-zero holds its initial time-based unload speed instead of shrinking every near-zero sample, and current-sweep load/stress target ramps start in gated feedback.
+- TMA setup preload now treats the first slack-to-taut load jump as engagement rather than trusted stiffness and caps setup preload acceptance so backlash/reversal logic cannot accept a multi-MPa overshoot as the preload target.
+- TMA current-sweep load/stress corrections now use the stiffest safe stiffness estimate and cap each planned correction to `10 MPa` as well as the strain limit, reducing aggressive first-approach jumps after setup.
+- TMA now treats the applied-load limit as a directional control boundary that blocks or halts only tension-increasing motion, and treats the raw scale display limit, defaulting to `30 g`, as a hard balance-protection interlock that halts automation and blocks ordinary moves until the live display is back below the limit.
+- TMA current sweeps can optionally pause the current ramp when load/stress/strain error exceeds a configured band, keep displacement correction active, and resume without a wall-clock current jump once the target recovers.
+- TMA current sweeps now freeze mechanical stiffness after setup/calibration, treat backlash as reversal take-up instead of large-error target acceptance, and ramp setup-preload overshoots down from the live overshot load/stress over the configured setup time.
+- TMA current-sweep dynamic speed control now controls correction distance as the primary average-speed mechanism: load/stress corrections shrink from coarse target-space caps toward `1 MPa` equivalent and then single motor steps near target while keeping the Tic command speed practical for short moves.
+- TMA runs now include `control_trace.csv`, a per-decision seek trace with target, feedback, error, stiffness, correction distance, backlash take-up, command speed, wait reason, and move result for diagnosing closed-loop behavior.
+- TMA current-sweep load/stress holds now use conservative gated force feedback with `1 MPa`-equivalent correction caps, avoiding stale cruise corrections that could stack around the target.
+- TMA setup slack take-up now caps each pre-contact move by a `5 MPa` stiffness-prior equivalent step, the zero-load plateau fallback accepts a stable baseline sooner, and live plots hide zero-current current/resistance points.
+- TMA setup preload and current-sweep load/stress fine correction now shrink to single motor-step moves near target, avoid predictive backlash injection in that fine band, and require extra fresh balance confirmation before repeating very-near-target corrections; `control_trace.csv` now includes motor-step and post-move sample-count diagnostics.
+- TMA length setup now computes unloaded `l0` from a fitted linear unload intercept during the post-preload 20 MPa -> 0 MPa return when the taut elastic segment is available, using slack/plateau detection as confirmation instead of the baseline source.
+- TMA setup return-to-zero now treats collapse of the linear unload slope as slack onset, commits the fitted zero-stress intercept for `l0`, and returns there instead of continuing to drive the wire farther into slack.
+- TMA current-sweep load/stress reversals no longer perform predictive full-backlash take-up, so dynamic correction steps around targets are not dominated by the saved backlash distance.
+- TMA zero-load plateau fallback now accepts a stable flat balance after `0.05%` of `l0` or `4` motor units of return travel, and the recovery load-to-zero graph now labels load and displacement with a legend.
+- TMA recovery graphs now use more distinct load/displacement colors and keep the x-axis label readable in dark mode.
+- TMA setup now keeps the continuity current active before current-sweep recipes, and length setup reuses the committed slack-onset zero position when applying `l0` instead of refitting the baseline after additional low-slope samples.
+- TMA current-ramp hold now uses a filtered, noise-adaptive high-side load/stress error so annealing fluctuations do not hold current indefinitely, and large current-sweep stress errors can use faster `10 MPa`/`5 MPa` correction caps before shrinking near target.
+- TMA current-sweep settle after each current ramp is now time-bounded instead of waiting forever for noisy annealing feedback, current hold uses the same absolute load/stress error on current-up and current-down ramps, and paused-current recovery can use a larger `20 MPa` equivalent correction cap while the current ramp is held.
+- TMA current-sweep recipes now expose the stress correction caps and current-hold filter/noise bands in the UI, show a concise current-task summary, and use a more compact dashboard header with native-font live values.
+- TMA current hold no longer has a maximum pause-time stop, and the dashboard header now uses a tighter 3-column live-value grid so the plot area fits better on narrower screens.
+- TMA current-sweep recipes now include a `First overheating` option that repeats the first target's current sweep once before continuing to later targets.
+- TMA current-sweep load/stress corrections now use a smooth dynamic error-fraction cap with visible sweep/hold hard rails, and current sweeps always include the return-to-start-current leg at each target.
+- TMA now exposes an occasional-use `Tare scale` button in the normal Hardware scale controls for balances whose front-panel tare is unavailable while connected.
+- TMA current-sweep advanced caps, hold bands, and filter settings are now collapsed behind an expander by default, the hold hard cap default migrates from `20 MPa` to `30 MPa`, and manual jog presses resync from the live motor position when no move is pending so stale targets cannot flip a down jog upward.
+- TMA dashboard graphs now append live UI-refresh samples between logged CSV rows, using already-known scale/motor/supply state so plots update smoothly without adding hardware reads.
 
 ## 2026-04-28 13:11 UTC
 
@@ -1257,7 +1257,7 @@
 
 ## 2026-04-28 11:45 UTC
 
-- Made Mini DMA recipe startup run the length setup as a mandatory unlogged preparation step before normal recipe CSV/graph logging begins.
+- Made TMA recipe startup run the length setup as a mandatory unlogged preparation step before normal recipe CSV/graph logging begins.
 - Streamlined the specimen panel into a `Sample` tab by removing manual gauge-length, preload-zero, Tic-zero, manual session, and optional naming controls; sample naming now always updates from the naming fields.
 - Added recipe-side stress/load equivalents, including ramp-rate equivalents, using the current wire diameter, and made those equivalent labels readable in the dark UI.
 - Remembered sample naming fields and the last `.pydpj` project, auto-imported matching Builder diameter data on restore/name changes, and marked manual/unimported diameter values in red while still allowing manual edits.
@@ -1272,29 +1272,29 @@
 
 ## 2026-04-28 11:06 UTC
 
-- Removed the Mini DMA hardware-tab separate heating program; current is now recipe-owned.
-- Changed Mini DMA voltage-limit handling during current sweeps to ramp recipe current back to the sweep start current and continue instead of stopping the whole recipe.
+- Removed the TMA hardware-tab separate heating program; current is now recipe-owned.
+- Changed TMA voltage-limit handling during current sweeps to ramp recipe current back to the sweep start current and continue instead of stopping the whole recipe.
 - Made the zero-load hanging-weight reference the default max applied-load ceiling, with the custom max-load setting acting only as an optional lower limit.
 
 ## 2026-04-28 11:01 UTC
 
-- Added a Recipe-tab sample reminder so Mini DMA shows the currently selected sample before a recipe starts.
-- Changed existing-output handling so repeated Mini DMA measurements can be saved as the next `_run02`, `_run03`, and later filename instead of replacing earlier files.
+- Added a Recipe-tab sample reminder so TMA shows the currently selected sample before a recipe starts.
+- Changed existing-output handling so repeated TMA measurements can be saved as the next `_run02`, `_run03`, and later filename instead of replacing earlier files.
 
 ## 2026-04-28 10:44 UTC
 
-- Added an automatic Mini DMA Calibration recipe that records baseline scale noise, preload targets, forward/reverse micro-move phases, and a JSON calibration report with stiffness, backlash, and stress-strain estimates when geometry is available.
+- Added an automatic TMA Calibration recipe that records baseline scale noise, preload targets, forward/reverse micro-move phases, and a JSON calibration report with stiffness, backlash, and stress-strain estimates when geometry is available.
 - Split calibration preload seeking from micro-move characterization so bent/stiff calibration wires can be straightened with faster, coarser corrections before fine stiffness/backlash measurements.
 - Shared the mandatory preload/return length setup workflow with the Calibration recipe and kept old `calibration_copper` saved settings compatible with the new generic recipe name.
 - Made the recipe panel size itself to the visible recipe page so calibration controls no longer leave a large blank area before the start button.
 
 ## 2026-04-28 09:46 UTC
 
-- Added a Mini DMA hardware profile documenting the current G&G balance, StepperOnline captive linear actuator, and Pololu Tic T500 controller, including product links, derived motion/load/stress implications, and backlash characterization guidance.
+- Added a TMA hardware profile documenting the current G&G balance, StepperOnline captive linear actuator, and Pololu Tic T500 controller, including product links, derived motion/load/stress implications, and backlash characterization guidance.
 
 ## 2026-04-28 09:26 UTC
 
-- Mini DMA now separates high-rate scale acquisition from slower session logging, writes a raw `<run>.scale_raw.csv` sidecar during active sessions, and adds interval load summary columns to the main CSV.
+- TMA now separates high-rate scale acquisition from slower session logging, writes a raw `<run>.scale_raw.csv` sidecar during active sessions, and adds interval load summary columns to the main CSV.
 - Current-sweep recipes now expose separate control and log intervals so closed-loop corrections can run faster than recorded session rows.
 
 ## 2026-04-27 14:13 UTC
@@ -1317,44 +1317,44 @@
 
 ## 2026-04-23 13:41 UTC
 
-- Mini DMA Logger now keeps the last confirmed stage position separate from the commanded target so strain, stress, and recorded points do not jump ahead of real motion after a move command.
+- TMA Logger now keeps the last confirmed stage position separate from the commanded target so strain, stress, and recorded points do not jump ahead of real motion after a move command.
 - Hsw distribution seeking now refuses to act on stale or missing balance readings for load- and stress-based control instead of nudging the stage on old force data.
-- Mini DMA session metadata now preserves the original creation timestamp across JSON sidecar rewrites during a run.
-- Mini DMA now supports active hardware auto-detection for the G&G scale, the serial supply, and the Pololu Tic controller, plus a normal zero-load scale reference workflow that leaves the balance showing real grams while keeping physical/software tare actions as advanced diagnostics only.
-- Mini DMA naming now mirrors the other microwire loggers more closely by keeping human-readable microwire tokens like `156/2` in the sample name while using file-safe tokens like `156_2` in the output filename.
-- Mini DMA's settings panel now prevents mouse-wheel scrolling from silently changing spin-box and drop-down values, removes horizontal scrolling, and exposes tare actions in the manual setup controls.
-- Mini DMA now hides low-level scale and motor driver settings behind a collapsed advanced hardware panel so routine bench controls are easier to understand.
-- Mini DMA recipe start now performs a hardware preflight that auto-detects/connects required scale and supply devices, reports missing hardware together, and avoids creating run files until preflight succeeds.
-- Mini DMA recipe estimates now switch to minutes/hours for longer runs and include a live progress bar, while the duplicate status-bar log echo is hidden.
-- Mini DMA hides the separate heating program for controlled current-sweep recipes because those recipes control current directly.
-- Mini DMA now restores stale saved `ticcmd` paths to a discovered local install, clamps tiny saved jog values to a usable minimum, and refuses motor moves that round to the current step.
-- Mini DMA now exposes per-recipe displacement or correction move speed for Tic moves, applies it through `ticcmd --max-speed`, and labels manual motion as stacked arrow `Move up` / `Move down` controls that repeat while held and chain from the last commanded target.
-- Mini DMA held manual movement now advances the commanded linear position by elapsed time times the configured `Manual move speed`, so a held `1 mm/s` move no longer crawls at the button repeat rate.
-- Mini DMA now warns when the Tic VIN motor-supply voltage is missing/too low and keeps resetting the Tic command timeout during active slow moves.
-- Mini DMA now shows optional zero-load reference capture inside the current-sweep recipe settings, and closed-loop recipe corrections chain from the last commanded target while using conservative recipe-specific correction step/speed values.
-- Mini DMA current-sweep seeking now detects target overshoot, switches to fine reverse correction steps, and can apply measured backlash take-up when reversing direction.
-- Mini DMA current-sweep seeking now records feedback samples while correcting load/stress/strain, uses smaller/slower correction moves near the target, and no longer stops merely because load is flat during displacement, which is expected during shape-memory transformation plateaus.
-- Mini DMA current-sweep defaults now use the faster copper bring-up recipe of `0` to `9 g` in `3 g` steps and a `1` to `3 mA` current ramp.
-- Mini DMA now has pause/resume recipe controls; pause/stop turn the current-annealing output off, stopped recipes can be resumed from the saved step or restarted, and any recipe stop/fault can offer displacement/load recovery.
-- Mini DMA can optionally power the motor from HMP4030 CH1 or CH2 during recipe preflight while keeping current annealing on the configured annealing channel.
-- Mini DMA recovery now opens a temporary dual-axis load/displacement vs time plot while returning displacement or load toward zero/start, without changing the normal run dashboard; the same recovery actions are also available as manual buttons.
-- Mini DMA motion spin boxes now clamp manual edits to the physical motor resolution instead of reverting mysteriously, and load/stress seeking stops on truly stale scale feedback while still waiting for a fresh reading after each commanded move.
-- Mini DMA max-load safety now blocks only tension-increasing moves when the live load is already over the limit, so relaxing/downward manual moves remain available to recover the rig.
-- Mini DMA now puts `Recipe` first, merges scale/motor/power setup into a lower-priority `Hardware` tab, and splits current-sweep recipes into explicit DMA-style entries for iso-load, iso-stress, and iso-strain.
-- Mini DMA recipe summaries and spin boxes now trim zero-only decimals, for example `20 g` instead of `20.0000 g`.
-- Mini DMA now includes current-sweep recipes for holding load, stress, or strain while ramping current at a configurable mA/s rate; the app updates current in smaller increments at the recipe interval, leaves zero-current resistance blank, and keeps sampling resistance/mechanics during seeking and settling.
-- Mini DMA now displays/logs applied tensile load as a positive magnitude even when the scale reports negative values, keeps raw scale/Tic diagnostics, and separates tensile displacement direction from scale sign so target seeking does not stop because of a sign mismatch.
-- Mini DMA now defaults this rig's motion convention to negative raw Tic travel as positive tensile displacement, keeps correcting toward a tighter near-target band inside the broad hold tolerance, stops the session log when a recipe completes, and keeps recovery-to-zero samples out of the recipe CSV.
-- Mini DMA load/stress correction now bases each correction on the latest confirmed Tic position and limits target distance by correction speed times recipe interval, preventing slow moves from stacking ahead of the real stage and causing overshoot/undershoot loops.
-- Mini DMA current sweeps now advance current from elapsed time, use HMP4030-style 0.2 mA setpoint resolution below 1 A, keep sub-mA precision on the first output-enable command, and throttle supply readbacks during fast automation so current commands do not fight voltage/current queries on the same serial link.
-- Mini DMA current-sweep recipes now ramp load/stress/strain targets at configurable g/s, MPa/s, or %/s rates, with a separate target-ramp stage speed so automatic return-to-target moves do not crawl at the fine correction speed.
-- Mini DMA recipe progress now counts timed target-ramp and current-ramp ticks, so long elapsed-time sweeps do not appear as a short handful of recipe rows or reach 100% before completion.
-- Mini DMA load/stress control now defaults to a `21.200 g` zero-load scale reference for the hanging-weight rig and computes applied wire load from the live real balance reading instead of remotely taring the scale.
-- Mini DMA current-sweep recipes can now run an optional zero/preload length setup before annealing: actively seek `0 g` applied load, ramp to a configurable preload stress, prompt for the measured gauge length, return to `0 g`, compute `l0`, and then start the recipe without using a slack/free-transformation mode.
-- Mini DMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
-- Added a Mini DMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
+- TMA session metadata now preserves the original creation timestamp across JSON sidecar rewrites during a run.
+- TMA now supports active hardware auto-detection for the G&G scale, the serial supply, and the Pololu Tic controller, plus a normal zero-load scale reference workflow that leaves the balance showing real grams while keeping physical/software tare actions as advanced diagnostics only.
+- TMA naming now mirrors the other microwire loggers more closely by keeping human-readable microwire tokens like `156/2` in the sample name while using file-safe tokens like `156_2` in the output filename.
+- TMA's settings panel now prevents mouse-wheel scrolling from silently changing spin-box and drop-down values, removes horizontal scrolling, and exposes tare actions in the manual setup controls.
+- TMA now hides low-level scale and motor driver settings behind a collapsed advanced hardware panel so routine bench controls are easier to understand.
+- TMA recipe start now performs a hardware preflight that auto-detects/connects required scale and supply devices, reports missing hardware together, and avoids creating run files until preflight succeeds.
+- TMA recipe estimates now switch to minutes/hours for longer runs and include a live progress bar, while the duplicate status-bar log echo is hidden.
+- TMA hides the separate heating program for controlled current-sweep recipes because those recipes control current directly.
+- TMA now restores stale saved `ticcmd` paths to a discovered local install, clamps tiny saved jog values to a usable minimum, and refuses motor moves that round to the current step.
+- TMA now exposes per-recipe displacement or correction move speed for Tic moves, applies it through `ticcmd --max-speed`, and labels manual motion as stacked arrow `Move up` / `Move down` controls that repeat while held and chain from the last commanded target.
+- TMA held manual movement now advances the commanded linear position by elapsed time times the configured `Manual move speed`, so a held `1 mm/s` move no longer crawls at the button repeat rate.
+- TMA now warns when the Tic VIN motor-supply voltage is missing/too low and keeps resetting the Tic command timeout during active slow moves.
+- TMA now shows optional zero-load reference capture inside the current-sweep recipe settings, and closed-loop recipe corrections chain from the last commanded target while using conservative recipe-specific correction step/speed values.
+- TMA current-sweep seeking now detects target overshoot, switches to fine reverse correction steps, and can apply measured backlash take-up when reversing direction.
+- TMA current-sweep seeking now records feedback samples while correcting load/stress/strain, uses smaller/slower correction moves near the target, and no longer stops merely because load is flat during displacement, which is expected during shape-memory transformation plateaus.
+- TMA current-sweep defaults now use the faster copper bring-up recipe of `0` to `9 g` in `3 g` steps and a `1` to `3 mA` current ramp.
+- TMA now has pause/resume recipe controls; pause/stop turn the current-annealing output off, stopped recipes can be resumed from the saved step or restarted, and any recipe stop/fault can offer displacement/load recovery.
+- TMA can optionally power the motor from HMP4030 CH1 or CH2 during recipe preflight while keeping current annealing on the configured annealing channel.
+- TMA recovery now opens a temporary dual-axis load/displacement vs time plot while returning displacement or load toward zero/start, without changing the normal run dashboard; the same recovery actions are also available as manual buttons.
+- TMA motion spin boxes now clamp manual edits to the physical motor resolution instead of reverting mysteriously, and load/stress seeking stops on truly stale scale feedback while still waiting for a fresh reading after each commanded move.
+- TMA max-load safety now blocks only tension-increasing moves when the live load is already over the limit, so relaxing/downward manual moves remain available to recover the rig.
+- TMA now puts `Recipe` first, merges scale/motor/power setup into a lower-priority `Hardware` tab, and splits current-sweep recipes into explicit DMA-style entries for iso-load, iso-stress, and iso-strain.
+- TMA recipe summaries and spin boxes now trim zero-only decimals, for example `20 g` instead of `20.0000 g`.
+- TMA now includes current-sweep recipes for holding load, stress, or strain while ramping current at a configurable mA/s rate; the app updates current in smaller increments at the recipe interval, leaves zero-current resistance blank, and keeps sampling resistance/mechanics during seeking and settling.
+- TMA now displays/logs applied tensile load as a positive magnitude even when the scale reports negative values, keeps raw scale/Tic diagnostics, and separates tensile displacement direction from scale sign so target seeking does not stop because of a sign mismatch.
+- TMA now defaults this rig's motion convention to negative raw Tic travel as positive tensile displacement, keeps correcting toward a tighter near-target band inside the broad hold tolerance, stops the session log when a recipe completes, and keeps recovery-to-zero samples out of the recipe CSV.
+- TMA load/stress correction now bases each correction on the latest confirmed Tic position and limits target distance by correction speed times recipe interval, preventing slow moves from stacking ahead of the real stage and causing overshoot/undershoot loops.
+- TMA current sweeps now advance current from elapsed time, use HMP4030-style 0.2 mA setpoint resolution below 1 A, keep sub-mA precision on the first output-enable command, and throttle supply readbacks during fast automation so current commands do not fight voltage/current queries on the same serial link.
+- TMA current-sweep recipes now ramp load/stress/strain targets at configurable g/s, MPa/s, or %/s rates, with a separate target-ramp stage speed so automatic return-to-target moves do not crawl at the fine correction speed.
+- TMA recipe progress now counts timed target-ramp and current-ramp ticks, so long elapsed-time sweeps do not appear as a short handful of recipe rows or reach 100% before completion.
+- TMA load/stress control now defaults to a `21.200 g` zero-load scale reference for the hanging-weight rig and computes applied wire load from the live real balance reading instead of remotely taring the scale.
+- TMA current-sweep recipes can now run an optional zero/preload length setup before annealing: actively seek `0 g` applied load, ramp to a configurable preload stress, prompt for the measured gauge length, return to `0 g`, compute `l0`, and then start the recipe without using a slack/free-transformation mode.
+- TMA now has an always-visible `EMERGENCY STOP` dashboard button that stops the active recipe/session, halts the Tic motor, and commands the power-supply output off.
+- Added a TMA measurement plan covering the copper-wire first test, the intended isostress current-sweep workflow, saved recipe files, and later dynamic recipes.
 - Microwire Data Builder video overrides now tolerate minimal video tables that are missing derived video-length columns.
-- Added dedicated Mini DMA regression tests for confirmed-position tracking, stale-scale safety, session metadata stability, hardware auto-detection, zero-load reference wiring, and naming behavior, and expanded import coverage to include the Mini DMA module.
+- Added dedicated TMA regression tests for confirmed-position tracking, stale-scale safety, session metadata stability, hardware auto-detection, zero-load reference wiring, and naming behavior, and expanded import coverage to include the TMA module.
 - Added `scipy==1.17.1` as a runtime dependency so `microwire_eda` imports and the related launcher test path work in a fresh project environment.
 
 ## 2026-04-23 13:22 UTC
@@ -1427,10 +1427,10 @@
 
 ## 2026-04-16 16:07 UTC
 
-- Added a new `Mini DMA Logger` launcher app for early hardware-driven stress/strain work with a serial scale and Pololu Tic-controlled stepper stage.
+- Added a new `TMA Logger` launcher app for early hardware-driven stress/strain work with a serial scale and Pololu Tic-controlled stepper stage.
 - The logger now supports scale polling, Tic status and jog commands, software tare and position zeroing, displacement-controlled ramp/cycle/hold recipes, richer session metadata, and TXT/CSV/JSON session export.
 - Added G&G scale diagnostics: a probe action, automatic no-data warnings, and UI guidance that G&G RS232 balances need a DB9 null modem crossover rather than a straight-through serial link.
-- Reworked the `Mini DMA Logger` UI into a dashboard layout with hardware/specimen/recipe tabs, status cards, naming helpers, safety limits, and a cleaner plot/log split.
+- Reworked the `TMA Logger` UI into a dashboard layout with hardware/specimen/recipe tabs, status cards, naming helpers, safety limits, and a cleaner plot/log split.
 - Added integrated current-annealing control with reusable supply profiles, manual output control, live current/voltage/resistance/power logging, and mechanical-plus-heating recipe support in the same session.
 - Added preload-aware strain zeroing with explicit `l0` gauge length handling so strain can stay pending until the sample is actually under load instead of during wire straightening.
 - Added configurable four-tile plotting with dark-theme-aware Matplotlib styling, selectable channels per axis, DMA/heating/mechanical presets, and a dedicated popup plot editor so the live dashboard keeps more space for graphs.

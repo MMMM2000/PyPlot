@@ -22,7 +22,7 @@ DEFAULT_BENCH_LOCK_TIMEOUT_S = 300.0
 
 
 class MiniDmaBenchAutomationError(RuntimeError):
-    """Raised when a Mini DMA bench automation plan is invalid or cannot run."""
+    """Raised when a TMA bench automation plan is invalid or cannot run."""
 
 
 @dataclass(frozen=True)
@@ -99,11 +99,11 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
-        raise MiniDmaBenchAutomationError(f"Could not read Mini DMA bench plan {path}: {exc}") from exc
+        raise MiniDmaBenchAutomationError(f"Could not read TMA bench plan {path}: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise MiniDmaBenchAutomationError(f"Mini DMA bench plan is not valid JSON: {exc}") from exc
+        raise MiniDmaBenchAutomationError(f"TMA bench plan is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan must contain a JSON object.")
+        raise MiniDmaBenchAutomationError("TMA bench plan must contain a JSON object.")
     return payload
 
 
@@ -111,9 +111,9 @@ def _as_float(value: object, *, field: str, minimum: float | None = None) -> flo
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
-        raise MiniDmaBenchAutomationError(f"Mini DMA bench plan field '{field}' must be numeric.") from exc
+        raise MiniDmaBenchAutomationError(f"TMA bench plan field '{field}' must be numeric.") from exc
     if minimum is not None and result < minimum:
-        raise MiniDmaBenchAutomationError(f"Mini DMA bench plan field '{field}' must be at least {minimum}.")
+        raise MiniDmaBenchAutomationError(f"TMA bench plan field '{field}' must be at least {minimum}.")
     return result
 
 
@@ -125,21 +125,21 @@ def _optional_float(mapping: Mapping[str, Any], key: str) -> float | None:
 
 def _resolve_plan_path(base: Path, value: object, *, field: str, must_exist: bool = False) -> Path:
     if not isinstance(value, str) or not value.strip():
-        raise MiniDmaBenchAutomationError(f"Mini DMA bench plan field '{field}' must be a non-empty path string.")
+        raise MiniDmaBenchAutomationError(f"TMA bench plan field '{field}' must be a non-empty path string.")
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = (base / path).resolve()
     if must_exist and not path.exists():
-        raise MiniDmaBenchAutomationError(f"Mini DMA bench plan path does not exist for '{field}': {path}")
+        raise MiniDmaBenchAutomationError(f"TMA bench plan path does not exist for '{field}': {path}")
     return path
 
 
 def _validate_arming(payload: Mapping[str, Any]) -> None:
     if not bool(payload.get("armed", False)):
-        raise MiniDmaBenchAutomationError("Mini DMA bench execution requires 'armed': true.")
+        raise MiniDmaBenchAutomationError("TMA bench execution requires 'armed': true.")
     if payload.get("operator_confirmation") != MINI_DMA_BENCH_CONFIRMATION:
         raise MiniDmaBenchAutomationError(
-            "Mini DMA bench execution requires operator_confirmation "
+            "TMA bench execution requires operator_confirmation "
             f"to equal {MINI_DMA_BENCH_CONFIRMATION!r}."
         )
 
@@ -148,9 +148,9 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     plan_path = Path(path).expanduser().resolve()
     payload = _load_json_object(plan_path)
     if payload.get("schema_version") != PLAN_SCHEMA_VERSION:
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan schema_version must be 1.")
+        raise MiniDmaBenchAutomationError("TMA bench plan schema_version must be 1.")
     if payload.get("kind") != PLAN_KIND:
-        raise MiniDmaBenchAutomationError(f"Mini DMA bench plan kind must be {PLAN_KIND!r}.")
+        raise MiniDmaBenchAutomationError(f"TMA bench plan kind must be {PLAN_KIND!r}.")
 
     execute = bool(payload.get("execute", False))
     if execute:
@@ -168,7 +168,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     if raw_sample is None:
         raw_sample = {}
     if not isinstance(raw_sample, Mapping):
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'sample_identity' must be an object.")
+        raise MiniDmaBenchAutomationError("TMA bench plan field 'sample_identity' must be an object.")
     builder_project_path = None
     if raw_sample.get("builder_project_path") is not None:
         builder_project_path = _resolve_plan_path(
@@ -191,23 +191,23 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     if raw_guardrails is None:
         raw_guardrails = {}
     if not isinstance(raw_guardrails, Mapping):
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'guardrails' must be an object.")
+        raise MiniDmaBenchAutomationError("TMA bench plan field 'guardrails' must be an object.")
     max_stress_mpa = _optional_float(raw_guardrails, "max_stress_mpa")
     recovery_stress_mpa = _optional_float(raw_guardrails, "recovery_stress_mpa")
     if recovery_stress_mpa is not None and recovery_stress_mpa <= 0.0:
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan guardrail recovery_stress_mpa must be positive.")
+        raise MiniDmaBenchAutomationError("TMA bench plan guardrail recovery_stress_mpa must be positive.")
     mechanical_slack_max_seek_mm = _optional_float(raw_guardrails, "mechanical_slack_max_seek_mm")
     if mechanical_slack_max_seek_mm is not None and mechanical_slack_max_seek_mm <= 0.0:
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan guardrail mechanical_slack_max_seek_mm must be positive.")
+        raise MiniDmaBenchAutomationError("TMA bench plan guardrail mechanical_slack_max_seek_mm must be positive.")
     current_hold_quality_timeout_s = _optional_float(raw_guardrails, "current_hold_quality_timeout_s")
     if current_hold_quality_timeout_s is not None and current_hold_quality_timeout_s <= 0.0:
         raise MiniDmaBenchAutomationError(
-            "Mini DMA bench plan guardrail current_hold_quality_timeout_s must be positive."
+            "TMA bench plan guardrail current_hold_quality_timeout_s must be positive."
         )
     current_hold_quality_error_mpa = _optional_float(raw_guardrails, "current_hold_quality_error_mpa")
     if current_hold_quality_error_mpa is not None and current_hold_quality_error_mpa <= 0.0:
         raise MiniDmaBenchAutomationError(
-            "Mini DMA bench plan guardrail current_hold_quality_error_mpa must be positive."
+            "TMA bench plan guardrail current_hold_quality_error_mpa must be positive."
         )
     guardrails = MiniDmaBenchGuardrails(
         max_stress_mpa=max_stress_mpa,
@@ -222,7 +222,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     if raw_bench_lock is None:
         raw_bench_lock = {}
     if not isinstance(raw_bench_lock, Mapping):
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'bench_lock' must be an object.")
+        raise MiniDmaBenchAutomationError("TMA bench plan field 'bench_lock' must be an object.")
     bench_lock_path = None
     if raw_bench_lock.get("lock_path") is not None:
         bench_lock_path = _resolve_plan_path(
@@ -233,7 +233,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         )
     bench_lock_owner = str(raw_bench_lock.get("owner") or "mini_dma_bench_automation").strip()
     if not bench_lock_owner:
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan bench_lock.owner must not be empty.")
+        raise MiniDmaBenchAutomationError("TMA bench plan bench_lock.owner must not be empty.")
     bench_lock_purpose = raw_bench_lock.get("purpose")
     if bench_lock_purpose is not None:
         bench_lock_purpose = str(bench_lock_purpose).strip() or None
@@ -252,7 +252,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     if raw_hardware is None:
         raw_hardware = {}
     if not isinstance(raw_hardware, Mapping):
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'hardware' must be an object.")
+        raise MiniDmaBenchAutomationError("TMA bench plan field 'hardware' must be an object.")
     hardware = MiniDmaHardwareConfig(
         supply_profile=None if raw_hardware.get("supply_profile") is None else str(raw_hardware["supply_profile"]),
         shared_broker_host=(
@@ -289,23 +289,23 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     if default_lengths is None:
         default_lengths = {}
     if not isinstance(default_lengths, Mapping):
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan field 'length_setup' must be an object.")
+        raise MiniDmaBenchAutomationError("TMA bench plan field 'length_setup' must be an object.")
     default_starting_length_mm = _optional_float(default_lengths, "starting_length_mm")
     default_preload_length_mm = _optional_float(default_lengths, "preload_length_mm")
 
     allow_interactive_setup_prompts = bool(payload.get("allow_interactive_setup_prompts", False))
     raw_runs = payload.get("runs")
     if not isinstance(raw_runs, list) or not raw_runs:
-        raise MiniDmaBenchAutomationError("Mini DMA bench plan requires a non-empty 'runs' array.")
+        raise MiniDmaBenchAutomationError("TMA bench plan requires a non-empty 'runs' array.")
 
     runs: list[MiniDmaBenchRun] = []
     for index, raw_run in enumerate(raw_runs, start=1):
         if not isinstance(raw_run, Mapping):
-            raise MiniDmaBenchAutomationError(f"Mini DMA bench run #{index} must be an object.")
+            raise MiniDmaBenchAutomationError(f"TMA bench run #{index} must be an object.")
         recipe_path = _resolve_plan_path(base, raw_run.get("recipe_path"), field=f"runs[{index}].recipe_path", must_exist=True)
         repeat = int(raw_run.get("repeat", 1))
         if repeat < 1:
-            raise MiniDmaBenchAutomationError(f"Mini DMA bench run #{index} repeat must be at least 1.")
+            raise MiniDmaBenchAutomationError(f"TMA bench run #{index} repeat must be at least 1.")
         max_run_duration_s = _as_float(
             raw_run.get("max_run_duration_s", default_max_run_duration_s),
             field=f"runs[{index}].max_run_duration_s",
@@ -315,7 +315,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         if run_lengths is None:
             run_lengths = {}
         if not isinstance(run_lengths, Mapping):
-            raise MiniDmaBenchAutomationError(f"Mini DMA bench run #{index} length_setup must be an object.")
+            raise MiniDmaBenchAutomationError(f"TMA bench run #{index} length_setup must be an object.")
         starting_length_mm = _optional_float(run_lengths, "starting_length_mm")
         preload_length_mm = _optional_float(run_lengths, "preload_length_mm")
         if starting_length_mm is None:
@@ -343,7 +343,7 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         ]
         if missing_lengths:
             raise MiniDmaBenchAutomationError(
-                "Mini DMA bench execution requires automated length_setup starting_length_mm "
+                "TMA bench execution requires automated length_setup starting_length_mm "
                 "and preload_length_mm for every run, unless allow_interactive_setup_prompts is true. "
                 f"Missing: {', '.join(missing_lengths)}"
             )
@@ -933,7 +933,7 @@ def run_mini_dma_bench_plan(
                 "enabled": plan.bench_lock.enabled,
                 "timeout_s": plan.bench_lock.timeout_s,
                 "owner": plan.bench_lock.owner,
-                "purpose": plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+                "purpose": plan.bench_lock.purpose or f"TMA bench plan {plan.path.name}",
                 "lock_path": None if plan.bench_lock.lock_path is None else str(plan.bench_lock.lock_path),
             },
             "planned_run_count": len(plan.runs),
@@ -955,7 +955,7 @@ def run_mini_dma_bench_plan(
         lock_factory = bench_lock_factory or wait_for_bench_lock
         bench_lock_context = lock_factory(
             owner=plan.bench_lock.owner,
-            purpose=plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+            purpose=plan.bench_lock.purpose or f"TMA bench plan {plan.path.name}",
             timeout_s=plan.bench_lock.timeout_s,
             lock_path=plan.bench_lock.lock_path,
         )
@@ -1023,7 +1023,7 @@ def run_mini_dma_bench_plan(
         "enabled": plan.bench_lock.enabled,
         "timeout_s": plan.bench_lock.timeout_s,
         "owner": plan.bench_lock.owner,
-        "purpose": plan.bench_lock.purpose or f"Mini DMA bench plan {plan.path.name}",
+        "purpose": plan.bench_lock.purpose or f"TMA bench plan {plan.path.name}",
         "lock_path": None if plan.bench_lock.lock_path is None else str(plan.bench_lock.lock_path),
     }
     if hasattr(bench_lock_context, "path"):

@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 
 
 class CampaignError(ValueError):
-    """Raised when a Mini DMA campaign manifest is malformed."""
+    """Raised when a TMA campaign manifest is malformed."""
 
 
 def _parse_scalar(text: str) -> Any:

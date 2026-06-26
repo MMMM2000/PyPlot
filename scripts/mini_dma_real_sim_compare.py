@@ -1,4 +1,4 @@
-"""Command-line wrapper for Mini DMA real-vs-simulator comparisons."""
+"""Command-line wrapper for TMA real-vs-simulator comparisons."""
 
 from __future__ import annotations
 

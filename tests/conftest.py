@@ -54,7 +54,7 @@ def pytest_configure() -> None:
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     if os.name != "nt":
         return
-    # Windows/Qt can crash natively if Mini DMA starts after the Microwire GUI tests.
+    # Windows/Qt can crash natively if TMA starts after the Microwire GUI tests.
     original_index = {item: index for index, item in enumerate(items)}
     microwire_index = min(
         (

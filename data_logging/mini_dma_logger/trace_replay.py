@@ -1,4 +1,4 @@
-"""Post-run Mini DMA control-trace diagnostics."""
+"""Post-run TMA control-trace diagnostics."""
 
 from __future__ import annotations
 
@@ -251,7 +251,7 @@ def write_markdown_report(path: Path, result: TraceReplayResult) -> None:
         "motor_step_floor",
         "replayed_acceptance_tolerance",
     ]
-    text = f"""# Mini DMA Control Trace Replay
+    text = f"""# TMA Control Trace Replay
 
 Run: `{summary.run_dir}`
 
@@ -290,8 +290,8 @@ def write_replay_outputs(result: TraceReplayResult, output_dir: Path | str) -> d
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Replay Mini DMA current-sweep control_trace.csv acceptance decisions.")
-    parser.add_argument("run_dir", help="Mini DMA run folder containing control_trace.csv and metadata.json.")
+    parser = argparse.ArgumentParser(description="Replay TMA current-sweep control_trace.csv acceptance decisions.")
+    parser.add_argument("run_dir", help="TMA run folder containing control_trace.csv and metadata.json.")
     parser.add_argument("--load-tolerance-g", type=float, default=DEFAULT_AUTO_TOLERANCE_LOAD_G)
     parser.add_argument("--out", type=Path, default=None, help="Output directory for replay CSV/JSON/Markdown files.")
     args = parser.parse_args(argv)

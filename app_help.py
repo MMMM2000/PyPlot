@@ -163,7 +163,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         ).strip(),
     },
     "mini_dma_logger": {
-        "title": "Mini DMA Logger",
+        "title": "TMA Logger",
         "body": dedent(
             """
             ### IR thermometer wiring
@@ -192,7 +192,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             include suitable pullups.
 
             ### Choosing the sensor
-            * Choose the connected sensor explicitly. Mini DMA does not auto-detect the
+            * Choose the connected sensor explicitly. TMA does not auto-detect the
               sensor because the current Nucleo firmware images are sensor-specific.
             * **MLX90614 spot thermometer** expects STM32Cube MLX90614 probe lines at
               `2000000` baud. Its setting is the probe sample interval. The logger
@@ -210,15 +210,15 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             combined firmware is possible later, but that is not the current bench setup.
 
             Use **Live camera** in the IR panel to open a passive MLX90640 heatmap popup
-            inside Mini DMA. During a measurement it shows the calibrated frames already
-            being read by Mini DMA IR logging, so it does not open a second serial
+            inside TMA. During a measurement it shows the calibrated frames already
+            being read by TMA IR logging, so it does not open a second serial
             connection or steal the COM port.
 
             Use **Flash firmware** after selecting **MLX90614 spot thermometer** or
             **MLX90640 Cube raw camera** to build and flash the matching STM32Cube
             firmware over SWD.
 
-            Mini DMA logging intentionally stores a compact temperature summary instead
+            TMA logging intentionally stores a compact temperature summary instead
             of every pixel, while the popup keeps the full live heatmap available for
             alignment and sanity checks.
             """

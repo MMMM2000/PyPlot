@@ -8,12 +8,12 @@ ledger:
 
 tasks:
   - id: "mini-dma-run-cleanup-ui"
-    title: "Mini DMA wire-break run cleanup review"
+    title: "TMA wire-break run cleanup review"
     status: "integrated"
     priority: "normal"
     owner:
       thread_id: "019eb109-4ad3-7d50-9ad0-f34ec09e89df"
-      thread_title: "Mini DMA run cleanup UI"
+      thread_title: "TMA run cleanup UI"
       role: "worker"
     git:
       base_branch: "codex/integration-mini-dma-ready-review"
@@ -24,7 +24,7 @@ tasks:
       clean_status_reported: true
     scope:
       summary: >
-        Adds opt-in cleanup/archive review after Mini DMA wire-break/contact-loss
+        Adds opt-in cleanup/archive review after TMA wire-break/contact-loss
         stops, with metadata-based sibling grouping, graph previews, iso-current
         preview handling, and clearer commanded-move log wording.
       touched_files:
@@ -36,9 +36,9 @@ tasks:
         - "changelog.d/2026-06-10-mini-dma-run-cleanup-ui.md"
         - "changelog.d/2026-06-11-mini-dma-motor-step-log.md"
       conflict_areas:
-        - "Mini DMA stop/recovery flow"
-        - "Mini DMA Matplotlib preview/dialog imports"
-        - "Mini DMA move log wording"
+        - "TMA stop/recovery flow"
+        - "TMA Matplotlib preview/dialog imports"
+        - "TMA move log wording"
     readiness:
       handoff_received: true
       branch_and_commit: true
@@ -58,13 +58,13 @@ tasks:
       changelog_status: "Fragments added."
       risks:
         - "No hardware validation."
-        - "Needs combined checks against recent Mini DMA stop/session/camera changes."
+        - "Needs combined checks against recent TMA stop/session/camera changes."
     integration:
       decision: "merge"
       merged_commit: "2a45778"
       combined_checks:
         - "tests/test_mini_dma_run_cleanup.py full file: 6 passed."
-        - "Combined Mini DMA cleanup/session/camera-stop/move-log slice: 10 passed."
+        - "Combined TMA cleanup/session/camera-stop/move-log slice: 10 passed."
         - "py_compile mini_dma_logger.py and run_cleanup.py passed."
       regression_guarantees_to_recheck:
         - "Stopped/control-stopped sessions do not keep appending live plot points."
@@ -77,12 +77,12 @@ tasks:
       artifacts: []
 
   - id: "mini-dma-ui-control-separation"
-    title: "Mini DMA UI/control separation and optimization fixes"
+    title: "TMA UI/control separation and optimization fixes"
     status: "ready"
     priority: "high"
     owner:
       thread_id: "019e9312-40b2-7f72-a127-ee907170e38d"
-      thread_title: "Run Mini DMA campaign"
+      thread_title: "Run TMA campaign"
       role: "worker"
     git:
       base_branch: "codex/integration-mini-dma-ready-review"
@@ -94,16 +94,16 @@ tasks:
     scope:
       summary: >
         UI/control separation commits are already integrated in this branch.
-        The remaining worker branch tip contains later Mini DMA metadata/import
+        The remaining worker branch tip contains later TMA metadata/import
         trust fixes that still need review/integration.
       touched_files:
         - "data_logging/mini_dma_logger/mini_dma_logger.py"
         - "tests/test_mini_dma_logger.py"
         - "docs/mini_dma_campaigns/"
       conflict_areas:
-        - "Mini DMA recipe control loop"
-        - "Mini DMA UI refresh/log batching"
-        - "Mini DMA current-hold correction logic"
+        - "TMA recipe control loop"
+        - "TMA UI refresh/log batching"
+        - "TMA current-hold correction logic"
         - "Sample metadata and diameter trust state"
     readiness:
       handoff_received: true
@@ -114,7 +114,7 @@ tasks:
         - "Run-log output is batched during active background control."
         - "Microwire suggestions and diameter import refresh are cheaper and retry after async races."
       tests:
-        - "505 Mini DMA logger tests passed for UI/control separation handoff."
+        - "505 TMA logger tests passed for UI/control separation handoff."
         - "Focused current-hold and import tests passed in worker."
       screenshots_or_artifacts: []
       changelog_status: "Fragments added in worker branch."
@@ -128,7 +128,7 @@ tasks:
         - "2026-06-15: git cherry shows only e7d5385/be1b3b2 as non-equivalent; both replayed empty onto current integration after conflict resolution, so no commit was added."
       regression_guarantees_to_recheck:
         - "Camera runtime/session stop fixes."
-        - "Mini DMA run cleanup stop/recovery hooks if merged first."
+        - "TMA run cleanup stop/recovery hooks if merged first."
         - "Existing current-sweep numeric expectations."
       final_status: "UI/control separation and metadata/import behavior represented in current integration; no broad merge from stale branch"
     links:
@@ -137,12 +137,12 @@ tasks:
       artifacts: []
 
   - id: "mini-dma-camera-runtime-controls"
-    title: "Mini DMA thermal camera runtime controls"
+    title: "TMA thermal camera runtime controls"
     status: "integrated"
     priority: "high"
     owner:
       thread_id: "019eab9d-6fdd-7ca0-93b4-7bf0a70afe5a"
-      thread_title: "Mini DMA camera/logging fixes"
+      thread_title: "TMA camera/logging fixes"
       role: "worker"
     git:
       base_branch: "origin/codex/integration-mini-dma-ready-review"
@@ -160,9 +160,9 @@ tasks:
         - "data_logging/mini_dma_logger/mini_dma_logger.py"
         - "tests/test_mini_dma_logger.py"
       conflict_areas:
-        - "Mini DMA IR worker and live camera popup"
-        - "Mini DMA plot channels"
-        - "Mini DMA recipe stop/session cleanup"
+        - "TMA IR worker and live camera popup"
+        - "TMA plot channels"
+        - "TMA recipe stop/session cleanup"
     readiness:
       handoff_received: true
       branch_and_commit: true
@@ -193,12 +193,12 @@ tasks:
       artifacts: []
 
   - id: "mini-dma-iso-current-transition"
-    title: "Mini DMA iso-current transition ramp"
+    title: "TMA iso-current transition ramp"
     status: "integrated"
     priority: "high"
     owner:
       thread_id: "019eab9d-6fdd-7ca0-93b4-7bf0a70afe5a"
-      thread_title: "Mini DMA camera/logging fixes"
+      thread_title: "TMA camera/logging fixes"
       role: "worker"
     git:
       base_branch: "codex/mini-dma-camera-runtime-controls"
@@ -221,9 +221,9 @@ tasks:
         - "tests/test_mini_dma_logger.py"
         - "changelog.d/2026-06-15-iso-current-transition.md"
       conflict_areas:
-        - "Mini DMA recipe generation"
-        - "Mini DMA mechanical scan logging"
-        - "Mini DMA recipe naming/dashboard choices"
+        - "TMA recipe generation"
+        - "TMA mechanical scan logging"
+        - "TMA recipe naming/dashboard choices"
     readiness:
       handoff_received: true
       branch_and_commit: true
@@ -251,12 +251,12 @@ tasks:
       decision: "cherry-pick"
       merged_commit: "b10160f, 116ea5c"
       combined_checks:
-        - "2026-06-15 new master: Mini DMA focused iso-current/import/camera slice: 18 passed, 517 deselected."
+        - "2026-06-15 new master: TMA focused iso-current/import/camera slice: 18 passed, 517 deselected."
         - "2026-06-15 new master follow-up: focused iso-current UI/recipe slice: 8 passed, 528 deselected."
         - "2026-06-15 new master follow-up: py_compile mini_dma_logger.py passed; git diff --check passed."
       regression_guarantees_to_recheck:
-        - "Mini DMA camera runtime/session logging behavior."
-        - "Mini DMA cleanup stop/recovery behavior."
+        - "TMA camera runtime/session logging behavior."
+        - "TMA cleanup stop/recovery behavior."
         - "Current-sweep CH4 limit refresh behavior."
       final_status: "integrated into current branch; focused combined checks passed"
     links:
@@ -265,12 +265,12 @@ tasks:
       artifacts: []
 
   - id: "mini-dma-current-hold-live-optimization"
-    title: "Mini DMA current-hold live optimization and fatigue follow-up"
+    title: "TMA current-hold live optimization and fatigue follow-up"
     status: "integrated"
     priority: "high"
     owner:
       thread_id: "019ed0b9-21d0-70d0-a15e-6d58b0404495"
-      thread_title: "Mini DMA current-hold optimization"
+      thread_title: "TMA current-hold optimization"
       role: "worker"
     git:
       base_branch: "codex/integration-mini-dma-ready-review"
@@ -297,10 +297,10 @@ tasks:
         - "tests/test_mini_dma_bench_automation.py"
         - "tests/test_mini_dma_fatigue_learning.py"
       conflict_areas:
-        - "Mini DMA current-hold recovery"
-        - "Mini DMA current-sweep recipe generation"
-        - "Mini DMA fatigue recipe JSON/UI"
-        - "Mini DMA bench automation summaries"
+        - "TMA current-hold recovery"
+        - "TMA current-sweep recipe generation"
+        - "TMA fatigue recipe JSON/UI"
+        - "TMA bench automation summaries"
     readiness:
       handoff_received: true
       branch_and_commit: true
@@ -316,7 +316,7 @@ tasks:
         - "Worker reported full tests/test_mini_dma_logger.py: 582 passed."
         - "Worker reported focused stiff guard tests: 2 passed."
         - "Worker final head reported 62 focused current-hold/volatile/control tests passed."
-        - "Worker reported py_compile for Mini DMA modules/scripts passed."
+        - "Worker reported py_compile for TMA modules/scripts passed."
         - "Worker reported campaign checker OK on the final live campaign manifest."
       screenshots_or_artifacts:
         - "G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-17_Ni50Fe25Ga25_2-3_150MPa_60mA_control_opt/analysis/stiff_sample_guard.json"
@@ -330,12 +330,12 @@ tasks:
       decision: "merge"
       merged_commit: "81ee3e47"
       combined_checks:
-        - "2026-06-18 integration: py_compile Mini DMA modules/scripts passed."
+        - "2026-06-18 integration: py_compile TMA modules/scripts passed."
         - "2026-06-18 integration: tests/test_mini_dma_logger.py tests/test_mini_dma_bench_automation.py tests/test_mini_dma_run_quality.py tests/test_mini_dma_fatigue_learning.py: 615 passed."
         - "2026-06-18 integration: tests/test_ac_susceptibility_logger.py tests/test_shared_power_supply_broker.py tests/test_shared_power_supply_setup_ui.py: 150 passed."
         - "2026-06-18 integration: git diff --check passed."
         - "2026-06-18 release-hardening: tests/test_mini_dma_logger.py full file: 594 passed."
-        - "2026-06-18 release-hardening: Mini DMA helper/reporting tests: 32 passed."
+        - "2026-06-18 release-hardening: TMA helper/reporting tests: 32 passed."
       regression_guarantees_to_recheck:
         - "First-overheating and fatigue cycle numbering remain stable in UI and saved recipes."
         - "Current-hold recovery does not reintroduce oscillation on historically stiff wires."
@@ -444,7 +444,7 @@ tasks:
         - "Worker reported 111 focused tests passed before later commits."
         - "Worker reported final combined AC/shared PSU run: 128 passed."
         - "Worker reported Current Annealing shared-broker guard: 25 passed."
-        - "Worker reported Mini DMA shared-broker guard: 7 passed."
+        - "Worker reported TMA shared-broker guard: 7 passed."
       screenshots_or_artifacts:
         - "artifacts/ac-broker-channel-visual/dropdown_unselected.png"
         - "artifacts/ac-broker-channel-visual/dropdown_ch3.png"
@@ -472,7 +472,7 @@ tasks:
     priority: "normal"
     owner:
       thread_id: ""
-      thread_title: "Continue Mini DMA HMP4040 work"
+      thread_title: "Continue TMA HMP4040 work"
       role: "worker"
     git:
       base_branch: "unknown"
@@ -644,7 +644,7 @@ tasks:
       artifacts: []
 
   - id: "release-hardening-shared-psu-ca-mini"
-    title: "Release hardening for shared PSU, experiment launchers, Current Annealing, AC, and Mini DMA"
+    title: "Release hardening for shared PSU, experiment launchers, Current Annealing, AC, and TMA"
     status: "integrated"
     priority: "high"
     owner:
@@ -663,9 +663,9 @@ tasks:
         Master-thread release audit/hardening pass after integrating recent
         workers. Tightens broker lease/profile invariants, preserves Current
         Annealing shared-broker settings, caps AC HMP voltage requests, makes
-        Mini DMA shared-broker release safer, prevents stale hidden one-way
+        TMA shared-broker release safer, prevents stale hidden one-way
         current-sweep state from changing fatigue recipes, fixes packaged AC
-        experiment startup, and makes very short completed Mini DMA recipes
+        experiment startup, and makes very short completed TMA recipes
         save at least one normal measurement row.
       touched_files:
         - "data_logging/shared_power_supply/"
@@ -677,8 +677,8 @@ tasks:
         - "tests/"
       conflict_areas:
         - "Shared HMP broker lease/profile state"
-        - "AC/Current Annealing/Mini DMA shared-broker assumptions"
-        - "Mini DMA current-sweep/fatigue recipe generation"
+        - "AC/Current Annealing/TMA shared-broker assumptions"
+        - "TMA current-sweep/fatigue recipe generation"
         - "Packaged experiment-process startup"
     readiness:
       handoff_received: true
@@ -689,28 +689,28 @@ tasks:
         - "Same-owner broker reconnects reuse the existing lease id."
         - "AC HMP and shared-broker voltage limits clamp to the physical HMP range."
         - "Current Annealing shared-broker port setting is restored instead of reset to 8765."
-        - "Mini DMA releases leased broker channels only after asking them to turn output off."
+        - "TMA releases leased broker channels only after asking them to turn output off."
         - "Iso-stress fatigue always saves/loads/builds up-and-back current sweeps."
         - "Packaged launcher includes the AC Susceptibility experiment process."
         - "PyPlot automation session registry follows the active TEMP/TMP path or explicit PYPLOT_SESSION_REGISTRY_DIR."
-        - "Very short normally completed Mini DMA recipes do not leave measurement.csv header-only."
+        - "Very short normally completed TMA recipes do not leave measurement.csv header-only."
       tests:
         - "py_compile touched modules passed."
         - "Shared PSU broker/setup/bench guard tests: 30 passed."
         - "AC susceptibility logger tests: 128 passed."
         - "Current Annealing logger tests: 84 passed."
-        - "Mini DMA focused fatigue/shared-broker slice: 10 passed."
-        - "Mini DMA logger full file: 594 passed."
-        - "Mini DMA helper/reporting tests: 32 passed."
+        - "TMA focused fatigue/shared-broker slice: 10 passed."
+        - "TMA logger full file: 594 passed."
+        - "TMA helper/reporting tests: 32 passed."
         - "2026-06-19 release readiness: shared PSU + Current Annealing + AC + bench guard tests: 242 passed."
-        - "2026-06-19 release readiness: Mini DMA full release slice: 629 passed."
-        - "2026-06-19 release readiness: launcher/current plotting/Mini DMA plugin/PyPlot import tests: 195 passed."
+        - "2026-06-19 release readiness: TMA full release slice: 629 passed."
+        - "2026-06-19 release readiness: launcher/current plotting/TMA plugin/PyPlot import tests: 195 passed."
         - "2026-06-19 release readiness: experiment process + launcher tests: 47 passed."
-        - "2026-06-19 final Mini DMA fallback slice: 172 passed."
-        - "2026-06-19 final Mini DMA full release slice: 629 passed."
-        - "2026-06-19 packaged launcher rebuilt and offscreen-smoked for Current Annealing, AC Susceptibility, and Mini DMA."
+        - "2026-06-19 final TMA fallback slice: 172 passed."
+        - "2026-06-19 final TMA full release slice: 629 passed."
+        - "2026-06-19 packaged launcher rebuilt and offscreen-smoked for Current Annealing, AC Susceptibility, and TMA."
         - "2026-06-19 live AC shared-broker/LCR smoke: CH1 1 mA through local broker, 4 LCR rows, TSV written, CH1 forced off."
-        - "2026-06-19 live Mini DMA smoke: supervised iso-stress recipe at 20 MPa, 1->3->1 mA, recipe_completed, 1 measurement row, 664 control-trace rows, run_quality completed."
+        - "2026-06-19 live TMA smoke: supervised iso-stress recipe at 20 MPa, 1->3->1 mA, recipe_completed, 1 measurement row, 664 control-trace rows, run_quality completed."
         - "2026-06-19 final HMP probe: CH1 off, CH4 off, CH3 motor rail on at 12 V."
         - "git diff --check passed with expected CRLF warnings only."
       screenshots_or_artifacts: []
@@ -718,7 +718,7 @@ tasks:
       risks:
         - "Old remote bundle origin/codex/integration-mw-builder-docx-visualization still needs separate review; not merged here."
         - "Large remote branch origin/codex/current-annealing-anchor-import-ui was not merged; it needs separate review because it is broad and mostly outside the release blockers."
-        - "Live Mini DMA smoke was intentionally tiny and validates the real iso-stress/control/logging path, not high-stress performance or long fatigue behavior."
+        - "Live TMA smoke was intentionally tiny and validates the real iso-stress/control/logging path, not high-stress performance or long fatigue behavior."
     integration:
       decision: "commit-before-main-merge"
       merged_commit: "current commit; see git log"
@@ -727,8 +727,8 @@ tasks:
         - "Live hardware evidence listed in readiness/tests."
       regression_guarantees_to_recheck:
         - "A real colleague-style Current Annealing run on a sacrificial wire remains useful after merge, but the shared-broker CH1 path was live-smoked through AC."
-        - "Mini DMA fatigue first-overheating and current cycles on a saved recipe before colleague release."
-      final_status: "master hardening patch committed after focused tests, package smoke, AC live smoke, and Mini DMA iso-stress live smoke"
+        - "TMA fatigue first-overheating and current cycles on a saved recipe before colleague release."
+      final_status: "master hardening patch committed after focused tests, package smoke, AC live smoke, and TMA iso-stress live smoke"
     links:
       handoff: "master audit"
       pr: ""

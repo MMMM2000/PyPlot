@@ -1,4 +1,4 @@
-"""Compare real Mini DMA runs with software-only simulator outputs."""
+"""Compare real TMA runs with software-only simulator outputs."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _boolish(value: object) -> bool:
 
 
 def load_measurement_points(path: Path) -> list[NormalizedPoint]:
-    """Load real or simulated Mini DMA measurement rows into a common shape."""
+    """Load real or simulated TMA measurement rows into a common shape."""
 
     points: list[NormalizedPoint] = []
     with path.open(newline="", encoding="utf-8-sig", errors="replace") as handle:
@@ -206,7 +206,7 @@ def _report(summary: dict[str, object]) -> str:
     assert isinstance(real, dict)
     assert isinstance(sim, dict)
     assert isinstance(delta, dict)
-    return f"""# Mini DMA real-vs-simulation comparison
+    return f"""# TMA real-vs-simulation comparison
 
 Real CSV: `{summary["real_csv"]}`
 
@@ -268,7 +268,7 @@ def _write_plot(path: Path, real: list[NormalizedPoint], sim: list[NormalizedPoi
     axes[1][1].set_title("Current-hold row fraction")
     axes[1][1].set_ylim(bottom=0.0)
     axes[1][1].grid(True, axis="y", alpha=0.25)
-    fig.suptitle("Mini DMA real-vs-simulation comparison")
+    fig.suptitle("TMA real-vs-simulation comparison")
     fig.savefig(path, dpi=170)
     plt.close(fig)
 
@@ -304,7 +304,7 @@ def _plot_current_time(ax: object, points: list[NormalizedPoint], label: str, co
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--real", required=True, type=Path, help="Real Mini DMA measurement.csv path.")
+    parser.add_argument("--real", required=True, type=Path, help="Real TMA measurement.csv path.")
     parser.add_argument("--sim", required=True, type=Path, help="Simulator measurement.csv path.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-real-vs-sim"))
     parser.add_argument("--max-target-mpa", type=float, default=None, help="Keep only rows at or below this target stress.")

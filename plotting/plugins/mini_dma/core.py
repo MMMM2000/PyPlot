@@ -83,9 +83,9 @@ def resolve_measurement_path(path: Path) -> Path:
     if candidate.is_dir():
         candidate = candidate / MEASUREMENT_FILE
     if candidate.name.casefold() != MEASUREMENT_FILE.casefold():
-        raise ValueError("Select a Mini DMA run folder or measurement.csv file.")
+        raise ValueError("Select a TMA run folder or measurement.csv file.")
     if not candidate.exists() or not candidate.is_file():
-        raise ValueError(f"Mini DMA measurement file not found: {candidate}")
+        raise ValueError(f"TMA measurement file not found: {candidate}")
     return candidate
 
 
@@ -94,7 +94,7 @@ def load_run(path: Path) -> MiniDmaRun:
     frame = pd.read_csv(measurement_path)
     missing = sorted(REQUIRED_COLUMNS.difference(frame.columns))
     if missing:
-        raise ValueError("Missing Mini DMA columns: " + ", ".join(missing))
+        raise ValueError("Missing TMA columns: " + ", ".join(missing))
     current_column = _choose_current_column(frame)
     if current_column is None:
         raise ValueError("Missing usable current column.")
@@ -119,7 +119,7 @@ def load_run(path: Path) -> MiniDmaRun:
         subset=["current_mA", "automation_target_value", "strain_pct", "resistance_ohm"]
     )
     if cleaned.empty:
-        raise ValueError("No usable Mini DMA current-sweep rows found.")
+        raise ValueError("No usable TMA current-sweep rows found.")
 
     metadata = _metadata_for_run(measurement_path)
     sample_name = _sample_name_for_run(measurement_path)

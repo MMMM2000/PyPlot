@@ -203,6 +203,6 @@ def test_scenario_matrix_report_writes_machine_and_human_outputs(tmp_path: Path)
     paths = write_scenario_matrix_report(traces, tmp_path)
 
     assert Path(paths["summary"]).exists()
-    assert Path(paths["report"]).read_text(encoding="utf-8").startswith("# Mini DMA")
+    assert Path(paths["report"]).read_text(encoding="utf-8").startswith("# TMA")
     if "plot" in paths:
         assert Path(paths["plot"]).exists()

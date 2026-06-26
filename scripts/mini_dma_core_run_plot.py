@@ -1,4 +1,4 @@
-"""Generate a phone-friendly Mini DMA per-run core plot."""
+"""Generate a phone-friendly TMA per-run core plot."""
 
 from __future__ import annotations
 

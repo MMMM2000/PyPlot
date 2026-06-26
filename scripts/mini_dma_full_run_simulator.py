@@ -1,4 +1,4 @@
-"""Command-line wrapper for the Mini DMA full-run software simulator."""
+"""Command-line wrapper for the TMA full-run software simulator."""
 
 from __future__ import annotations
 

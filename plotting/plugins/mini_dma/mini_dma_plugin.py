@@ -16,9 +16,9 @@ if TYPE_CHECKING:
     from plotting.pyplot.window import GraphLineState
 
 
-@register_plugin("Mini DMA")
+@register_plugin("TMA")
 class MiniDmaPlugin(PyPlotPlugin):
-    """Plot Mini DMA current-sweep logger output inside PyPlot."""
+    """Plot TMA current-sweep logger output inside PyPlot."""
 
     requires_imported_data = True
     supports_import_folders = True
@@ -39,7 +39,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         summary = QtWidgets.QLabel(
-            "Import Mini DMA run folders or measurement.csv files, then plot current sweeps by target MPa."
+            "Import TMA run folders or measurement.csv files, then plot current sweeps by target MPa."
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
@@ -58,7 +58,7 @@ class MiniDmaPlugin(PyPlotPlugin):
 
         window_module = window_api()
         section, section_layout = window_module.create_toolbar_section(
-            "Mini DMA plots",
+            "TMA plots",
             parent=container,
         )
         note = QtWidgets.QLabel(
@@ -70,7 +70,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         section_layout.addWidget(baseline_label)
         baseline_combo = QtWidgets.QComboBox()
         baseline_combo.setToolTip(
-            "Choose how Mini DMA recalculates the strain-current Y axis. "
+            "Choose how TMA recalculates the strain-current Y axis. "
             "Global minimum uses one shared l0 from all target-stress curves; "
             "each target minimum gives every stress plateau its own zero."
         )
@@ -97,7 +97,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         power_axis_combo = QtWidgets.QComboBox()
         power_axis_combo.setToolTip(
             "Choose whether the top power axis shows absolute electrical power "
-            "or power normalized by the Mini DMA initial wire length."
+            "or power normalized by the TMA initial wire length."
         )
         power_axis_combo.addItem(
             "Normalized by length (mW/cm)",
@@ -113,7 +113,7 @@ class MiniDmaPlugin(PyPlotPlugin):
         return container
 
     def plot_action_label(self) -> str:  # type: ignore[override]
-        return "Plot Mini DMA"
+        return "Plot TMA"
 
     def load_data(self) -> None:  # type: ignore[override]
         paths = self.host.ensure_data_selection(self)
@@ -140,17 +140,17 @@ class MiniDmaPlugin(PyPlotPlugin):
         if self._summary_label is not None:
             if runs:
                 self._summary_label.setText(
-                    f"Loaded {len(runs)} Mini DMA run(s). Click Plot to build current-sweep graphs."
+                    f"Loaded {len(runs)} TMA run(s). Click Plot to build current-sweep graphs."
                 )
             else:
                 self._summary_label.setText(
-                    "No compatible Mini DMA runs loaded. Select run folders or measurement.csv files."
+                    "No compatible TMA runs loaded. Select run folders or measurement.csv files."
                 )
         if failures:
             short = "\n".join(failures[:8])
             suffix = "\n..." if len(failures) > 8 else ""
-            self._log(f"Some Mini DMA inputs were skipped:\n{short}{suffix}", level="error")
-        self._log(f"Loaded {len(runs)} Mini DMA run(s).")
+            self._log(f"Some TMA inputs were skipped:\n{short}{suffix}", level="error")
+        self._log(f"Loaded {len(runs)} TMA run(s).")
         self.update_ui()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -160,7 +160,7 @@ class MiniDmaPlugin(PyPlotPlugin):
             QtWidgets.QMessageBox.information(
                 self.host,
                 self.name,
-                "Load one or more Mini DMA run folders or measurement.csv files before plotting.",
+                "Load one or more TMA run folders or measurement.csv files before plotting.",
             )
             return
 
@@ -197,7 +197,7 @@ class MiniDmaPlugin(PyPlotPlugin):
                 plots_created += 1
         if self._plot_tabs:
             self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
-        self._log(f"Generated {plots_created} Mini DMA plot(s).")
+        self._log(f"Generated {plots_created} TMA plot(s).")
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
@@ -207,7 +207,7 @@ class MiniDmaPlugin(PyPlotPlugin):
             QtWidgets.QMessageBox.information(
                 self.host,
                 self.name,
-                "Generate at least one Mini DMA graph before exporting to Origin.",
+                "Generate at least one TMA graph before exporting to Origin.",
             )
             return
         super().open_origin()

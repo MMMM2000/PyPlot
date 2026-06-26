@@ -229,7 +229,7 @@ OUTPUT_COLUMNS = [
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
-    "Mini DMA graphs",
+    "TMA graphs",
     "Manual stress/strain graphs",
     *SHAPE_MEMORY_VALUE_COLUMNS,
     *SHAPE_MEMORY_FRACTURE_COLUMNS,
@@ -254,15 +254,15 @@ FIGURE_COLUMNS = (
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
-MINI_DMA_COLUMN = "Mini DMA graphs"
-MINI_DMA_STRAIN_COLUMN = "Mini DMA strain by stress/load"
-MINI_DMA_TRANSITION_COLUMN = "Mini DMA transition currents by stress/load"
-MINI_DMA_BREAK_COLUMN = "Mini DMA break point"
+MINI_DMA_COLUMN = "TMA graphs"
+MINI_DMA_STRAIN_COLUMN = "TMA strain by stress/load"
+MINI_DMA_TRANSITION_COLUMN = "TMA transition currents by stress/load"
+MINI_DMA_BREAK_COLUMN = "TMA break point"
 SHAPE_MEMORY_STRESS_STRAIN_COLUMN = "Manual stress/strain graphs"
 VSM_HYSTERESIS_ORIGIN_COLUMN = "VSM hysteresis graphs (Origin)"
 VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN = "VSM temperature scan graphs (Origin)"
 DMA_ISOSTRESS_ORIGIN_COLUMN = "DMA iso-stress graphs (Origin)"
-MINI_DMA_ORIGIN_COLUMN = "Mini DMA graphs (Origin)"
+MINI_DMA_ORIGIN_COLUMN = "TMA graphs (Origin)"
 SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN = "Manual stress/strain graphs (Origin)"
 SHAPE_MEMORY_DISPLACEMENT_COLUMN = "Displacement (mm)"
 SHAPE_MEMORY_LOAD_COLUMN = "Load (g)"
@@ -816,7 +816,7 @@ class DmaIsoStressRecord:
 
 @dataclass
 class MiniDmaRecord:
-    """Parsed Mini DMA run for a single measurement folder."""
+    """Parsed TMA run for a single measurement folder."""
 
     path: Path
     sample: str
@@ -4713,7 +4713,7 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN: "VSM temperature scan graphs (Origin)",
     VSM_HYSTERESIS_ORIGIN_COLUMN: "VSM hysteresis graphs (Origin)",
     DMA_ISOSTRESS_ORIGIN_COLUMN: "DMA iso-stress graphs (Origin)",
-    MINI_DMA_ORIGIN_COLUMN: "Mini DMA graphs (Origin)",
+    MINI_DMA_ORIGIN_COLUMN: "TMA graphs (Origin)",
     SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN: "Manual stress/strain graphs (Origin)",
     FMR_ORIGIN_COLUMN: "FMR graphs (Origin)",
     RVT_POINT_COUNT_COLUMN: "R vs T points",
@@ -4811,7 +4811,7 @@ _WORD_GRAPH_SECTIONS: Tuple[
     ("VSM temperature scan", (VSM_TEMPERATURE_SCAN_ORIGIN_COLUMN,), (VSM_TEMPERATURE_SCAN_COLUMN,)),
     ("VSM hysteresis loops", (VSM_HYSTERESIS_ORIGIN_COLUMN,), (VSM_HYSTERESIS_COLUMN,)),
     ("DMA iso-stress", (DMA_ISOSTRESS_ORIGIN_COLUMN,), (DMA_ISOSTRESS_COLUMN,)),
-    ("Mini DMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
+    ("TMA", (MINI_DMA_ORIGIN_COLUMN,), (MINI_DMA_COLUMN,)),
     (
         "Manual stress/strain",
         (SHAPE_MEMORY_STRESS_STRAIN_ORIGIN_COLUMN,),
@@ -7517,8 +7517,8 @@ def build_database(
                 row,
                 records=mini_dma_entries,
                 origin_column=MINI_DMA_ORIGIN_COLUMN,
-                plugin_name="Mini DMA",
-                display_prefix="Mini DMA Origin graph",
+                plugin_name="TMA",
+                display_prefix="TMA Origin graph",
                 section_token="mini_dma",
             )
         shape_memory_records = shape_memory_stress_strain_groups.get(key, [])

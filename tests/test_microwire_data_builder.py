@@ -5026,7 +5026,7 @@ def test_builder_column_groups_include_transition_and_current_density_columns() 
         assert "As2 (mA)" in current_density_group
         assert "Mf2-Af2 (mA)" in current_density_group
         assert groups.get("Transition temps") == list(core.TRANSITION_TEMP_COLUMNS)
-        mini_dma_group = groups.get("Mini DMA")
+        mini_dma_group = groups.get("TMA")
         assert isinstance(mini_dma_group, list)
         assert core.MINI_DMA_COLUMN in mini_dma_group
         assert core.MINI_DMA_ORIGIN_COLUMN in mini_dma_group

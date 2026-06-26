@@ -1,4 +1,4 @@
-"""Mini DMA logger package."""
+"""TMA logger package."""
 
 from __future__ import annotations
 

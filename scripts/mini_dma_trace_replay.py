@@ -1,4 +1,4 @@
-"""Command-line wrapper for Mini DMA control-trace replay diagnostics."""
+"""Command-line wrapper for TMA control-trace replay diagnostics."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Command-line wrapper for the Mini DMA virtual wire simulator."""
+"""Command-line wrapper for the TMA virtual wire simulator."""
 
 from __future__ import annotations
 

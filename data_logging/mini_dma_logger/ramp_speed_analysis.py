@@ -1,4 +1,4 @@
-"""Compare Mini DMA current-sweep ramp speeds from saved run folders."""
+"""Compare TMA current-sweep ramp speeds from saved run folders."""
 
 from __future__ import annotations
 
@@ -246,7 +246,7 @@ def write_ramp_speed_outputs(metrics: list[RampSpeedRunMetrics], output_dir: Pat
         for item in sorted(metrics, key=lambda item: (item.ramp_speed_mA_s is None, item.ramp_speed_mA_s or 0.0))
     ]
     md_path.write_text(
-        "# Mini DMA Ramp-Speed Comparison\n\n"
+        "# TMA Ramp-Speed Comparison\n\n"
         + "\n".join([header, divider, *body])
         + "\n",
         encoding="utf-8",
@@ -255,7 +255,7 @@ def write_ramp_speed_outputs(metrics: list[RampSpeedRunMetrics], output_dir: Pat
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Compare Mini DMA current-sweep ramp speeds from saved run folders.")
+    parser = argparse.ArgumentParser(description="Compare TMA current-sweep ramp speeds from saved run folders.")
     parser.add_argument("paths", nargs="+", help="Run folders, metadata.json files, parent folders, or bench summary JSON files.")
     parser.add_argument("--out", type=Path, default=None, help="Directory for CSV/JSON/Markdown comparison outputs.")
     args = parser.parse_args(argv)

@@ -1,4 +1,4 @@
-"""Command-line wrapper for Mini DMA real-run reference summaries."""
+"""Command-line wrapper for TMA real-run reference summaries."""
 
 from __future__ import annotations
 

@@ -89,7 +89,7 @@ EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
         resource_tag="current_annealing",
     ),
     "mini_dma": ExperimentProcessSpec(
-        display_name="Mini DMA Logger",
+        display_name="TMA Logger",
         module="data_logging.mini_dma_logger.mini_dma_logger",
         resource_tag="mini_dma",
     ),
@@ -1300,8 +1300,10 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     )
     parser.add_argument(
         "--mini-dma-bench-plan",
+        "--tma-bench-plan",
+        dest="mini_dma_bench_plan",
         default=None,
-        help="Run or dry-run an explicitly armed Mini DMA bench automation plan JSON file.",
+        help="Run or dry-run an explicitly armed TMA bench automation plan JSON file.",
     )
     parser.add_argument(
         "--experiment-process",
@@ -2096,10 +2098,10 @@ _WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "mini_dma": (
         "_word_mini_dma_sources",
-        "Mini DMA graphs",
-        "Mini DMA graphs (Origin)",
-        "Mini DMA",
-        "Mini DMA Origin graph",
+        "TMA graphs",
+        "TMA graphs (Origin)",
+        "TMA",
+        "TMA Origin graph",
     ),
     "shape_memory_stress_strain": (
         "_word_shape_memory_stress_strain_sources",
@@ -2145,9 +2147,9 @@ _WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[st
         ("DMA iso-stress graphs", "DMA iso-stress graphs (Origin)"),
     ),
     (
-        "Mini DMA",
+        "TMA",
         ("_word_mini_dma_sources",),
-        ("Mini DMA graphs", "Mini DMA graphs (Origin)"),
+        ("TMA graphs", "TMA graphs (Origin)"),
     ),
     (
         "Manual stress/strain",
@@ -2447,7 +2449,7 @@ def _load_project_word_report_frame(
     mini_dma_paths: list[Path] = []
     seen_mini_dma_paths: set[Path] = set()
     for root in rvt_search_roots:
-        for mini_root_name in ("mini DMA", "Mini DMA", "mini_dma"):
+        for mini_root_name in ("mini DMA", "TMA", "mini_dma"):
             mini_root = root / mini_root_name
             if not mini_root.exists():
                 continue
@@ -4154,8 +4156,8 @@ LOGGERS: Dict[str, LauncherFactory] = {
         "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
         "ac_susceptibility",
     ),
-    "Mini DMA Logger": _experiment_process_launcher(
-        "Mini DMA Logger",
+    "TMA Logger": _experiment_process_launcher(
+        "TMA Logger",
         "data_logging.mini_dma_logger.mini_dma_logger",
         "mini_dma",
     ),

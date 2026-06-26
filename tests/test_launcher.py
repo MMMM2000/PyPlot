@@ -103,7 +103,7 @@ def _wait_for_registry(window: launcher_module.MasterLauncher, app: QtWidgets.QA
             "ac_susceptibility",
         ),
         (
-            "Mini DMA Logger",
+            "TMA Logger",
             "data_logging.mini_dma_logger.mini_dma_logger",
             "mini_dma",
         ),
@@ -335,6 +335,17 @@ def test_launcher_detects_mini_dma_bench_plan_flag() -> None:
     assert args.mini_dma_bench_plan == "bench-plan.json"
 
 
+def test_launcher_detects_tma_bench_plan_alias() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--tma-bench-plan",
+            "bench-plan.json",
+        ]
+    )
+    assert launcher_module._is_mini_dma_bench_requested(args) is True  # noqa: SLF001
+    assert args.mini_dma_bench_plan == "bench-plan.json"
+
+
 def test_launcher_detects_microwire_word_report_cli_flags() -> None:
     args, _qt_args = launcher_module._parse_launcher_args(
         [
@@ -503,7 +514,7 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["R vs T graphs"] == [rvt_path.name]
     assert row["R vs T points"] == 2
     assert row["R vs T temperature range (deg C)"] == "-40.5 to -39"
-    assert row["Mini DMA graphs"] == mini_dma_path.parent.name
+    assert row["TMA graphs"] == mini_dma_path.parent.name
 
 
 def test_microwire_word_report_project_exports_rvst_through_pyplot(
@@ -590,7 +601,7 @@ def test_microwire_word_report_project_exports_rvst_through_pyplot(
     ("name", "module", "resource_tag"),
     [
         (
-            "Mini DMA Logger",
+            "TMA Logger",
             "data_logging.mini_dma_logger.mini_dma_logger",
             "mini_dma",
         ),
@@ -1433,11 +1444,11 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     section_payload = output_payload["sections"]["mini_dma"]
     assert section_payload["rows"]
     row = section_payload["rows"][0]
-    assert row["Mini DMA strain by stress/load"] == [
+    assert row["TMA strain by stress/load"] == [
         "50 MPa: 0.1% @ 20 mA",
         "100 MPa: 0.2% @ 20 mA",
     ]
-    assert row["Mini DMA break point"] == ""
+    assert row["TMA break point"] == ""
     assert section_payload["payloads"]["mini_dma_records"]["encoding"] == "pickle-base64"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     command = manifest["commands"][0]
@@ -1452,8 +1463,8 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     assemble_rows = output_payload["sections"]["assemble"]["rows"]
     assert assemble_rows
     assemble_row = assemble_rows[0]
-    assert assemble_row["Mini DMA graphs"] == [run_path.name]
-    assert assemble_row["Mini DMA strain by stress/load"] == [
+    assert assemble_row["TMA graphs"] == [run_path.name]
+    assert assemble_row["TMA strain by stress/load"] == [
         "50 MPa: 0.1% @ 20 mA",
         "100 MPa: 0.2% @ 20 mA",
     ]
@@ -1512,11 +1523,11 @@ def test_builder_automation_recipe_updates_mini_dma_transition_currents(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     row = output_payload["sections"]["mini_dma"]["rows"][0]
-    assert row["Mini DMA transition currents by stress/load"] == [
+    assert row["TMA transition currents by stress/load"] == [
         "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
     ]
     assemble_row = output_payload["sections"]["assemble"]["rows"][0]
-    assert assemble_row["Mini DMA transition currents by stress/load"] == [
+    assert assemble_row["TMA transition currents by stress/load"] == [
         "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
     ]
 

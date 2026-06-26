@@ -1,4 +1,4 @@
-"""Summarize real Mini DMA runs for simulator calibration."""
+"""Summarize real TMA runs for simulator calibration."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def _measurement_metrics(path: Path) -> dict[str, object]:
 
 
 def summarize_run_quality(path: Path) -> dict[str, object] | None:
-    """Return one compact reference row for a Mini DMA ``run_quality.json`` file."""
+    """Return one compact reference row for a TMA ``run_quality.json`` file."""
 
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -159,7 +159,7 @@ def _reference_report(rows: list[dict[str, object]]) -> str:
         if row.get("include_in_optimization_summary") is True and _number(row.get("strain_span_pct")) is not None
     ]
     lines = [
-        "# Mini DMA real-run reference summary",
+        "# TMA real-run reference summary",
         "",
         f"Found {len(rows)} run_quality.json files; {len(usable)} included reference runs with measured strain.",
         "",
@@ -253,7 +253,7 @@ def _write_reference_plot(rows: list[dict[str, object]], path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("root", type=Path, help="Root folder containing Mini DMA run folders.")
+    parser.add_argument("root", type=Path, help="Root folder containing TMA run folders.")
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-real-run-reference"))
     args = parser.parse_args(argv)
 

@@ -24,7 +24,7 @@
 - Keep integration branches named clearly, for example `codex/integration-mini-dma-ready-review`.
 - Create and merge final PRs from the master thread by default. Use a separate PR-finalization worker only if PR cleanup becomes substantial.
 - Check active worker status opportunistically when the user prompts the master thread.
-- For Mini DMA optimization campaigns, the master thread owns creating or approving the campaign manifest before delegating live hardware work.
+- For TMA optimization campaigns, the master thread owns creating or approving the campaign manifest before delegating live hardware work.
 - Monitor automations should inspect and steer workers, not silently perform implementation or start hardware from the master thread.
 
 ## Worker Thread Workflow
@@ -40,7 +40,7 @@
 - Report completion with branch, commit, tests/checks, screenshot paths when relevant, and integration notes.
 - When ready or blocked, send a concise completion handoff back to the master coordination thread.
 - If blocked, report the blocker, current branch, git status, and what was already verified.
-- For Mini DMA optimization workers, do not start live hardware from chat memory or isolated artifacts. Start from a campaign manifest, run `scripts/mini_dma_campaign_check.py`, and report the checker result before live execution.
+- For TMA optimization workers, do not start live hardware from chat memory or isolated artifacts. Start from a campaign manifest, run `scripts/mini_dma_campaign_check.py`, and report the checker result before live execution.
 
 ## Delegation Strategy
 - Choose the split that gives the cleanest reasoning, least conflict, and fastest useful feedback; do not default to either one worker for everything or one worker per issue.
@@ -50,7 +50,7 @@
 - Use subagents for temporary investigation, code archaeology, review, test planning, diff audits, or parallel diagnosis inside a master or worker thread.
 - Avoid endlessly appending scope to a running worker. Once a worker has a coherent batch, let it finish, integrate it, and start the next cluster from the updated integration branch.
 - On this Windows machine, create PyPlot worker threads inside the PyPlot project with a new worktree and `no environment` selected. Avoid generic Chats/local-environment workers for PyPlot implementation unless the user explicitly asks for that mode.
-- Name worker threads immediately with a short subsystem-first title that matches the task and branch/ledger entry, for example `Mini DMA 12/2 optimization`, `AC logger broker autostart`, or `Thermo sensor MLX90614 bring-up`.
+- Name worker threads immediately with a short subsystem-first title that matches the task and branch/ledger entry, for example `TMA 12/2 optimization`, `AC logger broker autostart`, or `Thermo sensor MLX90614 bring-up`.
 - Avoid leaving worker titles as generic prompt fragments such as `You are a focused worker...`, `Continue...`, or `Fix issue`; rename them as soon as the worker is created or when the real task becomes clear.
 - Keep active worker threads pinned while they own unfinished work, pending integration, live validation, or deferred branch decisions. Unpin a worker only after its changes have been integrated here, explicitly rejected/deferred in the ledger, or the branch is no longer needed.
 
@@ -60,7 +60,7 @@
 - Examples of useful guarantees: "setup graph is not cropped", "Task label stays stable during stress ramp", "Microwire 10/1 -> 10/4 does not crash", and "equivalent unit labels preserve significant zeros".
 - New worker branches should start from the latest integration branch whenever possible. If they start elsewhere, explicitly compare overlapping files and preserve accepted guarantees during forward-porting.
 - Before bringing worker changes into the master/integration branch, check whether touched files overlap with recent guarantees and plan verification for those guarantees.
-- After integration, rerun the relevant guarantee checks from recently accepted branches, especially for Mini DMA UI, graph layout, task summaries, and hardware-control state.
+- After integration, rerun the relevant guarantee checks from recently accepted branches, especially for TMA UI, graph layout, task summaries, and hardware-control state.
 
 ## Autonomous Operability
 - Build tools and workflows so Codex can operate them safely and repeatably without manual UI intervention.
@@ -70,17 +70,17 @@
 - Make safety state observable: active process, hardware ownership, channel leases, output state, current recipe step, stop reason, and artifact paths.
 - Keep manual UI workflows pleasant, but do not make automation depend on clicking through the UI.
 
-## Mini DMA Optimization Campaigns
-- Treat Mini DMA optimization as a repeatable campaign, not an ad hoc run.
+## TMA Optimization Campaigns
+- Treat TMA optimization as a repeatable campaign, not an ad hoc run.
 - Make the optimization objective explicit before live work: minimize stress/load fluctuation, minimize stress error, recover quickly after transformation-driven stress changes, preserve useful strain-current curves, and quantify the measurement-time versus precision tradeoff.
 - Keep raw run history and reports in `G:\My Drive\1 Projects\Praha\mini DMA\automation_history`; keep reusable templates, recipes, schemas, scripts, and docs in the repo.
 - Every optimization campaign should have a `campaign.yaml` based on `docs/automation_templates/mini_dma_campaign.yaml`.
 - Before live optimization hardware, run:
   - `uv run python scripts/mini_dma_campaign_check.py <campaign.yaml>`
 - The campaign manifest must define sample identity, length, diameter source, approved control source, hardware channels, voltage/current limits, safety rails, run stages, and reporting outputs.
-- Optimization workers must start from the latest approved control logic named by the campaign, normally latest `main` or the current Mini DMA integration branch. Do not use a random stale worker branch just because it has local artifacts.
+- Optimization workers must start from the latest approved control logic named by the campaign, normally latest `main` or the current TMA integration branch. Do not use a random stale worker branch just because it has local artifacts.
 - If the campaign checker says the branch is dirty, behind the approved base, missing control source, or missing report paths, stop and ask the master thread to fix the campaign or integration state before running hardware.
-- Do not tune permanent Mini DMA control logic to one sample with hard-coded magic values. Prefer adaptive or physically derived rules based on diameter, length, stiffness/calibration, noise, motor step size, stress/load trend, current ramp rate, and measured compliance. Hard caps are acceptable for safety or campaign-local experiments, but they must be clearly labeled as such.
+- Do not tune permanent TMA control logic to one sample with hard-coded magic values. Prefer adaptive or physically derived rules based on diameter, length, stiffness/calibration, noise, motor step size, stress/load trend, current ramp rate, and measured compliance. Hard caps are acceptable for safety or campaign-local experiments, but they must be clearly labeled as such.
 - After campaign runs, generate the standard report with:
   - `uv run python scripts/mini_dma_run_quality.py <run-folder> --write`
   - `uv run python scripts/mini_dma_report.py <campaign.yaml>`
@@ -144,7 +144,7 @@
 - Do not run hardware commands from worker threads unless the delegated task authorizes it.
 - State channel assumptions before hardware work.
 - Prefer software tests/fake drivers before live hardware.
-- For Mini DMA/HMP work, avoid starting duplicate controllers. Confirm active processes/channels before long runs.
+- For TMA/HMP work, avoid starting duplicate controllers. Confirm active processes/channels before long runs.
 - When stopping after hardware errors, explicitly verify safe output state where possible.
 
 ## Diagnostics

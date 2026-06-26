@@ -2,11 +2,11 @@ schema_version: 1
 kind: mini_dma_optimization_campaign
 campaign:
   id: 2026-06-04_Ni50Fe27Ga23_12-2_heat_shield_33p68mm_80ma
-  title: Ni50Fe27Ga23 12/2 heat shield 33.68 mm 80 mA Mini DMA optimization
+  title: Ni50Fe27Ga23 12/2 heat shield 33.68 mm 80 mA TMA optimization
   root: G:/My Drive/1 Projects/Praha/mini DMA/automation_history/campaigns/2026-06-04_Ni50Fe27Ga23_12-2_heat_shield_33p68mm_80ma
   owner_thread: codex/mini-dma-live-opt-12-2-12e8
 objective:
-  primary: safely straighten/preload the mounted 12/2 heat-shield wire, then run a repeatable Mini DMA iso-stress current sweep only after CH3/Tic VIN and full preflight are clean
+  primary: safely straighten/preload the mounted 12/2 heat-shield wire, then run a repeatable TMA iso-stress current sweep only after CH3/Tic VIN and full preflight are clean
   optimize_for_generalization: true
   success_metrics:
     - stress_error_rms_mpa
@@ -52,9 +52,9 @@ hardware:
   current_voltage_limit_v: 32.05
   current_max_setpoint_mA: 80.0
   operator_confirmation_required:
-    - broker profile exposes CH3 for Mini DMA motor rail and CH4 for Mini DMA current sweep
-    - CH3 motor rail is preserved according to broker state and Mini DMA preflight
-    - CH4 current path is connected through the mounted wire and output is off before Mini DMA ownership
+    - broker profile exposes CH3 for TMA motor rail and CH4 for TMA current sweep
+    - CH3 motor rail is preserved according to broker state and TMA preflight
+    - CH4 current path is connected through the mounted wire and output is off before TMA ownership
     - no active broker lease conflicts with CH3 or CH4
 safety:
   max_stress_mpa: 300.0

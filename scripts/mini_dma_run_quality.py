@@ -1,4 +1,4 @@
-"""Command-line wrapper for Mini DMA per-run quality metrics."""
+"""Command-line wrapper for TMA per-run quality metrics."""
 
 from __future__ import annotations
 

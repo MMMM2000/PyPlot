@@ -1,6 +1,6 @@
-# Mini DMA Wire Simulator
+# TMA Wire Simulator
 
-`data_logging.mini_dma_logger.wire_simulator` provides a deterministic virtual wire and processed-center control harness for software-only Mini DMA controller experiments. It does not import Qt, serial, Tic, or power-supply code.
+`data_logging.mini_dma_logger.wire_simulator` provides a deterministic virtual wire and processed-center control harness for software-only TMA controller experiments. It does not import Qt, serial, Tic, or power-supply code.
 
 The model treats motor displacement and transformation contraction as the two contributors to tensile extension. Stress is computed from an elastic stiffness in MPa/mm, then optional direct stress fluctuations, noise, spikes, and drift are added. Raw stress samples are preserved for safety rails. Motor decisions use the processed control signal: median center, MAD noise, slope, sample count, freshness, and the raw envelope.
 
@@ -44,16 +44,16 @@ uv run python scripts/mini_dma_wire_simulator.py --scenario target_spanning_clou
 Each output folder contains:
 
 - `measurement.csv`: synthetic scale/current/motor samples at about 4-5 Hz.
-- `control_trace.csv`: controller-like robust-center decisions in a Mini DMA trace-compatible shape.
+- `control_trace.csv`: controller-like robust-center decisions in a TMA trace-compatible shape.
 - `summary.json`: final decision, raw stress range, stop reason, and expected decision.
 - `scenario.json`: full simulator parameters for reproducibility.
 - `scenario_matrix_summary.json`, `scenario_matrix_report.md`, and `scenario_matrix.png` when `--report` is used.
 
-Controller work can consume the CSV files or import `run_virtual_wire_scenario()` and compare its `MeasurementSample` stream against Mini DMA processed-center decisions. The simulator is deliberately simple: it is a repeatable control-test fixture, not a calibrated thermomechanical material model.
+Controller work can consume the CSV files or import `run_virtual_wire_scenario()` and compare its `MeasurementSample` stream against TMA processed-center decisions. The simulator is deliberately simple: it is a repeatable control-test fixture, not a calibrated thermomechanical material model.
 
 ## Full-run software validation
 
-`data_logging.mini_dma_logger.full_run_simulator` builds on the same virtual wire model to exercise a complete first-overheating style sequence: target acquisition, current rise, current endpoint recovery, optional reverse/current unwind, bounded mechanical corrections, delayed scale feedback, and slack take-up. It is still software-only and deterministic. It does not open Qt, serial ports, Tic drivers, power supplies, or the Mini DMA logger hardware path. The full-run model treats the wire's current/history-driven free transformation strain as hidden material state; stress is derived from the mismatch between that hidden contraction/elongation and the controller-produced motor strain, then delayed/noisy scale feedback is fed back to the controller.
+`data_logging.mini_dma_logger.full_run_simulator` builds on the same virtual wire model to exercise a complete first-overheating style sequence: target acquisition, current rise, current endpoint recovery, optional reverse/current unwind, bounded mechanical corrections, delayed scale feedback, and slack take-up. It is still software-only and deterministic. It does not open Qt, serial ports, Tic drivers, power supplies, or the TMA logger hardware path. The full-run model treats the wire's current/history-driven free transformation strain as hidden material state; stress is derived from the mismatch between that hidden contraction/elongation and the controller-produced motor strain, then delayed/noisy scale feedback is fed back to the controller.
 
 Run the full scenario matrix:
 
@@ -115,7 +115,7 @@ Run the broader stress-ladder policy grid:
 uv run python scripts/mini_dma_full_run_simulator.py --stress-ladder-policy-grid --out artifacts/mini-dma-stress-ladder-policy-grid
 ```
 
-Summarize real measured Mini DMA runs for simulator calibration:
+Summarize real measured TMA runs for simulator calibration:
 
 ```powershell
 uv run python scripts/mini_dma_real_run_reference.py "G:\My Drive\1 Projects\Praha\mini DMA" --out artifacts/mini-dma-real-run-reference
@@ -173,7 +173,7 @@ The stress-ladder policy grid expands that comparison across target-lead gates, 
 
 The full-run simulator also exposes `current_resume_requires_target_crossing` as an opt-in experiment. When enabled, a current hold that was triggered by processed-center error only resumes after the processed center has crossed to the target side, or the processed window spans the target. In the run32 first-target calibration this lowers p95 current-sweep error but increases hold time; in the broader ladder matrix it can become too slow for delayed thin wires. Treat it as comparison evidence, not a default live-control rule.
 
-The control-validation suite is the preferred software-only gate before changing live Mini DMA control behavior. It runs four policy families on nine cases: the real-run-calibrated run32 first 50 MPa target segment and eight 0 -> 50 -> 100 MPa stress-ladder cases spanning good, stiff/overresponsive, early/delayed, bad Co6-style, weak/noisy, stiffer/thicker, and very thin wire behavior. Current results favor the moderate-response policy over baseline because it lowers aggregate quality score and shortens hold time without failures. The aggressive-cap policy is faster and improves the run32 p95 current-sweep error, but worsens post-reacquisition later stress-ramp robustness. The target-crossing-resume policy lowers some current-sweep bias, but can turn delayed tiny-load stress ladders into incomplete runs, so it remains an experiment rather than a default.
+The control-validation suite is the preferred software-only gate before changing live TMA control behavior. It runs four policy families on nine cases: the real-run-calibrated run32 first 50 MPa target segment and eight 0 -> 50 -> 100 MPa stress-ladder cases spanning good, stiff/overresponsive, early/delayed, bad Co6-style, weak/noisy, stiffer/thicker, and very thin wire behavior. Current results favor the moderate-response policy over baseline because it lowers aggregate quality score and shortens hold time without failures. The aggressive-cap policy is faster and improves the run32 p95 current-sweep error, but worsens post-reacquisition later stress-ramp robustness. The target-crossing-resume policy lowers some current-sweep bias, but can turn delayed tiny-load stress ladders into incomplete runs, so it remains an experiment rather than a default.
 
 The production iso-current stress-ramp per-command cap is intentionally geometry-scaled as strain percent of gauge length. The simulator evidence above supports increasing that cap from 0.08% to 0.12% strain per correction for stress-ramp target acquisition; this speeds post-unwind 0 -> 50 -> 100 MPa recovery without introducing a hard mm or MPa cap. Response-gated adaptive cap growth remains simulator-only until it improves the weak/noisy and stiff cases more consistently.
 

@@ -1,4 +1,4 @@
-# Mini DMA Presentation Slide Plan
+# TMA Presentation Slide Plan
 
 Prepared as a planning artifact before editing `mini_dma_presentation.pptx`.
 
@@ -34,7 +34,7 @@ Source-folder context reviewed from:
 
 ## Story Thesis
 
-Commercial DMA is a precise and valuable way to identify transition behavior and strain response, but it is slow, resource-intensive, and not ideal when many shape-memory microwire samples need fast iteration. Mini DMA is a focused, low-cost, feedback-controlled instrument built for the specific experiment we need: controlled tensile load, strain/stress calculation, electrical heating, synchronized logging, and enough audit data to understand every run.
+Commercial DMA is a precise and valuable way to identify transition behavior and strain response, but it is slow, resource-intensive, and not ideal when many shape-memory microwire samples need fast iteration. TMA is a focused, low-cost, feedback-controlled instrument built for the specific experiment we need: controlled tensile load, strain/stress calculation, electrical heating, synchronized logging, and enough audit data to understand every run.
 
 The presentation should move from microwire motivation to measurement bottleneck, then from purpose-built solution to first evidence, and finally to the broader point: AI-assisted engineering made it realistic for one researcher to build an instrument that would previously have needed a larger team and more time.
 
@@ -44,7 +44,7 @@ The current authoritative PPTX is
 `docs/assets/presentations/mini_dma_colloquium_2026-05-21_revised.pptx`.
 It is the MacBook-built deck from commit `d91b1ec`, repaired on Windows into a
 14-slide version: real photos and plots keep their original aspect ratio, the
-manual stress-strain graph uses PyPlot cycle coloring, the first Mini DMA result
+manual stress-strain graph uses PyPlot cycle coloring, the first TMA result
 uses the PyPlot power top axis, and the next-step slide uses the thermal-camera
 frame.
 
@@ -56,13 +56,13 @@ Global decisions from the final review:
 - Use simple, normal slide titles. Avoid poetic phrasing such as `two speeds instead of one bottleneck`.
 - Keep text large and sparse. The audience should not need to read dense paragraphs.
 - Include page numbers.
-- Do not describe the Mini DMA as a replacement for commercial DMA. It is a cheap screening and protocol-development tool before final validation.
+- Do not describe the TMA as a replacement for commercial DMA. It is a cheap screening and protocol-development tool before final validation.
 - Do not say `validation remains experimental` in the closing. The final slide should hype the practical Codex/AI-assisted instrument-development story.
 - Do not use a made-up thermocamera plot. Only use the real thermal-camera frame if it is found; otherwise keep the thermal-camera slide as a next-step slide using real hardware.
 - Slide 3 should not mention `EDA`, because that label is not important for the talk. It should visually communicate that many preparation, geometry, temperature, stress, and strain parameters are being compared.
 - The cost comparison should make the approximate order-of-magnitude contrast obvious: `300€` versus `30000€`. The speaker can say "approximately" out loud.
 
-### Slide 1 - Mini DMA for Microwire Screening
+### Slide 1 - TMA for Microwire Screening
 
 Purpose:
 
@@ -110,7 +110,7 @@ Current visual:
 
 Talk out loud:
 
-- "Before the Mini DMA setup, I did some stress-strain measurements manually."
+- "Before the TMA setup, I did some stress-strain measurements manually."
 - "They were useful, but slow and annoying. One current value could take about half an hour of manual work."
 - "Manual stress-strain is a snapshot at one current. For screening transformation behavior, iso-stress sweeps are a better first measurement."
 
@@ -138,18 +138,18 @@ Talk out loud:
 - "It is good for selected samples and final validation."
 - "The bottleneck is using it as the first filter for every preparation variant."
 
-### Slide 7 - Use Mini DMA Before Commercial DMA
+### Slide 7 - Use TMA Before Commercial DMA
 
 Visible logic:
 
-- Mini DMA screening -> promising wires -> DMA validation.
+- TMA screening -> promising wires -> DMA validation.
 
 Talk out loud:
 
-- "The Mini DMA is a decision tool."
+- "The TMA is a decision tool."
 - "It helps decide which wires deserve slow, careful commercial DMA time."
 
-### Slide 8 - Mini DMA Hardware
+### Slide 8 - TMA Hardware
 
 Current visual:
 
@@ -213,11 +213,11 @@ Talk out loud:
 - "Near the target, it switches to gated corrections: move, wait for a fresh scale value, then move again."
 - "Near the final target it uses single 10 micrometer steps."
 
-### Slide 12 - First Mini DMA Current Sweeps
+### Slide 12 - First TMA Current Sweeps
 
 Current visual:
 
-- Real Mini DMA current sweep with only the lower stress curves, `50-200 MPa`, to avoid clutter.
+- Real TMA current sweep with only the lower stress curves, `50-200 MPa`, to avoid clutter.
 
 Talk out loud:
 
@@ -225,11 +225,11 @@ Talk out loud:
 - "The high-stress curves were removed on this slide only to keep it readable."
 - "Because current is measured, we can also estimate the power needed to reach a chosen contraction, for example 10 percent, which matters for practical actuator applications."
 
-### Slide 13 - Mini DMA Vs Commercial DMA
+### Slide 13 - TMA Vs Commercial DMA
 
 Current visual:
 
-- Mini DMA graph and commercial DMA graph side by side.
+- TMA graph and commercial DMA graph side by side.
 - Large price contrast underneath: `300€` and `30000€`.
 
 Talk out loud:
@@ -313,9 +313,9 @@ What not to import into the main talk:
 - Detailed Co-addition and Curie-temperature story.
 - Multiple composition case studies.
 - Dense fabrication-history slides.
-- Full magnetic measurement context unless it directly supports why Mini DMA is needed.
+- Full magnetic measurement context unless it directly supports why TMA is needed.
 
-For a 15-minute Mini DMA talk, the microwire introduction should be about 3 slides and 3 minutes total. Its job is to make the audience understand why the instrument matters, not to retell the whole microwire research program.
+For a 15-minute TMA talk, the microwire introduction should be about 3 slides and 3 minutes total. Its job is to make the audience understand why the instrument matters, not to retell the whole microwire research program.
 
 ## Programme-Aware Revision
 
@@ -335,7 +335,7 @@ Do not spend 3-4 minutes introducing microwires unless Limpat's talk is cancelle
 
 > "After Limpat's overview of the microwires themselves, I will focus on the measurement problem: how do we prepare good wires reproducibly, and how do we measure enough of them quickly enough to learn the preparation rules?"
 
-The revised story should be: research goal -> measurement throughput problem -> DMA bottleneck -> purpose-built Mini DMA setup -> current status -> next experiments.
+The revised story should be: research goal -> measurement throughput problem -> DMA bottleneck -> purpose-built TMA setup -> current status -> next experiments.
 
 ## Prague / SAIA Project Context
 
@@ -347,16 +347,16 @@ Useful framing points for this talk:
 - Target behavior: clear and stable martensitic transformation in an application-relevant range, strong recoverable strain, and reproducible preparation.
 - The original project plan emphasized SEM/EDS, VSM, and DMA; the half-year report adds a practical screening hierarchy: Joule-heating resistance scans, fast manual/mechanical strain checks, magnetic/FMR characterization, and finally slow high-precision DMA.
 - Quick screening is not a side task; it is part of the research strategy. Time-consuming detailed measurements should be focused on promising wires.
-- This makes Mini DMA fit naturally as an instrumentation answer: a bridge between very fast rough screening and slow commercial DMA validation.
+- This makes TMA fit naturally as an instrumentation answer: a bridge between very fast rough screening and slow commercial DMA validation.
 - SAIA report results that can be mentioned if useful: manual screening found several wires with more than 10% strain under suitable current/stress, and commercial DMA measured about 16% recoverable strain for sample `11/1` under 40 MPa.
 
 Power-axis implementation note, checked 2026-05-20:
 
 - PR #262 has been merged into `main`, and this presentation branch has been fast-forwarded to include it.
-- Mini DMA logs electrical channels such as current, voltage, resistance, and power in the logger context.
-- Mini DMA PyPlot graphs now support optional top power axes for strain-current and resistance-current plots.
+- TMA logs electrical channels such as current, voltage, resistance, and power in the logger context.
+- TMA PyPlot graphs now support optional top power axes for strain-current and resistance-current plots.
 - The graph implementation calculates electrical power as `P = I^2R` in mW from plotted current and resistance values, then labels the top X axis with power while the bottom X axis remains measured current.
-- Before editing the final PPTX, replot the Mini DMA graphs with `Show power top axis` enabled so the result slide can show current on the bottom axis and calculated power on the top axis.
+- Before editing the final PPTX, replot the TMA graphs with `Show power top axis` enabled so the result slide can show current on the bottom axis and calculated power on the top axis.
 
 ## Preferred 15-Minute Flow After Programme Update
 
@@ -366,7 +366,7 @@ Delivery style:
 
 - Speak like you are explaining your own problem-solving path, not reading a paper abstract.
 - Use Limpat's talk as a handoff: "you have already seen what these wires are; now I want to show why the measurement workflow became a problem for me."
-- Keep the repeated thread simple: `to prepare good wires, we need many measurements; commercial DMA is excellent but slow; Mini DMA is the practical bridge`.
+- Keep the repeated thread simple: `to prepare good wires, we need many measurements; commercial DMA is excellent but slow; TMA is the practical bridge`.
 - Do not over-defend the machine. Say clearly that it is a screening and development setup, and that commercial DMA remains the validation tool.
 - The AI-assisted build story should sound like a closing reflection, not a sales pitch.
 
@@ -381,7 +381,7 @@ Visible slide text:
 
 Image / visual:
 
-- Mini DMA setup photo, ideally with the wire/load path visible.
+- TMA setup photo, ideally with the wire/load path visible.
 
 Talk out loud:
 
@@ -490,21 +490,21 @@ Time: 1:00
 
 Visible slide text:
 
-- `Mini DMA for screening and protocol development`
+- `TMA for screening and protocol development`
 - `commercial DMA for final validation`
 
 Image / visual:
 
-- Pipeline: `many wires -> Mini DMA -> selected candidates -> commercial DMA`.
+- Pipeline: `many wires -> TMA -> selected candidates -> commercial DMA`.
 
 Talk out loud:
 
 - "So the idea is not to replace the commercial DMA."
 - "I see this more as a first-pass instrument."
 - "We can use it to screen samples, try different protocols, and understand which wires are worth sending to the proper DMA measurement."
-- "In other words, Mini DMA should make the commercial DMA time more focused and more useful."
+- "In other words, TMA should make the commercial DMA time more focused and more useful."
 
-### Slide 7 - Mini DMA Concept
+### Slide 7 - TMA Concept
 
 Time: 1:30
 
@@ -590,7 +590,7 @@ Visible slide text:
 Image / visual:
 
 - One dominant result plot from the current deck, annotated with the one feature the audience should see.
-- Replot the Mini DMA graph after the PR #262 merge with `Show power top axis` enabled; use measured current on the bottom axis and calculated power on the top axis.
+- Replot the TMA graph after the PR #262 merge with `Show power top axis` enabled; use measured current on the bottom axis and calculated power on the top axis.
 
 Talk out loud:
 
@@ -651,10 +651,10 @@ The current deck is hardware-first:
 6. Setup / `l0`
 7. Control approach to 100 MPa
 8. First results
-9. Mini DMA vs commercial DMA
+9. TMA vs commercial DMA
 10. Next steps
 
-This is a good technical inventory, but the audience meets the hardware before they understand the problem. The revised flow should start with why DMA matters, why the commercial instrument is a bottleneck, and why a dedicated Mini DMA is a reasonable scientific tool rather than just a gadget.
+This is a good technical inventory, but the audience meets the hardware before they understand the problem. The revised flow should start with why DMA matters, why the commercial instrument is a bottleneck, and why a dedicated TMA is a reasonable scientific tool rather than just a gadget.
 
 ## Backup 15-Minute Flow With Microwire Intro
 
@@ -662,19 +662,19 @@ Keep this version as a fallback only if the programme changes or Limpat does not
 
 Target: 12 slides, about 14.5 minutes spoken, leaving a little room for transitions. If the session is strict, cut slide 11 and close with slide 12.
 
-### Slide 1 - Title: Mini DMA
+### Slide 1 - Title: TMA
 
 Time: 0:30
 
 Visible slide text:
 
-- `Mini DMA`
+- `TMA`
 - `A purpose-built instrument for shape-memory microwire measurements`
 - Your name, group, date
 
 Image / visual:
 
-- Strong full-machine photo or close-up of the Mini DMA setup.
+- Strong full-machine photo or close-up of the TMA setup.
 
 Talk out loud:
 
@@ -788,7 +788,7 @@ Talk out loud:
 - "We only needed the part that matters for this experiment: tensile control while the wire is heated electrically."
 - "That narrower goal made the instrument realistic."
 
-### Slide 7 - Mini DMA At A Glance
+### Slide 7 - TMA At A Glance
 
 Time: 1:15
 
@@ -880,7 +880,7 @@ Time: 1:30
 Visible slide text:
 
 - `First controlled sweep`
-- `Mini DMA can produce interpretable response curves`
+- `TMA can produce interpretable response curves`
 - `preliminary validation`
 
 Image / visual:
@@ -902,12 +902,12 @@ Visible slide text:
 
 - `More samples, faster iteration`
 - `commercial DMA for validation`
-- `Mini DMA for screening and custom workflows`
+- `TMA for screening and custom workflows`
 - `AI-assisted instrument building`
 
 Image / visual:
 
-- Pipeline: `many samples -> Mini DMA screening -> selected samples -> commercial DMA validation`.
+- Pipeline: `many samples -> TMA screening -> selected samples -> commercial DMA validation`.
 - Small side timeline: `idea -> components -> wiring -> drivers -> software`.
 
 Talk out loud:
@@ -925,7 +925,7 @@ Talk out loud:
 | Opening | 1 | 0:30 |
 | Microwire motivation | 2-4 | 3:45 |
 | Measurement bottleneck | 5-6 | 2:00 |
-| Mini DMA design/control | 7-10 | 5:15 |
+| TMA design/control | 7-10 | 5:15 |
 | Result and close | 11-12 | 3:00 |
 | Total | 12 slides | 14:30 |
 
@@ -941,14 +941,14 @@ Aim for 12 main slides plus 2 optional backup slides. If time is short, combine 
 
 Visible slide text:
 
-- `Mini DMA`
+- `TMA`
 - `A purpose-built instrument for faster shape-memory microwire measurements`
 - Your name, group, date
 
 Image / visual:
 
-- Strong full-machine photo or clean close-up of the Mini DMA setup.
-- If the current title slide already has the best image, keep it but make the title more specific than only `Mini DMA`.
+- Strong full-machine photo or clean close-up of the TMA setup.
+- If the current title slide already has the best image, keep it but make the title more specific than only `TMA`.
 
 Talk out loud:
 
@@ -1024,11 +1024,11 @@ Talk out loud:
 - "The key experiment is to heat the wire while controlling the mechanical condition."
 - "That makes a dedicated instrument realistic."
 
-### Slide 5 - Mini DMA At A Glance
+### Slide 5 - TMA At A Glance
 
 Visible slide text:
 
-- `Mini DMA = motion + force feedback + electrical heating + software control`
+- `TMA = motion + force feedback + electrical heating + software control`
 - Labels on the image: `linear actuator`, `balance`, `wire`, `power supply`, `PC/software`
 
 Image / visual:
@@ -1188,13 +1188,13 @@ Talk out loud:
 - "The important point is that it can run the intended workflow and produce data that we can analyze."
 - "The remaining work is calibration, repeatability, and comparison against the commercial DMA."
 
-### Slide 13 - Mini DMA vs Commercial DMA
+### Slide 13 - TMA vs Commercial DMA
 
 Visible slide text:
 
 - `Commercial DMA`
 - `full instrument, validated standard, temperature-driven`
-- `Mini DMA`
+- `TMA`
 - `focused instrument, fast iteration, current-driven`
 - Existing cost comparison if defensible: `about 350 EUR vs about 30,000 EUR`
 
@@ -1207,7 +1207,7 @@ Talk out loud:
 
 - "I do not want to claim this replaces a commercial DMA."
 - "The commercial instrument remains the standard for validated measurements."
-- "Mini DMA is a complementary screening and development tool."
+- "TMA is a complementary screening and development tool."
 - "It lets us run more experiments, test ideas faster, and reserve the commercial DMA for the most important validation measurements."
 
 Facts to verify before final PPTX edit:
@@ -1226,7 +1226,7 @@ Visible slide text:
 
 Image / visual:
 
-- A clean pipeline: `sample idea -> Mini DMA screening -> selected samples -> commercial DMA validation`.
+- A clean pipeline: `sample idea -> TMA screening -> selected samples -> commercial DMA validation`.
 - Or a screenshot/summary of the saved run artifacts: `measurement.csv`, `scale_raw.csv`, `control_trace.csv`, `metadata.json`.
 
 Talk out loud:
@@ -1332,12 +1332,12 @@ Use 10 slides:
 1. Title
 2. Why DMA matters
 3. Bottleneck
-4. Mini DMA at a glance
+4. TMA at a glance
 5. Force sensitivity
 6. Hardware: scale + motor combined
 7. Setup and control
 8. First results
-9. Commercial DMA vs Mini DMA
+9. Commercial DMA vs TMA
 10. AI-assisted build + next steps
 
 ## Open Questions Before Editing The PPTX

@@ -356,7 +356,7 @@ run log and failure dialog should point to the operator action instead of only
 showing the raw TCP or lease exception.
 The broker channel starts as **Select channel...** on first use, and a sweep will
 not start until the operator explicitly chooses the wired HMP channel. On the
-current shared bench, choose `CH1` for AC susceptibility; Mini DMA uses `CH3`
+current shared bench, choose `CH1` for AC susceptibility; TMA uses `CH3`
 for its motor rail and `CH4` for its current-sweep channel. Channels saved by
 older development builds before this confirmation marker are treated as
 unconfirmed and must be selected again.
@@ -410,7 +410,7 @@ bench comparison plan is:
 
 ## Live Plots
 
-The right-side graph area follows the Mini DMA dashboard pattern: use
+The right-side graph area follows the TMA dashboard pattern: use
 **Configure plots** to choose which plot tiles are visible and what each tile
 uses for bottom X, left Y, optional right Y, and optional far-right Y.
 Live plots intentionally separate the raw time trace from parameter summaries

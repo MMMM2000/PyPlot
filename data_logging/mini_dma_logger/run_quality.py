@@ -1,4 +1,4 @@
-"""Mini DMA per-run quality metrics.
+"""TMA per-run quality metrics.
 
 The output is a derived cache. Raw run CSV/JSON files remain the source of truth.
 """
@@ -679,7 +679,7 @@ def discover_quality_run_dirs(paths: Iterable[Path | str]) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Compute Mini DMA per-run quality metrics.")
+    parser = argparse.ArgumentParser(description="Compute TMA per-run quality metrics.")
     parser.add_argument("paths", nargs="+", help="Run folders, metadata.json files, or parent folders.")
     parser.add_argument("--write", action="store_true", help="Write run_quality.json into each run folder.")
     parser.add_argument(

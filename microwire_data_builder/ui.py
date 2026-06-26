@@ -17893,7 +17893,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
 
 class MiniDmaSection(MiniDatabaseSection):
     section_key = "mini_dma"
-    section_title = "Mini DMA"
+    section_title = "TMA"
     supported_suffixes = (".csv",)
 
     def __init__(
@@ -17906,11 +17906,11 @@ class MiniDmaSection(MiniDatabaseSection):
         self._record_groups_by_key: Dict[str, List[MiniDmaRecord]] = {}
         super().__init__(logger, log_callback, parent)
         self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
-        self.open_pyplot_button.setToolTip("Open the selected Mini DMA runs in PyPlot.")
+        self.open_pyplot_button.setToolTip("Open the selected TMA runs in PyPlot.")
         self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
         self.controls_layout.addWidget(self.open_pyplot_button)
         self.open_origin_button = QtWidgets.QPushButton("Open in Origin")
-        self.open_origin_button.setToolTip("Send the selected Mini DMA runs to Origin via PyPlot.")
+        self.open_origin_button.setToolTip("Send the selected TMA runs to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
         self._refresh_record_groups()
@@ -17922,7 +17922,7 @@ class MiniDmaSection(MiniDatabaseSection):
         progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
     ) -> SectionProcessResult:
         if mini_dma_core is None:
-            raise RuntimeError("Mini DMA parser is not available.")
+            raise RuntimeError("TMA parser is not available.")
         records: List[MiniDmaRecord] = []
         processed: Dict[str, float] = {}
         total = len(paths)
@@ -17941,7 +17941,7 @@ class MiniDmaSection(MiniDatabaseSection):
             try:
                 run = mini_dma_core.load_run(measurement_path)
             except Exception:
-                self.logger.exception("Failed to parse Mini DMA run %s", path)
+                self.logger.exception("Failed to parse TMA run %s", path)
                 if progress is not None:
                     try:
                         progress(idx, total, f"Skipped {path.name}")
@@ -17970,7 +17970,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 )
                 break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
             except Exception:
-                self.logger.exception("Failed to summarize Mini DMA run %s", run_path)
+                self.logger.exception("Failed to summarize TMA run %s", run_path)
             record = MiniDmaRecord(
                 path=run_path,
                 sample=sample or raw_sample or getattr(run, "sample_name", "") or run_path.name,
@@ -18074,7 +18074,7 @@ class MiniDmaSection(MiniDatabaseSection):
             return
         _open_pyplot_for_paths(
             paths,
-            "Mini DMA",
+            "TMA",
             self.logger,
             auto_plot=True,
             open_origin=open_origin,
@@ -23647,7 +23647,7 @@ class AssemblySection(QtWidgets.QWidget):
             ("vsm_temperature_scan", "VSM temperature scan"),
             ("transition_temps", "Transition temps"),
             ("dma_iso_stress", "DMA iso-stress"),
-            ("mini_dma", "Mini DMA"),
+            ("mini_dma", "TMA"),
             ("shape_memory_stress_strain", "Manual stress/strain"),
             ("fmr", "FMR"),
             ("strain", "Strain"),
@@ -24773,7 +24773,7 @@ class AssemblySection(QtWidgets.QWidget):
             if isinstance(payload, list):
                 mini_dma_records = list(payload)
             else:
-                _mark_missing("Mini DMA")
+                _mark_missing("TMA")
         self._cached_mini_dma_records = list(mini_dma_records)
         self._cached_mini_dma_groups = _group_graph_records_by_key(mini_dma_records)
 
@@ -26730,7 +26730,7 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("VSM temperature scan", section_map.get("vsm_temperature_scan", []))
         add_group("Transition temps", section_map.get("transition_temps", []))
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
-        add_group("Mini DMA", section_map.get("mini_dma", []))
+        add_group("TMA", section_map.get("mini_dma", []))
         add_group(
             "Manual stress/strain",
             section_map.get("shape_memory_stress_strain", []),
@@ -28721,7 +28721,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         _pump_events()
 
         self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.mini_dma_section, "Mini DMA")
+        self.tab_widget.addTab(self.mini_dma_section, "TMA")
         self.sections["mini_dma"] = self.mini_dma_section
         _pump_events()
 

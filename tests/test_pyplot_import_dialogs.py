@@ -505,7 +505,7 @@ def test_import_data_from_folder_uses_plugin_scoped_start_dir(tmp_path: Path) ->
 
 def test_mini_dma_import_folder_keeps_directory_selection(tmp_path: Path) -> None:
     app = _ensure_app()
-    window = PyPlotWorkbench(initial_plotter="Mini DMA")
+    window = PyPlotWorkbench(initial_plotter="TMA")
     run_folder = tmp_path / "mini_dma_parent" / "sample_run01"
     run_folder.mkdir(parents=True)
     try:
@@ -525,7 +525,7 @@ def test_mini_dma_import_folder_keeps_directory_selection(tmp_path: Path) -> Non
 
 def test_mini_dma_import_folder_autoloads_multiple_run_folders(tmp_path: Path) -> None:
     app = _ensure_app()
-    window = PyPlotWorkbench(initial_plotter="Mini DMA")
+    window = PyPlotWorkbench(initial_plotter="TMA")
     parent = tmp_path / "mini_dma_parent"
     first = parent / "sample_run01"
     second = parent / "sample_run02"
@@ -566,7 +566,7 @@ def test_mini_dma_folder_import_skips_generic_sidecar_workbook_import(
     tmp_path: Path,
 ) -> None:
     app = _ensure_app()
-    window = PyPlotWorkbench(initial_plotter="Mini DMA")
+    window = PyPlotWorkbench(initial_plotter="TMA")
     parent = tmp_path / "mini_dma_parent"
     run_folder = parent / "sample_run01"
     run_folder.mkdir(parents=True)
@@ -609,7 +609,7 @@ def test_mini_dma_folder_import_skips_generic_sidecar_workbook_import(
         plugin = window._current_plugin  # noqa: SLF001 - test hook
         runs = getattr(plugin, "_runs")
         assert [run.path for run in runs] == [run_folder.resolve()]
-        assert window._workbooks == {}  # noqa: SLF001 - Mini DMA folders are plugin data
+        assert window._workbooks == {}  # noqa: SLF001 - TMA folders are plugin data
         assert information_calls == []
         assert warning_calls == []
     finally:
