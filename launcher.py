@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Tuple, Sequence, cast, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Tuple, Sequence, cast, Protocol
 
 import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
@@ -1221,6 +1221,252 @@ def _serialise_assemble_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return export_frame
 
 
+TMA_TARGET_EXPORT_SHEET = "TMA targets"
+TMA_TARGET_EXPORT_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "TMA run",
+    "TMA target",
+    "TMA stress (MPa)",
+    "TMA load (g)",
+    "TMA strain (%)",
+    "TMA strain peak current (mA)",
+    "TMA As",
+    "TMA Af",
+    "TMA Ms",
+    "TMA Mf",
+]
+_TMA_TARGET_RE = re.compile(
+    r"(?:^|:\s*)(?P<stress>[-+]?\d+(?:\.\d+)?)\s*MPa"
+    r"(?:\s*/\s*(?P<load>[-+]?\d+(?:\.\d+)?)\s*g)?",
+    re.IGNORECASE,
+)
+_TMA_TRANSITION_RE = re.compile(
+    r"\b(?P<label>As|Af|Ms|Mf)\s+(?P<value>[-+]?\d+(?:\.\d+)?)\s*mA\b",
+    re.IGNORECASE,
+)
+_TMA_STRAIN_RE = re.compile(
+    r":\s*(?P<strain>[-+]?\d+(?:\.\d+)?)\s*%\s*@\s*"
+    r"(?P<current>[-+]?\d+(?:\.\d+)?)\s*mA\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_tma_target_label(target_label: object) -> dict[str, object]:
+    text = str(target_label or "").strip()
+    result: dict[str, object] = {"TMA target": text}
+    match = _TMA_TARGET_RE.search(text)
+    if match is None:
+        return result
+    for group_name, column in (("stress", "TMA stress (MPa)"), ("load", "TMA load (g)")):
+        value = match.group(group_name)
+        if value is None:
+            continue
+        try:
+            result[column] = float(value)
+        except ValueError:
+            pass
+    return result
+
+
+def _tma_target_identity(target_label: object) -> tuple[object, ...]:
+    parsed = _parse_tma_target_label(target_label)
+    stress = parsed.get("TMA stress (MPa)")
+    load = parsed.get("TMA load (g)")
+    if isinstance(stress, (int, float)) and math.isfinite(float(stress)):
+        load_value: object = None
+        if isinstance(load, (int, float)) and math.isfinite(float(load)):
+            load_value = round(float(load), 6)
+        return ("stress_load", round(float(stress), 6), load_value)
+    return ("label", str(target_label or "").strip().casefold())
+
+
+def _parse_tma_transition_line(line: object) -> tuple[str, dict[str, float]]:
+    text = str(line or "").strip()
+    target, _separator, body = text.rpartition(":")
+    values: dict[str, float] = {}
+    for match in _TMA_TRANSITION_RE.finditer(body):
+        try:
+            values[match.group("label").title()] = float(match.group("value"))
+        except ValueError:
+            continue
+    return target.strip(), values
+
+
+def _parse_tma_strain_line(line: object) -> tuple[str, dict[str, float]]:
+    text = str(line or "").strip()
+    target, _separator, _body = text.rpartition(":")
+    match = _TMA_STRAIN_RE.search(text)
+    if match is None:
+        return target.strip(), {}
+    try:
+        return target.strip(), {
+            "TMA strain (%)": float(match.group("strain")),
+            "TMA strain peak current (mA)": float(match.group("current")),
+        }
+    except ValueError:
+        return target.strip(), {}
+
+
+def _coerce_tma_values(value: object) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, float] = {}
+    for label in ("As", "Af", "Ms", "Mf"):
+        raw = value.get(label)
+        if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+            result[label] = float(raw)
+    return result
+
+
+def _coerce_tma_cleared_labels(value: object) -> set[str]:
+    if isinstance(value, str):
+        candidates: object = value.replace(";", ",").split(",")
+    else:
+        candidates = value
+    if not isinstance(candidates, Iterable):
+        return set()
+    valid = {"As", "Af", "Ms", "Mf"}
+    return {
+        str(label).strip().title()
+        for label in candidates
+        if str(label).strip().title() in valid
+    }
+
+
+def _sample_to_tma_identity(sample: object) -> tuple[str, str]:
+    text = str(sample or "").strip()
+    if not text:
+        return "", ""
+    parts = text.split()
+    composition = parts[0] if parts else ""
+    microwire = parts[1].replace("_", "/").replace("-", "/") if len(parts) >= 2 else ""
+    return composition, microwire
+
+
+def _normalise_tma_status(value: object) -> str:
+    return str(value or "").strip().replace("-", "_").casefold()
+
+
+def _mini_dma_review_records_from_sections(sections: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    mini_dma = sections.get("mini_dma")
+    if not isinstance(mini_dma, Mapping):
+        return {}
+    extra = mini_dma.get("extra")
+    if not isinstance(extra, Mapping):
+        return {}
+    raw_reviews = extra.get("mini_dma_transition_reviews")
+    if isinstance(raw_reviews, Mapping) and isinstance(raw_reviews.get("records"), Mapping):
+        raw_reviews = raw_reviews.get("records")
+    if not isinstance(raw_reviews, Mapping):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in raw_reviews.items()
+        if isinstance(value, Mapping)
+    }
+
+
+def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    assemble_frame = _assemble_export_frame_from_sections(sections)
+    compact_rows = assemble_frame.to_dict(orient="records")
+    rows: list[dict[str, object]] = []
+    reviewed_targets: set[tuple[str, str, tuple[object, ...]]] = set()
+    strain_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+    transition_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+
+    for compact_row in compact_rows:
+        composition = str(compact_row.get("Composition") or "").strip()
+        microwire = str(compact_row.get("Microwire") or "").strip()
+        for raw_line in compact_row.get("Mini DMA strain by stress/load") or ():
+            target, values = _parse_tma_strain_line(raw_line)
+            if target and values:
+                strain_by_target[(composition, microwire, _tma_target_identity(target))] = values
+        for raw_line in compact_row.get("Mini DMA transition currents by stress/load") or ():
+            target, values = _parse_tma_transition_line(raw_line)
+            if target and values:
+                transition_by_target[(composition, microwire, _tma_target_identity(target))] = values
+
+    for record_id, review in _mini_dma_review_records_from_sections(sections).items():
+        status = _normalise_tma_status(review.get("status"))
+        if status == "excluded":
+            continue
+        target = str(review.get("target_label") or record_id.rsplit("::", 1)[-1]).strip()
+        if not target:
+            continue
+        composition, microwire = _sample_to_tma_identity(review.get("sample"))
+        if not composition or not microwire:
+            for compact_row in compact_rows:
+                compact_targets = " ".join(
+                    str(line)
+                    for line in compact_row.get("Mini DMA transition currents by stress/load") or ()
+                )
+                if target in compact_targets:
+                    composition = composition or str(compact_row.get("Composition") or "").strip()
+                    microwire = microwire or str(compact_row.get("Microwire") or "").strip()
+                    break
+        run_label = str(review.get("run_label") or "").strip()
+        row: dict[str, object] = {
+            "Composition": composition,
+            "Microwire": microwire,
+            "TMA run": run_label,
+            **_parse_tma_target_label(target),
+            **strain_by_target.get((composition, microwire, _tma_target_identity(target)), {}),
+        }
+        values = _coerce_tma_values(review.get("manual_values_mA"))
+        if not values:
+            values = _coerce_tma_values(review.get("values"))
+        if not values:
+            values = _coerce_tma_values(review.get("auto_values_mA"))
+        cleared = _coerce_tma_cleared_labels(review.get("cleared_labels"))
+        if status == "no_transition":
+            for label in ("As", "Af", "Ms", "Mf"):
+                row[f"TMA {label}"] = "No transition"
+        else:
+            for label in ("As", "Af", "Ms", "Mf"):
+                if label in cleared:
+                    row[f"TMA {label}"] = "Not observed"
+                elif label in values:
+                    row[f"TMA {label}"] = values[label]
+        rows.append(row)
+        reviewed_targets.add((composition, microwire, _tma_target_identity(target)))
+
+    for compact_row in compact_rows:
+        composition = str(compact_row.get("Composition") or "").strip()
+        microwire = str(compact_row.get("Microwire") or "").strip()
+        raw_runs = compact_row.get("Mini DMA graphs")
+        if isinstance(raw_runs, str):
+            run_label = raw_runs
+        elif isinstance(raw_runs, Iterable):
+            run_label = ", ".join(str(run) for run in raw_runs if str(run).strip())
+        else:
+            run_label = ""
+        for (parent_composition, parent_microwire, target_key), values in transition_by_target.items():
+            if (parent_composition, parent_microwire) != (composition, microwire):
+                continue
+            if (composition, microwire, target_key) in reviewed_targets:
+                continue
+            target = ""
+            for raw_line in compact_row.get("Mini DMA transition currents by stress/load") or ():
+                candidate_target, _candidate_values = _parse_tma_transition_line(raw_line)
+                if _tma_target_identity(candidate_target) == target_key:
+                    target = candidate_target
+                    break
+            row = {
+                "Composition": composition,
+                "Microwire": microwire,
+                "TMA run": run_label,
+                **_parse_tma_target_label(target),
+                **strain_by_target.get((composition, microwire, target_key), {}),
+            }
+            for label in ("As", "Af", "Ms", "Mf"):
+                if label in values:
+                    row[f"TMA {label}"] = values[label]
+            rows.append(row)
+
+    return pd.DataFrame(rows, columns=TMA_TARGET_EXPORT_COLUMNS)
+
+
 def _sections_represented_in_builder_project(sections: Mapping[str, object]) -> list[str]:
     represented: list[str] = []
     for section_name, payload in sections.items():
@@ -1259,6 +1505,7 @@ def _write_assemble_workbook(
     output_path: Path,
     frame: pd.DataFrame,
     preset: str,
+    tma_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     output_path = output_path.with_suffix(".xlsx")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1286,8 +1533,17 @@ def _write_assemble_workbook(
     ]
     audit_columns = list(dict.fromkeys([*identity_columns, *dropped_columns]))
     hidden_sheets: list[str] = []
+    extra_sheets: dict[str, dict[str, object]] = {}
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         main_frame.to_excel(writer, sheet_name="Assemble", index=False)
+        if tma_frame is not None and not tma_frame.empty:
+            serialised_tma = _serialise_assemble_export_frame(tma_frame)
+            serialised_tma.to_excel(writer, sheet_name=TMA_TARGET_EXPORT_SHEET, index=False)
+            extra_sheets[TMA_TARGET_EXPORT_SHEET] = {
+                "row_count": int(len(serialised_tma.index)),
+                "column_count": int(len(serialised_tma.columns)),
+                "columns": [str(column) for column in serialised_tma.columns],
+            }
         if audit_columns:
             audit_frame = serialised.loc[:, audit_columns].copy()
             audit_frame.to_excel(writer, sheet_name="Assemble audit", index=False)
@@ -1306,6 +1562,7 @@ def _write_assemble_workbook(
         "dropped_columns": dropped_columns,
         "row_count": int(len(main_frame.index)),
         "column_count": int(len(main_frame.columns)),
+        "extra_sheets": extra_sheets,
     }
 
 
@@ -1412,11 +1669,13 @@ def _export_builder_assemble_workbook(
         raise _AutomationRecipeError(
             "Builder project has no saved Assemble rows. Re-run with Assemble rebuild enabled."
         )
+    tma_frame = _expanded_tma_export_frame_from_sections(sections)
 
     workbook_info = _write_assemble_workbook(
         output_path=output_path,
         frame=frame,
         preset=preset,
+        tma_frame=tma_frame,
     )
     manifest_target = manifest_path.expanduser() if manifest_path is not None else output_path.with_suffix(".manifest.json")
     export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -1440,6 +1699,7 @@ def _export_builder_assemble_workbook(
         "dropped_columns": workbook_info["dropped_columns"],
         "hidden_sheets": workbook_info["hidden_sheets"],
         "audit_sheet": workbook_info["audit_sheet"],
+        "extra_sheets": workbook_info["extra_sheets"],
         "rebuild": rebuild_result,
         "git_commit": _current_git_commit(),
     }
@@ -1480,10 +1740,12 @@ def _run_builder_export_assemble_command(
         raise _AutomationRecipeError(
             f"Builder export_assemble command {command_index} has no Assemble rows to export."
         )
+    tma_frame = _expanded_tma_export_frame_from_sections(sections)
     workbook_info = _write_assemble_workbook(
         output_path=output_path,
         frame=frame,
         preset=preset,
+        tma_frame=tma_frame,
     )
     manifest_target = manifest_path or output_path.with_suffix(".manifest.json")
     payload = _load_json_object(output_project, label="Microwire Data Builder project copy") if output_project.exists() else {}
@@ -1508,6 +1770,7 @@ def _run_builder_export_assemble_command(
         "dropped_columns": workbook_info["dropped_columns"],
         "hidden_sheets": workbook_info["hidden_sheets"],
         "audit_sheet": workbook_info["audit_sheet"],
+        "extra_sheets": workbook_info["extra_sheets"],
         "rebuild": None,
         "git_commit": _current_git_commit(),
     }
@@ -1522,6 +1785,7 @@ def _run_builder_export_assemble_command(
         "column_count": workbook_info["column_count"],
         "dropped_columns": workbook_info["dropped_columns"],
         "hidden_sheets": workbook_info["hidden_sheets"],
+        "extra_sheets": workbook_info["extra_sheets"],
     }
 
 
