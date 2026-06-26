@@ -1307,6 +1307,14 @@ def _tma_target_identity(target_label: object) -> tuple[object, ...]:
     return ("label", str(target_label or "").strip().casefold())
 
 
+def _tma_target_stress_identity(target_label: object) -> tuple[object, ...] | None:
+    parsed = _parse_tma_target_label(target_label)
+    stress = parsed.get("TMA stress (MPa)")
+    if isinstance(stress, (int, float)) and math.isfinite(float(stress)):
+        return ("stress", round(float(stress), 6))
+    return None
+
+
 def _parse_tma_transition_line(line: object) -> tuple[str, dict[str, float]]:
     text = str(line or "").strip()
     target, _separator, body = text.rpartition(":")
@@ -1393,22 +1401,46 @@ def _mini_dma_review_records_from_sections(sections: Mapping[str, object]) -> di
     }
 
 
+def _compact_tma_export_lines(row: Mapping[str, object], *columns: str) -> tuple[object, ...]:
+    for column in columns:
+        value = row.get(column)
+        if value:
+            if isinstance(value, str):
+                return (value,)
+            if isinstance(value, Iterable) and not isinstance(value, Mapping):
+                return tuple(value)
+            return (value,)
+    return ()
+
+
 def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
     assemble_frame = _assemble_export_frame_from_sections(sections)
     compact_rows = assemble_frame.to_dict(orient="records")
     rows: list[dict[str, object]] = []
     reviewed_targets: set[tuple[str, str, tuple[object, ...]]] = set()
     strain_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+    strain_by_stress: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
     transition_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
 
     for compact_row in compact_rows:
         composition = str(compact_row.get("Composition") or "").strip()
         microwire = str(compact_row.get("Microwire") or "").strip()
-        for raw_line in compact_row.get("Mini DMA strain by stress/load") or ():
+        for raw_line in _compact_tma_export_lines(
+            compact_row,
+            "TMA strain by stress/load",
+            "Mini DMA strain by stress/load",
+        ):
             target, values = _parse_tma_strain_line(raw_line)
             if target and values:
                 strain_by_target[(composition, microwire, _tma_target_identity(target))] = values
-        for raw_line in compact_row.get("Mini DMA transition currents by stress/load") or ():
+                stress_key = _tma_target_stress_identity(target)
+                if stress_key is not None:
+                    strain_by_stress[(composition, microwire, stress_key)] = values
+        for raw_line in _compact_tma_export_lines(
+            compact_row,
+            "TMA transition currents by stress/load",
+            "Mini DMA transition currents by stress/load",
+        ):
             target, values = _parse_tma_transition_line(raw_line)
             if target and values:
                 transition_by_target[(composition, microwire, _tma_target_identity(target))] = values
@@ -1425,7 +1457,11 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
             for compact_row in compact_rows:
                 compact_targets = " ".join(
                     str(line)
-                    for line in compact_row.get("Mini DMA transition currents by stress/load") or ()
+                    for line in _compact_tma_export_lines(
+                        compact_row,
+                        "TMA transition currents by stress/load",
+                        "Mini DMA transition currents by stress/load",
+                    )
                 )
                 if target in compact_targets:
                     composition = composition or str(compact_row.get("Composition") or "").strip()
@@ -1437,8 +1473,14 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
             "Microwire": microwire,
             "TMA run": run_label,
             **_parse_tma_target_label(target),
-            **strain_by_target.get((composition, microwire, _tma_target_identity(target)), {}),
         }
+        strain_values = strain_by_target.get((composition, microwire, _tma_target_identity(target)))
+        if not strain_values:
+            stress_key = _tma_target_stress_identity(target)
+            if stress_key is not None:
+                strain_values = strain_by_stress.get((composition, microwire, stress_key))
+        if strain_values:
+            row.update(strain_values)
         values = _coerce_tma_values(review.get("manual_values_mA"))
         if not values:
             values = _coerce_tma_values(review.get("values"))
@@ -1460,7 +1502,7 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
     for compact_row in compact_rows:
         composition = str(compact_row.get("Composition") or "").strip()
         microwire = str(compact_row.get("Microwire") or "").strip()
-        raw_runs = compact_row.get("Mini DMA graphs")
+        raw_runs = compact_row.get("TMA graphs") or compact_row.get("Mini DMA graphs")
         if isinstance(raw_runs, str):
             run_label = raw_runs
         elif isinstance(raw_runs, Iterable):
@@ -1473,7 +1515,11 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
             if (composition, microwire, target_key) in reviewed_targets:
                 continue
             target = ""
-            for raw_line in compact_row.get("Mini DMA transition currents by stress/load") or ():
+            for raw_line in _compact_tma_export_lines(
+                compact_row,
+                "TMA transition currents by stress/load",
+                "Mini DMA transition currents by stress/load",
+            ):
                 candidate_target, _candidate_values = _parse_tma_transition_line(raw_line)
                 if _tma_target_identity(candidate_target) == target_key:
                     target = candidate_target
@@ -1483,8 +1529,14 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 "Microwire": microwire,
                 "TMA run": run_label,
                 **_parse_tma_target_label(target),
-                **strain_by_target.get((composition, microwire, target_key), {}),
             }
+            strain_values = strain_by_target.get((composition, microwire, target_key))
+            if not strain_values:
+                stress_key = _tma_target_stress_identity(target)
+                if stress_key is not None:
+                    strain_values = strain_by_stress.get((composition, microwire, stress_key))
+            if strain_values:
+                row.update(strain_values)
             for label in ("As", "Af", "Ms", "Mf"):
                 if label in values:
                     row[f"TMA {label}"] = values[label]
