@@ -686,13 +686,14 @@ def test_summarize_current_sweep_reports_per_target_strain_with_per_curve_l0() -
     assert first.l0_mm == pytest.approx(52.8, abs=0.1)
     assert first.max_current_mA == pytest.approx(79.9, abs=0.2)
     assert first.max_strain_pct >= first.strain_at_max_current_pct >= 0.0
+    assert first.current_at_max_strain_mA == pytest.approx(3.7, abs=0.1)
     lines = core.format_current_sweep_strain_summary(summary)
     assert lines[0].startswith("50 MPa / 1.46 g:")
-    assert "@ 80 mA" in lines[0]
+    assert "10.81% @ 4 mA" in lines[0]
     assert core.format_current_sweep_break_summary(summary) == ""
 
 
-def test_strain_summary_reports_strain_at_max_current_not_absolute_max() -> None:
+def test_strain_summary_reports_peak_strain_not_strain_at_max_current() -> None:
     summary = core.CurrentSweepSummary(
         targets=(
             core.CurrentSweepTargetSummary(
@@ -702,12 +703,13 @@ def test_strain_summary_reports_strain_at_max_current_not_absolute_max() -> None
                 max_current_mA=80.0,
                 max_strain_pct=2.5,
                 strain_at_max_current_pct=1.25,
+                current_at_max_strain_mA=42.0,
             ),
         ),
     )
 
     assert core.format_current_sweep_strain_summary(summary) == [
-        "50 MPa / 1.56 g: 1.25% @ 80 mA"
+        "50 MPa / 1.56 g: 2.5% @ 42 mA"
     ]
 
 

@@ -1788,6 +1788,82 @@ def test_build_database_includes_mini_dma_strain_and_break_summary(tmp_path: Pat
     assert row[MINI_DMA_BREAK_COLUMN] == ["400 MPa / 11.69 g @ 35 mA"]
 
 
+def test_build_database_keeps_mini_dma_only_rows_with_column_filter(tmp_path: Path) -> None:
+    mini_dma = MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 with glass iso-stress_run08",
+        sample="Ni50Fe27Ga23 12_2 with glass",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="with glass iso-stress_run08",
+        strain_summary=("50 MPa / 1.46 g: 5.16% @ 15 mA",),
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+            column_filter=("Composition", "Microwire", MINI_DMA_STRAIN_COLUMN),
+        ),
+        measurement_records=[],
+        mini_dma_records=[mini_dma],
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    assert list(result.dataframe.columns) == [
+        "Composition",
+        "Microwire",
+        MINI_DMA_STRAIN_COLUMN,
+    ]
+    row = result.dataframe.iloc[0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row[MINI_DMA_STRAIN_COLUMN] == ["50 MPa / 1.46 g: 5.16% @ 15 mA"]
+
+
+def test_build_database_recomputes_stale_mini_dma_strain_summary(tmp_path: Path) -> None:
+    mini_dma = MiniDmaRecord(
+        path=tmp_path / "missing_raw_run",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(
+            {
+                "elapsed_s": [0.0, 1.0, 2.0],
+                "automation_phase": ["current", "current", "current"],
+                "automation_target_value": [50.0, 50.0, 50.0],
+                "current_mA": [10.0, 30.0, 20.0],
+                "strain_pct": [5.0, 3.0, 6.0],
+                "resistance_ohm": [100.0, 100.0, 100.0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="saved run",
+        strain_summary=("50 MPa: 0% @ 30 mA",),
+    )
+
+    result = build_database(
+        BuilderConfig(
+            fabrication_files=[],
+            annealing_files=[],
+            output_dir=tmp_path,
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+        ),
+        measurement_records=[],
+        mini_dma_records=[mini_dma],
+        fabrication_index=FabricationIndex(),
+        skip_exports=True,
+    )
+
+    row = result.dataframe.iloc[0]
+    assert row["Microwire"] == "12/2"
+    assert row[MINI_DMA_STRAIN_COLUMN] == ["50 MPa: 3% @ 20 mA"]
+
+
 def test_mini_dma_section_frame_accepts_multiple_break_summaries(tmp_path: Path) -> None:
     first = MiniDmaRecord(
         path=tmp_path / "Ni50Fe27Ga23 5_4 run01",

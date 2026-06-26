@@ -94,6 +94,7 @@ class CurrentSweepTargetSummary:
     max_current_mA: float | None
     max_strain_pct: float | None
     strain_at_max_current_pct: float | None
+    current_at_max_strain_mA: float | None = None
     as_current_mA: float | None = None
     af_current_mA: float | None = None
     ms_current_mA: float | None = None
@@ -553,8 +554,12 @@ def summarize_current_sweep(
             max_current_mA = float(current.loc[max_index])
             strain_at_max_current = float(strain.loc[max_index])
         max_strain_pct: float | None = None
+        current_at_max_strain_mA: float | None = None
         if strain.notna().any():
-            max_strain_pct = float(strain.max(skipna=True))
+            max_strain_index = strain.idxmax(skipna=True)
+            max_strain_pct = float(strain.loc[max_strain_index])
+            if current.notna().any() and max_strain_index in current.index:
+                current_at_max_strain_mA = float(current.loc[max_strain_index])
         l0_mm = _group_l0_mm(run, group)
         target_summaries.append(
             CurrentSweepTargetSummary(
@@ -564,6 +569,7 @@ def summarize_current_sweep(
                 max_current_mA=max_current_mA,
                 max_strain_pct=max_strain_pct,
                 strain_at_max_current_pct=strain_at_max_current,
+                current_at_max_strain_mA=current_at_max_strain_mA,
                 **_transition_currents_for_group(strain, group),
             )
         )
@@ -576,8 +582,10 @@ def summarize_current_sweep(
 def format_current_sweep_strain_summary(summary: CurrentSweepSummary) -> list[str]:
     lines: list[str] = []
     for target in summary.targets:
-        strain = target.strain_at_max_current_pct
-        current = target.max_current_mA
+        strain = target.max_strain_pct
+        current = getattr(target, "current_at_max_strain_mA", None)
+        if current is None:
+            current = target.max_current_mA
         if strain is None or current is None:
             continue
         label = _format_target_summary_label(target.stress_mpa, target.load_g)

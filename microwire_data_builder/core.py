@@ -28,6 +28,11 @@ import pandas as pd
 from plotting.shared.transition_analysis import estimate_temperature_transition_points
 
 try:
+    from plotting.plugins.mini_dma import core as mini_dma_core
+except Exception:  # pragma: no cover - Mini DMA support is optional in minimal installs.
+    mini_dma_core = None  # type: ignore[assignment]
+
+try:
     from .video import extract_video_metrics
 except ImportError:
     module_name = "microwire_data_builder.video"
@@ -1036,6 +1041,61 @@ class MiniDmaRecord:
     strain_summary: Tuple[str, ...] = ()
     transition_summary: Tuple[str, ...] = ()
     break_summary: str = ""
+
+
+def _mini_dma_core_module() -> Any:
+    global mini_dma_core
+    if mini_dma_core is not None:
+        return mini_dma_core
+    try:
+        from plotting.plugins.mini_dma import core as module
+    except Exception:
+        return None
+    mini_dma_core = module  # type: ignore[assignment]
+    return module
+
+
+def _mini_dma_peak_strain_summary(record: MiniDmaRecord) -> Tuple[str, ...]:
+    """Return current Mini DMA peak-strain summary, falling back to cached text."""
+    cached = tuple(str(line) for line in getattr(record, "strain_summary", ()) or ())
+    module = _mini_dma_core_module()
+    if module is None:
+        return cached
+
+    run = None
+    path_value = getattr(record, "path", None)
+    if isinstance(path_value, (str, Path)):
+        try:
+            path = Path(path_value)
+            if path.exists():
+                run = module.load_run(path)
+        except Exception:
+            run = None
+
+    if run is None:
+        data = getattr(record, "data", None)
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            return cached
+        sample_name = str(getattr(record, "sample", "") or getattr(record, "label", "") or "Mini DMA")
+        path = Path(path_value) if isinstance(path_value, (str, Path)) else Path(sample_name)
+        try:
+            run = module.MiniDmaRun(
+                path=path,
+                measurement_path=path / module.MEASUREMENT_FILE,
+                frame=data.copy(),
+                sample_name=sample_name,
+            )
+        except Exception:
+            return cached
+
+    try:
+        if module.is_iso_current_run(run):
+            return cached
+        summary = module.summarize_current_sweep(run)
+        lines = tuple(module.format_current_sweep_strain_summary(summary))
+        return lines or cached
+    except Exception:
+        return cached
 
 
 @dataclass
@@ -8504,7 +8564,7 @@ def build_database(
             transition_lines: List[str] = []
             break_lines: List[str] = []
             for record in mini_dma_entries:
-                for line in getattr(record, "strain_summary", ()) or ():
+                for line in _mini_dma_peak_strain_summary(record):
                     if line and line not in strain_lines:
                         strain_lines.append(str(line))
                 for line in getattr(record, "transition_summary", ()) or ():

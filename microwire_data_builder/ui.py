@@ -131,6 +131,7 @@ from .core import (
     _microwire_key_to_str,
     _microwire_key_from_string,
     _split_microwire_key,
+    _mini_dma_peak_strain_summary,
     MICROWIRE_SORT_RE,
     _parse_strain_float,
     _plot_measurement_matplotlib,
@@ -10493,7 +10494,7 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
         transition_lines: List[str] = []
         break_lines: List[str] = []
         for record in group:
-            for line in getattr(record, "strain_summary", ()) or ():
+            for line in _mini_dma_peak_strain_summary(record):
                 if line and line not in strain_lines:
                     strain_lines.append(str(line))
             for line in getattr(record, "transition_summary", ()) or ():
