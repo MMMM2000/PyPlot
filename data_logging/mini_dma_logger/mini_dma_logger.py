@@ -24836,7 +24836,6 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_ms = self._control_interval_ms()
         move_duration_s = self._move_duration_s(distance_mm, speed_mm_s)
         steps = [AutomationStep("move", target_mm=target_mm, duration_s=move_duration_s, note=label)]
-        steps.append(AutomationStep("record", note=label))
         if not self._preflight_recipe_hardware(steps):
             return
         self._show_recovery_plot_dialog(f"Mini DMA Recovery: {label}")

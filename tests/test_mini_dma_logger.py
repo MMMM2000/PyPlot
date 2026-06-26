@@ -21420,7 +21420,7 @@ def test_recovery_position_start_restarts_ui_refresh_timer(tmp_path: Path, qtbot
 
         assert window._automation_active is True
         assert window._automation_name == mini_dma_mod.RECOVERY_POSITION
-        assert [step.action for step in window._automation_steps] == ["move", "record"]
+        assert [step.action for step in window._automation_steps] == ["move"]
         assert window._ui_refresh_timer.isActive() is True
     finally:
         _close_test_window(window)
