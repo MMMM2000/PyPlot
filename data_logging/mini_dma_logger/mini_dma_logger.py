@@ -4635,6 +4635,39 @@ class SharedBrokerSupplyController:
             self.current_limit_a = previous_limit_a
             raise
 
+    def refresh_current_limit_after_idle_lease_mA(self, current_limit_mA: float) -> None:
+        requested_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
+        previous_limit_a = self.current_limit_a
+        channel = self.selected_channel()
+        if channel <= 0:
+            self.current_limit_a = requested_limit_a
+            return
+        with self._io_lock:
+            client = self._require_client()
+            lease_id = self._leases.get(channel)
+            if lease_id:
+                try:
+                    client.set_output(channel=channel, lease_id=lease_id, output_on=False)
+                    client.configure_channel(
+                        channel=channel,
+                        lease_id=lease_id,
+                        voltage_v=1.0,
+                        current_a=0.001,
+                        output_on=False,
+                    )
+                    client.release(channel=channel, lease_id=lease_id)
+                except Exception as exc:
+                    if not self._looks_like_stale_lease(exc):
+                        raise
+                finally:
+                    self._forget_lease(channel)
+            self.current_limit_a = requested_limit_a
+            try:
+                self._ensure_confirmed_role(channel)
+            except Exception:
+                self.current_limit_a = previous_limit_a
+                raise
+
     def configure_channel(
         self,
         *,
@@ -10181,6 +10214,25 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             method(limit_mA)
         except Exception as exc:
+            refresh_after_idle_lease = getattr(
+                self._supply_controller,
+                "refresh_current_limit_after_idle_lease_mA",
+                None,
+            )
+            if callable(refresh_after_idle_lease) and not self._automation_active and not self._supply_output_enabled:
+                try:
+                    refresh_after_idle_lease(limit_mA)
+                except Exception as refresh_exc:
+                    self._log(f"Current-sweep channel limit update failed: {refresh_exc}")
+                    return False
+                self._current_sweep_channel_limit_checked = (channel, limit_mA)
+                if log:
+                    channel_text = "-" if channel is None else f"CH{channel}"
+                    self._log(
+                        f"Current-sweep {channel_text} idle lease refreshed for "
+                        f"{_format_compact_unit(limit_mA, 'mA', decimals=2)} recipe maximum."
+                    )
+                return True
             self._log(f"Current-sweep channel limit update failed: {exc}")
             return False
         self._current_sweep_channel_limit_checked = (channel, limit_mA)
