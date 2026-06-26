@@ -4545,16 +4545,6 @@ class SharedBrokerSupplyController:
             return self.motor_voltage_limit_v, self.motor_current_limit_a
         return self.max_voltage_v, self.current_limit_a
 
-    @staticmethod
-    def _limit_matches(configured: object, desired: float | None) -> bool:
-        if desired is None:
-            return configured is None
-        try:
-            configured_value = float(configured)
-        except (TypeError, ValueError):
-            return False
-        return math.isclose(configured_value, float(desired), rel_tol=1e-9, abs_tol=1e-12)
-
     def _ensure_confirmed_role(self, channel: int) -> None:
         client = self._require_client()
         role = self._role_for_channel(channel)
@@ -4565,12 +4555,7 @@ class SharedBrokerSupplyController:
         raw_config = raw_channels.get(str(channel), {}) if isinstance(raw_channels, dict) else {}
         configured_role = str(raw_config.get("role") or "unused") if isinstance(raw_config, dict) else "unused"
         confirmed = bool(raw_config.get("confirmed", False)) if isinstance(raw_config, dict) else False
-        limits_match = (
-            isinstance(raw_config, dict)
-            and self._limit_matches(raw_config.get("voltage_limit_v"), voltage_limit_v)
-            and self._limit_matches(raw_config.get("current_limit_a"), current_limit_a)
-        )
-        if configured_role == role and confirmed and limits_match:
+        if configured_role == role and confirmed:
             return
         if configured_role not in {"unused", role}:
             raise RuntimeError(f"Shared HMP broker CH{channel} is assigned to {configured_role}, not {role}.")
@@ -4616,57 +4601,7 @@ class SharedBrokerSupplyController:
         return max(0.0, round(float(current_mA) / resolution_mA) * resolution_mA)
 
     def set_current_limit_mA(self, current_limit_mA: float) -> None:
-        requested_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
-        previous_limit_a = self.current_limit_a
-        channel = self.selected_channel()
-        if channel <= 0:
-            self.current_limit_a = requested_limit_a
-            return
-        if (
-            channel in self._leases
-            and previous_limit_a is not None
-            and requested_limit_a <= float(previous_limit_a) + 1e-12
-        ):
-            return
-        self.current_limit_a = requested_limit_a
-        try:
-            self._ensure_confirmed_role(channel)
-        except Exception:
-            self.current_limit_a = previous_limit_a
-            raise
-
-    def refresh_current_limit_after_idle_lease_mA(self, current_limit_mA: float) -> None:
-        requested_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
-        previous_limit_a = self.current_limit_a
-        channel = self.selected_channel()
-        if channel <= 0:
-            self.current_limit_a = requested_limit_a
-            return
-        with self._io_lock:
-            client = self._require_client()
-            lease_id = self._leases.get(channel)
-            if lease_id:
-                try:
-                    client.set_output(channel=channel, lease_id=lease_id, output_on=False)
-                    client.configure_channel(
-                        channel=channel,
-                        lease_id=lease_id,
-                        voltage_v=1.0,
-                        current_a=0.001,
-                        output_on=False,
-                    )
-                    client.release(channel=channel, lease_id=lease_id)
-                except Exception as exc:
-                    if not self._looks_like_stale_lease(exc):
-                        raise
-                finally:
-                    self._forget_lease(channel)
-            self.current_limit_a = requested_limit_a
-            try:
-                self._ensure_confirmed_role(channel)
-            except Exception:
-                self.current_limit_a = previous_limit_a
-                raise
+        self.current_limit_a = max(0.0, float(current_limit_mA)) / 1000.0
 
     def configure_channel(
         self,
@@ -9782,16 +9717,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_supply_controller(self) -> PowerSupplyController:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         if self._using_shared_broker_supply():
-            current_limit_mA = self._planned_current_sweep_limit_mA()
             return SharedBrokerSupplyController(  # type: ignore[return-value]
                 host=self.edit_shared_broker_host.text().strip(),
                 port=int(self.spin_shared_broker_port.value()),
                 max_voltage_v=float(self.spin_supply_voltage_limit.value()),
                 current_channel=self._current_sweep_supply_channel(),
                 motor_channel=self._motor_supply_channel(),
-                current_limit_a=current_limit_mA / 1000.0,
+                current_limit_a=None,
                 motor_voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
-                motor_current_limit_a=float(self.spin_motor_supply_current_limit.value()),
+                motor_current_limit_a=None,
             )
         return PowerSupplyController(
             port_name=str(self.combo_supply_port.currentData() or "").strip(),
@@ -9950,21 +9884,20 @@ class MainWindow(QtWidgets.QMainWindow):
             if driver.profile is None:
                 raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
             broker = SharedPowerSupplyBroker(driver, driver.profile)
-            current_limit_mA = self._planned_current_sweep_limit_mA()
             broker.assign_role(
                 channel=current_channel,
                 role=ROLE_MINI_DMA_CURRENT,
                 confirmed=True,
-                voltage_limit_v=float(self.spin_supply_voltage_limit.value()),
-                current_limit_a=current_limit_mA / 1000.0,
+                voltage_limit_v=None,
+                current_limit_a=None,
             )
             if motor_channel is not None:
                 broker.assign_role(
                     channel=motor_channel,
                     role=ROLE_MINI_DMA_MOTOR,
                     confirmed=True,
-                    voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
-                    current_limit_a=float(self.spin_motor_supply_current_limit.value()),
+                    voltage_limit_v=None,
+                    current_limit_a=None,
                 )
             broker.confirm_profile(name="Mini DMA auto-started shared HMP broker")
             server, thread = start_broker_server(
@@ -10194,6 +10127,10 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         if self._supply_controller is None:
             return False
+        if self._using_shared_broker_supply() or isinstance(self._supply_controller, SharedBrokerSupplyController):
+            channel = self._current_sweep_supply_channel()
+            self._current_sweep_channel_limit_checked = (channel, math.inf)
+            return True
         method = getattr(self._supply_controller, "set_current_limit_mA", None)
         if not callable(method):
             return True
@@ -10214,25 +10151,6 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             method(limit_mA)
         except Exception as exc:
-            refresh_after_idle_lease = getattr(
-                self._supply_controller,
-                "refresh_current_limit_after_idle_lease_mA",
-                None,
-            )
-            if callable(refresh_after_idle_lease) and not self._automation_active and not self._supply_output_enabled:
-                try:
-                    refresh_after_idle_lease(limit_mA)
-                except Exception as refresh_exc:
-                    self._log(f"Current-sweep channel limit update failed: {refresh_exc}")
-                    return False
-                self._current_sweep_channel_limit_checked = (channel, limit_mA)
-                if log:
-                    channel_text = "-" if channel is None else f"CH{channel}"
-                    self._log(
-                        f"Current-sweep {channel_text} idle lease refreshed for "
-                        f"{_format_compact_unit(limit_mA, 'mA', decimals=2)} recipe maximum."
-                    )
-                return True
             self._log(f"Current-sweep channel limit update failed: {exc}")
             return False
         self._current_sweep_channel_limit_checked = (channel, limit_mA)

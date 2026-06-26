@@ -914,7 +914,7 @@ def test_current_annealing_shared_broker_clamps_overshoot_to_max_current(qtbot) 
     ) in fake.calls
 
 
-def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> None:
+def test_current_annealing_ignores_stale_confirmed_broker_current_limit(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     fake = _FakeScheduledBrokerClient()
@@ -929,13 +929,13 @@ def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> No
 
     window._send_current_setpoint()
 
-    assert window.current_current_set == pytest.approx(0.002)
+    assert window.current_current_set == pytest.approx(0.0022)
     assert (
         "schedule_current_ramp",
         {
             "channel": 1,
             "lease_id": "lease-1",
-            "target_mA": 2.0,
+            "target_mA": 2.2,
             "rate_mA_s": 0.2,
             "max_step_mA": 0.2,
             "resolution_mA": 0.2,
@@ -943,7 +943,7 @@ def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> No
     ) in fake.calls
 
 
-def test_current_annealing_preflight_blocks_stale_broker_current_limit(qtbot) -> None:
+def test_current_annealing_preflight_ignores_stale_broker_current_limit(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     fake = _FakeScheduledBrokerClient()
@@ -968,7 +968,7 @@ def test_current_annealing_preflight_blocks_stale_broker_current_limit(qtbot) ->
 
     errors = window._start_preflight_errors()
 
-    assert any("35" in error and "30" in error and "shared broker" in error for error in errors)
+    assert errors == []
 
 
 def test_current_annealing_shared_broker_zero_current_stops_after_startup_grace(
@@ -1003,7 +1003,7 @@ def test_current_annealing_shared_broker_zero_current_stops_after_startup_grace(
     assert "Measured current is zero" in warnings[-1][1]
 
 
-def test_current_annealing_broker_limit_clamp_reverses_instead_of_stalling(
+def test_current_annealing_stale_broker_limit_does_not_reverse_current_ramp(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1027,14 +1027,14 @@ def test_current_annealing_broker_limit_clamp_reverses_instead_of_stalling(
 
     window._send_current_setpoint()
 
-    assert window.current_current_set == pytest.approx(0.030)
-    assert window.current_increment == pytest.approx(-0.001)
-    assert window.direction_ascending is False
+    assert window.current_current_set == pytest.approx(0.031)
+    assert window.current_increment == pytest.approx(0.001)
+    assert window.direction_ascending is True
     ramp_calls = [payload for name, payload in fake.calls if name == "schedule_current_ramp"]
     assert ramp_calls
     assert ramp_calls[-1]["channel"] == 1
     assert ramp_calls[-1]["lease_id"] == "lease-1"
-    assert ramp_calls[-1]["target_mA"] == pytest.approx(30.0)
+    assert ramp_calls[-1]["target_mA"] == pytest.approx(31.0)
     assert ramp_calls[-1]["rate_mA_s"] == pytest.approx(1.0)
 
 
@@ -1266,8 +1266,8 @@ def test_shared_broker_connect_starts_owned_broker_when_no_existing_broker(
                 "channel": 1,
                 "role": "current_annealing",
                 "confirmed": True,
-                "voltage_limit_v": pytest.approx(32.05),
-                "current_limit_a": pytest.approx(0.03),
+                "voltage_limit_v": None,
+                "current_limit_a": None,
             },
         ),
         ("confirm_profile", {"name": "Current Annealing auto-started shared HMP broker"}),

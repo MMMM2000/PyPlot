@@ -12682,7 +12682,7 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     ]
 
 
-def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
+def test_shared_broker_supply_controller_does_not_rewrite_confirmed_channel_limits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeBrokerClient:
@@ -12732,18 +12732,8 @@ def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
     controller.set_current_limit_mA(60.0)
 
     assign_calls = [call for call in clients[0].calls if call[0] == "assign_role"]
-    assert assign_calls == [
-        (
-            "assign_role",
-            {
-                "channel": 4,
-                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
-                "confirmed": True,
-                "voltage_limit_v": 32.05,
-                "current_limit_a": 0.06,
-            },
-        )
-    ]
+    assert assign_calls == []
+    assert controller.current_limit_a == pytest.approx(0.06)
 
 
 def test_shared_broker_supply_controller_rolls_back_refused_current_limit(
@@ -12784,11 +12774,9 @@ def test_shared_broker_supply_controller_rolls_back_refused_current_limit(
     )
 
     controller.connect()
+    controller.set_current_limit_mA(32.0)
 
-    with pytest.raises(PermissionError):
-        controller.set_current_limit_mA(32.0)
-
-    assert controller.current_limit_a == pytest.approx(0.03)
+    assert controller.current_limit_a == pytest.approx(0.032)
 
 
 def test_shared_broker_supply_controller_does_not_lower_limit_while_leased(
@@ -12847,104 +12835,8 @@ def test_shared_broker_supply_controller_does_not_lower_limit_while_leased(
     controller.configure_channel(channel=4, voltage_v=32.05, current_a=0.001, output_on=True)
     controller.set_current_limit_mA(35.0)
 
-    assert controller.current_limit_a == pytest.approx(0.04)
+    assert controller.current_limit_a == pytest.approx(0.035)
     assert [call for call in clients[0].calls if call[0] == "assign_role"] == []
-
-
-def test_shared_broker_supply_controller_refreshes_limit_after_idle_lease(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _FakeBrokerClient:
-        def __init__(self, *, host: str, port: int) -> None:
-            self.current_limit_a = 0.04
-            self.leases: dict[int, str] = {}
-            self.calls: list[tuple[str, dict[str, object]]] = []
-
-        def request(self, action: str, **payload: object) -> dict[str, object]:
-            self.calls.append((action, dict(payload)))
-            if action == "snapshot":
-                return {
-                    "snapshot": {
-                        "bench_profile": {
-                            "channels": {
-                                "4": {
-                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
-                                    "confirmed": True,
-                                    "voltage_limit_v": 32.05,
-                                    "current_limit_a": self.current_limit_a,
-                                }
-                            }
-                        }
-                    }
-                }
-            if action == "assign_role":
-                if self.leases:
-                    raise PermissionError("Cannot change CH4 role while it is leased.")
-                self.current_limit_a = float(payload["current_limit_a"])
-            return {"ok": True}
-
-        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
-            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
-            self.leases[int(channel)] = "lease-4"
-            return {"lease_id": "lease-4"}
-
-        def configure_channel(self, **payload: object) -> dict[str, object]:
-            self.calls.append(("configure_channel", dict(payload)))
-            return {"ok": True}
-
-        def set_output(self, **payload: object) -> dict[str, object]:
-            self.calls.append(("set_output", dict(payload)))
-            return {"ok": True}
-
-        def release(self, *, channel: int, lease_id: str) -> dict[str, object]:
-            self.calls.append(("release", {"channel": channel, "lease_id": lease_id}))
-            self.leases.pop(int(channel), None)
-            return {"ok": True}
-
-    clients: list[_FakeBrokerClient] = []
-
-    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
-        client = _FakeBrokerClient(host=host, port=port)
-        clients.append(client)
-        return client
-
-    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
-    controller = mini_dma_mod.SharedBrokerSupplyController(
-        host="127.0.0.1",
-        port=8765,
-        max_voltage_v=32.05,
-        current_channel=4,
-        current_limit_a=0.04,
-    )
-
-    controller.connect()
-    controller.configure_channel(channel=4, voltage_v=32.05, current_a=0.001, output_on=False)
-    controller.refresh_current_limit_after_idle_lease_mA(60.0)
-
-    assert controller.current_limit_a == pytest.approx(0.06)
-    assert clients[0].leases == {}
-    call_names = [name for name, _payload in clients[0].calls]
-    set_output_index = call_names.index("set_output")
-    release_index = call_names.index("release")
-    assign_index = call_names.index("assign_role")
-    assert set_output_index < release_index < assign_index
-    assert ("configure_channel", {
-        "channel": 4,
-        "lease_id": "lease-4",
-        "voltage_v": 1.0,
-        "current_a": 0.001,
-        "output_on": False,
-    }) in clients[0].calls
-    assert clients[0].calls[-1] == (
-        "assign_role",
-        {
-            "channel": 4,
-            "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
-            "confirmed": True,
-            "voltage_limit_v": 32.05,
-            "current_limit_a": 0.06,
-        },
-    )
 
 
 def test_shared_broker_supply_controller_retries_after_stale_current_lease(
@@ -13167,6 +13059,9 @@ def test_motor_supply_enable_fails_when_output_readback_stays_off(tmp_path: Path
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13573,7 +13468,7 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
         _close_test_window(window)
 
 
-def test_recipe_preflight_refreshes_existing_shared_broker_current_limit(
+def test_recipe_preflight_does_not_rewrite_shared_broker_current_limit(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -13592,6 +13487,9 @@ def test_recipe_preflight_refreshes_existing_shared_broker_current_limit(
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13606,13 +13504,13 @@ def test_recipe_preflight_refreshes_existing_shared_broker_current_limit(
         steps = [mini_dma_mod.AutomationStep("sweep_current", current_start_mA=1.0, current_end_mA=85.0)]
         assert window._preflight_recipe_hardware(steps) is True
 
-        assert limits == pytest.approx([85.0])
-        assert "CH4 limit checked" in window.log_output.toPlainText()
+        assert limits == []
+        assert "limit checked" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
 
-def test_recipe_preflight_limit_includes_independent_first_overheating_current(
+def test_recipe_preflight_does_not_push_independent_first_overheating_limit_to_broker(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -13631,6 +13529,9 @@ def test_recipe_preflight_limit_includes_independent_first_overheating_current(
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13650,18 +13551,18 @@ def test_recipe_preflight_limit_includes_independent_first_overheating_current(
         ]
         assert window._preflight_recipe_hardware(steps) is True
 
-        assert limits == pytest.approx([60.0])
-        assert "60 mA recipe maximum" in window.log_output.toPlainText()
+        assert limits == []
+        assert "recipe maximum" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
 
-def test_recipe_preflight_refreshes_idle_broker_lease_when_limit_is_leased(
+def test_recipe_preflight_ignores_stale_shared_broker_limit_lease_error(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    refreshed_limits: list[float] = []
+    limit_attempts: list[float] = []
 
     class _FakeSupply:
         current_limit_a = 0.04
@@ -13670,17 +13571,17 @@ def test_recipe_preflight_refreshes_idle_broker_lease_when_limit_is_leased(
             return True
 
         def set_current_limit_mA(self, current_limit_mA: float) -> None:
+            limit_attempts.append(current_limit_mA)
             raise PermissionError("Cannot change CH4 role while it is leased.")
-
-        def refresh_current_limit_after_idle_lease_mA(self, current_limit_mA: float) -> None:
-            refreshed_limits.append(current_limit_mA)
-            self.current_limit_a = current_limit_mA / 1000.0
 
         def disconnect(self) -> None:
             return None
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13702,19 +13603,18 @@ def test_recipe_preflight_refreshes_idle_broker_lease_when_limit_is_leased(
         ]
         assert window._preflight_recipe_hardware(steps) is True
 
-        assert refreshed_limits == pytest.approx([60.0])
+        assert limit_attempts == []
         assert window._current_sweep_channel_limit_checked is not None
         assert window._current_sweep_channel_limit_checked[0] == 4
-        assert window._current_sweep_channel_limit_checked[1] == pytest.approx(60.0)
+        assert math.isinf(window._current_sweep_channel_limit_checked[1])
         log_text = window.log_output.toPlainText()
-        assert "idle lease refreshed" in log_text
         assert "Current-sweep channel limit update failed" not in log_text
     finally:
         window._automation_active = False
         _close_test_window(window)
 
 
-def test_prepare_current_sweep_channel_refreshes_broker_limit_before_configure(
+def test_prepare_current_sweep_channel_does_not_rewrite_shared_broker_limit_before_configure(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -13739,6 +13639,9 @@ def test_prepare_current_sweep_channel_refreshes_broker_limit_before_configure(
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13748,7 +13651,7 @@ def test_prepare_current_sweep_channel_refreshes_broker_limit_before_configure(
 
         assert window._prepare_current_sweep_supply_channel() is True
 
-        assert calls[:2] == [("limit", pytest.approx(85.0)), ("configure", pytest.approx(1.0))]
+        assert calls[:2] == [("configure", pytest.approx(1.0)), ("select", None)]
     finally:
         _close_test_window(window)
 
@@ -15776,6 +15679,9 @@ def test_first_overheating_runtime_update_lowers_without_refreshing_leased_limit
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )

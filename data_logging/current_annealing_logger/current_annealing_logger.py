@@ -2743,26 +2743,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Could not refresh the shared HMP broker channel limits before starting: "
                     + broker_failure_diagnostic(exc, context="Current Annealing shared HMP broker")
                 )
-            else:
-                limit_mA = getattr(self, "_shared_broker_current_limit_mA", None)
-                try:
-                    requested_mA = max(
-                        float(getattr(self, "max_current_mA", 0.0) or 0.0),
-                        float(getattr(self, "start_current_mA", 0.0) or 0.0),
-                    )
-                except Exception:
-                    requested_mA = 0.0
-                try:
-                    limit_value = None if limit_mA is None else float(limit_mA)
-                except Exception:
-                    limit_value = None
-                tolerance_mA = max(1e-6, self._current_resolution_mA() * 1e-3)
-                if limit_value is not None and limit_value > 0.0 and requested_mA > limit_value + tolerance_mA:
-                    errors.append(
-                        f"Requested max current is {requested_mA:g} mA, but the shared broker "
-                        f"has CH{self._shared_broker_channel()} confirmed for only {limit_value:g} mA. "
-                        "Update the shared broker/profile limit before starting."
-                    )
         return errors
 
     def _show_start_preflight_errors(self, errors: list[str]) -> None:
@@ -3161,13 +3141,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if driver.profile is None:
                     raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
                 broker = SharedPowerSupplyBroker(driver, driver.profile)
-                current_limit_a = self._shared_broker_current_limit_a()
                 broker.assign_role(
                     channel=channel,
                     role=ROLE_CURRENT_ANNEALING,
                     confirmed=True,
-                    voltage_limit_v=float(getattr(self, "max_voltage", HMP4040_PROFILE.max_voltage_v)),
-                    current_limit_a=current_limit_a,
+                    voltage_limit_v=None,
+                    current_limit_a=None,
                 )
                 broker.confirm_profile(name="Current Annealing auto-started shared HMP broker")
                 server, thread = start_broker_server(broker, host=host, port=port)
@@ -3182,7 +3161,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._owned_shared_broker_server = server
             self._owned_shared_broker_thread = thread
             self._owned_shared_broker_driver = driver
-            self._shared_broker_current_limit_mA = max(0.0, current_limit_a * 1000.0)
+            self._shared_broker_current_limit_mA = None
             self.port_name = port_name
             self._show_status_message(
                 f"Started shared HMP broker on {host}:{port} for {port_name}.",
@@ -4561,7 +4540,6 @@ class MainWindow(QtWidgets.QMainWindow):
         current_limits_mA: list[float] = []
         for value in (
             getattr(self, "max_current_mA", 0.0),
-            getattr(self, "_shared_broker_current_limit_mA", None),
         ):
             try:
                 limit = float(value)
@@ -4575,30 +4553,6 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance_mA = max(1e-9, self._current_resolution_mA() * 1e-6)
             if requested_mA > max_current_mA + tolerance_mA:
                 self.current_current_set = max_current_mA / 1000.0
-                shared_limit_mA = getattr(self, "_shared_broker_current_limit_mA", None)
-                try:
-                    shared_limit_value = None if shared_limit_mA is None else float(shared_limit_mA)
-                except Exception:
-                    shared_limit_value = None
-                if self._using_shared_broker() and shared_limit_value is not None and shared_limit_value > 0.0:
-                    message = (
-                        f"Shared broker CH{self._shared_broker_channel()} limit is {shared_limit_value:g} mA, "
-                        f"but the run requested {requested_mA:g} mA. "
-                        "The current was clamped to the confirmed broker limit."
-                    )
-                    if self.process_running:
-                        self._show_status_message(message, timeout_ms=15000)
-                        if not self._shared_broker_limit_warning_shown:
-                            self._shared_broker_limit_warning_shown = True
-                            try:
-                                QtWidgets.QMessageBox.warning(self, "Shared broker current limit", message)
-                            except Exception:
-                                pass
-                    if self.process_running and self.current_increment > 0:
-                        self.current_increment = -abs(self.current_step_A)
-                        self.line_color = "b"
-                        self.direction_ascending = False
-                        self._reset_voltage_projection()
         if self._using_shared_broker():
             self._set_shared_broker_current()
             self.ui.label_last_command.setText(

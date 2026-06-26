@@ -244,11 +244,7 @@ class SharedPowerSupplyBroker:
         output_on: bool,
     ) -> None:
         with self._lock:
-            config = self._require_lease(channel=channel, lease_id=lease_id)
-            if config.voltage_limit_v is not None and voltage_v > config.voltage_limit_v:
-                raise ValueError(f"Requested voltage exceeds CH{channel} limit.")
-            if config.current_limit_a is not None and current_a > config.current_limit_a:
-                raise ValueError(f"Requested current exceeds CH{channel} limit.")
+            self._require_lease(channel=channel, lease_id=lease_id)
             self.driver.configure_channel(
                 channel=channel,
                 voltage_v=voltage_v,
@@ -258,9 +254,7 @@ class SharedPowerSupplyBroker:
 
     def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
         with self._lock:
-            config = self._require_lease(channel=channel, lease_id=lease_id)
-            if config.current_limit_a is not None and current_mA / 1000.0 > config.current_limit_a:
-                raise ValueError(f"Requested current exceeds CH{channel} limit.")
+            self._require_lease(channel=channel, lease_id=lease_id)
             self.driver.set_current_mA(channel=channel, current_mA=current_mA)
 
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:
