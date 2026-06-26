@@ -67,6 +67,40 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                         ],
                     }
                 ],
+                "extra": {
+                    "mini_dma_transition_reviews": {
+                        "schema_version": 1,
+                        "records": {
+                            "G:/runs/run01::50 MPa / 1.46 g": {
+                                "status": "accepted",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "50 MPa / 1.46 g",
+                                "values": {"As": 31.0, "Af": 71.0, "Ms": 66.0, "Mf": 26.0},
+                            },
+                            "G:/runs/run01::75 MPa / 2.19 g": {
+                                "status": "no_transition",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "75 MPa / 2.19 g",
+                            },
+                            "G:/runs/run01::100 MPa / 2.92 g": {
+                                "status": "accepted",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "100 MPa / 2.92 g",
+                                "values": {"As": 35.0, "Af": 74.0},
+                                "cleared_labels": ["Ms", "Mf"],
+                            },
+                            "G:/runs/run01::125 MPa / 3.65 g": {
+                                "status": "excluded",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "125 MPa / 3.65 g",
+                            },
+                        },
+                    },
+                },
             },
             "transition_temps": {
                 "section": "transition_temps",
@@ -87,6 +121,7 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                     "Composition",
                     "Microwire",
                     "Mini DMA graphs",
+                    "Mini DMA strain by stress/load",
                     "Mini DMA transition currents by stress/load",
                     "Current annealing transition status",
                     "VSM transition temp status",
@@ -112,7 +147,15 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                         "Microwire": "12/2",
                         "Mini DMA graphs": ["run01", "run02"],
                         "Mini DMA transition currents by stress/load": [
-                            "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+                            "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA",
+                            "150 MPa / 4.38 g: As 40 mA, Af 80 mA, Ms 72 mA, Mf 33 mA",
+                        ],
+                        "Mini DMA strain by stress/load": [
+                            "50 MPa / 1.46 g: 5.16% @ 15 mA",
+                            "75 MPa / 2.19 g: 0.2% @ 20 mA",
+                            "100 MPa / 2.92 g: 3.5% @ 22 mA",
+                            "125 MPa / 3.65 g: 9.9% @ 25 mA",
+                            "150 MPa / 4.38 g: 6.5% @ 28 mA",
                         ],
                         "Current annealing transition status": "No transition",
                         "VSM transition temp status": "No transition",
@@ -167,7 +210,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert manifest["source_project"] == str(project_path.resolve())
     assert manifest["source_saved_at"] == "2026-06-17 09:30"
     assert manifest["row_count"] == 1
-    assert manifest["column_count"] == 13
+    assert manifest["column_count"] == 14
     assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
     assert "Data source" in manifest["dropped_columns"]
     assert "Source label" in manifest["dropped_columns"]
@@ -175,6 +218,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "internal review note" in manifest["dropped_columns"]
     assert "provenance file" in manifest["dropped_columns"]
     assert manifest["hidden_sheets"] == ["Assemble audit"]
+    assert manifest["extra_sheets"]["TMA targets"]["row_count"] == 4
     assert manifest["git_commit"]
 
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
@@ -195,9 +239,12 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "VSM transition temp status" in headers
     assert "Mini DMA transition status" in headers
     assert "Mini DMA transition currents by stress/load" in headers
+    assert "Mini DMA strain by stress/load" in headers
     row = [cell.value for cell in workbook["Assemble"][2]]
     assert "run01, run02" in row
-    assert "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA" in row
+    assert "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA" in row[
+        headers.index("Mini DMA transition currents by stress/load")
+    ]
     assert row[headers.index("Current annealing transition status")] == "No transition"
     assert row[headers.index("VSM transition temp status")] == "No transition"
     assert row[headers.index("Mini DMA transition status")] == "No transition"
@@ -210,6 +257,38 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "Measured" in audit_row
     assert "Ko\u0161ice" in audit_row
     assert "G:/internal/provenance.json" in audit_row
+    tma_headers = [cell.value for cell in workbook["TMA targets"][1]]
+    tma_rows = [
+        dict(zip(tma_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["TMA targets"].iter_rows(min_row=2)
+    ]
+    assert [entry["TMA target"] for entry in tma_rows] == [
+        "50 MPa / 1.46 g",
+        "75 MPa / 2.19 g",
+        "100 MPa / 2.92 g",
+        "150 MPa / 4.38 g",
+    ]
+    first = tma_rows[0]
+    assert first["Composition"] == "Ni50Fe27Ga23"
+    assert first["Microwire"] == "12/2"
+    assert first["TMA run"] == "run01"
+    assert first["TMA stress (MPa)"] == 50
+    assert first["TMA load (g)"] == 1.46
+    assert first["TMA strain (%)"] == 5.16
+    assert first["TMA strain peak current (mA)"] == 15
+    assert first["TMA As"] == 31
+    assert first["TMA Af"] == 71
+    assert first["TMA Ms"] == 66
+    assert first["TMA Mf"] == 26
+    assert {tma_rows[1][label] for label in ("TMA As", "TMA Af", "TMA Ms", "TMA Mf")} == {
+        "No transition"
+    }
+    assert tma_rows[2]["TMA As"] == 35
+    assert tma_rows[2]["TMA Af"] == 74
+    assert tma_rows[2]["TMA Ms"] == "Not observed"
+    assert tma_rows[2]["TMA Mf"] == "Not observed"
+    assert tma_rows[3]["TMA As"] == 40
+    assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
 
 
 def test_builder_automation_recipe_exports_assemble_public_workbook(
