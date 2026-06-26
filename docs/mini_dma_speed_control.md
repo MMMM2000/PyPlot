@@ -1,12 +1,12 @@
-# Mini DMA Speed Control
+﻿# TMA Speed Control
 
-This document describes how Mini DMA chooses motor speed and correction distance during displacement ramps, load/stress/strain target seeking, setup preload, and iso-load/iso-stress/iso-strain current sweeps.
+This document describes how TMA chooses motor speed and correction distance during displacement ramps, load/stress/strain target seeking, setup preload, and iso-load/iso-stress/iso-strain current sweeps.
 
 It is meant to be the operator-facing source of truth for the control logic. If code behavior changes, update this file in the same change.
 
 ## Hardware Limits
 
-The Mini DMA rig has two different clocks:
+The TMA rig has two different clocks:
 
 - **Motor command clock:** Tic commands can be sent quickly, especially through the persistent native-USB/dispatcher path.
 - **Force-feedback clock:** the current G&G balance replies to request/response reads at about 4-5 Hz, so fresh load/stress feedback is roughly every 200-250 ms.
@@ -20,13 +20,13 @@ near_target_period =
   + next_scale_reply
 ```
 
-Far from target, Mini DMA can now use the scale clock more aggressively. The motor may keep moving toward an extended predicted target, and each new balance sample is used as a delayed reality check. The controller can update speed, extend the target, or drop back to conservative mode as soon as that fresh scale sample arrives. It still must not stack multiple force corrections from one unchanged scale value.
+Far from target, TMA can now use the scale clock more aggressively. The motor may keep moving toward an extended predicted target, and each new balance sample is used as a delayed reality check. The controller can update speed, extend the target, or drop back to conservative mode as soon as that fresh scale sample arrives. It still must not stack multiple force corrections from one unchanged scale value.
 
 ![Sample-driven load/stress correction clock](assets/mini_dma_scale_sample_timing.svg)
 
 ## Quantities
 
-Mini DMA keeps several related speed and sensitivity terms:
+TMA keeps several related speed and sensitivity terms:
 
 | Term | Meaning |
 | --- | --- |
@@ -42,7 +42,7 @@ Mini DMA keeps several related speed and sensitivity terms:
 | `correction_mm` | Specimen displacement correction requested by one closed-loop decision, excluding backlash take-up. |
 | `max_speed` | User-facing hard motor speed cap for the active mode. |
 
-Mini DMA stores the motor conversion as two values: mechanical full motor steps/mm and the Tic step mode. The derived value used for position commands is Tic controller position units/mm. The current rig is mechanically about `100 full motor steps/mm`; with the Tic configured for `1/8 step`, the controller coordinate is:
+TMA stores the motor conversion as two values: mechanical full motor steps/mm and the Tic step mode. The derived value used for position commands is Tic controller position units/mm. The current rig is mechanically about `100 full motor steps/mm`; with the Tic configured for `1/8 step`, the controller coordinate is:
 
 ```text
 Tic units/mm = full_motor_steps/mm * microsteps/full_step
@@ -50,32 +50,32 @@ Tic units/mm = full_motor_steps/mm * microsteps/full_step
              = 800 Tic units/mm
 ```
 
-The external-gauge motor step calibration confirmed this value (`798.4 Tic units/mm`, `R2 = 0.99998`), so Mini DMA should use about `100 full steps/mm` and `800 Tic units/mm` at 1/8 step. Older runs and profiles that used `100 steps/mm` treated full motor steps as if they were Tic position units and therefore report motor displacement and strain eight times too large for the same real Tic travel.
+The external-gauge motor step calibration confirmed this value (`798.4 Tic units/mm`, `R2 = 0.99998`), so TMA should use about `100 full steps/mm` and `800 Tic units/mm` at 1/8 step. Older runs and profiles that used `100 steps/mm` treated full motor steps as if they were Tic position units and therefore report motor displacement and strain eight times too large for the same real Tic travel.
 
-If the Tic step mode is changed, Mini DMA derives the new controller conversion from the full-steps/mm setting:
+If the Tic step mode is changed, TMA derives the new controller conversion from the full-steps/mm setting:
 
-| Tic step mode | Mini DMA value for this rig |
+| Tic step mode | TMA value for this rig |
 | --- | ---: |
 | Full step | `100 Tic units/mm` |
 | 1/2 step | `200 Tic units/mm` |
 | 1/4 step | `400 Tic units/mm` |
 | 1/8 step | `800 Tic units/mm` |
 
-There is usually no reason to reduce microstepping for the current Mini DMA speeds. At `1/8 step`, `1 mm/s` is `800 Tic units/s`, which Mini DMA sends to the Tic as a max-speed value of `8,000,000` because Tic speed units are `Tic units/s * 10000`. The inspected controller's permanent reset default was `10,000,000`, equivalent to `1.25 mm/s` at `800 Tic units/mm`, and Mini DMA can still request per-move temporary speed limits from the configured `mm/s` controls. Only consider a coarser step mode if the controller rejects the requested pulse rate or the motor loses steps at the needed speed; then recalibrate and update this conversion.
+There is usually no reason to reduce microstepping for the current TMA speeds. At `1/8 step`, `1 mm/s` is `800 Tic units/s`, which TMA sends to the Tic as a max-speed value of `8,000,000` because Tic speed units are `Tic units/s * 10000`. The inspected controller's permanent reset default was `10,000,000`, equivalent to `1.25 mm/s` at `800 Tic units/mm`, and TMA can still request per-move temporary speed limits from the configured `mm/s` controls. Only consider a coarser step mode if the controller rejects the requested pulse rate or the motor loses steps at the needed speed; then recalibrate and update this conversion.
 
-For example, `5 mm/s` at 1/8 step is `4000 Tic units/s`, sent as a Tic max-speed value of `40,000,000`. Switching to 1/4 step would halve the required pulse rate, but it also halves displacement resolution. When Mini DMA applies a different Tic step mode, it halts the motor, changes the controller mode, recomputes `Tic units/mm`, and rewrites the Tic current-position register so the physical mm coordinate remains continuous.
+For example, `5 mm/s` at 1/8 step is `4000 Tic units/s`, sent as a Tic max-speed value of `40,000,000`. Switching to 1/4 step would halve the required pulse rate, but it also halves displacement resolution. When TMA applies a different Tic step mode, it halts the motor, changes the controller mode, recomputes `Tic units/mm`, and rewrites the Tic current-position register so the physical mm coordinate remains continuous.
 
 The saved backlash compensation is intentionally disabled during the `Calibration` recipe. Calibration uses its forward/reverse micro-move data to estimate backlash, so the previous value must not inflate the target acceptance band or add reversal take-up while the new value is being measured.
 
 ## Position Ramps
 
-Displacement-only recipes are open-loop position motion. The target position is known from the recipe, so Mini DMA schedules motion by distance and the configured displacement speed:
+Displacement-only recipes are open-loop position motion. The target position is known from the recipe, so TMA schedules motion by distance and the configured displacement speed:
 
 ```text
 move_duration_s = Tic trapezoid/triangle profile duration
 ```
 
-When live Tic status includes max acceleration and max deceleration, Mini DMA converts those Tic units into `mm/s^2` and estimates the same style of motion profile the Tic uses for target-position moves: accelerate toward the requested speed, optionally cruise, then decelerate to the target step. If acceleration/deceleration are unavailable, it falls back to the older linear `distance / speed` estimate. This does not change how motion is commanded: Mini DMA still sends target positions plus maximum speed, and the Tic still owns the physical ramp.
+When live Tic status includes max acceleration and max deceleration, TMA converts those Tic units into `mm/s^2` and estimates the same style of motion profile the Tic uses for target-position moves: accelerate toward the requested speed, optionally cruise, then decelerate to the target step. If acceleration/deceleration are unavailable, it falls back to the older linear `distance / speed` estimate. This does not change how motion is commanded: TMA still sends target positions plus maximum speed, and the Tic still owns the physical ramp.
 
 The acceleration-aware estimate is used for recipe duration estimates, post-move feedback gates, and the predicted travel available before the next useful scale sample. The motor may receive planned position updates between force samples because displacement ramps do not need fresh scale feedback to know where the target is.
 
@@ -95,10 +95,10 @@ Load, stress, and strain seeking are closed-loop. A correction decision is:
 
 The final mode decision is important:
 
-- **Far mode:** if the remaining predicted correction distance is safely larger than the distance the motor can travel before the next useful balance sample, Mini DMA may extend the motor target without waiting for the previous move to finish. It still waits for a new scale sample before making the next force-control decision.
-- **Near/setup mode:** if the target is close, the trend disagrees with prediction, the target was crossed, the scale data is stale, or setup preload is running, Mini DMA sends one correction and then waits for expected move completion plus fresh post-move scale feedback before deciding again. Setup preload also has an overload guard: if the live load/stress greatly exceeds the requested setup target, the run stops instead of issuing another tensioning correction.
+- **Far mode:** if the remaining predicted correction distance is safely larger than the distance the motor can travel before the next useful balance sample, TMA may extend the motor target without waiting for the previous move to finish. It still waits for a new scale sample before making the next force-control decision.
+- **Near/setup mode:** if the target is close, the trend disagrees with prediction, the target was crossed, the scale data is stale, or setup preload is running, TMA sends one correction and then waits for expected move completion plus fresh post-move scale feedback before deciding again. Setup preload also has an overload guard: if the live load/stress greatly exceeds the requested setup target, the run stops instead of issuing another tensioning correction.
 
-In near mode, the speed shown by the recipe or dynamic controller is treated as the desired average speed over the full correction cycle, not only the speed while the motor is physically moving. Mini DMA can therefore command a higher instantaneous motor speed to compensate for dead time:
+In near mode, the speed shown by the recipe or dynamic controller is treated as the desired average speed over the full correction cycle, not only the speed while the motor is physically moving. TMA can therefore command a higher instantaneous motor speed to compensate for dead time:
 
 ```text
 dead_time_s =
@@ -121,7 +121,7 @@ command_speed_mm_s =
     clamp(command_speed_mm_s, minimum_speed, hard_speed_cap)
 ```
 
-If `moving_time_s <= 0`, the requested average speed is impossible for that tiny correction and feedback dead time, so Mini DMA uses the hard speed cap. The move will still be slower than the requested average, but that is a physical timing limit rather than a calculation delay.
+If `moving_time_s <= 0`, the requested average speed is impossible for that tiny correction and feedback dead time, so TMA uses the hard speed cap. The move will still be slower than the requested average, but that is a physical timing limit rather than a calculation delay.
 
 Example:
 
@@ -141,7 +141,7 @@ Without this compensation the same correction would move for `0.5 s`, then wait 
 
 ## Effective Tolerance
 
-Load/stress target tolerance is automatic. Mini DMA starts from a small requested load floor of `0.005 g`, converts it to stress when the active basis is MPa, and then raises that request when the hardware cannot physically resolve something tighter.
+Load/stress target tolerance is automatic. TMA starts from a small requested load floor of `0.005 g`, converts it to stress when the active basis is MPa, and then raises that request when the hardware cannot physically resolve something tighter.
 
 ```text
 requested_load_floor = 0.005 g
@@ -161,7 +161,7 @@ calibrated_stiffness_g_per_mm
 calibrated_length_mm
 ```
 
-For a different mounted wire length, Mini DMA rescales it:
+For a different mounted wire length, TMA rescales it:
 
 ```text
 current_stiffness_g_per_mm =
@@ -181,7 +181,7 @@ Strain sensitivity is geometric:
 sensitivity_pct_per_mm = 100 / l0_mm
 ```
 
-During setup, calibration, and ordinary load/stress seeking, Mini DMA can also update live stiffness from recent observed response:
+During setup, calibration, and ordinary load/stress seeking, TMA can also update live stiffness from recent observed response:
 
 ```text
 observed_sensitivity = abs(delta_value / delta_effective_displacement_mm)
@@ -190,11 +190,11 @@ live_stiffness = (1 - alpha) * old_live_stiffness + alpha * observed_stiffness
 
 Only moves large enough to be meaningful are used. Tiny moves below about half a motor step are ignored.
 
-The live stiffness is kept both for the exact target currently being chased and as a run-level stiffness estimate. That matters during setup and non-current ramps, where the desired target changes every tick. During iso-load/iso-stress/iso-strain current sweeps, live stiffness learning is frozen and Mini DMA uses the latest setup/calibration stiffness prior instead of treating current-driven load/stress fluctuations as mechanical stiffness.
+The live stiffness is kept both for the exact target currently being chased and as a run-level stiffness estimate. That matters during setup and non-current ramps, where the desired target changes every tick. During iso-load/iso-stress/iso-strain current sweeps, live stiffness learning is frozen and TMA uses the latest setup/calibration stiffness prior instead of treating current-driven load/stress fluctuations as mechanical stiffness.
 
 ## Predictive Correction Distance
 
-When sensitivity is available, Mini DMA estimates the correction distance:
+When sensitivity is available, TMA estimates the correction distance:
 
 ```text
 predicted_move_mm = correction_gain * abs(error) / abs(sensitivity)
@@ -211,7 +211,7 @@ For current-sweep servo holds, this clamp is strain-based instead of clock-based
 
 ## Far-Vs-Near Mode Switching
 
-Mini DMA does not use a broad fixed hysteresis band for the far/near transition. The boundary is predictive and speed-dependent:
+TMA does not use a broad fixed hysteresis band for the far/near transition. The boundary is predictive and speed-dependent:
 
 ```text
 remaining_correction_mm =
@@ -245,7 +245,7 @@ Far mode is disabled immediately if:
 
 ## Generic Smooth Landing
 
-For non-current-sweep seeking without sensitivity-specific behavior, Mini DMA uses a smooth landing zone. Far from target it can use full speed; near target it slows down to the minimum useful motor speed.
+For non-current-sweep seeking without sensitivity-specific behavior, TMA uses a smooth landing zone. Far from target it can use full speed; near target it slows down to the minimum useful motor speed.
 
 ![Generic seek speed vs target error](assets/mini_dma_smooth_landing_speed.svg)
 
@@ -305,7 +305,7 @@ speed_mm_s =
 speed_mm_s = clamp(speed_mm_s, minimum_speed, speed_ceiling_mm_s)
 ```
 
-In this block, `speed_mm_s` is the desired average servo speed. In far/cruise mode it is also approximately the motor command speed, because the motor can keep moving continuously between scale samples. In near/gated mode, Mini DMA converts it to a higher instantaneous command speed with the dead-time compensation above, then clamps that command to the same `speed_ceiling_mm_s`.
+In this block, `speed_mm_s` is the desired average servo speed. In far/cruise mode it is also approximately the motor command speed, because the motor can keep moving continuously between scale samples. In near/gated mode, TMA converts it to a higher instantaneous command speed with the dead-time compensation above, then clamps that command to the same `speed_ceiling_mm_s`.
 
 This means:
 
@@ -318,11 +318,11 @@ This means:
 - gated wait time is compensated by faster moving-part speed when the hard caps allow it;
 - the same smooth landing cap applies near target, so a high ceiling such as 5 mm/s is not used right outside the hold band.
 
-By default the current ramp itself stays static, because transition temperature and thermal history can depend on the commanded current-ramp rate. When the optional current-ramp hold is enabled, Mini DMA holds the present current setpoint when a short filtered load/stress signal shows a persistent absolute target error. The same rule is used while current is rising and falling: if stress/load runs too far above or below the target, the current ramp pauses while displacement catches up. Hold entry uses a transformation-sized filtered-error band so ordinary annealing fluctuations do not trigger a hold by themselves. Resume uses a separate automatic recovery band calculated from the effective target tolerance, motor-step/stiffness floor, calibrated noise floor, current filtered-signal noise, and the configured minimum resume floor. Heating continues once the signal is practically recovered instead of waiting for the much tighter final target-seek tolerance. While held, the displacement servo keeps correcting; if the recovery seek accepts the target, Mini DMA immediately resumes the current ramp and shifts the ramp clock by the hold duration so resuming does not jump to the current that wall-clock time would otherwise imply. If filtered stress is already returning quickly toward target under the held current, Mini DMA waits for that natural recovery instead of adding another motor move on top of the transformation. If a full fresh filter window arrives with the filtered value still unchanged, Mini DMA treats that as a real no-response sample and sends the next bounded correction instead of waiting indefinitely. There is no maximum hold-time stop; wire-break/current faults are handled by their own protection paths. If the sample response is consistently too fast for the servo to track, lowering the fixed current ramp rate is still the cleaner first adjustment.
+By default the current ramp itself stays static, because transition temperature and thermal history can depend on the commanded current-ramp rate. When the optional current-ramp hold is enabled, TMA holds the present current setpoint when a short filtered load/stress signal shows a persistent absolute target error. The same rule is used while current is rising and falling: if stress/load runs too far above or below the target, the current ramp pauses while displacement catches up. Hold entry uses a transformation-sized filtered-error band so ordinary annealing fluctuations do not trigger a hold by themselves. Resume uses a separate automatic recovery band calculated from the effective target tolerance, motor-step/stiffness floor, calibrated noise floor, current filtered-signal noise, and the configured minimum resume floor. Heating continues once the signal is practically recovered instead of waiting for the much tighter final target-seek tolerance. While held, the displacement servo keeps correcting; if the recovery seek accepts the target, TMA immediately resumes the current ramp and shifts the ramp clock by the hold duration so resuming does not jump to the current that wall-clock time would otherwise imply. If filtered stress is already returning quickly toward target under the held current, TMA waits for that natural recovery instead of adding another motor move on top of the transformation. If a full fresh filter window arrives with the filtered value still unchanged, TMA treats that as a real no-response sample and sends the next bounded correction instead of waiting indefinitely. There is no maximum hold-time stop; wire-break/current faults are handled by their own protection paths. If the sample response is consistently too fast for the servo to track, lowering the fixed current ramp rate is still the cleaner first adjustment.
 
-Load/stress decisions during current sweeps use the same recent scale window, but as a robust median plus median-absolute-deviation noise estimate instead of a raw last sample. A single delayed or spiky balance reply can still be plotted and logged, but it should not by itself trigger an opposite correction or mark the target far away. When the filtered signal crosses the target after a previous correction, Mini DMA waits for that reversed error sign to remain present for a short confirmation interval before sending the first opposite load/stress move. This makes the controller less reactive to balance chatter while still responding when the wire is genuinely transforming away from the target.
+Load/stress decisions during current sweeps use the same recent scale window, but as a robust median plus median-absolute-deviation noise estimate instead of a raw last sample. A single delayed or spiky balance reply can still be plotted and logged, but it should not by itself trigger an opposite correction or mark the target far away. When the filtered signal crosses the target after a previous correction, TMA waits for that reversed error sign to remain present for a short confirmation interval before sending the first opposite load/stress move. This makes the controller less reactive to balance chatter while still responding when the wire is genuinely transforming away from the target.
 
-The current sweep always returns current to the start current at each target, so each target records a heating and cooling leg. The `First overheating` option changes only the recipe sequence: Mini DMA first runs one current sweep at a configurable fixed-stress target before advancing to the normal target loads/stresses/strains. This is intended for wires whose very first heating has a higher transformation temperature than later heating/cooling cycles. With `First overheating` enabled, the fixed-stress preheat target runs once, then each normal target runs the usual up/down pair.
+The current sweep always returns current to the start current at each target, so each target records a heating and cooling leg. The `First overheating` option changes only the recipe sequence: TMA first runs one current sweep at a configurable fixed-stress target before advancing to the normal target loads/stresses/strains. This is intended for wires whose very first heating has a higher transformation temperature than later heating/cooling cycles. With `First overheating` enabled, the fixed-stress preheat target runs once, then each normal target runs the usual up/down pair.
 
 The dashboard header displays the most recent commanded speed in fixed-width cells:
 
@@ -330,7 +330,7 @@ The dashboard header displays the most recent commanded speed in fixed-width cel
 mm/s, g/s, MPa/s, %/s
 ```
 
-The g/s and MPa/s values use the frozen setup/calibration stiffness prior during current-sweep control. Mini DMA does not update this stiffness from current-driven load/stress fluctuations, so phase/current transients cannot inflate backlash cost or rewrite the mechanical sensitivity while the sweep is in progress. The %/s value uses the current `l0`.
+The g/s and MPa/s values use the frozen setup/calibration stiffness prior during current-sweep control. TMA does not update this stiffness from current-driven load/stress fluctuations, so phase/current transients cannot inflate backlash cost or rewrite the mechanical sensitivity while the sweep is in progress. The %/s value uses the current `l0`.
 
 ![Iso-stress/current-sweep dynamic balance speed](assets/mini_dma_current_sweep_servo_speed.svg)
 
@@ -338,7 +338,7 @@ The g/s and MPa/s values use the frozen setup/calibration stiffness prior during
 
 When a recipe says `1 MPa/s` or `0.1 g/s`, that is a target-value ramp rate, not directly a motor speed.
 
-Mini DMA converts it through sensitivity:
+TMA converts it through sensitivity:
 
 ```text
 speed_cap_from_ramp = target_rate_value_per_s / abs(sensitivity_value_per_mm)
@@ -367,11 +367,11 @@ The setup sequence is:
 5. Ask for measured length at preload.
 6. Return toward zero load over the setup return-time target and compute `l0`.
 
-Before force starts responding, Mini DMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Each slack take-up move is also capped by the configurable `Slack step cap`, which defaults to a `50 MPa` stiffness-prior equivalent, so a plausible prior prevents unlimited pre-contact jumps without forcing very slow millimeter-scale slack removal. Once applied load rises above the slack-take-up threshold, setup leaves slack mode for that preload target and uses the same target-space step shrinking as current-sweep load/stress control: coarse while far away, `1 MPa` equivalent near target, and one motor step in the fine band. The first slack-to-taut load jump is treated only as engagement evidence, not as elastic stiffness evidence; live stiffness learning starts from later post-contact samples, and setup preload acceptance is capped so a single large jump cannot make a multi-MPa overshoot look "close enough." The setup time is interpreted as current engaged load/stress to preload target, not always `0 -> preload`. If setup starts below preload, Mini DMA moves up to that preload and can settle there. If setup starts already above preload, it does not first relax to preload or ask for a second length entry; it uses the length captured at the beginning and returns directly toward zero load. Setup preload deliberately stays in one-move-at-a-time feedback and does not use cruise feedback or dead-time speed compensation. `Preload settle time` applies only when the setup preload ramp actually runs. The return-to-zero phase no longer adds a separate timed zero-load settle after the unload/plateau target is accepted, because it only needs a practical unloaded reference for `l0`, not a measurement-quality baseline hold. Setup return-to-zero estimates the unload travel from the initial live load and stiffness, divides by the Manual Actions `Return-to-zero time`, and holds that planned unload speed instead of shrinking it on every near-zero sample; the actual return can still be slower when feedback gating and zero-plateau checks add time. The same return-time setting is used for manual displacement recovery and post-recipe return-to-start moves. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
+Before force starts responding, TMA uses the setup slack take-up speed in `%/s`; with `20 mm` length and `1 %/s`, that is `0.2 mm/s`. Tiny residual loads near zero are still treated as slack take-up, because a long or bent wire can show a few milligrams of apparent load before it is meaningfully straight. Each slack take-up move is also capped by the configurable `Slack step cap`, which defaults to a `50 MPa` stiffness-prior equivalent, so a plausible prior prevents unlimited pre-contact jumps without forcing very slow millimeter-scale slack removal. Once applied load rises above the slack-take-up threshold, setup leaves slack mode for that preload target and uses the same target-space step shrinking as current-sweep load/stress control: coarse while far away, `1 MPa` equivalent near target, and one motor step in the fine band. The first slack-to-taut load jump is treated only as engagement evidence, not as elastic stiffness evidence; live stiffness learning starts from later post-contact samples, and setup preload acceptance is capped so a single large jump cannot make a multi-MPa overshoot look "close enough." The setup time is interpreted as current engaged load/stress to preload target, not always `0 -> preload`. If setup starts below preload, TMA moves up to that preload and can settle there. If setup starts already above preload, it does not first relax to preload or ask for a second length entry; it uses the length captured at the beginning and returns directly toward zero load. Setup preload deliberately stays in one-move-at-a-time feedback and does not use cruise feedback or dead-time speed compensation. `Preload settle time` applies only when the setup preload ramp actually runs. The return-to-zero phase no longer adds a separate timed zero-load settle after the unload/plateau target is accepted, because it only needs a practical unloaded reference for `l0`, not a measurement-quality baseline hold. Setup return-to-zero estimates the unload travel from the initial live load and stiffness, divides by the Manual Actions `Return-to-zero time`, and holds that planned unload speed instead of shrinking it on every near-zero sample; the actual return can still be slower when feedback gating and zero-plateau checks add time. The same return-time setting is used for manual displacement recovery and post-recipe return-to-start moves. If stiffness is still unknown near target, the fallback correction also uses the smooth landing curve; near target it sends one motor step at the minimum motor speed instead of a full global-speed-sized correction.
 
-Current-sweep target ramps start in conservative gated feedback for load/stress control. Mini DMA sends one correction, waits for fresh post-move scale feedback, and only then decides the next correction. It does not update stiffness during the current sweep. Direction reversals in current-sweep load/stress control do not prepend the configured backlash distance; the controller sends the requested correction step, then uses the following scale response to decide whether the move was specimen motion or mostly backlash. This keeps a `1 MPa` or one-motor-step correction from being dominated by a saved `0.02 mm` backlash value.
+Current-sweep target ramps start in conservative gated feedback for load/stress control. TMA sends one correction, waits for fresh post-move scale feedback, and only then decides the next correction. It does not update stiffness during the current sweep. Direction reversals in current-sweep load/stress control do not prepend the configured backlash distance; the controller sends the requested correction step, then uses the following scale response to decide whether the move was specimen motion or mostly backlash. This keeps a `1 MPa` or one-motor-step correction from being dominated by a saved `0.02 mm` backlash value.
 
-For iso-load and iso-stress current sweeps, "dynamic speed control" means dynamic average correction speed. The most important controlled quantity is the step size, not the motor's instantaneous Tic speed. Mini DMA first predicts the mechanical correction from the frozen setup/calibration stiffness, then caps that correction by a smooth fraction of the current target-space error:
+For iso-load and iso-stress current sweeps, "dynamic speed control" means dynamic average correction speed. The most important controlled quantity is the step size, not the motor's instantaneous Tic speed. TMA first predicts the mechanical correction from the frozen setup/calibration stiffness, then caps that correction by a smooth fraction of the current target-space error:
 
 ```text
 if abs(error) <= near_step_band:
@@ -383,37 +383,37 @@ else:
 
 The active hard cap is the visible sweep hard cap while the current ramp is moving, and the hold hard cap while the current ramp is paused for target recovery. The hold hard cap defaults to `30 MPa`; older saved profiles that still contain the previous default `20 MPa` are migrated to `30 MPa`, while custom values are preserved. The hard cap remains an absolute safety rail; the smooth error fraction normally determines the requested correction. For load-control sweeps, the same MPa-equivalent values are converted to grams using the current wire diameter. The specimen correction is still clipped by the configured maximum correction strain percentage. This makes the controller progressively shrink real correction distance as it approaches target without abrupt far/mid/near bucket changes, so the average motion slows down even when the Tic command speed remains reasonably fast.
 
-When the current ramp is paused and several fresh post-move samples show that the current transformation response is much softer than the frozen setup/calibration stiffness, Mini DMA uses a separate hold-only response estimate to size recovery corrections. This estimate is local to the current target and does not update the frozen current-sweep stiffness used for safety, backlash, or normal ramping. The estimate only learns from samples where the filtered load/stress change follows the commanded motor direction; opposite-direction changes are treated as transformation drift rather than elastic motor response. The adaptive hold step asks for roughly half of the filtered target-space error, rising toward about 80% for large persistent errors, but it is still clipped by the hold hard cap, the configured strain cap, a small per-command displacement/strain rail, and the one-motor-step floor. Near target, the controller still returns to fine one-step corrections and fresh-sample gating.
+When the current ramp is paused and several fresh post-move samples show that the current transformation response is much softer than the frozen setup/calibration stiffness, TMA uses a separate hold-only response estimate to size recovery corrections. This estimate is local to the current target and does not update the frozen current-sweep stiffness used for safety, backlash, or normal ramping. The estimate only learns from samples where the filtered load/stress change follows the commanded motor direction; opposite-direction changes are treated as transformation drift rather than elastic motor response. The adaptive hold step asks for roughly half of the filtered target-space error, rising toward about 80% for large persistent errors, but it is still clipped by the hold hard cap, the configured strain cap, a small per-command displacement/strain rail, and the one-motor-step floor. Near target, the controller still returns to fine one-step corrections and fresh-sample gating.
 
-The Tic command speed is kept practical for these small corrections. During current-sweep balancing, Mini DMA will not deliberately creep below about `0.05 mm/s` unless the stage speed cap itself is lower. The balance feedback is normally the bottleneck, so a tiny correction should finish quickly and then wait for the next fresh scale reply instead of spending seconds moving slowly.
+The Tic command speed is kept practical for these small corrections. During current-sweep balancing, TMA will not deliberately creep below about `0.05 mm/s` unless the stage speed cap itself is lower. The balance feedback is normally the bottleneck, so a tiny correction should finish quickly and then wait for the next fresh scale reply instead of spending seconds moving slowly.
 
-Current-sweep load/stress correction is conservative-gated in target-ramp, hold, and settle phases. Mini DMA does not use cruise feedback for these modes, because delayed balance samples can otherwise stack several stale corrections while the sample is already passing through the target. During the main current phase, a far-from-target force error can still cruise on a fresh in-flight scale sample when the safety margin says the remaining error is much larger than feedback latency, backlash, tolerance, and motor-step floors. Each gated force correction consumes one fresh scale sample; in the very-near/fine band the next correction waits for two fresh scale samples so one delayed or noisy value cannot immediately trigger a reversal.
+Current-sweep load/stress correction is conservative-gated in target-ramp, hold, and settle phases. TMA does not use cruise feedback for these modes, because delayed balance samples can otherwise stack several stale corrections while the sample is already passing through the target. During the main current phase, a far-from-target force error can still cruise on a fresh in-flight scale sample when the safety margin says the remaining error is much larger than feedback latency, backlash, tolerance, and motor-step floors. Each gated force correction consumes one fresh scale sample; in the very-near/fine band the next correction waits for two fresh scale samples so one delayed or noisy value cannot immediately trigger a reversal.
 
 Backlash is treated as its own state, but it is no longer trusted as guaranteed free travel during current-sweep force control. Current-sweep load/stress reversals send the dynamic correction step directly, even outside the finest band, because a saved backlash distance can be much larger than the intended stress correction. The raw/effective displacement split remains available for true backlash-only moves in other seek modes, but the current-sweep force servo favors observed scale response over predictive backlash injection.
 
-Each closed-loop seek decision is written to `control_trace.csv` in the run folder. The trace includes target, live value, error, tolerance, stiffness/sensitivity, motor-step size, correction distance, backlash distance, command speed, required/observed post-move sample count, target motor position, effective specimen target, wait reason, and command result. Recipe/control ticks now run on the Mini DMA control worker with a frozen copy of the recipe and safety settings, not on the Qt repaint timer. Use this file when the behavior looks strange: it should explain whether Mini DMA waited for feedback, took up backlash, sent a correction, blocked a move, or accepted the target.
+Each closed-loop seek decision is written to `control_trace.csv` in the run folder. The trace includes target, live value, error, tolerance, stiffness/sensitivity, motor-step size, correction distance, backlash distance, command speed, required/observed post-move sample count, target motor position, effective specimen target, wait reason, and command result. Recipe/control ticks now run on the TMA control worker with a frozen copy of the recipe and safety settings, not on the Qt repaint timer. Use this file when the behavior looks strange: it should explain whether TMA waited for feedback, took up backlash, sent a correction, blocked a move, or accepted the target.
 
-The live setup, recovery, and dashboard graphs are UI views, not the raw acquisition clock. They append a new plotted point on the live label/telemetry timer when a fresh scale reply is available, including during operator prompts, post-session displacement recovery, and the main recipe view between scheduled CSV rows. Main dashboard live plot points use the latest already-known motor/scale/supply state, so they do not send extra serial commands and are not written to the measurement CSV. Dashboard redraws are throttled by the separate dashboard graph interval, while setup/recovery popup graphs keep updating from their own live sample paths; during setup, the normal dashboard graph can lag or skip redraws without changing preload/control timing. The live plot history is capped and older points are downsampled so redraws stay bounded on slower PCs. When that cap hides a long middle span, Mini DMA inserts a visible plot break instead of drawing a diagonal bridge between the retained old point and the newer live chunk. For auditing true balance cadence, use `scale_raw.csv`, whose elapsed time remains continuous across setup and normal recipe logging.
+The live setup, recovery, and dashboard graphs are UI views, not the raw acquisition clock. They append a new plotted point on the live label/telemetry timer when a fresh scale reply is available, including during operator prompts, post-session displacement recovery, and the main recipe view between scheduled CSV rows. Main dashboard live plot points use the latest already-known motor/scale/supply state, so they do not send extra serial commands and are not written to the measurement CSV. Dashboard redraws are throttled by the separate dashboard graph interval, while setup/recovery popup graphs keep updating from their own live sample paths; during setup, the normal dashboard graph can lag or skip redraws without changing preload/control timing. The live plot history is capped and older points are downsampled so redraws stay bounded on slower PCs. When that cap hides a long middle span, TMA inserts a visible plot break instead of drawing a diagonal bridge between the retained old point and the newer live chunk. For auditing true balance cadence, use `scale_raw.csv`, whose elapsed time remains continuous across setup and normal recipe logging.
 
 The live label/telemetry interval does not set the control-loop or raw balance frequency. The default `200 ms` timer controls labels, dialog samples, dashboard live point collection, and UI telemetry rows; the default `1000 ms` dashboard graph interval controls the heavier Matplotlib dashboard redraw. A lightweight Qt heartbeat targets the normal display cadence and samples event-loop responsiveness for `ui_telemetry.csv`; it is diagnostic only, not a hardware or graph scheduler. The request/response scale cadence is set by the scale poll interval and the balance reply speed, the main recipe CSV cadence is set by the log interval, Tic status has its own slower polling path, and supply readbacks remain throttled separately so voltage/current queries do not block current setpoint commands. Seeing `measurement.csv` rows at `500 ms` therefore does not mean the scale or servo only updated every `500 ms`; inspect `scale_raw.csv` and `control_trace.csv` for that.
 
 The setup points are saved to `setup.csv` and `setup.txt` in the run folder. If setup jumps or oscillates, inspect `setup.csv` first.
 
-Two load limits are enforced differently because they protect different things. The applied-load limit is a directional specimen/load boundary: above it, Mini DMA blocks new tension-increasing moves and halts an in-flight tensioning move, but it does not stop the recipe just because feedback slightly overshot; relaxing moves remain available so the controller can return toward target. The raw scale display limit is a hard balance-protection interlock: when the live balance display reaches the limit, Mini DMA halts the motor, stops automation, and blocks ordinary moves until the displayed scale value is below the limit again.
+Two load limits are enforced differently because they protect different things. The applied-load limit is a directional specimen/load boundary: above it, TMA blocks new tension-increasing moves and halts an in-flight tensioning move, but it does not stop the recipe just because feedback slightly overshot; relaxing moves remain available so the controller can return toward target. The raw scale display limit is a hard balance-protection interlock: when the live balance display reaches the limit, TMA halts the motor, stops automation, and blocks ordinary moves until the displayed scale value is below the limit again.
 
-During the post-preload return to zero, Mini DMA computes `l0` from the clean linear unload segment instead of blindly using the final slack position. It fits stress/load versus position while the wire is still taut, extrapolates that line to zero stress, and uses that intercept as the unloaded stage position. Once recent unload points are low-stress and their slope collapses relative to the fitted elastic line, Mini DMA treats that as slack onset: it commits the fitted zero-stress intercept, returns to that position, and stops driving farther into visibly slack wire. That committed slack-onset intercept is reused when applying `l0`; later low-slope points do not refit the baseline to a different zero position. The later near-zero/slack plateau is still useful confirmation and can update the run's corrected zero-load scale reference. If the motor keeps relaxing but the raw balance only fluctuates inside a small flat band, the controller uses the center of that raw band as the corrected zero-load reference for the current run and returns to the first plateau position before computing or confirming `l0`. The plateau must last at least `0.8 s` and span at least the larger of `0.05%` of the current `l0` or `4` motor units, so the fallback accepts a flat balance sooner while still respecting motor resolution. The same plateau fallback is used by final zero-load return and manual load-zero recovery.
+During the post-preload return to zero, TMA computes `l0` from the clean linear unload segment instead of blindly using the final slack position. It fits stress/load versus position while the wire is still taut, extrapolates that line to zero stress, and uses that intercept as the unloaded stage position. Once recent unload points are low-stress and their slope collapses relative to the fitted elastic line, TMA treats that as slack onset: it commits the fitted zero-stress intercept, returns to that position, and stops driving farther into visibly slack wire. That committed slack-onset intercept is reused when applying `l0`; later low-slope points do not refit the baseline to a different zero position. The later near-zero/slack plateau is still useful confirmation and can update the run's corrected zero-load scale reference. If the motor keeps relaxing but the raw balance only fluctuates inside a small flat band, the controller uses the center of that raw band as the corrected zero-load reference for the current run and returns to the first plateau position before computing or confirming `l0`. The plateau must last at least `0.8 s` and span at least the larger of `0.05%` of the current `l0` or `4` motor units, so the fallback accepts a flat balance sooner while still respecting motor resolution. The same plateau fallback is used by final zero-load return and manual load-zero recovery.
 
 Zero-load acceptance is stricter than ordinary target acceptance. The ordinary load/stress tolerance can be inflated by stiffness, motor step size, noise, and backlash so the controller does not hunt near a preload target. During return-to-zero, that inflated band is not allowed to silently accept a high residual load as `0 g`; only a truly near-zero residual or the stable near-zero plateau fallback can finish the return.
 
 ## Backlash And Reversal Rules
 
-Backlash take-up is real motor travel that should not count as specimen displacement. Mini DMA therefore keeps:
+Backlash take-up is real motor travel that should not count as specimen displacement. TMA therefore keeps:
 
 - raw motor position;
 - effective specimen displacement;
 - backlash take-up travel excluded from strain.
 
-Direction reversal is expensive near target. Mini DMA should not reverse just because one sample crossed the target by less than the physical reversal band.
+Direction reversal is expensive near target. TMA should not reverse just because one sample crossed the target by less than the physical reversal band.
 
 The reversal band is based on:
 
@@ -423,7 +423,7 @@ motor_step_mm * sensitivity
 backlash_mm * sensitivity
 ```
 
-If a correction crosses the target but the remaining error is inside this band, Mini DMA accepts the target as reached instead of reversing immediately. This prevents backlash-driven hunting.
+If a correction crosses the target but the remaining error is inside this band, TMA accepts the target as reached instead of reversing immediately. This prevents backlash-driven hunting.
 
 ## Current Limitations
 
@@ -447,7 +447,7 @@ requested_value_rate =
   + feedforward_from_current_ramp
 ```
 
-This matters during current annealing because the wire can contract quickly as current rises. Feed-forward would let the motor start compensating before the delayed scale feedback shows the full stress increase. For now, Mini DMA keeps the requested current ramp static and uses the hybrid motor servo to follow it.
+This matters during current annealing because the wire can contract quickly as current rises. Feed-forward would let the motor start compensating before the delayed scale feedback shows the full stress increase. For now, TMA keeps the requested current ramp static and uses the hybrid motor servo to follow it.
 
 ## What To Check In A Run
 

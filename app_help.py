@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from textwrap import dedent
 from typing import Optional
@@ -17,47 +17,47 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             2. Leave the launcher running. It keeps track of every child window so you can
                open a logger, switch to a plotter, or return to the experiments without
                restarting the program.
-            3. Whenever you open a dialog, pull down **Help → View Help** to keep this guide
+            3. Whenever you open a dialog, pull down **Help â†’ View Help** to keep this guide
                beside you. The help viewer is specific to the tool you opened.
 
             ### Understanding each window
-            * **Left column – file browser.** Add or remove datasets, drag the splitter to gain
-              room, or hide the pane entirely from **View → Show File Browser** when you just
+            * **Left column â€“ file browser.** Add or remove datasets, drag the splitter to gain
+              room, or hide the pane entirely from **View â†’ Show File Browser** when you just
               want to focus on options.
-            * **Right column – configuration.** Options are grouped into collapsible sections
+            * **Right column â€“ configuration.** Options are grouped into collapsible sections
               (readability, export, backends). Scroll the panel; the **Run/Plot** row is pinned
               just below the options so it never disappears off-screen.
-            * **Console – live status.** Messages from file parsing, instrument polling, and
+            * **Console â€“ live status.** Messages from file parsing, instrument polling, and
               export steps appear here. Clear the console between runs to keep logs readable.
             * **Double-click** any file in the list to open it in Explorer/Finder for quick
               inspection.
 
             ### Develop menu essentials
-            * **Keep File Selections** – when iterating on a dataset, enable this so the dialog
+            * **Keep File Selections** â€“ when iterating on a dataset, enable this so the dialog
               reopens with your previous file list intact.
-            * **Show Experiments Tab** – exposes prototypes such as thermal-camera viewing,
+            * **Show Experiments Tab** â€“ exposes prototypes such as thermal-camera viewing,
               conversion helpers, and folder exporters. Leave the toggle off during routine work
               to keep the launcher tidy.
 
             ### Menu bar highlights
-            * **File → Open File… / Open Folder…** call the same loaders as the toolbar buttons
+            * **File â†’ Open Fileâ€¦ / Open Folderâ€¦** call the same loaders as the toolbar buttons
               and remember your most recent paths. Use **Close Window** or **Quit** when you are
               done.
-            * **Edit → Undo / Redo / Cut / Copy / Paste / Select All** target whichever widget
+            * **Edit â†’ Undo / Redo / Cut / Copy / Paste / Select All** target whichever widget
               currently has focus, so you can edit text boxes or tables without leaving the
               keyboard.
-            * **View → Theme** flips between system, light, and dark palettes across every open
+            * **View â†’ Theme** flips between system, light, and dark palettes across every open
               window. Changes apply instantly, even to existing loggers.
-            * **View → Reset Layout** restores splitter positions if you shrink a pane too far.
-            * **Window** mirrors native macOS and Windows behaviour—minimise, zoom, move/resize,
+            * **View â†’ Reset Layout** restores splitter positions if you shrink a pane too far.
+            * **Window** mirrors native macOS and Windows behaviourâ€”minimise, zoom, move/resize,
               enter full screen, jump between open tools, or bring them all to the front.
-            * **Help → View Help** keeps this step-by-step manual at hand for whichever dialog
+            * **Help â†’ View Help** keeps this step-by-step manual at hand for whichever dialog
               you are learning.
 
             ### Typical workflow
             1. Choose or load input files with **Add Files/Folders** (or type a VISA resource in
                loggers).
-            2. Walk through the configuration sections from top to bottom—backend selection,
+            2. Walk through the configuration sections from top to bottomâ€”backend selection,
                export directories, readability controls. Settings persist per tool.
             3. Start the run. Watch the console for prompts (missing files, contact-loss
                warnings, Origin export status).
@@ -65,7 +65,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                window, then iterate on the same dataset using the retained file list.
 
             ### Origin integration
-            * OriginPro maintains its own Python environment. Open **Connectivity → Python
+            * OriginPro maintains its own Python environment. Open **Connectivity â†’ Python
               Packages** inside Origin and install the automation stack (`originpro`, `numpy`,
               `pandas`, `python-dateutil`, `pytz`, `six`, `tzdata`) before selecting the
               **Origin** backend in any tool.
@@ -89,12 +89,12 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                while the selected window opens so you can return here without relaunching the
                program. New windows are tracked automatically and the launcher warns you if
                closing it would also close child dialogs.
-            3. Use **Develop → Show Experiments Tab** to reveal or hide the prototype list and
-               **Develop → Keep File Selections** if you want plotting dialogs to reopen with
+            3. Use **Develop â†’ Show Experiments Tab** to reveal or hide the prototype list and
+               **Develop â†’ Keep File Selections** if you want plotting dialogs to reopen with
                the same input files pre-selected. The experiments currently bundle prototype
                hardware viewers, conversion helpers, and folder exporters.
-            4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
-               console, and reset splitter sizes when needed. **File → Exit** quits the launcher
+            4. The **View** menu mirrors other windowsâ€”switch theme, collapse the file browser or
+               console, and reset splitter sizes when needed. **File â†’ Exit** quits the launcher
                after confirming there are no unsaved child windows.
             """
         ).strip(),
@@ -163,7 +163,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         ).strip(),
     },
     "mini_dma_logger": {
-        "title": "Mini DMA Logger",
+        "title": "TMA Logger",
         "body": dedent(
             """
             ### IR thermometer wiring
@@ -192,7 +192,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             include suitable pullups.
 
             ### Choosing the sensor
-            * Choose the connected sensor explicitly. Mini DMA does not auto-detect the
+            * Choose the connected sensor explicitly. TMA does not auto-detect the
               sensor because the current Nucleo firmware images are sensor-specific.
             * **MLX90614 spot thermometer** expects STM32Cube MLX90614 probe lines at
               `2000000` baud. Its setting is the probe sample interval. The logger
@@ -210,15 +210,15 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             combined firmware is possible later, but that is not the current bench setup.
 
             Use **Live camera** in the IR panel to open a passive MLX90640 heatmap popup
-            inside Mini DMA. During a measurement it shows the calibrated frames already
-            being read by Mini DMA IR logging, so it does not open a second serial
+            inside TMA. During a measurement it shows the calibrated frames already
+            being read by TMA IR logging, so it does not open a second serial
             connection or steal the COM port.
 
             Use **Flash firmware** after selecting **MLX90614 spot thermometer** or
             **MLX90640 Cube raw camera** to build and flash the matching STM32Cube
             firmware over SWD.
 
-            Mini DMA logging intentionally stores a compact temperature summary instead
+            TMA logging intentionally stores a compact temperature summary instead
             of every pixel, while the popup keeps the full live heatmap available for
             alignment and sanity checks.
             """
@@ -236,16 +236,16 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               *Keep File Selections* toggle active the list will persist between sessions.
 
             ### Configure the run
-            1. Choose which curves to plot (T1, T2, T1+T2, T2−T1). Your choices are remembered
+            1. Choose which curves to plot (T1, T2, T1+T2, T2âˆ’T1). Your choices are remembered
                individually, so each return trip keeps the previous mix of variables.
-            2. Select the baseline treatment: *None* for raw values, *Zero 25 °C* to subtract the
-               25 °C mean per sample, or *Both* to produce two plots per variable.
+            2. Select the baseline treatment: *None* for raw values, *Zero 25â€¯Â°C* to subtract the
+               25â€¯Â°C mean per sample, or *Both* to produce two plots per variable.
             3. Pick Matplotlib, Origin, or both as the backend. Set the export directory, format,
                and PNG DPI. **Create subfolder** drops results into `<script> data YYYY-MM-DD`.
             4. Adjust moving-average windows for continuous sweeps. A five-sample median followed
                by a 200-sample moving average keeps contact loss visible while calming noise.
             5. Tidy titles, legends, fonts, and tick labels from the **Readability** pane before
-               running—the plot updates respect all of these switches.
+               runningâ€”the plot updates respect all of these switches.
 
             ### Running and reviewing output
             * Press **Run** once files and settings look right. The console records progress and
@@ -254,15 +254,15 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Matplotlib windows appear immediately (if **Show plots** is enabled) and are saved
               alongside their Origin counterparts. Axes, legends, and colours match across both
               backends.
-            * Origin exports paint `2/1`, `2/2`, … tick labels directly onto the graph so the
+            * Origin exports paint `2/1`, `2/2`, â€¦ tick labels directly onto the graph so the
               workbook and plotted figure stay in sync even after reopening the project.
               Continuous overlays are offset slightly around each microwire to avoid obscuring
-              the mean markers, and Δ(100 °C−25 °C) annotations sit just above the 100 °C point
+              the mean markers, and Î”(100â€¯Â°Câˆ’25â€¯Â°C) annotations sit just above the 100â€¯Â°C point
               for each sample.
 
             ### Troubleshooting
             * If a sample is missing from the Origin plot, confirm its filename follows the
-              expected pattern and that the wire appears in both 25 °C and 100 °C groups.
+              expected pattern and that the wire appears in both 25â€¯Â°C and 100â€¯Â°C groups.
             * When using the developer file retention toggle, prune the list with **Remove
               Selected** to avoid accidentally reusing stale traces.
             """
@@ -277,7 +277,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                by composition so the tool can overlay the correct microwires.
             2. Choose which statistics to emphasise (mean, delta, continuous traces) and adjust
                the smoothing windows for continuous data as needed.
-            3. Configure export settings exactly as in the sensitivity plotter—backend, output
+            3. Configure export settings exactly as in the sensitivity plotterâ€”backend, output
                folder, format, and DPI are all remembered per tool.
             4. Use the **Readability** panel to position the legend, scale fonts, or hide axes
                before plotting.
@@ -331,8 +331,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "body": dedent(
             """
             ### Plot loops and workbooks
-            1. Use **Browse files…** or **Browse folder…** to point at your Lakeshore
-               `VSM-Hys-Data` exports. Selected items load immediately and populate every dock—click
+            1. Use **Browse filesâ€¦** or **Browse folderâ€¦** to point at your Lakeshore
+               `VSM-Hys-Data` exports. Selected items load immediately and populate every dockâ€”click
                **Plot VSM Hysteresis Loops** whenever you want to rebuild the graphs and per-graph
                workbooks.
             2. Tune the X/Y axis selectors in the **Graph Settings** dock. Your axis choices,
@@ -340,13 +340,13 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                remembered across sessions.
 
             ### Explore the workspace
-            * The left auto-hide docks mirror Origin’s layout with a **Project Explorer** (double
+            * The left auto-hide docks mirror Originâ€™s layout with a **Project Explorer** (double
               click a measurement to jump to its temperature tab) and a running **Message Log** of
               parser decisions. Unread errors (missing files, parsing issues, or metrics that could
               not be computed) turn the dock tab red until you hover or pin it open, making it easy
               to spot issues even when the panel is collapsed.
-            * The right-side **Object Manager** mirrors whichever plot tab is active—temperature
-              loops, overlay comparisons, or derived metrics—so ticking/unticking a node only
+            * The right-side **Object Manager** mirrors whichever plot tab is activeâ€”temperature
+              loops, overlay comparisons, or derived metricsâ€”so ticking/unticking a node only
               affects the visible curves while keeping Matplotlib pop-outs and Origin exports in
               sync without regenerating plots. Angles and temperatures are sorted numerically to
               match the legends shown on each tab.
@@ -366,7 +366,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               limits when you click it again. Derived-metric tabs remain in their native units so
               comparisons such as saturation versus angle stay meaningful. **Open in Matplotlib**
               re-plots just the selected tab with constrained layout when you want desktop zoom
-              tools, and **Save graph…** captures that same tab (loops, overlays, or metrics) as
+              tools, and **Save graphâ€¦** captures that same tab (loops, overlays, or metrics) as
               PNG, PDF, or SVG.
 
             ### Derived metrics
@@ -375,17 +375,17 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               intercepts even when they land on the same side of zero. The analysis walks the
               samples in acquisition order so the intercepts mirror what you see on screen even
               when sweeps double back. Noisy outer segments cannot inflate the reported
-              magnitudes while asymmetric loops still produce balanced ±Hc and ±Mr for plotting.
-            * Zero-crossing detection adapts to each loop’s scale—if the data only grazes the axis
+              magnitudes while asymmetric loops still produce balanced Â±Hc and Â±Mr for plotting.
+            * Zero-crossing detection adapts to each loopâ€™s scaleâ€”if the data only grazes the axis
               the plotter interpolates from the nearest neighbours, and the tolerance follows the
-              actual field/moment magnitudes instead of assuming at least ±1 units. Micro-emu traces
+              actual field/moment magnitudes instead of assuming at least Â±1 units. Micro-emu traces
               therefore keep their intercepts instead of collapsing to zero, and when no trustworthy
               value exists an error entry is pushed to the Message Log (highlighting the dock) so
               you can inspect the worksheet straight away.
-            * Need to double-check those numbers? Choose **Develop → Coercivity debug…** or
-              **Develop → Remanence debug…** to open a floating inspector with one tab per
+            * Need to double-check those numbers? Choose **Develop â†’ Coercivity debugâ€¦** or
+              **Develop â†’ Remanence debugâ€¦** to open a floating inspector with one tab per
               temperature listing the source X/Y columns, both raw zero-crossing values (even if
-              they share the same sign), the symmetrised ± pairs, and a quick plot comparing the
+              they share the same sign), the symmetrised Â± pairs, and a quick plot comparing the
               original and corrected curves versus angle.
             * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
               saturation) showing how each temperature behaves across rotations.
@@ -394,7 +394,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               styling, theme, and save controls as the main plots.
 
             ### Exporting
-            * **Export TXT…** writes Origin-ready tables for either the entire measurement columns or
+            * **Export TXTâ€¦** writes Origin-ready tables for either the entire measurement columns or
               just the axes used in the current plots, with short/long names, units, comments, and
               axis roles set automatically. Enable the subfolder option to group multi-file exports.
             * **Export metrics** saves the derived coercivity/remanence/saturation tables grouped by
@@ -411,7 +411,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             1. Load switching-field CSV exports for the wires you want to compare.
             2. Configure bin widths, enable or disable Gaussian fits, and decide whether to show
                cumulative fractions.
-            3. Overlay multiple groups to compare treatments—the legend is positioned outside the
+            3. Overlay multiple groups to compare treatmentsâ€”the legend is positioned outside the
                axes by default to keep bars clear, but you can reposition it from the readability
                settings.
             """
@@ -436,11 +436,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
             ### How to use
             1. Load long-running Maxion measurement logs.
-            2. Choose whether to scale the axis (×10³/×10⁴) or centre the data on the median to
+            2. Choose whether to scale the axis (Ã—10Â³/Ã—10â´) or centre the data on the median to
                emphasise drift.
             3. Combine continuous traces with statistical summaries if you want both context and
                compact overlays.
-            4. Enable “Colour legend text” to match legend entries to their traces.
+            4. Enable â€œColour legend textâ€ to match legend entries to their traces.
             """
         ).strip(),
     },
@@ -491,10 +491,10 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "body": dedent(
             """
             ### Prepare your sources
-            1. Click **Microwire data folder → Add folder** and choose the root directory that
+            1. Click **Microwire data folder â†’ Add folder** and choose the root directory that
                holds fabrication spreadsheets, microscope overlays, and videos. The builder follows
-               the existing “Microwire data/…” layout automatically.
-            2. Add annealing logs with **Annealing files → Add files/folder**. Enable **Recursive
+               the existing â€œMicrowire data/â€¦â€ layout automatically.
+            2. Add annealing logs with **Annealing files â†’ Add files/folder**. Enable **Recursive
                scan** when you point at a directory so every draw/piece is collected.
             3. Drop microscope overlays and any manual captures into **Microscope images** if the
                automatic search misses them. The folder picker also supports **Recursive scan** for
@@ -513,7 +513,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               assembly, plotting, and export steps; the ETA blends per-stage averages from previous
               runs with the live moving average so it steadies quickly without large swings.
             * Watch the log panel for missing metadata or skipped files. Use
-              **Cancel** to stop safely—the builder tidies partial exports and keeps all of your
+              **Cancel** to stop safelyâ€”the builder tidies partial exports and keeps all of your
               settings for the next attempt.
 
             ### After the run
@@ -527,7 +527,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               **Microscope images**; the builder merges manual and discovered files before you
               review and enter the stored values.
             * Use **Clear** in any section to reset the list before loading a different batch, and
-              revisit **Help → View Help** at any time for this guide.
+              revisit **Help â†’ View Help** at any time for this guide.
             """
         ).strip(),
     },
@@ -541,7 +541,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                file name to minimise setup time.
             2. Configure the current ramp: maximum current, step size, interval between steps,
                dwell time at the peak, number of loops, and whether automatic reversal to zero is
-               allowed. Choosing ∞ for the loop count locks the control and displays the total time
+               allowed. Choosing âˆž for the loop count locks the control and displays the total time
                as infinity.
 
             ### Running the process
@@ -553,7 +553,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               Raw serial commands are disabled in this mode.
             * Contact-loss detection waits for the first non-zero current, applies a short grace
               period, and then requires several consecutive zero readings before halting. If the
-              supply reaches 30 V a dialog lets you hold, reverse, or abort the ramp safely.
+              supply reaches 30â€¯V a dialog lets you hold, reverse, or abort the ramp safely.
             * Use **Reverse now** to begin the downward ramp immediately or **Stop** to terminate
               the process and flush the log to disk.
 
@@ -613,7 +613,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                calculated from load and cross-section area; strain is calculated relative to the
                last zero-load displacement point before loading starts.
                Optionally connect a Microwire Database Builder project (`.pydpj` / `.pypdj`) and
-               use **Auto-fill diameter** to pull `d (µm)` directly from the project data.
+               use **Auto-fill diameter** to pull `d (Âµm)` directly from the project data.
             3. Click **Start**, then manually enter displacement and load values point-by-point.
                Use **Add Point** to append each measurement.
 
@@ -652,7 +652,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Bridge two serial endpoints for testing.  Point the emulator at one side of a
               virtual COM-pair (or a `loop://` port on Windows) and forward traffic to the
               other.
-            * Useful when exercising the loggers without physical hardware—feed scripted
+            * Useful when exercising the loggers without physical hardwareâ€”feed scripted
               responses or replay recorded sessions through the emulator to validate
               parsing.
             * Use the menu bar to toggle the theme or to revisit these instructions from the
@@ -673,7 +673,7 @@ def _resolve_topic(topic: str) -> tuple[str, str]:
 def show_help(topic: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
     title, body = _resolve_topic(topic)
     dialog = QtWidgets.QDialog(parent)
-    dialog.setWindowTitle(f"Help — {title}")
+    dialog.setWindowTitle(f"Help â€” {title}")
     dialog.setModal(True)
     layout = QtWidgets.QVBoxLayout(dialog)
 

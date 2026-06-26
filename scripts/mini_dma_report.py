@@ -1,4 +1,4 @@
-"""Generate the standard Mini DMA optimization campaign report."""
+﻿"""Generate the standard TMA optimization campaign report."""
 
 from __future__ import annotations
 
@@ -149,9 +149,9 @@ def generate_report(manifest_path: Path | str) -> dict[str, Any]:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     pdf = canvas.Canvas(str(report_path), pagesize=A4)
     width, height = A4
-    pdf.setTitle(str(nested(manifest, "campaign", "title") or "Mini DMA optimization report"))
+    pdf.setTitle(str(nested(manifest, "campaign", "title") or "TMA optimization report"))
     pdf.setFont("Helvetica-Bold", 15)
-    pdf.drawString(0.7 * inch, height - 0.8 * inch, "Mini DMA Optimization Report")
+    pdf.drawString(0.7 * inch, height - 0.8 * inch, "TMA Optimization Report")
     pdf.setFont("Helvetica", 9)
     pdf.drawString(0.7 * inch, height - 1.05 * inch, f"Campaign: {nested(manifest, 'campaign', 'id') or ''}")
     pdf.drawString(0.7 * inch, height - 1.22 * inch, f"Runs: {len(rows)}")
@@ -180,7 +180,7 @@ def generate_report(manifest_path: Path | str) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate a standard Mini DMA optimization campaign report.")
+    parser = argparse.ArgumentParser(description="Generate a standard TMA optimization campaign report.")
     parser.add_argument("manifest", help="Path to campaign.yaml or campaign.json.")
     parser.add_argument("--json", action="store_true", help="Print summary JSON.")
     return parser
@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, indent=2, ensure_ascii=False))
     else:
-        print(f"Generated Mini DMA report: {summary['report_path']}")
+        print(f"Generated TMA report: {summary['report_path']}")
         print(f"Runs: {len(summary['runs'])}")
     return 0
 

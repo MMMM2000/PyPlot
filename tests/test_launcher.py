@@ -237,17 +237,17 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "J_As1 (A/mm^2)" in headers
     assert "Current annealing transition status" in headers
     assert "VSM transition temp status" in headers
-    assert "Mini DMA transition status" in headers
-    assert "Mini DMA transition currents by stress/load" in headers
-    assert "Mini DMA strain by stress/load" in headers
+    assert "TMA transition status" in headers
+    assert "TMA transition currents by stress/load" in headers
+    assert "TMA strain by stress/load" in headers
     row = [cell.value for cell in workbook["Assemble"][2]]
     assert "run01, run02" in row
     assert "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA" in row[
-        headers.index("Mini DMA transition currents by stress/load")
+        headers.index("TMA transition currents by stress/load")
     ]
     assert row[headers.index("Current annealing transition status")] == "No transition"
     assert row[headers.index("VSM transition temp status")] == "No transition"
-    assert row[headers.index("Mini DMA transition status")] == "No transition"
+    assert row[headers.index("TMA transition status")] == "No transition"
     assert '{"fit": "accepted", "points": 120}' in row
     audit_headers = [cell.value for cell in workbook["Assemble audit"][1]]
     audit_row = [cell.value for cell in workbook["Assemble audit"][2]]
@@ -452,7 +452,7 @@ def _wait_for_registry(window: launcher_module.MasterLauncher, app: QtWidgets.QA
             "ac_susceptibility",
         ),
         (
-            "Mini DMA Logger",
+            "TMA Logger",
             "data_logging.mini_dma_logger.mini_dma_logger",
             "mini_dma",
         ),
@@ -677,6 +677,17 @@ def test_launcher_detects_mini_dma_bench_plan_flag() -> None:
     args, _qt_args = launcher_module._parse_launcher_args(
         [
             "--mini-dma-bench-plan",
+            "bench-plan.json",
+        ]
+    )
+    assert launcher_module._is_mini_dma_bench_requested(args) is True  # noqa: SLF001
+    assert args.mini_dma_bench_plan == "bench-plan.json"
+
+
+def test_launcher_detects_tma_bench_plan_alias() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--tma-bench-plan",
             "bench-plan.json",
         ]
     )
@@ -951,7 +962,7 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["R vs T graphs"] == [rvt_path.name]
     assert row["R vs T points"] == 2
     assert row["R vs T temperature range (deg C)"] == "-40.5 to -39"
-    assert row["Mini DMA graphs"] == mini_dma_path.parent.name
+    assert row["TMA graphs"] == mini_dma_path.parent.name
 
 
 def test_microwire_word_report_project_replaces_stale_mini_dma_sources_with_active_runs(
@@ -1011,7 +1022,7 @@ def test_microwire_word_report_project_replaces_stale_mini_dma_sources_with_acti
     assert len(frame) == 1
     row = frame.iloc[0]
     assert set(row["_word_mini_dma_sources"]) == {str(active_a), str(active_b)}
-    mini_dma_graphs = row["Mini DMA graphs"]
+    mini_dma_graphs = row["TMA graphs"]
     assert set(mini_dma_graphs) == {active_a.name, active_b.name}
     assert archived.name not in mini_dma_graphs
     assert "stale archived run" not in mini_dma_graphs
@@ -1087,7 +1098,7 @@ def test_microwire_word_report_project_blocks_stale_mini_dma_when_newest_active_
     assert len(frame) == 1
     row = frame.iloc[0]
     assert not launcher_module._word_project_value_items(row.get("_word_mini_dma_sources"))  # noqa: SLF001
-    assert not launcher_module._word_project_value_items(row.get("Mini DMA graphs"))  # noqa: SLF001
+    assert not launcher_module._word_project_value_items(row.get("TMA graphs"))  # noqa: SLF001
 
 
 def test_microwire_word_report_project_uses_shape_memory_payload_sources(
@@ -1265,7 +1276,7 @@ def test_microwire_word_report_project_exports_rvst_through_pyplot(
     ("name", "module", "resource_tag"),
     [
         (
-            "Mini DMA Logger",
+            "TMA Logger",
             "data_logging.mini_dma_logger.mini_dma_logger",
             "mini_dma",
         ),
@@ -2370,11 +2381,11 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     section_payload = output_payload["sections"]["mini_dma"]
     assert section_payload["rows"]
     row = section_payload["rows"][0]
-    assert row["Mini DMA strain by stress/load"] == [
+    assert row["TMA strain by stress/load"] == [
         "50 MPa: 0.1% @ 20 mA",
         "100 MPa: 0.2% @ 20 mA",
     ]
-    assert row["Mini DMA break point"] == ""
+    assert row["TMA break point"] == ""
     assert section_payload["payloads"]["mini_dma_records"]["encoding"] == "pickle-base64"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     command = manifest["commands"][0]
@@ -2390,8 +2401,8 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     assemble_rows = output_payload["sections"]["assemble"]["rows"]
     assert assemble_rows
     assemble_row = assemble_rows[0]
-    assert assemble_row["Mini DMA graphs"] == [run_path.name]
-    assert assemble_row["Mini DMA strain by stress/load"] == [
+    assert assemble_row["TMA graphs"] == [run_path.name]
+    assert assemble_row["TMA strain by stress/load"] == [
         "50 MPa: 0.1% @ 20 mA",
         "100 MPa: 0.2% @ 20 mA",
     ]
@@ -2450,11 +2461,11 @@ def test_builder_automation_recipe_updates_mini_dma_transition_currents(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     row = output_payload["sections"]["mini_dma"]["rows"][0]
-    assert row["Mini DMA transition currents by stress/load"] == [
+    assert row["TMA transition currents by stress/load"] == [
         "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
     ]
     assemble_row = output_payload["sections"]["assemble"]["rows"][0]
-    assert assemble_row["Mini DMA transition currents by stress/load"] == [
+    assert assemble_row["TMA transition currents by stress/load"] == [
         "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
     ]
 

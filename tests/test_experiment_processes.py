@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import subprocess
 import sys
@@ -80,7 +80,7 @@ def test_launch_experiment_process_starts_child_from_repo_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = ExperimentProcessSpec(
-        display_name="Mini DMA Logger",
+        display_name="TMA Logger",
         module="data_logging.mini_dma_logger.mini_dma_logger",
         resource_tag="mini_dma",
     )
@@ -115,12 +115,12 @@ def test_launch_experiment_process_starts_child_from_repo_root(
     log_path = Path(env["PYPLOT_EXPERIMENT_LOG_PATH"])
     assert log_path.parent == tmp_path / "experiment-logs"
     assert log_path.exists()
-    assert "launching Mini DMA Logger" in log_path.read_text(encoding="utf-8")
+    assert "launching TMA Logger" in log_path.read_text(encoding="utf-8")
 
 
 def test_experiment_process_log_path_uses_ignored_logs_dir() -> None:
     spec = ExperimentProcessSpec(
-        display_name="Mini DMA Logger",
+        display_name="TMA Logger",
         module="data_logging.mini_dma_logger.mini_dma_logger",
         resource_tag="mini_dma",
     )

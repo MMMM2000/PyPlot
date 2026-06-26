@@ -1,11 +1,11 @@
-# Košice Origin Manual Stress/Strain Extraction
+﻿# KoÅ¡ice Origin Manual Stress/Strain Extraction
 
-This prototype extracts manual stress/strain worksheets from the Košice Origin project into files that can later be imported by the Microwire Data Builder Manual stress/strain section.
+This prototype extracts manual stress/strain worksheets from the KoÅ¡ice Origin project into files that can later be imported by the Microwire Data Builder Manual stress/strain section.
 
 Source project:
 
 ```text
-G:\Shared drives\Charakterizácia mikrodrôtov\shape memory database\Kosice\Stress-Strain-Ni50Fe27Ga23-CuCo.opju
+G:\Shared drives\CharakterizÃ¡cia mikrodrÃ´tov\shape memory database\Kosice\Stress-Strain-Ni50Fe27Ga23-CuCo.opju
 ```
 
 The extractor never writes to the source `.opju`. When the file is readable and `originpro` can open Origin, it copies the project under `artifacts/kosice_origin_extract/origin_copy/`, opens that copy read-only, enumerates workbook sheets, and exports worksheets that can be normalized to:
@@ -32,7 +32,7 @@ Outputs:
 - `artifacts/kosice_origin_extract/normalized_csv/*.csv`
 - `artifacts/kosice_origin_extract/builder_txt/*.txt`
 
-The `builder_txt` files use the same two-header-row TXT shape as the existing Manual Stress/Strain Logger exports, so the current Builder parser can read them. The manifest records workbook/sheet names, detected sample key, source columns, units, row count, and output paths. Keep this provenance visible in Builder-side artifacts; public Excel exports should hide or unify the Košice/Origin source label later in the export presentation layer.
+The `builder_txt` files use the same two-header-row TXT shape as the existing Manual Stress/Strain Logger exports, so the current Builder parser can read them. The manifest records workbook/sheet names, detected sample key, source columns, units, row count, and output paths. Keep this provenance visible in Builder-side artifacts; public Excel exports should hide or unify the KoÅ¡ice/Origin source label later in the export presentation layer.
 
 Current worker result:
 

@@ -1,4 +1,4 @@
-# AC Susceptibility Analysis And Origin Handoff
+﻿# AC Susceptibility Analysis And Origin Handoff
 
 This note is for continuing the completed `Ni50Fe27Ga23 12/2` AC susceptibility
 analysis on a Windows PC that has Origin installed. The local PC can run the
@@ -40,7 +40,7 @@ turns: 350 in two layers
 wire diameter: 0.05 mm
 ```
 
-Sensing coil, "snímacia cievka":
+Sensing coil, "snÃ­macia cievka":
 
 ```text
 length: 1 mm

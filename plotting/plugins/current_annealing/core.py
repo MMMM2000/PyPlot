@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import os
@@ -273,7 +273,7 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
 def summarize_transition_loops(df: pd.DataFrame) -> Tuple[AnnealingTransitionSummary, ...]:
     """Estimate annealing As/Af/Ms/Mf currents for each paired R(I) loop.
 
-    The annealing traces are deliberately gated more conservatively than Mini DMA:
+    The annealing traces are deliberately gated more conservatively than TMA:
     a loop is emitted only when its increasing-current leg has an accepted
     austenite tangent fit. Cooling points are added for that same loop when the
     following decreasing-current leg has a clear martensite fit.
@@ -761,8 +761,8 @@ def _current_axis_label(currents: np.ndarray, diameter_um: object) -> str:
     return (
         f"{base_label} "
         f"({_format_compact_number(max_current_mA, max_decimals=0)} mA = "
-        f"{_format_compact_number(density, max_decimals=0)} A/mm², "
-        f"d = {_format_compact_number(normalised_diameter)} µm)"
+        f"{_format_compact_number(density, max_decimals=0)} A/mmÂ², "
+        f"d = {_format_compact_number(normalised_diameter)} Âµm)"
     )
 
 
@@ -788,7 +788,7 @@ def _add_current_density_top_axis(ax: Any, diameter_um: object) -> Any | None:
             for tick in ticks
         ]
     )
-    top_ax.set_xlabel("Current density [A/mm²]", fontsize=AXIS_LABEL_SIZE)
+    top_ax.set_xlabel("Current density [A/mmÂ²]", fontsize=AXIS_LABEL_SIZE)
     top_ax.tick_params(axis="x", labelsize=TICK_SIZE)
     return top_ax
 
@@ -1186,7 +1186,7 @@ def _prepare_origin_workspace(
         worksheet.set_label(0, "mA", "U")
         worksheet.set_label(0, legend_label, "C")
         worksheet.set_label(1, "Resistance", "L")
-        worksheet.set_label(1, "Ω", "U")
+        worksheet.set_label(1, "Î©", "U")
         worksheet.set_label(1, legend_label, "C")
     except Exception:
         pass
@@ -1453,7 +1453,7 @@ def _plot_origin_experimental(
         if col is not None:
             try:
                 col.LongName = "Current" if is_x else "Resistance"
-                col.Units = "mA" if is_x else "Ω"
+                col.Units = "mA" if is_x else "Î©"
                 col.Comment = label
                 col.Type = 3 if is_x else 4
             except Exception:
@@ -1461,7 +1461,7 @@ def _plot_origin_experimental(
         else:
             try:
                 worksheet.set_label(col_index, "Current" if is_x else "Resistance", "L")
-                worksheet.set_label(col_index, "mA" if is_x else "Ω", "U")
+                worksheet.set_label(col_index, "mA" if is_x else "Î©", "U")
                 worksheet.set_label(col_index, label, "C")
             except Exception:
                 pass
@@ -1668,7 +1668,7 @@ def plot_one(
             previous_direction = direction
 
     ax.set_xlabel(_current_axis_label(currents, wire_diameter_um), fontsize=AXIS_LABEL_SIZE)
-    ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_ylabel("Resistance [Î©]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
     density_top_axis = None

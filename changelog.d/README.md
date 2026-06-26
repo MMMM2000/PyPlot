@@ -1,4 +1,4 @@
-# Changelog Fragments
+﻿# Changelog Fragments
 
 Add one fragment file per branch/worktree change set.
 

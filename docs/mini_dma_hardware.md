@@ -1,6 +1,6 @@
-# Mini DMA Hardware Profile
+﻿# TMA Hardware Profile
 
-This document is the canonical hardware reference for the current Mini DMA bench. Keep product links, measured limits, and control implications here so future Mini DMA software work starts from the same physical assumptions.
+This document is the canonical hardware reference for the current TMA bench. Keep product links, measured limits, and control implications here so future TMA software work starts from the same physical assumptions.
 
 ## Hardware Stack
 
@@ -12,7 +12,7 @@ This document is the canonical hardware reference for the current Mini DMA bench
 
 ## Bench Provisioning Defaults
 
-Mini DMA includes a bench-provisioning action for copying the setup to a second bench. The operator still has to connect the hardware correctly and choose/confirm ambiguous ports or channels, but the app should configure the normal Košice-style defaults from there:
+TMA includes a bench-provisioning action for copying the setup to a second bench. The operator still has to connect the hardware correctly and choose/confirm ambiguous ports or channels, but the app should configure the normal KoÅ¡ice-style defaults from there:
 
 - HMP4040 current-sweep channel on the current bench: `CH4`.
 - HMP4040 motor-supply channel on the current bench: `CH3`, `12 V`, `0.5 A` rail-current limit.
@@ -42,15 +42,15 @@ Known specifications:
 - The manual does not publish a maximum measuring/update frequency or maximum `ESC p` request rate.
 - Current bench link: the balance was verified on `COM6` at `9600` bit/s using the `ESC+p` request. Passive streaming was not observed in this mode.
 - Measured request/response cadence on 2026-04-29: 60 samples in a 12 s benchmark, 4.94 Hz achieved rate, mean/median period about 202 ms/sample, 0 timeouts, and a stable raw line of `21.125 g`.
-- Mini DMA default for this request-mode balance: 250 ms scale acquisition interval with a 300 ms serial read timeout.
+- TMA default for this request-mode balance: 250 ms scale acquisition interval with a 300 ms serial read timeout.
 
 Important control implication:
 
-- The manual explicitly warns against dynamic weighing because internal stability compensation can distort results while load is changing. Mini DMA should therefore treat the balance as a high-resolution, low-bandwidth force signal rather than a fast load cell.
+- The manual explicitly warns against dynamic weighing because internal stability compensation can distort results while load is changing. TMA should therefore treat the balance as a high-resolution, low-bandwidth force signal rather than a fast load cell.
 - Fresh force feedback from the current request/response balance is only about 5 Hz. The motor/control loop can run faster, but load/stress decisions must not assume 20 Hz balance data.
 - Raising the serial baud rate alone is unlikely to improve the measured 202 ms response, because the transmitted payload is small compared with the balance's internal response time.
 - Faster force feedback would require a supported scale-side fast/streaming mode, lower filtering/stability averaging, or a different load sensor.
-- Keep the physical balance display in real grams. Mini DMA should continue using the zero-load scale reference to calculate applied wire load.
+- Keep the physical balance display in real grams. TMA should continue using the zero-load scale reference to calculate applied wire load.
 - Log raw balance readings alongside applied load so dynamic behavior can be audited after each run.
 
 ## Linear Actuator Details
@@ -86,9 +86,9 @@ Microstepping improves command granularity and smoothness, but it is not the sam
 
 ## Backlash Status
 
-The actual Mini DMA backlash is not known from the product datasheet. It must be measured on the assembled rig.
+The actual TMA backlash is not known from the product datasheet. It must be measured on the assembled rig.
 
-StepperOnline's page does not give a numeric backlash value for this captive actuator. It only states generally that standard lead screw and nut assemblies have nominal backlash that can increase after many cycles, and it describes anti-backlash nuts as a separate/custom option for other linear motor styles. That note is not a measured value for the installed Mini DMA actuator.
+StepperOnline's page does not give a numeric backlash value for this captive actuator. It only states generally that standard lead screw and nut assemblies have nominal backlash that can increase after many cycles, and it describes anti-backlash nuts as a separate/custom option for other linear motor styles. That note is not a measured value for the installed TMA actuator.
 
 Treat backlash as an empirical bench parameter:
 
@@ -102,13 +102,13 @@ Recommended characterization:
 2. Command a series of same-direction micro-moves and record applied load change per move.
 3. Reverse direction with the same move size and count how much commanded travel occurs before the load responds consistently.
 4. Repeat at several preload levels because backlash and stiction can be load-dependent.
-5. Store the measured take-up distance as the Mini DMA backlash setting, but keep the raw data because the best value may differ between seeking and servo holding.
+5. Store the measured take-up distance as the TMA backlash setting, but keep the raw data because the best value may differ between seeking and servo holding.
 
 Until measured, do not assume the actuator has zero backlash. For software defaults, use `0 mm` only as "unknown/not compensated", not as a physical claim.
 
-Mini DMA includes a generic `Calibration` recipe for this measurement. A 0.12 mm copper wire is stable and useful for a first mechanical check, but it is much stiffer than the microwires and may need several grams of preload before it is straight. A mounted microwire can also be used when matching the real experiment geometry matters more than isolating material transformations. The routine is automatic after physical setup: it runs the preload/return length setup when setup is enabled, records still-load noise, uses a separate preload seek to straighten or tension the wire, performs smaller forward/reverse micro-move sweeps, and stores the resulting stiffness/backlash and stress-strain report in the session JSON metadata.
+TMA includes a generic `Calibration` recipe for this measurement. A 0.12 mm copper wire is stable and useful for a first mechanical check, but it is much stiffer than the microwires and may need several grams of preload before it is straight. A mounted microwire can also be used when matching the real experiment geometry matters more than isolating material transformations. The routine is automatic after physical setup: it runs the preload/return length setup when setup is enabled, records still-load noise, uses a separate preload seek to straighten or tension the wire, performs smaller forward/reverse micro-move sweeps, and stores the resulting stiffness/backlash and stress-strain report in the session JSON metadata.
 
-The hanging-weight zero-load scale reference is also the physical applied-load ceiling for this rig: once the balance reading reaches about `0 g`, the weight is airborne and the wire cannot receive more load from that mass. Mini DMA therefore uses the zero-load reference as the default max applied load; the custom lower limit is only for stopping below the installed weight.
+The hanging-weight zero-load scale reference is also the physical applied-load ceiling for this rig: once the balance reading reaches about `0 g`, the weight is airborne and the wire cannot receive more load from that mass. TMA therefore uses the zero-load reference as the default max applied load; the custom lower limit is only for stopping below the installed weight.
 
 ## Stress And Load Conversions
 
@@ -151,11 +151,11 @@ estimated_correction_mm = error_g / stiffness_g_per_mm
 velocity_mm_s = estimated_correction_mm / response_time_s
 ```
 
-Mini DMA now uses this as a first-pass proportional seeking law: calibration supplies the initial stiffness/noise/backlash prior, stiffness is rescaled by the ratio between the calibrated length and the current unloaded gauge length, live load response can refine the estimate during a run, and commanded correction is clamped by motor resolution, user speed/step ceilings, the real scale-feedback interval, and safety limits. Backlash take-up is kept out of specimen displacement/strain, and small reversals can be skipped when the backlash cost is larger than the predicted target improvement. During setup preload, early slack take-up can use the setup slack `%/s` speed over each fresh scale interval instead of being restricted by the fine preload correction step.
+TMA now uses this as a first-pass proportional seeking law: calibration supplies the initial stiffness/noise/backlash prior, stiffness is rescaled by the ratio between the calibrated length and the current unloaded gauge length, live load response can refine the estimate during a run, and commanded correction is clamped by motor resolution, user speed/step ceilings, the real scale-feedback interval, and safety limits. Backlash take-up is kept out of specimen displacement/strain, and small reversals can be skipped when the backlash cost is larger than the predicted target improvement. During setup preload, early slack take-up can use the setup slack `%/s` speed over each fresh scale interval instead of being restricted by the fine preload correction step.
 
 Add integral correction and current-ramp feedforward only after the basic proportional controller is characterized on copper wire, a dummy spring, or several representative microwire lengths.
 
-Current sweeps own their current program. If the supply reaches the configured voltage limit before the requested current, Mini DMA ramps current back down to that sweep's start current at the recipe ramp rate and continues with the next recipe step instead of stopping the experiment.
+Current sweeps own their current program. If the supply reaches the configured voltage limit before the requested current, TMA ramps current back down to that sweep's start current at the recipe ramp rate and continues with the next recipe step instead of stopping the experiment.
 
 ## Characterization Checklist
 

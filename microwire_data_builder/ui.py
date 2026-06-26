@@ -98,6 +98,13 @@ from .core import (
     MINI_DMA_TRANSITION_STATUS_COLUMN,
     MINI_DMA_TRANSITION_COUNTS_COLUMN,
     MINI_DMA_BREAK_COLUMN,
+    LEGACY_MINI_DMA_COLUMN,
+    LEGACY_MINI_DMA_ORIGIN_COLUMN,
+    LEGACY_MINI_DMA_STRAIN_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_STATUS_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COUNTS_COLUMN,
+    LEGACY_MINI_DMA_BREAK_COLUMN,
     CURRENT_ANNEALING_TRANSITION_STATUS_COLUMN,
     CURRENT_ANNEALING_TRANSITION_COUNTS_COLUMN,
     VSM_TRANSITION_TEMP_STATUS_COLUMN,
@@ -7822,7 +7829,7 @@ def _mini_dma_transition_review_entries(
             )
             summary = mini_dma_core.summarize_current_sweep(run)
         except Exception:
-            logger.exception("Failed to prepare Mini DMA transition review for %s", path)
+            logger.exception("Failed to prepare TMA transition review for %s", path)
             continue
         sample = str(getattr(record, "sample", "") or getattr(run, "sample_name", "") or path.name)
         run_label = str(getattr(record, "label", "") or path.name)
@@ -7861,7 +7868,7 @@ class _MiniDmaTransitionReviewLoadWorker(QtCore.QObject):
         try:
             entries = _mini_dma_transition_review_entries([self._record], self._logger)
         except Exception as exc:
-            self._logger.exception("Failed to prepare Mini DMA transition review")
+            self._logger.exception("Failed to prepare TMA transition review")
             self.finished.emit(_MiniDmaTransitionReviewLoadResult(self._key, [], str(exc)))
             return
         self.finished.emit(_MiniDmaTransitionReviewLoadResult(self._key, entries))
@@ -7878,7 +7885,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         review_setter: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Mini DMA transition review")
+        self.setWindowTitle("TMA transition review")
         self.resize(1280, 820)
         self._logger = logger
         self._review_provider = review_provider
@@ -7942,7 +7949,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.transition_controls = _MiniDmaTransitionEditorControls(plot_panel)
-        self.empty_label = QtWidgets.QLabel("No Mini DMA transition review targets are available.", plot_panel)
+        self.empty_label = QtWidgets.QLabel("No TMA transition review targets are available.", plot_panel)
         self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         plot_layout.addWidget(self.toolbar)
         plot_layout.addWidget(self.canvas, 1)
@@ -8028,7 +8035,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             nodes.append(
                 _MiniDmaTransitionReviewRunNode(
                     key=key,
-                    sample=sample or "Mini DMA",
+                    sample=sample or "TMA",
                     run_label=run_label or key,
                     record=record,
                 )
@@ -8053,7 +8060,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         try:
             snapshot = self._review_provider()
         except Exception:
-            self._logger.exception("Failed to load Mini DMA transition reviews")
+            self._logger.exception("Failed to load TMA transition reviews")
             return {}
         return snapshot if isinstance(snapshot, dict) else {}
 
@@ -8240,7 +8247,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                     self._handle_tree_selection(current, None)
                     return
         if not self._runs:
-            self._show_empty("No Mini DMA transition review targets are available.")
+            self._show_empty("No TMA transition review targets are available.")
             return
         item = self._run_items.get(self._runs[0].key)
         if item is not None:
@@ -8263,7 +8270,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             self._current_ref = None
             self._ensure_run_loaded(key, select_first=True)
             if key in self._loading_keys:
-                self._show_empty("Loading Mini DMA transition fits...")
+                self._show_empty("Loading TMA transition fits...")
             elif key not in self._entries_by_run:
                 self._show_empty("Select a stress/load entry after the run is loaded.")
             return
@@ -8384,7 +8391,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         try:
             self._review_setter(record_id, payload)
         except Exception:
-            self._logger.exception("Failed to store Mini DMA transition review")
+            self._logger.exception("Failed to store TMA transition review")
             return
         if self.accepted_only_check.isChecked() or self.rejected_only_check.isChecked():
             self._refresh_tree()
@@ -8492,7 +8499,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         try:
             self._review_setter(record_id, payload)
         except Exception:
-            self._logger.exception("Failed to store Mini DMA transition review values")
+            self._logger.exception("Failed to store TMA transition review values")
             return
         review = self._review_for_entry(entry)
         self.transition_controls.set_auto_values(auto_values)
@@ -8548,7 +8555,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         try:
             self._review_setter(record_id, payload)
         except Exception:
-            self._logger.exception("Failed to clear Mini DMA transition review label")
+            self._logger.exception("Failed to clear TMA transition review label")
             return
         refreshed = self._review_for_entry(entry)
         self.transition_controls.set_auto_values(auto_values)
@@ -8616,7 +8623,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         if pending:
             self._select_first_entry_for_run(result.key)
         elif self._current_run_key == result.key and not result.entries and not result.error:
-            self._show_empty("No supported current-sweep transition targets for this Mini DMA run.")
+            self._show_empty("No supported current-sweep transition targets for this TMA run.")
 
     def _select_first_entry_for_run(self, key: str) -> None:
         entries = self._entries_by_run.get(key, [])
@@ -8629,9 +8636,9 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 return
         self._current_ref = None
         self._current_run_key = key
-        self._show_empty("No supported current-sweep transition targets for this Mini DMA run.")
+        self._show_empty("No supported current-sweep transition targets for this TMA run.")
 
-    def _show_empty(self, message: str = "No Mini DMA transition review targets are available.") -> None:
+    def _show_empty(self, message: str = "No TMA transition review targets are available.") -> None:
         self.figure.clear()
         self.canvas.hide()
         self.toolbar.hide()
@@ -9187,12 +9194,12 @@ def _mini_dma_preview_items(
                 "No current-sweep target groups with enough points" in message
                 or "No iso-current stress/strain groups with enough points" in message
             ):
-                logger.debug("Skipping Mini DMA preview for %s: %s", path, exc)
+                logger.debug("Skipping TMA preview for %s: %s", path, exc)
             else:
-                logger.exception("Failed to render Mini DMA preview for %s", path)
+                logger.exception("Failed to render TMA preview for %s", path)
             continue
         except Exception:
-            logger.exception("Failed to render Mini DMA preview for %s", path)
+            logger.exception("Failed to render TMA preview for %s", path)
             continue
         pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
         if pixmap is None:
@@ -9205,24 +9212,24 @@ def _mini_dma_preview_items(
                 partial(
                     _open_pyplot_for_paths,
                     paths,
-                    "Mini DMA",
+                    "TMA",
                     logger,
                     auto_plot=True,
                     open_origin=False,
                 ),
-                tooltip="Open this Mini DMA run in PyPlot.",
+                tooltip="Open this TMA run in PyPlot.",
             ),
             _GraphPreviewAction(
                 "Open in Origin",
                 partial(
                     _open_pyplot_for_paths,
                     paths,
-                    "Mini DMA",
+                    "TMA",
                     logger,
                     auto_plot=True,
                     open_origin=True,
                 ),
-                tooltip="Send this Mini DMA run to Origin via PyPlot.",
+                tooltip="Send this TMA run to Origin via PyPlot.",
             ),
         )
         items.append(_GraphPreviewItem(title, pixmap, actions=actions))
@@ -10509,6 +10516,30 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
             list(dict.fromkeys(break_lines)) if break_lines else ""
         )
     return frame
+
+
+_TMA_LEGACY_COLUMN_ALIASES = {
+    LEGACY_MINI_DMA_COLUMN: MINI_DMA_COLUMN,
+    LEGACY_MINI_DMA_ORIGIN_COLUMN: MINI_DMA_ORIGIN_COLUMN,
+    LEGACY_MINI_DMA_STRAIN_COLUMN: MINI_DMA_STRAIN_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COLUMN: MINI_DMA_TRANSITION_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_STATUS_COLUMN: MINI_DMA_TRANSITION_STATUS_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COUNTS_COLUMN: MINI_DMA_TRANSITION_COUNTS_COLUMN,
+    LEGACY_MINI_DMA_BREAK_COLUMN: MINI_DMA_BREAK_COLUMN,
+}
+
+
+def _normalise_tma_display_columns(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    rename_map = {
+        old: new
+        for old, new in _TMA_LEGACY_COLUMN_ALIASES.items()
+        if old in frame.columns and new not in frame.columns
+    }
+    if not rename_map:
+        return frame
+    return frame.rename(columns=rename_map)
 
 
 def _mini_dma_resolve_measurement_path(path: Path) -> Path | None:
@@ -23924,7 +23955,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
 
 class MiniDmaSection(MiniDatabaseSection):
     section_key = "mini_dma"
-    section_title = "Mini DMA"
+    section_title = "TMA"
     supported_suffixes = (".csv",)
     excluded_refresh_dirs = set(
         getattr(
@@ -23966,16 +23997,16 @@ class MiniDmaSection(MiniDatabaseSection):
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
         self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
-        self.open_pyplot_button.setToolTip("Open the selected Mini DMA runs in PyPlot.")
+        self.open_pyplot_button.setToolTip("Open the selected TMA runs in PyPlot.")
         self.open_pyplot_button.clicked.connect(self._open_selected_in_pyplot)
         self.controls_layout.addWidget(self.open_pyplot_button)
         self.open_origin_button = QtWidgets.QPushButton("Open in Origin")
-        self.open_origin_button.setToolTip("Send the selected Mini DMA runs to Origin via PyPlot.")
+        self.open_origin_button.setToolTip("Send the selected TMA runs to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
         self.review_transitions_button = QtWidgets.QPushButton("Review transitions")
         self.review_transitions_button.setToolTip(
-            "Review Mini DMA transition fits by sample, run, and stress/load."
+            "Review TMA transition fits by sample, run, and stress/load."
         )
         self.review_transitions_button.clicked.connect(self._open_transition_review)
         self.controls_layout.addWidget(self.review_transitions_button)
@@ -24089,7 +24120,7 @@ class MiniDmaSection(MiniDatabaseSection):
         progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
     ) -> SectionProcessResult:
         if mini_dma_core is None:
-            raise RuntimeError("Mini DMA parser is not available.")
+            raise RuntimeError("TMA parser is not available.")
         reportable_paths, reportability = self.reportable_measurements(
             paths,
             sources=self.data.sources,
@@ -24113,7 +24144,7 @@ class MiniDmaSection(MiniDatabaseSection):
             try:
                 run = mini_dma_core.load_run(measurement_path)
             except Exception:
-                self.logger.exception("Failed to parse Mini DMA run %s", path)
+                self.logger.exception("Failed to parse TMA run %s", path)
                 if progress is not None:
                     try:
                         progress(idx, total, f"Skipped {progress_name}")
@@ -24143,7 +24174,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     )
                     break_summary = mini_dma_core.format_current_sweep_break_summary(sweep_summary)
                 except Exception:
-                    self.logger.exception("Failed to summarize Mini DMA run %s", run_path)
+                    self.logger.exception("Failed to summarize TMA run %s", run_path)
             record = MiniDmaRecord(
                 path=run_path,
                 sample=sample or raw_sample or getattr(run, "sample_name", "") or run_path.name,
@@ -24167,6 +24198,7 @@ class MiniDmaSection(MiniDatabaseSection):
                 except Exception:
                     pass
         table = _mini_dma_records_to_frame(records)
+        table = _normalise_tma_display_columns(table)
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -24176,11 +24208,13 @@ class MiniDmaSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
+        self.model.set_frame(_normalise_tma_display_columns(self.model.frame()))
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self.model.set_frame(_normalise_tma_display_columns(self.model.frame()))
         _drop_visible_sample_column(self)
         self._load_transition_reviews()
         self._refresh_record_groups()
@@ -24188,6 +24222,7 @@ class MiniDmaSection(MiniDatabaseSection):
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
+        self.model.set_frame(_normalise_tma_display_columns(self.model.frame()))
         self._load_transition_reviews()
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
@@ -24328,7 +24363,7 @@ class MiniDmaSection(MiniDatabaseSection):
             QtWidgets.QMessageBox.information(
                 self,
                 self.section_title,
-                "No Mini DMA runs are available to review.",
+                "No TMA runs are available to review.",
             )
             return
         dialog = _MiniDmaTransitionReviewDialog(
@@ -24396,7 +24431,7 @@ class MiniDmaSection(MiniDatabaseSection):
         try:
             self.store.save(self.data)
         except Exception:
-            self.logger.exception("Failed to persist Mini DMA transition reviews")
+            self.logger.exception("Failed to persist TMA transition reviews")
 
     def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
         snapshot: Dict[str, Dict[str, Any]] = {}
@@ -24519,7 +24554,7 @@ class MiniDmaSection(MiniDatabaseSection):
             return
         _open_pyplot_for_paths(
             paths,
-            "Mini DMA",
+            "TMA",
             self.logger,
             auto_plot=True,
             open_origin=open_origin,
@@ -24546,13 +24581,13 @@ class DmaTransitionsSection(QtWidgets.QWidget):
         self.refresh_button.clicked.connect(self.refresh_data)
         controls.addWidget(self.refresh_button)
         self.review_button = QtWidgets.QPushButton("Review transition currents...")
-        self.review_button.setToolTip("Review Mini DMA transition-current targets.")
+        self.review_button.setToolTip("Review TMA transition-current targets.")
         self.review_button.clicked.connect(self._open_transition_review)
         controls.addWidget(self.review_button)
         controls.addStretch(1)
         layout.addLayout(controls)
 
-        self.status_label = QtWidgets.QLabel("Waiting for Mini DMA data.", self)
+        self.status_label = QtWidgets.QLabel("Waiting for TMA data.", self)
         layout.addWidget(self.status_label)
 
         self.summary_table = QtWidgets.QTableWidget(0, 7, self)
@@ -24673,9 +24708,9 @@ class DmaTransitionsSection(QtWidgets.QWidget):
                 f"{counts['reviewed']} of {counts['total']} DMA target row(s) reviewed across {len(records)} run(s)."
             )
         elif records:
-            self.status_label.setText("Mini DMA runs are available, but no transition-current targets were found.")
+            self.status_label.setText("TMA runs are available, but no transition-current targets were found.")
         else:
-            self.status_label.setText("No Mini DMA runs available yet.")
+            self.status_label.setText("No TMA runs available yet.")
 
     @staticmethod
     def _format_counts(counts: Mapping[str, int]) -> str:
@@ -30635,7 +30670,7 @@ class AssemblySection(QtWidgets.QWidget):
             ("vsm_temperature_scan", "VSM temperature scan"),
             ("transition_temps", "VSM transitions"),
             ("dma_iso_stress", "DMA iso-stress"),
-            ("mini_dma", "Mini DMA"),
+            ("mini_dma", "TMA"),
             ("shape_memory_stress_strain", "Manual stress/strain"),
             ("fmr", "FMR"),
             ("strain", "Strain"),
@@ -31821,7 +31856,7 @@ class AssemblySection(QtWidgets.QWidget):
                     mini_dma_transition_reviews = section.transition_reviews_snapshot()
                     mini_dma_records = section.records_with_reviewed_transitions(mini_dma_records)
             else:
-                _mark_missing("Mini DMA")
+                _mark_missing("TMA")
         self._cached_mini_dma_records = list(mini_dma_records)
         self._cached_mini_dma_groups = _group_graph_records_by_key(mini_dma_records)
 
@@ -33953,7 +33988,7 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("VSM temperature scan", section_map.get("vsm_temperature_scan", []))
         add_group("VSM transitions", section_map.get("transition_temps", []))
         add_group("DMA iso-stress", section_map.get("dma_iso_stress", []))
-        add_group("Mini DMA", section_map.get("mini_dma", []))
+        add_group("TMA", section_map.get("mini_dma", []))
         add_group(
             "Manual stress/strain",
             section_map.get("shape_memory_stress_strain", []),
@@ -35982,7 +36017,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             _pump_events()
 
             self.mini_dma_section = MiniDmaSection(self.logger, _append_log)
-            self.tab_widget.addTab(self.mini_dma_section, "Mini DMA")
+            self.tab_widget.addTab(self.mini_dma_section, "TMA")
             self.sections["mini_dma"] = self.mini_dma_section
             _pump_events()
 

@@ -1,4 +1,4 @@
-# Microwire Builder Agent Automation Plan
+﻿# Microwire Builder Agent Automation Plan
 
 This note tracks the implementation direction for making Microwire Data Builder safe to operate from Codex without opening the UI by hand.
 
@@ -116,7 +116,7 @@ to timestamped copies in `archive/` before promoting a successful new run.
 - Loading a project copy with VSM Temperature Scan records works after clearing `MiniDatabaseStore` memory and pointing AppData storage at an empty temp folder.
 - A builder automation recipe updates only the copied `.pydpj`, remains idempotent for repeated inputs, and reports skipped malformed VSM files in the manifest.
 - Current annealing and the other graph-backed sections are supported by the same `update_section` command family.
-- Assemble rebuild can use copied project payloads, including Mini DMA summaries, without constructing the full Builder window.
+- Assemble rebuild can use copied project payloads, including TMA summaries, without constructing the full Builder window.
 - A builder automation recipe with `database_dir` promotes a new latest project/manifest and archives the previous latest files with a timestamp.
 
 ## Later Phases

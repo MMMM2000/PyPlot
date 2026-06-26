@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -3521,7 +3521,7 @@ def test_shared_broker_manual_auto_connect_applies_ch3_ch4_defaults_before_tic_s
         assert window.combo_motor_supply_channel.currentData() == 3
         assert window.check_motor_supply_power.isChecked()
         assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
-        assert "Shared HMP Mini DMA bench defaults applied for Tic preflight" in window.log_output.toPlainText()
+        assert "Shared HMP TMA bench defaults applied for Tic preflight" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -9619,7 +9619,7 @@ def test_recipe_preflight_reports_tic_status_read_failure(
         assert len(warnings) == 1
         assert "Motor controller status could not be read" in warnings[0]
         assert "Access denied" in warnings[0]
-        assert "other Mini DMA/test processes" in warnings[0]
+        assert "other TMA/test processes" in warnings[0]
     finally:
         _close_test_window(window)
 
@@ -13002,7 +13002,7 @@ def test_shared_broker_preflight_auto_starts_owned_broker_when_default_broker_is
 
         assert owned_broker_starts == [True]
         log_text = window.log_output.toPlainText()
-        assert "Mini DMA will not open the HMP serial port" not in log_text
+        assert "TMA will not open the HMP serial port" not in log_text
         assert "Supply connected through shared HMP broker" in log_text
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
     finally:

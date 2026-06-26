@@ -972,13 +972,13 @@ def test_summarize_current_sweep_detects_voltage_limit_break() -> None:
 def test_plugin_is_registered() -> None:
     registry = builtin_plugin_registry()
 
-    assert "Mini DMA" in registry
+    assert "TMA" in registry
 
 
 def test_plugin_defaults_to_global_strain_baseline_and_power_axis() -> None:
     app = _ensure_qapp()
     host = QtWidgets.QWidget()
-    plugin = MiniDmaPlugin(host, "Mini DMA")
+    plugin = MiniDmaPlugin(host, "TMA")
     try:
         plugin.settings_widget()
         assert plugin._strain_baseline_mode() == core.STRAIN_BASELINE_GLOBAL_MINIMUM

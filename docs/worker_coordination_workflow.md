@@ -1,4 +1,4 @@
-# Worker Coordination Workflow
+﻿# Worker Coordination Workflow
 
 This workflow is for the PyPlot master coordination thread when multiple Codex workers, worktrees, subagents, or monitor automations are active at the same time.
 
@@ -119,9 +119,9 @@ On this machine, new PyPlot worker threads should be created inside the PyPlot p
 
 Avoid creating worker threads in the generic Chats area for PyPlot tasks. If a task accidentally starts there but is already making progress, let it finish only if it is safe, then bring the branch back through the ledger.
 
-## Mini DMA Optimization Tasks
+## TMA Optimization Tasks
 
-Mini DMA live optimization tasks must start from a campaign manifest, not from chat memory or isolated artifacts. The campaign must identify the approved control source, sample, hardware channels, safety limits, run stages, report outputs, and success metrics.
+TMA live optimization tasks must start from a campaign manifest, not from chat memory or isolated artifacts. The campaign must identify the approved control source, sample, hardware channels, safety limits, run stages, report outputs, and success metrics.
 
 Before a live run, the worker must run:
 

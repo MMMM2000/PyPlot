@@ -1,4 +1,4 @@
-"""Command-line wrapper for Mini DMA current-ramp speed comparison."""
+﻿"""Command-line wrapper for TMA current-ramp speed comparison."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# Praha Microwire Database Update Checklist
+﻿# Praha Microwire Database Update Checklist
 
 Use this checklist whenever refreshing the shared `.pydpj` database before DOCX export. The goal is to make each refresh reproducible and to record when fabrication data is not available yet.
 
@@ -11,8 +11,8 @@ Use this checklist whenever refreshing the shared `.pydpj` database before DOCX 
    ```
 
 4. Confirm the recipe manifest includes the intended updated sections and `rebuild_assemble`.
-5. Open the copied project, not the original live project, and spot-check Current annealing, Fabrication, Mini DMA, Assemble, and any newly changed graph sections.
+5. Open the copied project, not the original live project, and spot-check Current annealing, Fabrication, TMA, Assemble, and any newly changed graph sections.
 6. Only after the copied project is correct, promote it to `microwire_database_latest.pydpj`.
-7. Export DOCX reports from the promoted project only after the Mini DMA and current-annealing transition reviews are accepted for the relevant samples.
+7. Export DOCX reports from the promoted project only after the TMA and current-annealing transition reviews are accepted for the relevant samples.
 
 Current limitation: `update_section` does not yet support Fabrication because Fabrication keeps draw-level and piece-level index payloads in addition to visible rows. Until a dedicated fabrication automation command is added, refresh Fabrication via the Builder UI or a dedicated helper and note the result next to the automation manifest.

@@ -113,7 +113,7 @@ EXPERIMENT_PROCESS_MODULES: dict[str, ExperimentProcessSpec] = {
         resource_tag="current_annealing",
     ),
     "mini_dma": ExperimentProcessSpec(
-        display_name="Mini DMA Logger",
+        display_name="TMA Logger",
         module="data_logging.mini_dma_logger.mini_dma_logger",
         resource_tag="mini_dma",
     ),
@@ -350,6 +350,8 @@ def _normalise_project_path(path: Path, *, suffix: str = ".pypj") -> Path:
 def _validate_pyplot_plugin_name(plugin_name: str | None) -> None:
     if plugin_name is None:
         return
+    if plugin_name == "Mini DMA":
+        plugin_name = "TMA"
     _pyplot_main, plugin_names = _load_pyplot_metadata()
     if plugin_name not in plugin_names:
         raise _AutomationRecipeError(
@@ -1208,8 +1210,32 @@ def _assemble_export_frame_from_sections(sections: Mapping[str, object]) -> pd.D
     columns = assemble.get("columns")
     if isinstance(columns, list):
         column_names = [str(column) for column in columns]
-        return pd.DataFrame(rows, columns=column_names)
-    return pd.DataFrame(rows)
+        frame = pd.DataFrame(rows, columns=column_names)
+    else:
+        frame = pd.DataFrame(rows)
+    return _normalise_tma_assemble_export_columns(frame)
+
+
+def _normalise_tma_assemble_export_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    aliases = {
+        "Mini DMA graphs": "TMA graphs",
+        "Mini DMA graphs (Origin)": "TMA graphs (Origin)",
+        "Mini DMA strain by stress/load": "TMA strain by stress/load",
+        "Mini DMA transition currents by stress/load": "TMA transition currents by stress/load",
+        "Mini DMA transition status": "TMA transition status",
+        "Mini DMA transition review counts": "TMA transition review counts",
+        "Mini DMA break point": "TMA break point",
+    }
+    rename_map = {
+        old: new
+        for old, new in aliases.items()
+        if old in frame.columns and new not in frame.columns
+    }
+    if not rename_map:
+        return frame
+    return frame.rename(columns=rename_map)
 
 
 def _serialise_assemble_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -2256,8 +2282,10 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
     )
     parser.add_argument(
         "--mini-dma-bench-plan",
+        "--tma-bench-plan",
+        dest="mini_dma_bench_plan",
         default=None,
-        help="Run or dry-run an explicitly armed Mini DMA bench automation plan JSON file.",
+        help="Run or dry-run an explicitly armed TMA bench automation plan JSON file.",
     )
     parser.add_argument(
         "--experiment-process",
@@ -3257,10 +3285,10 @@ _WORD_PROJECT_GRAPH_SOURCE_SPECS: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "mini_dma": (
         "_word_mini_dma_sources",
-        "Mini DMA graphs",
-        "Mini DMA graphs (Origin)",
-        "Mini DMA",
-        "Mini DMA Origin graph",
+        "TMA graphs",
+        "TMA graphs (Origin)",
+        "TMA",
+        "TMA Origin graph",
     ),
     "shape_memory_stress_strain": (
         "_word_shape_memory_stress_strain_sources",
@@ -3306,9 +3334,9 @@ _WORD_REPORT_GRAPH_MANIFEST_SECTIONS: tuple[tuple[str, tuple[str, ...], tuple[st
         ("DMA iso-stress graphs", "DMA iso-stress graphs (Origin)"),
     ),
     (
-        "Mini DMA",
+        "TMA",
         ("_word_mini_dma_sources",),
-        ("Mini DMA graphs", "Mini DMA graphs (Origin)"),
+        ("TMA graphs", "TMA graphs (Origin)", "Mini DMA graphs", "Mini DMA graphs (Origin)"),
     ),
     (
         "Manual stress/strain",
@@ -5586,8 +5614,8 @@ LOGGERS: Dict[str, LauncherFactory] = {
         "data_logging.ac_susceptibility_logger.ac_susceptibility_logger",
         "ac_susceptibility",
     ),
-    "Mini DMA Logger": _experiment_process_launcher(
-        "Mini DMA Logger",
+    "TMA Logger": _experiment_process_launcher(
+        "TMA Logger",
         "data_logging.mini_dma_logger.mini_dma_logger",
         "mini_dma",
     ),

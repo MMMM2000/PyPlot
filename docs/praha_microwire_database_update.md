@@ -1,4 +1,4 @@
-# Praha Microwire Database Update
+﻿# Praha Microwire Database Update
 
 Use this workflow when updating the live Praha Microwire Data Builder database.
 Do not hand-edit the live `.pydpj` and do not export DOCX reports until the
@@ -30,13 +30,13 @@ $env:UV_CACHE_DIR='C:\Users\Martin\PyPlot\artifacts\uv-cache'
 
 ## Required Behavior
 
-- The recipe refreshes the Mini DMA section from
+- The recipe refreshes the TMA section from
   `G:/My Drive/1 Projects/Praha/mini DMA`.
 - It ignores `archive`, `automation_history`, `automated_control_tests`, and
   `automated` folders.
-- Mini DMA import is sample-gated: if the newest active run for a sample is not
+- TMA import is sample-gated: if the newest active run for a sample is not
   finished, no older run for that same sample is imported as a fallback.
-- After refreshing Mini DMA, the recipe rebuilds Assemble from the project
+- After refreshing TMA, the recipe rebuilds Assemble from the project
   sections.
 - The automation archives the previous `microwire_database_latest.pydpj` before
   promoting the newly rebuilt latest project.
@@ -48,9 +48,9 @@ Inspect `update_manifest_latest.json` and confirm:
 - `status` is `ok`.
 - `database.archived_project` points to the previous latest project.
 - `database.latest_project` points to the promoted latest project.
-- The Mini DMA command reports the expected source path and row count.
+- The TMA command reports the expected source path and row count.
 - Assemble rows were rebuilt.
 
-Only after this manifest check should DOCX export be considered. For Mini DMA
+Only after this manifest check should DOCX export be considered. For TMA
 transition-current work, manually review the Builder transition review UI before
 treating extracted As/Af/Ms/Mf values as final report values.
