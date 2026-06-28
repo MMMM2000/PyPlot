@@ -2665,7 +2665,7 @@ def test_dma_transitions_view_lists_run_target_rows() -> None:
         assert table.item(0, 3).text() == reviewed_entry.target_label
         assert table.item(0, 4).text() == "Accepted"
         assert "total=" in table.item(0, 6).text()
-        assert "DMA target row(s)" in section.status_label.text()
+        assert "TMA target row(s)" in section.status_label.text()
     finally:
         section.close()
         section.deleteLater()
@@ -8077,7 +8077,7 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         transitions = window.transitions_section
         assert transitions.tab_widget.tabText(0) == "Annealing"
         assert transitions.tab_widget.tabText(1) == "VSM"
-        assert transitions.tab_widget.tabText(2) == "DMA"
+        assert transitions.tab_widget.tabText(2) == "TMA"
         assert isinstance(transitions.tab_widget.widget(0), builder_ui._AnnealingTransitionWorkspace)  # noqa: SLF001
         assert isinstance(transitions.tab_widget.widget(1), builder_ui._VsmTransitionWorkspace)  # noqa: SLF001
         assert isinstance(transitions.tab_widget.widget(2), builder_ui._MiniDmaTransitionWorkspace)  # noqa: SLF001
@@ -10871,3 +10871,56 @@ def test_assemble_import_project_payload_preserves_hidden_columns_and_order(qtbo
         ]
     finally:
         window.close()
+
+
+def test_assemble_default_visible_columns_do_not_disable_export_sections(qtbot) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        assert all(assembly._section_states.values())  # noqa: SLF001
+
+        visible_columns = assembly._resolve_selected_columns(  # noqa: SLF001
+            [
+                "Composition",
+                "Microwire",
+                "d (µm)",
+                "D (µm)",
+                "TMA strain by stress/load",
+            ]
+        )
+
+        assert visible_columns == [
+            "Composition",
+            "Microwire",
+            "d (µm)",
+            "D (µm)",
+            "TMA strain by stress/load",
+        ]
+        assert all(assembly._section_states.values())  # noqa: SLF001
+        assert len(assembly._selected_sections()) == len(assembly._section_choices)  # noqa: SLF001
+    finally:
+        assembly.close()
+
+
+def test_assemble_preview_status_reports_hidden_oe_rows(qtbot) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        assembly._raw_preview_frame = pd.DataFrame(  # noqa: SLF001
+            [
+                {"Composition": "Ni50Fe27Ga23", "Microwire": "1/1"},
+                {"Composition": "Ni50Fe27Ga23", "Microwire": "1/2oe"},
+            ]
+        )
+        assembly._show_oe_samples = False  # noqa: SLF001
+
+        assembly._refresh_preview_frame()  # noqa: SLF001
+
+        assert assembly.status_label.text() == (
+            "Preview ready - 1 of 2 row(s) shown (OE samples hidden)."
+        )
+        assert len(assembly._selected_sections()) == len(assembly._section_choices)  # noqa: SLF001
+    finally:
+        assembly.close()

@@ -1401,6 +1401,33 @@ def _mini_dma_review_records_from_sections(sections: Mapping[str, object]) -> di
     }
 
 
+def _mini_dma_records_from_sections(sections: Mapping[str, object]) -> list[object]:
+    mini_dma = sections.get("mini_dma")
+    if not isinstance(mini_dma, Mapping):
+        return []
+    payloads = mini_dma.get("payloads")
+    if not isinstance(payloads, Mapping):
+        return []
+    raw_records = payloads.get("mini_dma_records")
+    if isinstance(raw_records, Mapping):
+        encoding = str(raw_records.get("encoding") or "").strip().casefold()
+        raw_value = raw_records.get("value", raw_records.get("data"))
+        if encoding == "pickle-base64" and isinstance(raw_value, str):
+            try:
+                decoded = pickle.loads(base64.b64decode(raw_value))
+            except Exception:
+                return []
+            return list(decoded) if isinstance(decoded, Iterable) else []
+    if isinstance(raw_records, Iterable) and not isinstance(raw_records, (str, bytes, Mapping)):
+        return list(raw_records)
+    return []
+
+
+def _tma_source_identity(value: object) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    return text.casefold()
+
+
 def _compact_tma_export_lines(row: Mapping[str, object], *columns: str) -> tuple[object, ...]:
     for column in columns:
         value = row.get(column)
@@ -1418,8 +1445,12 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
     compact_rows = assemble_frame.to_dict(orient="records")
     rows: list[dict[str, object]] = []
     reviewed_targets: set[tuple[str, str, tuple[object, ...]]] = set()
+    emitted_record_targets: set[tuple[str, tuple[object, ...]]] = set()
+    record_sample_targets: set[tuple[str, str, tuple[object, ...]]] = set()
     strain_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
     strain_by_stress: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
+    record_strain_by_target: dict[tuple[str, tuple[object, ...]], dict[str, float]] = {}
+    record_strain_rows: list[dict[str, object]] = []
     transition_by_target: dict[tuple[str, str, tuple[object, ...]], dict[str, float]] = {}
 
     for compact_row in compact_rows:
@@ -1445,6 +1476,34 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
             if target and values:
                 transition_by_target[(composition, microwire, _tma_target_identity(target))] = values
 
+    for record in _mini_dma_records_from_sections(sections):
+        composition, microwire = _sample_to_tma_identity(getattr(record, "sample", ""))
+        if not composition or not microwire:
+            continue
+        source_key = _tma_source_identity(getattr(record, "path", ""))
+        run_label = str(getattr(record, "label", "") or "").strip()
+        if not run_label:
+            run_label = Path(str(getattr(record, "path", "") or "")).name
+        for raw_line in getattr(record, "strain_summary", ()) or ():
+            target, strain_values = _parse_tma_strain_line(raw_line)
+            if not target or not strain_values:
+                continue
+            target_key = _tma_target_identity(target)
+            record_sample_targets.add((composition, microwire, target_key))
+            if source_key:
+                record_strain_by_target[(source_key, target_key)] = strain_values
+            record_strain_rows.append(
+                {
+                    "Composition": composition,
+                    "Microwire": microwire,
+                    "TMA run": run_label,
+                    **_parse_tma_target_label(target),
+                    **strain_values,
+                    "_source_key": source_key,
+                    "_target_key": target_key,
+                }
+            )
+
     for record_id, review in _mini_dma_review_records_from_sections(sections).items():
         status = _normalise_tma_status(review.get("status"))
         if status == "excluded":
@@ -1468,13 +1527,19 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                     microwire = microwire or str(compact_row.get("Microwire") or "").strip()
                     break
         run_label = str(review.get("run_label") or "").strip()
+        source_key = ""
+        if "::" in record_id:
+            source_key = _tma_source_identity(record_id.rsplit("::", 1)[0])
         row: dict[str, object] = {
             "Composition": composition,
             "Microwire": microwire,
             "TMA run": run_label,
             **_parse_tma_target_label(target),
         }
-        strain_values = strain_by_target.get((composition, microwire, _tma_target_identity(target)))
+        target_key = _tma_target_identity(target)
+        strain_values = record_strain_by_target.get((source_key, target_key)) if source_key else None
+        if not strain_values:
+            strain_values = strain_by_target.get((composition, microwire, target_key))
         if not strain_values:
             stress_key = _tma_target_stress_identity(target)
             if stress_key is not None:
@@ -1497,7 +1562,9 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 elif label in values:
                     row[f"TMA {label}"] = values[label]
         rows.append(row)
-        reviewed_targets.add((composition, microwire, _tma_target_identity(target)))
+        reviewed_targets.add((composition, microwire, target_key))
+        if source_key:
+            emitted_record_targets.add((source_key, target_key))
 
     for compact_row in compact_rows:
         composition = str(compact_row.get("Composition") or "").strip()
@@ -1513,6 +1580,8 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
             if (parent_composition, parent_microwire) != (composition, microwire):
                 continue
             if (composition, microwire, target_key) in reviewed_targets:
+                continue
+            if (composition, microwire, target_key) in record_sample_targets:
                 continue
             target = ""
             for raw_line in _compact_tma_export_lines(
@@ -1541,6 +1610,19 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
                 if label in values:
                     row[f"TMA {label}"] = values[label]
             rows.append(row)
+
+    for record_row in record_strain_rows:
+        source_key = str(record_row.pop("_source_key", "") or "")
+        target_key = record_row.pop("_target_key", ())
+        if source_key and (source_key, target_key) in emitted_record_targets:
+            continue
+        composition = str(record_row.get("Composition") or "").strip()
+        microwire = str(record_row.get("Microwire") or "").strip()
+        transition_values = transition_by_target.get((composition, microwire, target_key), {})
+        for label in ("As", "Af", "Ms", "Mf"):
+            if label in transition_values:
+                record_row[f"TMA {label}"] = transition_values[label]
+        rows.append(record_row)
 
     return pd.DataFrame(rows, columns=TMA_TARGET_EXPORT_COLUMNS)
 

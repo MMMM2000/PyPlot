@@ -291,6 +291,55 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
 
 
+def test_tma_target_export_includes_strain_only_record_payloads() -> None:
+    records = [
+        SimpleNamespace(
+            path=Path("G:/runs/Ni50Fe27Ga23 6_6 run01"),
+            sample="Ni50Fe27Ga23 6-6",
+            label="iso-stress - Ni50Fe27Ga23 6_6 run01",
+            strain_summary=(
+                "20 MPa / 0.37 g: 0.86% @ 59 mA",
+                "50 MPa / 0.93 g: 0.63% @ 40 mA",
+            ),
+        ),
+        SimpleNamespace(
+            path=Path("G:/runs/Ni50Fe27Ga23 6_6 run02"),
+            sample="Ni50Fe27Ga23 6-6",
+            label="iso-stress - Ni50Fe27Ga23 6_6 run02",
+            strain_summary=("50 MPa / 0.93 g: 0.72% @ 42 mA",),
+        ),
+    ]
+    encoded = base64.b64encode(pickle.dumps(records)).decode("ascii")
+    frame = launcher_module._expanded_tma_export_frame_from_sections(  # noqa: SLF001
+        {
+            "mini_dma": {
+                "payloads": {
+                    "mini_dma_records": {
+                        "encoding": "pickle-base64",
+                        "value": encoded,
+                    }
+                }
+            }
+        }
+    )
+
+    assert len(frame.index) == 3
+    rows = frame.to_dict(orient="records")
+    assert [row["TMA run"] for row in rows] == [
+        "iso-stress - Ni50Fe27Ga23 6_6 run01",
+        "iso-stress - Ni50Fe27Ga23 6_6 run01",
+        "iso-stress - Ni50Fe27Ga23 6_6 run02",
+    ]
+    assert [row["TMA target"] for row in rows] == [
+        "20 MPa / 0.37 g",
+        "50 MPa / 0.93 g",
+        "50 MPa / 0.93 g",
+    ]
+    assert [row["TMA strain (%)"] for row in rows] == [0.86, 0.63, 0.72]
+    assert [row["TMA strain peak current (mA)"] for row in rows] == [59.0, 40.0, 42.0]
+    assert all(row["TMA As"] is None or row["TMA As"] != row["TMA As"] for row in rows)
+
+
 def test_builder_automation_recipe_exports_assemble_public_workbook(
     tmp_path: Path,
 ) -> None:

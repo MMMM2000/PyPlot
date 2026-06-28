@@ -24562,7 +24562,7 @@ class MiniDmaSection(MiniDatabaseSection):
 
 
 class DmaTransitionsSection(QtWidgets.QWidget):
-    section_title = "DMA transitions"
+    section_title = "TMA transitions"
 
     def __init__(
         self,
@@ -24705,7 +24705,7 @@ class DmaTransitionsSection(QtWidgets.QWidget):
             pass
         if rows:
             self.status_label.setText(
-                f"{counts['reviewed']} of {counts['total']} DMA target row(s) reviewed across {len(records)} run(s)."
+                f"{counts['reviewed']} of {counts['total']} TMA target row(s) reviewed across {len(records)} run(s)."
             )
         elif records:
             self.status_label.setText("TMA runs are available, but no transition-current targets were found.")
@@ -24805,7 +24805,7 @@ class _MiniDmaTransitionWorkspace(_EmbeddedTransitionReviewWorkspace):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._mini_dma_section = mini_dma_section
-        super().__init__("DMA transition review", self._create_dialog, parent)
+        super().__init__("TMA transition review", self._create_dialog, parent)
 
     def _create_dialog(self, parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
         records = list(getattr(self._mini_dma_section, "_all_mini_dma_records", []) or [])
@@ -24853,6 +24853,7 @@ class _VsmTransitionWorkspace(QtWidgets.QWidget):
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setColumnWidth(0, 280)
         self.tree.setColumnWidth(1, 120)
+        self.tree.setMinimumWidth(320)
         self.preview_panel = _TransitionTempPreviewPanel(
             getattr(self._section, "logger", logging.getLogger(__name__)),
             splitter,
@@ -24867,6 +24868,7 @@ class _VsmTransitionWorkspace(QtWidgets.QWidget):
         self.preview_panel.scanChanged.connect(self._sync_selected_from_panel)
         splitter.addWidget(self.tree)
         splitter.addWidget(self.preview_panel)
+        splitter.setSizes([360, 900])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
@@ -25037,7 +25039,7 @@ class TransitionsSection(QtWidgets.QWidget):
         self.dma_workspace = _MiniDmaTransitionWorkspace(dma_transitions._mini_dma_section, self)
         self.tab_widget.addTab(self.annealing_workspace, "Annealing")
         self.tab_widget.addTab(self.vsm_workspace, "VSM")
-        self.tab_widget.addTab(self.dma_workspace, "DMA")
+        self.tab_widget.addTab(self.dma_workspace, "TMA")
         layout.addWidget(self.tab_widget, 1)
 
     def show_view(self, view: str) -> None:
@@ -32732,6 +32734,7 @@ class AssemblySection(QtWidgets.QWidget):
         started_s = time.perf_counter()
         loading = _builder_project_load_active()
         raw_frame = self._raw_preview_frame
+        raw_row_count = len(raw_frame.index) if isinstance(raw_frame, pd.DataFrame) else 0
         total_rows = 0
         if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
             display_frame = pd.DataFrame()
@@ -32818,6 +32821,10 @@ class AssemblySection(QtWidgets.QWidget):
             if (self._preview_search_text or self._preview_source_filter_text != SOURCE_LABEL_ALL) and total_rows != row_count:
                 self.status_label.setText(
                     f"Preview ready - {row_count} of {total_rows} row(s) shown."
+                )
+            elif not self._show_oe_samples and raw_row_count and raw_row_count != row_count:
+                self.status_label.setText(
+                    f"Preview ready - {row_count} of {raw_row_count} row(s) shown (OE samples hidden)."
                 )
             else:
                 self.status_label.setText(f"Preview ready - {row_count} row(s).")
@@ -32971,6 +32978,7 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _resolve_selected_columns(self, columns: Sequence[str]) -> List[str]:
         column_names = [str(column) for column in columns]
+        selected_was_explicit = self._selected_columns is not None
         if self._selected_columns is None:
             self._selected_columns = {
                 column
@@ -32979,7 +32987,8 @@ class AssemblySection(QtWidgets.QWidget):
             }
         self._known_columns.update(column_names)
         self._selected_columns.update(self._mandatory_columns)
-        self._sync_section_states_from_columns(self._selected_columns, column_names)
+        if selected_was_explicit:
+            self._sync_section_states_from_columns(self._selected_columns, column_names)
         return [column for column in column_names if column in self._selected_columns]
 
     def _apply_sort_spec(self, frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[int]]:
@@ -36247,8 +36256,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
             ),
             (
                 getattr(self.mini_dma_section, "review_transitions_button", None),
-                "DMA",
-                "Open DMA transitions in the Transitions workspace.",
+                "TMA",
+                "Open TMA transitions in the Transitions workspace.",
                 "dma",
             ),
         )
