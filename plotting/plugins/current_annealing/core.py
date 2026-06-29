@@ -1186,7 +1186,7 @@ def _prepare_origin_workspace(
         worksheet.set_label(0, "mA", "U")
         worksheet.set_label(0, legend_label, "C")
         worksheet.set_label(1, "Resistance", "L")
-        worksheet.set_label(1, "Î©", "U")
+        worksheet.set_label(1, "Ω", "U")
         worksheet.set_label(1, legend_label, "C")
     except Exception:
         pass
@@ -1453,7 +1453,7 @@ def _plot_origin_experimental(
         if col is not None:
             try:
                 col.LongName = "Current" if is_x else "Resistance"
-                col.Units = "mA" if is_x else "Î©"
+                col.Units = "mA" if is_x else "Ω"
                 col.Comment = label
                 col.Type = 3 if is_x else 4
             except Exception:
@@ -1461,7 +1461,7 @@ def _plot_origin_experimental(
         else:
             try:
                 worksheet.set_label(col_index, "Current" if is_x else "Resistance", "L")
-                worksheet.set_label(col_index, "mA" if is_x else "Î©", "U")
+                worksheet.set_label(col_index, "mA" if is_x else "Ω", "U")
                 worksheet.set_label(col_index, label, "C")
             except Exception:
                 pass
@@ -1668,7 +1668,7 @@ def plot_one(
             previous_direction = direction
 
     ax.set_xlabel(_current_axis_label(currents, wire_diameter_um), fontsize=AXIS_LABEL_SIZE)
-    ax.set_ylabel("Resistance [Î©]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
     density_top_axis = None

@@ -13562,6 +13562,10 @@ class AnnealingSection(MiniDatabaseSection):
         self._pixmap_cache: Dict[Tuple[object, ...], Optional[QtGui.QPixmap]] = {}
         self._phase_points: Dict[str, Dict[str, float]] = {}
         self._transition_reviews: Dict[str, Dict[str, Any]] = {}
+        self._transition_review_store_timer: QtCore.QTimer | None = QtCore.QTimer(self)
+        self._transition_review_store_timer.setSingleShot(True)
+        self._transition_review_store_timer.setInterval(250)
+        self._transition_review_store_timer.timeout.connect(self._store_transition_reviews)
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, dict):
             cleaned: Dict[str, Dict[str, float]] = {}
@@ -13954,6 +13958,18 @@ class AnnealingSection(MiniDatabaseSection):
         except Exception:
             self.logger.exception("Failed to persist transition review records")
 
+    def _schedule_transition_review_store(self) -> None:
+        self.data.extra[TRANSITION_REVIEW_EXTRA_KEY] = self._transition_reviews_payload()
+        timer = self._transition_review_store_timer
+        if timer is None:
+            self._store_transition_reviews()
+            return
+        timer.start()
+
+    def export_project_payload(self) -> Dict[str, Any]:
+        self._store_transition_reviews()
+        return super().export_project_payload()
+
     def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
         snapshot: Dict[str, Dict[str, Any]] = {}
         for record_id, payload in self._transition_reviews.items():
@@ -13979,7 +13995,7 @@ class AnnealingSection(MiniDatabaseSection):
                 entry.update(self._transition_review_metadata(record_id, record))
             entry["updated_at"] = datetime.now(UTC).isoformat()
             self._transition_reviews[record_id] = entry
-        self._store_transition_reviews()
+        self._schedule_transition_review_store()
         try:
             self.data_updated.emit()
         except Exception:
@@ -14000,10 +14016,40 @@ class AnnealingSection(MiniDatabaseSection):
         if not records:
             for group in self._record_groups.values():
                 records.extend(group)
-        valid_ids = {
-            _transition_record_id_for_annealing_record(record)
-            for record in records
-        }
+        records_by_id: Dict[str, MeasurementRecord] = {}
+        aliases: Dict[Tuple[str, str], str] = {}
+
+        def _path_alias(value: object) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            try:
+                return str(Path(text)).replace("\\", "/").casefold()
+            except Exception:
+                return text.replace("\\", "/").casefold()
+
+        def _add_alias(kind: str, value: object, record_id: str) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            key = (kind, _path_alias(text) if kind == "source_path" else text.casefold())
+            existing = aliases.get(key)
+            if existing is None:
+                aliases[key] = record_id
+            elif existing != record_id:
+                aliases.pop(key, None)
+
+        for record in records:
+            record_id = _transition_record_id_for_annealing_record(record)
+            records_by_id[record_id] = record
+            metadata = self._transition_review_metadata(record_id, record)
+            _add_alias("source_path", metadata.get("source_path"), record_id)
+            _add_alias(
+                "sample_graph",
+                f"{metadata.get('sample_key', '')}|{metadata.get('graph_label', '')}",
+                record_id,
+            )
+        valid_ids = set(records_by_id)
         if not valid_ids:
             if self._transition_reviews:
                 self._transition_reviews.clear()
@@ -14013,8 +14059,28 @@ class AnnealingSection(MiniDatabaseSection):
         removed = False
         for record_id in list(self._transition_reviews.keys()):
             if record_id not in valid_ids:
-                self._transition_reviews.pop(record_id, None)
+                payload = self._transition_reviews.pop(record_id, None)
                 removed = True
+                if not isinstance(payload, Mapping):
+                    continue
+                new_id = aliases.get(("source_path", _path_alias(payload.get("source_path"))))
+                if new_id is None:
+                    new_id = aliases.get(
+                        (
+                            "sample_graph",
+                            f"{payload.get('sample_key', '')}|{payload.get('graph_label', '')}".casefold(),
+                        )
+                    )
+                if not new_id or new_id in self._transition_reviews:
+                    continue
+                remapped = self._clean_transition_review_payload(new_id, payload)
+                record = records_by_id.get(new_id)
+                if remapped and record is not None:
+                    preserved_updated_at = remapped.get("updated_at")
+                    remapped.update(self._transition_review_metadata(new_id, record))
+                    if preserved_updated_at:
+                        remapped["updated_at"] = preserved_updated_at
+                    self._transition_reviews[new_id] = remapped
         if removed and store:
             self._store_transition_reviews()
 

@@ -8308,6 +8308,102 @@ def test_current_density_collects_auto_annealing_transition_points() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_annealing_transition_review_prune_remaps_changed_record_id() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        source_path = Path("G:/current annealing/Ni50Fe27Ga23 6_4a s2 30mA.txt")
+        metadata = MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=6,
+            piece_y=4,
+            setpoint_mA=30,
+            alt_variant=True,
+            measurement_id="new-id",
+            file_name=source_path.name,
+            relpath=source_path.name,
+            timestamp_mtime_utc="2026-06-08T00:00:00+00:00",
+        )
+        record = MeasurementRecord(
+            path=source_path,
+            metadata=metadata,
+            dataframe=pd.DataFrame({"I_mA": [1.0, 30.0], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+        new_record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        old_record_id = "ca:old-stale-id"
+        assert new_record_id != old_record_id
+        section._all_records = [record]  # noqa: SLF001
+        section._record_groups = {}  # noqa: SLF001
+        section._transition_reviews = {  # noqa: SLF001
+            old_record_id: {
+                "transition_record_id": old_record_id,
+                "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                "included": False,
+                "source_path": str(source_path),
+                "graph_label": source_path.name,
+                "sample_key": "Ni50Fe27Ga23|6|4|a",
+                "updated_at": "2026-06-19T11:12:33+00:00",
+            }
+        }
+
+        section._prune_transition_reviews(store=False)  # noqa: SLF001
+        snapshot = section.transition_reviews_snapshot()
+
+        assert old_record_id not in snapshot
+        assert snapshot[new_record_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert snapshot[new_record_id]["source_path"] == str(source_path)
+    finally:
+        section.close()
+
+
+def test_annealing_transition_review_setter_defers_store_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        source_path = Path("Ni50Fe27Ga23 10_4 80mA.txt")
+        metadata = MeasurementMetadata(
+            composition_token="Ni50Fe27Ga23",
+            draw_x=10,
+            piece_y=4,
+            setpoint_mA=80,
+            alt_variant=False,
+            measurement_id="manual-transition",
+            file_name=source_path.name,
+            relpath=source_path.name,
+            timestamp_mtime_utc="2026-06-08T00:00:00+00:00",
+        )
+        record = MeasurementRecord(
+            path=source_path,
+            metadata=metadata,
+            dataframe=pd.DataFrame({"I_mA": [1.0, 80.0], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        section._all_records = [record]  # noqa: SLF001
+        save_calls: list[object] = []
+        monkeypatch.setattr(section.store, "save", lambda data: save_calls.append(data))
+
+        section.set_transition_review_for_record(
+            record_id,
+            {
+                "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                "included": False,
+            },
+        )
+
+        assert save_calls == []
+        assert record_id in section.transition_reviews_snapshot()
+        assert builder_ui.TRANSITION_REVIEW_EXTRA_KEY in section.data.extra
+
+        section._store_transition_reviews()  # noqa: SLF001
+        assert len(save_calls) == 1
+    finally:
+        section.close()
+
+
 def test_current_density_manual_editor_values_persist_to_snapshot() -> None:
     _ensure_qapp()
     annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
