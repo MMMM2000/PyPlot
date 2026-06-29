@@ -1247,6 +1247,124 @@ def _serialise_assemble_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return export_frame
 
 
+_PUBLIC_MICROWIRE_LABEL_RE = re.compile(
+    r"^\s*(?P<draw>\d+)\s*[/\-]\s*(?P<piece>\d+)\s*(?P<suffix>[A-Za-z][A-Za-z0-9]*)?\s*$"
+)
+
+
+def _public_microwire_label_parts(value: object) -> tuple[str, str, str] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _PUBLIC_MICROWIRE_LABEL_RE.match(text)
+    if match is None:
+        return None
+    try:
+        draw = str(int(match.group("draw")))
+        piece = str(int(match.group("piece")))
+    except (TypeError, ValueError):
+        return None
+    suffix = str(match.group("suffix") or "").strip()
+    return draw, piece, suffix
+
+
+def _public_base_microwire_label(value: object) -> str:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return str(value or "").strip()
+    draw, piece, _suffix = parts
+    return f"{draw}/{piece}"
+
+
+def _is_public_other_end_microwire(value: object) -> bool:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return False
+    _draw, _piece, suffix = parts
+    return suffix.casefold() == "oe"
+
+
+def _public_microwire_has_non_identity_suffix(value: object) -> bool:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return False
+    _draw, _piece, suffix = parts
+    return bool(suffix) and suffix.casefold() != "oe"
+
+
+def _is_blank_export_value(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return not value
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _prepare_public_assemble_main_frame(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    info = {
+        "excluded_oe_rows": 0,
+        "normalised_suffix_rows": 0,
+        "collapsed_suffix_rows": 0,
+    }
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "Microwire" not in frame.columns:
+        return frame.copy(), info
+
+    working = frame.copy()
+    oe_mask = working["Microwire"].map(_is_public_other_end_microwire)
+    info["excluded_oe_rows"] = int(oe_mask.sum())
+    working = working.loc[~oe_mask].copy()
+    if working.empty:
+        return working, info
+
+    suffix_mask = working["Microwire"].map(_public_microwire_has_non_identity_suffix)
+    info["normalised_suffix_rows"] = int(suffix_mask.sum())
+    working["Microwire"] = working["Microwire"].map(_public_base_microwire_label)
+
+    if not {"Composition", "Microwire"}.issubset(working.columns):
+        return working, info
+
+    grouped_rows: list[dict[str, object]] = []
+    collapsed = 0
+    for _key, group in working.groupby(["Composition", "Microwire"], sort=False, dropna=False):
+        base = group.iloc[0].to_dict()
+        if len(group.index) > 1:
+            collapsed += int(len(group.index) - 1)
+        for _idx, row in group.iloc[1:].iterrows():
+            for column, value in row.items():
+                if _is_blank_export_value(base.get(column)) and not _is_blank_export_value(value):
+                    base[column] = value
+        grouped_rows.append(base)
+
+    info["collapsed_suffix_rows"] = collapsed
+    return pd.DataFrame(grouped_rows, columns=list(working.columns)), info
+
+
+def _prepare_public_tma_target_frame(frame: pd.DataFrame | None) -> tuple[pd.DataFrame | None, dict[str, int]]:
+    info = {
+        "excluded_oe_rows": 0,
+        "normalised_suffix_rows": 0,
+    }
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty or "Microwire" not in frame.columns:
+        return frame, info
+
+    working = frame.copy()
+    oe_mask = working["Microwire"].map(_is_public_other_end_microwire)
+    info["excluded_oe_rows"] = int(oe_mask.sum())
+    working = working.loc[~oe_mask].copy()
+    if working.empty:
+        return working, info
+
+    suffix_mask = working["Microwire"].map(_public_microwire_has_non_identity_suffix)
+    info["normalised_suffix_rows"] = int(suffix_mask.sum())
+    working["Microwire"] = working["Microwire"].map(_public_base_microwire_label)
+    return working, info
+
+
 TMA_TARGET_EXPORT_SHEET = "TMA targets"
 TMA_TARGET_EXPORT_COLUMNS = [
     "Composition",
@@ -1669,7 +1787,14 @@ def _write_assemble_workbook(
 ) -> dict[str, Any]:
     output_path = output_path.with_suffix(".xlsx")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    serialised = _serialise_assemble_export_frame(frame)
+    export_frame = frame
+    export_tma_frame = tma_frame
+    public_filters: dict[str, dict[str, int]] = {}
+    if preset == "public":
+        export_frame, public_filters["assemble"] = _prepare_public_assemble_main_frame(frame)
+        export_tma_frame, public_filters[TMA_TARGET_EXPORT_SHEET] = _prepare_public_tma_target_frame(tma_frame)
+
+    serialised = _serialise_assemble_export_frame(export_frame)
     if preset == "public":
         dropped_columns = [
             str(column)
@@ -1696,8 +1821,8 @@ def _write_assemble_workbook(
     extra_sheets: dict[str, dict[str, object]] = {}
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         main_frame.to_excel(writer, sheet_name="Assemble", index=False)
-        if tma_frame is not None and not tma_frame.empty:
-            serialised_tma = _serialise_assemble_export_frame(tma_frame)
+        if export_tma_frame is not None and not export_tma_frame.empty:
+            serialised_tma = _serialise_assemble_export_frame(export_tma_frame)
             serialised_tma.to_excel(writer, sheet_name=TMA_TARGET_EXPORT_SHEET, index=False)
             extra_sheets[TMA_TARGET_EXPORT_SHEET] = {
                 "row_count": int(len(serialised_tma.index)),
@@ -1723,6 +1848,7 @@ def _write_assemble_workbook(
         "row_count": int(len(main_frame.index)),
         "column_count": int(len(main_frame.columns)),
         "extra_sheets": extra_sheets,
+        "public_filters": public_filters,
     }
 
 
@@ -1860,6 +1986,7 @@ def _export_builder_assemble_workbook(
         "hidden_sheets": workbook_info["hidden_sheets"],
         "audit_sheet": workbook_info["audit_sheet"],
         "extra_sheets": workbook_info["extra_sheets"],
+        "public_filters": workbook_info["public_filters"],
         "rebuild": rebuild_result,
         "git_commit": _current_git_commit(),
     }
@@ -1931,6 +2058,7 @@ def _run_builder_export_assemble_command(
         "hidden_sheets": workbook_info["hidden_sheets"],
         "audit_sheet": workbook_info["audit_sheet"],
         "extra_sheets": workbook_info["extra_sheets"],
+        "public_filters": workbook_info["public_filters"],
         "rebuild": None,
         "git_commit": _current_git_commit(),
     }
@@ -1946,6 +2074,7 @@ def _run_builder_export_assemble_command(
         "dropped_columns": workbook_info["dropped_columns"],
         "hidden_sheets": workbook_info["hidden_sheets"],
         "extra_sheets": workbook_info["extra_sheets"],
+        "public_filters": workbook_info["public_filters"],
     }
 
 

@@ -7706,6 +7706,21 @@ def test_microscope_key_parses_other_end_suffix() -> None:
     assert core._microscope_key(sample) == ("Ni50Fe27Ga23", 10, 5, "oe")
 
 
+def test_microscope_key_groups_non_identity_suffixes_with_base_sample() -> None:
+    assert core._microscope_key(Path("Ni46Fe27Ga23Cu2Co2 2_1No1 glass.png")) == (
+        "Ni46Fe27Ga23Cu2Co2",
+        2,
+        1,
+        None,
+    )
+    assert core._microscope_key(Path("Ni44Fe27Ga23Cu3Co3 1_1noload core.jpg")) == (
+        "Ni44Fe27Ga23Cu3Co3",
+        1,
+        1,
+        None,
+    )
+
+
 def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     high = tmp_path / "Ni55Fe18Ga27 4_1 1000mA.txt"
     low = tmp_path / "Ni55Fe18Ga27 4_1 120mA.txt"

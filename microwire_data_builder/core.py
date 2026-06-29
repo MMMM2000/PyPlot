@@ -590,6 +590,19 @@ MICROWIRE_TOKEN_RE = re.compile(
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
+
+def _normalise_microwire_identity_suffix(suffix: object) -> Optional[str]:
+    """Return only suffixes that should create separate sample identities."""
+
+    if suffix is None or _is_nan(suffix):
+        return None
+    text = str(suffix).strip()
+    if not text:
+        return None
+    if text.casefold() == "oe":
+        return "oe"
+    return None
+
 DRAW_NUMERIC_FIELDS = {
     "mass_g",
     "fabrication_resistance_ohm",
@@ -2288,6 +2301,7 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
             except (TypeError, ValueError):
                 return None
             suffix = _suffix_from_text(source_text, match.end())
+            suffix = _normalise_microwire_identity_suffix(suffix)
             return composition, draw_x, piece_y, suffix
 
         for pattern in MICROSCOPE_PAIR_PATTERNS:

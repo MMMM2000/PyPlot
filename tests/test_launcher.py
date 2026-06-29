@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 from PyQt6 import QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -289,6 +290,110 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert tma_rows[2]["TMA Mf"] == "Not observed"
     assert tma_rows[3]["TMA As"] == 40
     assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
+
+
+def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixes(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "public_suffixes.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4",
+                "d (\u00b5m)": None,
+                "D (\u00b5m)": None,
+                "Source label": "Praha",
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4noload",
+                "d (\u00b5m)": 12.0,
+                "D (\u00b5m)": 42.0,
+                "Source label": "Praha",
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4oe",
+                "d (\u00b5m)": 13.0,
+                "D (\u00b5m)": 43.0,
+                "Source label": "Praha",
+            },
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4No1",
+                "TMA run": "run-a",
+                "TMA target": "50 MPa / 1 g",
+                "TMA strain (%)": 2.5,
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4No1",
+                "TMA run": "run-b",
+                "TMA target": "100 MPa / 2 g",
+                "TMA strain (%)": 3.5,
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4oe",
+                "TMA run": "run-oe",
+                "TMA target": "50 MPa / 1 g",
+                "TMA strain (%)": 4.5,
+            },
+        ]
+    )
+
+    info = launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        tma_frame=tma_frame,
+    )
+
+    assert info["row_count"] == 1
+    assert info["public_filters"]["assemble"] == {
+        "excluded_oe_rows": 1,
+        "normalised_suffix_rows": 1,
+        "collapsed_suffix_rows": 1,
+    }
+    assert info["public_filters"]["TMA targets"] == {
+        "excluded_oe_rows": 1,
+        "normalised_suffix_rows": 2,
+    }
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    headers = [cell.value for cell in workbook["Assemble"][1]]
+    rows = [
+        dict(zip(headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Assemble"].iter_rows(min_row=2)
+    ]
+    assert rows == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "5/4",
+            "d (\u00b5m)": 12,
+            "D (\u00b5m)": 42,
+        }
+    ]
+    audit_headers = [cell.value for cell in workbook["Assemble audit"][1]]
+    audit_rows = [
+        dict(zip(audit_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Assemble audit"].iter_rows(min_row=2)
+    ]
+    assert [row["Microwire"] for row in audit_rows] == ["5/4"]
+
+    tma_headers = [cell.value for cell in workbook["TMA targets"][1]]
+    tma_rows = [
+        dict(zip(tma_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["TMA targets"].iter_rows(min_row=2)
+    ]
+    assert [row["Microwire"] for row in tma_rows] == ["5/4", "5/4"]
+    assert [row["TMA run"] for row in tma_rows] == ["run-a", "run-b"]
+    assert [row["TMA target"] for row in tma_rows] == ["50 MPa / 1 g", "100 MPa / 2 g"]
 
 
 def test_tma_target_export_includes_strain_only_record_payloads() -> None:
