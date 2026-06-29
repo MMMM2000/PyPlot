@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-24.1"
+CONTROL_LOGIC_VERSION = "2026-06-29.1"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -142,7 +142,6 @@ CONTROL_LOGIC_FEATURES = [
     "voltage_limit_unwind_waits_for_target_recovery",
     "first_overheating_current_included_in_channel_limit",
     "wire_break_recovery_prompt_ui_thread",
-    "current_sweep_mechanical_load_loss_guard",
     "fault_stop_metadata_preserved_on_app_close",
     "control_trace_row_local_task_text",
     "control_trace_supply_snapshot",
@@ -377,8 +376,6 @@ SETUP_ZERO_FALLBACK_RAW_SPAN_G = 0.012
 SETUP_ZERO_FALLBACK_MIN_RESIDUAL_G = 0.02
 SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G = 0.10
 SETUP_PRELOAD_TAKEUP_LOAD_G = 0.03
-CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_STRAIN_PCT = 0.5
-CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_MOTOR_STEPS = 20.0
 SETUP_PRELOAD_MAX_SLACK_STEP_STRESS_MPA = 50.0
 SETUP_RETURN_MIN_SPEED_STRAIN_PCT = 0.10
 SETUP_UNLOAD_BASELINE_MIN_POINTS = 5
@@ -14668,96 +14665,6 @@ class MainWindow(QtWidgets.QMainWindow):
             current_load_g = self._current_effective_load_g()
         return abs(float(current_load_g))
 
-    def _current_sweep_mechanical_load_loss_min_travel_mm(self) -> float:
-        config = self._control_config()
-        length_mm = max(
-            0.001,
-            config.initial_length_mm if config is not None else float(self.spin_initial_length.value()),
-        )
-        strain_travel_mm = length_mm * (CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_STRAIN_PCT / 100.0)
-        motor_travel_mm = self._motor_step_mm() * CURRENT_SWEEP_MECHANICAL_LOAD_LOSS_MIN_MOTOR_STEPS
-        return max(strain_travel_mm, motor_travel_mm)
-
-    def _current_sweep_mechanical_load_loss_detected(
-        self,
-        basis: str,
-        target_value: float,
-        current_value: float,
-        tolerance: float,
-    ) -> bool:
-        if (
-            not self._is_current_sweep_mode(self._automation_name)
-            or self._automation_phase != "target_ramp"
-            or self._automation_step_note in {"setup_preload", "setup_return_zero"}
-            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
-        ):
-            return False
-        target_load_g = self._basis_value_as_load_g(basis, target_value)
-        tolerance_load_g = self._basis_value_as_load_g(basis, tolerance)
-        current_load_g = self._basis_value_as_load_g(basis, current_value)
-        if target_load_g is None or current_load_g is None:
-            return False
-        required_target_g = max(
-            self._zero_return_acceptance_tolerance_g(),
-            SETUP_ZERO_FALLBACK_MAX_RESIDUAL_G,
-            0.0 if tolerance_load_g is None else abs(float(tolerance_load_g)),
-        )
-        if abs(float(target_load_g)) <= required_target_g:
-            return False
-        if abs(float(current_load_g)) > self._zero_return_acceptance_tolerance_g():
-            return False
-        travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
-        return travel_mm >= self._current_sweep_mechanical_load_loss_min_travel_mm()
-
-    def _stop_for_current_sweep_mechanical_load_loss(
-        self,
-        basis: str,
-        target_value: float,
-        current_value: float,
-    ) -> None:
-        travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
-        message = (
-            "Current-sweep mechanical load loss detected: "
-            f"target {_format_compact_unit(float(target_value), self._distribution_units(basis)[0])}, "
-            f"measured {_format_compact_unit(float(current_value), self._distribution_units(basis)[0])}, "
-            f"tensile travel {_format_compact_unit(travel_mm, 'mm')} with near-zero load. "
-            "Electrical continuity is not inferred from this guard; current may still be flowing. "
-            "Current output was disabled and the measurement was stopped."
-        )
-        self._log(message)
-        self._stop_auto_ramp(
-            log_completion=False,
-            offer_recovery=False,
-            stop_reason="mechanical_load_loss",
-            stop_detail=message,
-        )
-
-    def _current_sweep_mechanical_slack_takeup_allowed(self) -> bool:
-        return bool(getattr(self, "_bench_allow_mechanical_slack_takeup", False))
-
-    def _note_current_sweep_mechanical_slack_takeup(
-        self,
-        basis: str,
-        target_value: float,
-        current_value: float,
-    ) -> None:
-        key = (basis, self._automation_plateau_index, round(float(target_value), 6))
-        logged_keys = getattr(self, "_bench_mechanical_slack_takeup_logged_keys", None)
-        if logged_keys is None:
-            logged_keys = set()
-            self._bench_mechanical_slack_takeup_logged_keys = logged_keys
-        if key in logged_keys:
-            return
-        logged_keys.add(key)
-        travel_mm = abs(self._tensile_displacement_mm(self._measurement_effective_position_mm()))
-        self._log(
-            "Bench automation detected mechanical slack/load loss during current sweep: "
-            f"target {_format_compact_unit(float(target_value), self._distribution_units(basis)[0])}, "
-            f"measured {_format_compact_unit(float(current_value), self._distribution_units(basis)[0])}, "
-            f"tensile travel {_format_compact_unit(travel_mm, 'mm')}. "
-            "Continuing tensile take-up because the bench plan explicitly allows it."
-        )
-
     def _clamp_motion_resolution_controls(self) -> None:
         step_mm = self._motor_step_mm()
         min_speed = self._minimum_held_speed_mm_s()
@@ -17338,17 +17245,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._setup_preload_overload_exceeded(basis, target_value, current_value, effective_tolerance):
             self._stop_for_setup_preload_overload(basis, target_value, current_value)
             return False
-        if self._current_sweep_mechanical_load_loss_detected(
-            basis,
-            target_value,
-            current_value,
-            effective_tolerance,
-        ):
-            if self._current_sweep_mechanical_slack_takeup_allowed():
-                self._note_current_sweep_mechanical_slack_takeup(basis, target_value, current_value)
-            else:
-                self._stop_for_current_sweep_mechanical_load_loss(basis, target_value, current_value)
-                return False
         if self._maybe_start_setup_unload_baseline_fallback():
             return False
         if self._maybe_start_setup_zero_plateau_fallback(basis, current_value, effective_tolerance):

@@ -1489,12 +1489,22 @@ def test_setup_zero_plateau_fallback_rejects_loaded_baseline_drift(
         _close_test_window(window)
 
 
-def test_current_sweep_target_ramp_stops_on_mechanical_load_loss_after_l0(
+def test_current_sweep_target_ramp_continues_through_near_zero_load_after_l0(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    window._move_to_position_mm = pytest.fail  # type: ignore[method-assign]
+    moves: list[float] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append(target_mm)
+        window._current_position_mm = target_mm
+        effective = kwargs.get("effective_target_mm")
+        if effective is not None:
+            window._effective_position_mm = float(effective)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_zero_load_scale_g.setValue(0.0)
@@ -1533,11 +1543,11 @@ def test_current_sweep_target_ramp_stops_on_mechanical_load_loss_after_l0(
         )
 
         assert reached is False
-        assert window._automation_active is False
-        assert window._session_stop_reason == "mechanical_load_loss"
+        assert window._automation_active is True
+        assert window._session_stop_reason is None
+        assert moves
         log_text = window.log_output.toPlainText().lower()
-        assert "mechanical load loss detected" in log_text
-        assert "current may still be flowing" in log_text
+        assert "mechanical load loss detected" not in log_text
     finally:
         _close_test_window(window)
 
@@ -1600,7 +1610,6 @@ def test_bench_current_sweep_can_take_up_mechanical_slack_after_l0(
         assert window._automation_active is True
         assert moves
         log_text = window.log_output.toPlainText().lower()
-        assert "continuing tensile take-up" in log_text
         assert "mechanical load loss detected" not in log_text
     finally:
         _close_test_window(window)
@@ -22697,7 +22706,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
         assert "current_hold_automatic_entry_gate" in first_logic["features"]
-        assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
+        assert "current_sweep_mechanical_load_loss_guard" not in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
         assert "conservative_current_hold_response_stiffness" in first_logic["features"]
