@@ -624,6 +624,11 @@ def _filter_builder_records_outside_refresh_roots(
 
 def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
     return {
+        "fabrication": {
+            "class": builder_ui.FabricationSection,
+            "payload": "fabrication_index",
+            "payload_kind": "object",
+        },
         "microscope": {
             "class": builder_ui.MicroscopeSection,
             "payload": "microscope_index",
@@ -664,6 +669,12 @@ def _builder_section_specs(builder_ui: Any) -> dict[str, dict[str, Any]]:
             "payload": "shape_memory_stress_strain_records",
             "graph_column": builder_ui.SHAPE_MEMORY_STRESS_STRAIN_COLUMN,
         },
+        "videos": {
+            "class": builder_ui.VideoSection,
+            "payload": "video_index",
+            "payload_kind": "mapping",
+            "table_builder": lambda records: builder_ui._video_index_to_frame(records),
+        },
         "fmr": {
             "class": builder_ui.FmrSection,
             "payload": "fmr_records",
@@ -682,6 +693,22 @@ def _merge_builder_records(existing_records: Sequence[object], new_records: Sequ
             key = f"record-{fallback_index}"
         merged[key] = record
     return list(merged.values())
+
+
+def _builder_payload_record_count(payload: object) -> int:
+    if payload is None:
+        return 0
+    if isinstance(payload, Mapping):
+        return len(payload)
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+        return len(payload)
+    draw_level = getattr(payload, "draw_level", None)
+    piece_level = getattr(payload, "piece_level", None)
+    if isinstance(piece_level, Mapping):
+        return len(piece_level)
+    if isinstance(draw_level, Mapping):
+        return len(draw_level)
+    return 1
 
 
 def _run_builder_update_section_command(
@@ -785,17 +812,21 @@ def _run_builder_update_section_command(
             new_payload = result.payloads.get(payload_name, {})
             new_mapping = dict(new_payload) if isinstance(new_payload, Mapping) else {}
             merged_records = {**existing_mapping, **new_mapping}
+        elif payload_kind == "object":
+            merged_records = result.payloads.get(payload_name)
         else:
             new_payload = result.payloads.get(payload_name, [])
             new_records = list(new_payload) if isinstance(new_payload, list) else []
             merged_records = _merge_builder_records(existing_records, new_records)
 
+        if payload_kind == "object":
+            section.data.table = result.table
         if callable(table_builder):
             try:
                 section.data.table = table_builder(merged_records, result.extra)
             except TypeError:
                 section.data.table = table_builder(merged_records)
-        else:
+        elif payload_kind != "object":
             section.data.table = builder_ui._graph_records_to_frame(
                 merged_records,
                 str(graph_column),
@@ -804,8 +835,14 @@ def _run_builder_update_section_command(
         section.data.processed = {**section.data.processed, **result.processed}
         if isinstance(result.extra, dict):
             section.data.extra.update(result.extra)
-        section.data.extra["payloads"] = {payload_name: payload_name}
-        section.store.save_payload(payload_name, merged_records)
+        payload_refs: dict[str, str] = {payload_name: payload_name}
+        for result_payload_name, result_payload in result.payloads.items():
+            name = str(result_payload_name)
+            section.store.save_payload(name, result_payload)
+            payload_refs[name] = name
+        if payload_name not in result.payloads:
+            section.store.save_payload(payload_name, merged_records)
+        section.data.extra["payloads"] = payload_refs
         section.store.save(section.data)
         sections[section_name] = section.export_project_payload()
         return {
@@ -817,7 +854,7 @@ def _run_builder_update_section_command(
             "updated_count": len(processed_keys),
             "skipped_count": len(skipped_sources),
             "skipped_sources": skipped_sources,
-            "record_count": len(merged_records),
+            "record_count": _builder_payload_record_count(merged_records),
             "row_count": int(len(section.data.table.index)),
             "sources": source_strings,
         }
@@ -1152,7 +1189,13 @@ def _overlay_builder_current_density_snapshot(
                     continue
                 if column not in output.columns:
                     output[column] = None
-                output.at[index, column] = value
+                elif isinstance(value, str) and getattr(output[column], "dtype", None) != object:
+                    output[column] = output[column].astype(object)
+                try:
+                    output.at[index, column] = value
+                except (TypeError, ValueError):
+                    output[column] = output[column].astype(object)
+                    output.at[index, column] = value
         return output
     finally:
         for widget in (current_density_section, annealing_section, microscope_section):
@@ -2352,6 +2395,8 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         print(f"[automation-recipe] {exc}")
         return 2
     except Exception as exc:
+        if os.environ.get("PYPLOT_AUTOMATION_TRACEBACK"):
+            traceback.print_exc()
         print(f"[automation-recipe] {type(exc).__name__}: {exc}")
         return 1
 

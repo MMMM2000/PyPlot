@@ -16239,6 +16239,8 @@ class MicroscopeSection(MiniDatabaseSection):
         for column in MICROSCOPE_TABLE_COLUMNS:
             if column not in updated.columns:
                 updated[column] = pd.Series([None] * len(updated))
+        if MICROSCOPE_STATUS_COLUMN in updated.columns:
+            updated[MICROSCOPE_STATUS_COLUMN] = updated[MICROSCOPE_STATUS_COLUMN].astype(object)
         if updated.empty:
             return updated.loc[:, MICROSCOPE_TABLE_COLUMNS]
         for index, row in updated.iterrows():

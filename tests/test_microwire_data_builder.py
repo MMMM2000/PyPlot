@@ -4488,6 +4488,37 @@ def test_microscope_status_distinguishes_missing_images_and_other_ends(tmp_path:
         section.close()
 
 
+def test_microscope_status_column_allows_text_when_loaded_as_float() -> None:
+    _ensure_qapp()
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "TestCompA",
+                    "Microwire": "1/1",
+                    builder_ui.MICROSCOPE_D_COLUMN: 7.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 28.0,
+                    "d/D": 0.25,
+                    builder_ui.MICROSCOPE_STATUS_COLUMN: float("nan"),
+                    "_key": "TestCompA|1|1",
+                    "_core_image": "core.jpg",
+                    "_glass_image": "glass.jpg",
+                    "_images": ["core.jpg", "glass.jpg"],
+                }
+            ]
+        )
+
+        section.apply_data(MiniDatabaseData(table=frame, extra={}))
+        updated = section.model.frame()
+
+        assert updated.at[0, builder_ui.MICROSCOPE_STATUS_COLUMN] == "Values need review"
+        assert updated[builder_ui.MICROSCOPE_STATUS_COLUMN].dtype == object
+    finally:
+        section._shutdown_background_threads()
+        section.close()
+
+
 def test_microscope_expected_rows_show_unlinked_status_and_source_label() -> None:
     _ensure_qapp()
     section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
