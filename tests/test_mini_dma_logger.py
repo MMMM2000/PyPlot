@@ -12184,7 +12184,7 @@ def test_voltage_limit_unwind_open_circuit_stops_before_mechanical_seek(
     trace_rows: list[dict[str, object]] = []
     seek_calls: list[tuple[object, ...]] = []
     window._ask_wire_break_recovery_after_stop = recovery_prompts.append  # type: ignore[method-assign]
-    window._maybe_offer_run_cleanup_after_wire_break = lambda: None  # type: ignore[method-assign]
+    window._maybe_offer_run_cleanup = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     window._supply_controller = supply  # type: ignore[assignment]
     window._supply_output_enabled = True
     window._supply_last_setpoint_mA = 25.4
@@ -22779,15 +22779,17 @@ def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) ->
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("metadata_summary_generation")
     window._record_current_point = lambda: None  # type: ignore[method-assign]
-    requested: list[Path] = []
-    window._start_run_summary_generation = lambda run_dir: requested.append(run_dir)  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
 
     try:
         window._start_session()
         window._stop_session(reason="recipe_completed", detail="Recipe completed.")
 
         assert window._session_base_path is not None
-        assert requested == [window._session_base_path.parent]
+        assert requested == [(window._session_base_path.parent, True)]
     finally:
         _close_test_window(window)
 
@@ -22798,8 +22800,10 @@ def test_control_worker_error_finalizes_session_and_summary(tmp_path: Path, qtbo
     window._record_current_point = lambda: None  # type: ignore[method-assign]
     window._run_on_ui_thread = lambda callback: callback()  # type: ignore[method-assign]
     window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
-    requested: list[Path] = []
-    window._start_run_summary_generation = lambda run_dir: requested.append(run_dir)  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
 
     try:
         window._start_session()
@@ -22817,7 +22821,7 @@ def test_control_worker_error_finalizes_session_and_summary(tmp_path: Path, qtbo
         assert payload["stop"]["category"] == "fault"
         assert "Invalid argument" in payload["stop"]["detail"]
         assert window._session_base_path is not None
-        assert requested == [window._session_base_path.parent]
+        assert requested == [(window._session_base_path.parent, False)]
     finally:
         window._automation_active = False
         _close_test_window(window)

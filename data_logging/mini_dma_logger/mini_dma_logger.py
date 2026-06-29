@@ -10588,7 +10588,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._stop_session(reason="wire_break_or_contact_loss", detail=message)
             self.statusBar().showMessage(message, 15000)
             self._ask_wire_break_recovery_after_stop(message)
-            self._maybe_offer_run_cleanup_after_wire_break()
+            self._maybe_offer_run_cleanup()
         finally:
             self._wire_break_stop_in_progress = False
 
@@ -10613,13 +10613,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if box.clickedButton() == return_position_button:
             self._start_recovery_displacement_zero()
 
-    def _maybe_offer_run_cleanup_after_wire_break(self) -> None:
+    def _maybe_offer_run_cleanup(self, current_run: Path | None = None) -> None:
         if not self._is_ui_thread():
-            self._run_on_ui_thread(self._maybe_offer_run_cleanup_after_wire_break)
+            self._run_on_ui_thread(lambda current_run=current_run: self._maybe_offer_run_cleanup(current_run))
             return
-        if self._session_base_path is None:
+        if current_run is None and self._session_base_path is not None:
+            current_run = self._session_base_path.parent
+        if current_run is None:
             return
-        current_run = self._session_base_path.parent
         try:
             candidates = discover_cleanup_candidates_for_run(current_run)
         except Exception as exc:
@@ -20810,25 +20811,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
         if self._session_base_path is not None:
-            self._start_run_summary_generation(self._session_base_path.parent)
+            self._start_run_summary_generation(
+                self._session_base_path.parent,
+                offer_cleanup=self._session_stop_reason == "recipe_completed",
+            )
         self._clear_run_zero_load_scale_reference()
         self._release_experiment_sleep_guard()
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
         self._refresh_live_labels()
 
-    def _start_run_summary_generation(self, run_dir: Path) -> None:
+    def _start_run_summary_generation(self, run_dir: Path, *, offer_cleanup: bool = False) -> None:
         def _worker() -> None:
             try:
                 from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot
 
                 summary = generate_core_run_plot(run_dir)
-                self._run_on_ui_thread(
-                    lambda: self._log(
+                def _finish_summary() -> None:
+                    self._log(
                         "Generated run summary images: "
                         f"{summary['image_path']} and {summary['detail_image_path']}"
                     )
-                )
+                    if offer_cleanup:
+                        self._maybe_offer_run_cleanup(run_dir)
+
+                self._run_on_ui_thread(_finish_summary)
             except Exception as exc:
                 self._run_on_ui_thread(
                     lambda exc=exc: self._log(f"TMA run summary generation failed for {run_dir}: {exc}")
