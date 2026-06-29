@@ -1,5 +1,69 @@
 # Changelog
 
+## 2026-06-29 13:25 UTC
+
+- Removed the TMA current-sweep mechanical load-loss stop condition so near-zero load during target acquisition no longer disables current or stops a recipe when electrical continuity/current feedback can still indicate an intact wire.
+- The TMA logger now offers the sibling-run cleanup/archive review after normally completed recipes as well as after wire-break/contact-loss stops.
+
+## 2026-06-26 12:31 UTC
+
+- Renamed user-facing legacy logger wording to `TMA` across the launcher, logger, docs, reports, tests, and related help text while leaving legacy `mini_dma` module names, payload keys, and paths compatible.
+
+## 2026-06-25 09:45 UTC
+
+- TMA control-trace file write failures no longer stop active recipes; tracing is disabled and the recipe continues when the trace file handle fails.
+- TMA control-worker crashes now finalize the run through the normal stop path so metadata stop reasons and summary images are still generated.
+
+## 2026-06-24 13:00 UTC
+
+- TMA runtime current-sweep edits now reject a refused current-limit refresh without stopping the active recipe, and shared-broker limit changes roll back when the broker refuses them.
+- TMA displacement-to-zero recovery now stops after reaching the displacement target instead of adding a timed settle step.
+- TMA progress text no longer offsets the progress bar fill, and microwire completion closes after selecting a wire.
+
+## 2026-06-24 01:35 UTC
+
+- Added software-only TMA real-run reference tools that scan existing run-quality artifacts and measurement CSVs into calibration tables, plots, and real-vs-simulation overlays for simulator scenario selection.
+- Added real-run-inspired simulator scenarios, including a thin 8.3 um high-strain/high-hold stress ladder and a `realistic_run32_first_target` case with hidden free-strain roughness.
+- Added p95 stress-error metrics, ranked policy-grid artifacts, adaptive-cap tightening, target-crossing-resume experiments, and a control-validation simulation suite for comparing candidate policies without changing live defaults.
+- Split later-ramp simulator scoring from raw post-unwind slack reacquisition, and updated the live TMA current-hold path so larger adaptive hold corrections must be earned by observed same-side error improvement after fresh feedback.
+
+## 2026-06-23 20:05 UTC
+
+- TMA full-run simulation reports now expose hidden free transformation strain, motor-derived measured strain, elastic mismatch, and measured-vs-free strain tracking error so controller changes can be judged against modeled wire contraction/elongation.
+- Added broad free-strain, stress-ladder, and control-policy matrices covering good high-strain wires, early/delayed 19/8 behavior, bad Co6-style wires, weak/noisy wires, rough transformations, delayed feedback, stiffness variants, and multi-target 0 -> 50 -> 100 MPa ladders.
+- Added target-scaled quality status, normalized stress-error/tracking metrics, current-phase event counts, target-lead/correction-cap policy comparisons, and stable per-policy seeds to the simulator reports.
+- Increased the production iso-current stress-ramp per-command cap from 0.08% to 0.12% strain of gauge length based on the stable simulator grid, while leaving adaptive cap growth disabled by default.
+
+## 2026-06-23 18:25 UTC
+
+- TMA full-run software simulations now include a bad `Ni47Fe24Ga23Co6 2/1` first-overheating scenario with early transformation stress surge, delayed scale feedback, bounded correction, low usable strain, and raw stress break/contact-loss behavior for control-policy screening.
+- The good-wire and bad-wire full-run simulations now start from unloaded target acquisition and ramp the active target to 50 MPa before current sweep; plotted strain remains derived only from simulated controller motor motion and gauge length.
+
+## 2026-06-23 15:45 UTC
+
+- Let TMA iso-stress current sweeps update the independent first-overheating max current during the active preheat ramp, with rejection when the ramp has already passed the safe update point.
+
+## 2026-06-23 14:05 UTC
+
+- Added a software-only TMA full-run simulator for first-overheating style target acquisition, current rise, endpoint recovery, reverse unwind, bounded mechanical corrections, delayed scale feedback, and slack take-up.
+- Added calibrated realistic 50 MPa good-wire simulation, full-run scenario reports, parameter sweeps, and machine-readable artifacts; strain-current plots are now derived from simulated controller motor motion rather than artificial current/transformation strain shaping.
+- Recalibrated the realistic full-run transformation driver against real 50 MPa run34 hold spans and bounded processed-noise admission so broad raw stress envelopes cannot hide a materially off-target processed center.
+
+## 2026-06-23 13:52 UTC
+
+- Tightened TMA current-hold processed-signal bands so large raw fluctuations centered near target do not cause chasing, while biased processed centers still trigger recovery.
+- Disabled cruise feedback for TMA current-sweep load/stress control, added endpoint recovery checks before current sweep or unwind steps can complete, and kept grouped strain/current core plots from dropping first-overheating rows that do not have a numeric plateau index.
+- Expanded the TMA wire simulator with processed-center scenario-matrix reports covering noise, transformation, slack, stiffness, wire diameter, and delayed-feedback cases.
+
+## 2026-06-23 13:45 UTC
+
+- TMA recipe progress text now uses the normal application font instead of a fixed-width system font.
+
+## 2026-06-23 10:38 UTC
+
+- Added a deterministic TMA virtual wire simulator and CLI for generating synthetic measurement/control traces for current-sweep controller tests.
+- Documented built-in robust-center, safety-rail, transformation-bias, reversal, and wire-break scenarios.
+
 ## 2026-06-19 07:20 UTC
 
 - Record a final TMA measurement point when a normally completed very short recipe would otherwise save a header-only measurement file.
