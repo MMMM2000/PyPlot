@@ -25108,7 +25108,14 @@ class TransitionsSection(QtWidgets.QWidget):
         self.tab_widget.addTab(self.annealing_workspace, "Annealing")
         self.tab_widget.addTab(self.vsm_workspace, "VSM")
         self.tab_widget.addTab(self.dma_workspace, "TMA")
+        self.tab_widget.currentChanged.connect(lambda _index: self.refresh_current_workspace())
         layout.addWidget(self.tab_widget, 1)
+
+    def refresh_current_workspace(self) -> None:
+        widget = self.tab_widget.currentWidget()
+        refresher = getattr(widget, "refresh_workspace", None)
+        if callable(refresher):
+            refresher()
 
     def show_view(self, view: str) -> None:
         index = self._view_aliases.get(str(view).strip().lower())
@@ -25121,6 +25128,7 @@ class TransitionsSection(QtWidgets.QWidget):
             except Exception:
                 pass
             self.tab_widget.setCurrentIndex(index)
+            self.refresh_current_workspace()
 
     def set_view_visible(self, view: str, visible: bool) -> None:
         index = self._view_aliases.get(str(view).strip().lower())
@@ -38082,6 +38090,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
         finally:
             MiniDatabaseSection._project_load_batch_mode = batch_mode
+        transitions = getattr(self, "transitions_section", None)
+        if isinstance(transitions, TransitionsSection):
+            transitions.refresh_current_workspace()
 
     def _remember_project_directory(self, directory: Path) -> None:
         try:

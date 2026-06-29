@@ -8152,6 +8152,59 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        record = MeasurementRecord(
+            path=Path("Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt"),
+            metadata=MeasurementMetadata(
+                composition_token="Ni44Fe27Ga23Cu3Co3",
+                draw_x=1,
+                piece_y=2,
+                setpoint_mA=100,
+                alt_variant=False,
+                measurement_id="loaded-record",
+                file_name="Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt",
+                relpath="Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt",
+                timestamp_mtime_utc="2026-06-29T12:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, 100.0], "R_Ohm": [100.0, 220.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        window.annealing_section._all_records = [record]  # noqa: SLF001
+        window.annealing_section._record_groups = {}  # noqa: SLF001
+        window.annealing_section._transition_reviews = {  # noqa: SLF001
+            record_id: {
+                "transition_record_id": record_id,
+                "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                "included": False,
+                "source_path": str(record.path),
+                "graph_label": record.path.name,
+                "sample_key": "Ni44Fe27Ga23Cu3Co3|1|2",
+            }
+        }
+
+        window.transitions_section.tab_widget.setCurrentIndex(0)
+        window._refresh_sections_after_project_load()  # noqa: SLF001
+
+        dialog = window.transitions_section.annealing_workspace._dialog  # noqa: SLF001
+        assert dialog is not None
+        tree = dialog.findChild(QtWidgets.QTreeWidget)
+        assert tree is not None
+        assert tree.topLevelItemCount() == 1
+        assert tree.topLevelItem(0).text(1) == "No transition"
+        assert "Done 1" in dialog._counts_label.text()  # noqa: SLF001
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_annealing_transition_view_uses_one_row_per_graph() -> None:
     _ensure_qapp()
     annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
