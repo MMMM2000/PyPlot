@@ -2823,8 +2823,50 @@ def test_mini_dma_section_applies_reviewed_transition_values_to_records(
         reviewed = section.records_with_reviewed_transitions([record])
 
         assert reviewed[0].transition_summary == ("50 MPa / 1.46 g: As 30 mA, Af 64 mA",)
+        section._apply_transition_reviews_to_table()  # noqa: SLF001
         assert "Af 64 mA" in str(section.model.frame().iloc[0][MINI_DMA_TRANSITION_COLUMN])
     finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_transition_review_defers_heavy_store_and_table_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    store_calls = 0
+    table_calls = 0
+
+    def _fake_store() -> None:
+        nonlocal store_calls
+        store_calls += 1
+
+    def _fake_apply() -> None:
+        nonlocal table_calls
+        table_calls += 1
+
+    section._store_transition_reviews = _fake_store  # type: ignore[method-assign]  # noqa: SLF001
+    section._apply_transition_reviews_to_table = _fake_apply  # type: ignore[method-assign]  # noqa: SLF001
+    try:
+        section.set_transition_review_for_target(
+            "run::50 MPa",
+            {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                "sample": "Ni50Fe27Ga23 12_2",
+                "target_label": "50 MPa",
+            },
+        )
+
+        assert section.transition_reviews_snapshot()["run::50 MPa"]["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION
+        assert store_calls == 0
+        assert table_calls == 0
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
@@ -8202,6 +8244,58 @@ def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
         window._dirty = False
         window.hide()
         window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_annealing_transition_review_defers_dependent_refresh() -> None:
+    _ensure_qapp()
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    emitted = 0
+
+    def _record() -> MeasurementRecord:
+        return MeasurementRecord(
+            path=Path("Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt"),
+            metadata=MeasurementMetadata(
+                composition_token="Ni44Fe27Ga23Cu3Co3",
+                draw_x=1,
+                piece_y=2,
+                setpoint_mA=100,
+                alt_variant=False,
+                measurement_id="deferred-review-refresh",
+                file_name="Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt",
+                relpath="Ni44Fe27Ga23Cu3Co3 1_2 100mA.txt",
+                timestamp_mtime_utc="2026-06-29T12:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, 100.0], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+
+    def _count_emit() -> None:
+        nonlocal emitted
+        emitted += 1
+
+    try:
+        record = _record()
+        record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+        section._all_records = [record]  # noqa: SLF001
+        section.data_updated.connect(_count_emit)
+
+        section.set_transition_review_for_record(
+            record_id,
+            {
+                "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                "included": False,
+            },
+        )
+
+        assert section.transition_reviews_snapshot()[record_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert emitted == 0
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_review_update_timer.stop()  # noqa: SLF001
+        section.close()
+        section.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 

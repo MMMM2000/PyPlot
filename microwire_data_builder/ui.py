@@ -4545,6 +4545,50 @@ def _add_annealing_transition_markers(
         pass
 
 
+def _add_annealing_transition_markers_from_values(
+    figure: Figure | None,
+    values: Mapping[str, Any] | None,
+) -> bool:
+    if figure is None or not figure.axes:
+        return False
+    cleaned = _clean_transition_values(values)
+    if not cleaned:
+        return False
+    axis = figure.axes[0]
+    style_map = {
+        "As": ("#65a30d", "--"),
+        "Af": ("#65a30d", ":"),
+        "Ms": ("#7e22ce", "--"),
+        "Mf": ("#7e22ce", ":"),
+    }
+    added = False
+    for label in PHASE_POINT_LABELS:
+        value = cleaned.get(label)
+        if value is None:
+            continue
+        base = label[:2]
+        color, linestyle = style_map.get(base, ("#111827", "--"))
+        numeric = float(value)
+        line = axis.axvline(
+            numeric,
+            color=color,
+            linestyle=linestyle,
+            linewidth=0.95,
+            alpha=0.48,
+            label="_nolegend_",
+            zorder=3,
+        )
+        _set_transition_marker_metadata(line, label, "auto")
+        _annotate_transition_marker(axis, numeric, label, color, reviewed=False)
+        added = True
+    if added:
+        try:
+            axis.legend(loc="best", fontsize=8)
+        except Exception:
+            pass
+    return added
+
+
 def _add_reviewed_transition_markers(
     figure: Figure | None,
     values: Mapping[str, Any] | None,
@@ -5700,6 +5744,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         setpoint: Optional[float],
         description: str,
         reviewed_values: Optional[Mapping[str, Any]] = None,
+        auto_values: Optional[Mapping[str, Any]] = None,
     ) -> None:
         render_started_s = time.perf_counter()
         if record is None:
@@ -5709,7 +5754,11 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
 
         try:
             build_started_s = time.perf_counter()
-            figure = self._build_figure(record, reviewed_values=reviewed_values)
+            figure = self._build_figure(
+                record,
+                reviewed_values=reviewed_values,
+                auto_values=auto_values,
+            )
             _log_builder_timing(
                 self._logger,
                 "current_annealing_review_build_figure",
@@ -5898,6 +5947,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         record: MeasurementRecord,
         *,
         reviewed_values: Optional[Mapping[str, Any]] = None,
+        auto_values: Optional[Mapping[str, Any]] = None,
     ):
         frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -5933,6 +5983,15 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             raise ValueError("Current annealing dataframe missing expected columns")
         if plot_df.empty:
             raise ValueError("No valid samples to plot")
+        display_df = plot_df
+        max_display_points = 4000
+        if len(plot_df.index) > max_display_points:
+            step = max(int(math.ceil(len(plot_df.index) / max_display_points)), 1)
+            display_df = pd.concat(
+                [plot_df.iloc[::step], plot_df.tail(1)],
+                ignore_index=False,
+            )
+            display_df = display_df[~display_df.index.duplicated(keep="first")]
         path = getattr(record, "path", None)
         stem = None
         if path:
@@ -5946,7 +6005,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         target_width = max(int(ANNEALING_GRAPH_WIDTH * 2), ANNEALING_GRAPH_WIDTH)
         target_height = max(int(ANNEALING_GRAPH_HEIGHT * 2), ANNEALING_GRAPH_HEIGHT)
         figure, _ = plot_annealing_curve(
-            plot_df,
+            display_df,
             title,
             target_px=(target_width, target_height),
             wire_diameter_um=_annealing_wire_diameter_um(record),
@@ -5956,11 +6015,12 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         except Exception:
             logger = None
         if bool(self.__dict__.get("_show_transition_markers", False)):
-            _add_annealing_transition_markers(
-                figure,
-                plot_df,
-                logger if isinstance(logger, logging.Logger) else None,
-            )
+            if not _add_annealing_transition_markers_from_values(figure, auto_values):
+                _add_annealing_transition_markers(
+                    figure,
+                    plot_df,
+                    logger if isinstance(logger, logging.Logger) else None,
+                )
             _add_reviewed_transition_markers(figure, reviewed_values)
         try:
             axes = figure.axes[0] if figure.axes else None
@@ -7026,6 +7086,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             setpoint=_extract_setpoint(entry.record),
             description="Select an annealing run to review.",
             reviewed_values=values,
+            auto_values=entry.auto_values,
         )
 
     def _current_entry(self) -> Optional[_AnnealingTransitionReviewEntry]:
@@ -7085,6 +7146,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
                         setpoint=_extract_setpoint(entry.record),
                         description="Select an annealing run to review.",
                         reviewed_values=stored_values,
+                        auto_values=entry.auto_values,
                     )
                 if self._current_item is not None:
                     self._apply_status_to_item(self._current_item, entry, stored_payload, stored_values)
@@ -7140,6 +7202,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
                     setpoint=_extract_setpoint(entry.record),
                     description="Select an annealing run to review.",
                     reviewed_values=refreshed_values,
+                    auto_values=entry.auto_values,
                 )
         if self._current_item is not None:
             self._apply_status_to_item(self._current_item, entry, refreshed, refreshed_values)
@@ -7909,7 +7972,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.accepted_only_check = QtWidgets.QCheckBox("Accepted only")
         self.rejected_only_check = QtWidgets.QCheckBox("Rejected only")
         self.show_resistance_check = QtWidgets.QCheckBox("Resistance")
-        self.show_resistance_check.setChecked(True)
+        self.show_resistance_check.setChecked(False)
         self.show_fit_lines_check = QtWidgets.QCheckBox("Fit lines")
         self.show_fit_lines_check.setChecked(True)
         self.show_markers_check = QtWidgets.QCheckBox("Markers")
@@ -8599,7 +8662,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda key=key: self._workers.pop(key, None))
+        thread.finished.connect(lambda *_args, key=key: self._workers.pop(key, None))
         self._workers[key] = (thread, worker)
         thread.start()
 
@@ -13566,6 +13629,10 @@ class AnnealingSection(MiniDatabaseSection):
         self._transition_review_store_timer.setSingleShot(True)
         self._transition_review_store_timer.setInterval(250)
         self._transition_review_store_timer.timeout.connect(self._store_transition_reviews)
+        self._transition_review_update_timer = QtCore.QTimer(self)
+        self._transition_review_update_timer.setSingleShot(True)
+        self._transition_review_update_timer.setInterval(500)
+        self._transition_review_update_timer.timeout.connect(self.data_updated.emit)
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, dict):
             cleaned: Dict[str, Dict[str, float]] = {}
@@ -13966,6 +14033,22 @@ class AnnealingSection(MiniDatabaseSection):
             return
         timer.start()
 
+    def _schedule_transition_review_dependents_update(self) -> None:
+        timer = getattr(self, "_transition_review_update_timer", None)
+        if timer is None:
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+            return
+        try:
+            timer.start()
+        except Exception:
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
+
     def export_project_payload(self) -> Dict[str, Any]:
         self._store_transition_reviews()
         return super().export_project_payload()
@@ -13996,10 +14079,7 @@ class AnnealingSection(MiniDatabaseSection):
             entry["updated_at"] = datetime.now(UTC).isoformat()
             self._transition_reviews[record_id] = entry
         self._schedule_transition_review_store()
-        try:
-            self.data_updated.emit()
-        except Exception:
-            pass
+        self._schedule_transition_review_dependents_update()
 
     def _record_by_transition_id(self, record_id: str) -> Optional[MeasurementRecord]:
         for record in self._all_records:
@@ -19333,6 +19413,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
         )
         self._transition_points = self._load_transition_points()
         self._transition_reviews = self._load_transition_reviews()
+        self._transition_state_store_timer = QtCore.QTimer(self)
+        self._transition_state_store_timer.setSingleShot(True)
+        self._transition_state_store_timer.setInterval(250)
+        self._transition_state_store_timer.timeout.connect(self._persist_transition_state)
         self._auto_values_cache: Dict[str, Dict[str, float]] = {}
         self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._last_sources: List[str] = []
@@ -19532,6 +19616,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
         return cleaned
 
     def _store_transition_points(self) -> None:
+        self._sync_transition_points_payload()
+        self._persist_transition_state()
+
+    def _sync_transition_points_payload(self) -> None:
         snapshot: Dict[str, Dict[str, float]] = {}
         for key, payload in self._transition_points.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
@@ -19544,12 +19632,24 @@ class TransitionTempsSection(QtWidgets.QWidget):
             if entry:
                 snapshot[key] = entry
         self.data.extra[VSM_TRANSITION_VALUES_KEY] = snapshot
+
+    def _persist_transition_state(self) -> None:
+        self._sync_transition_points_payload()
         self._store_transition_reviews(update_table=False)
         self.data.table = self.model.frame()
         try:
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist transition temps")
+
+    def _schedule_transition_state_store(self) -> None:
+        self._sync_transition_points_payload()
+        self._store_transition_reviews(update_table=False)
+        self.data.table = self.model.frame()
+        try:
+            self._transition_state_store_timer.start()
+        except Exception:
+            self._persist_transition_state()
 
     def _store_transition_reviews(self, *, update_table: bool = True) -> None:
         records: Dict[str, Dict[str, Any]] = {}
@@ -20468,8 +20568,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
             payload["included"] = False
         self._transition_reviews[record_id] = self._clean_transition_review_payload(record_id, payload)
         self._pending_preview_record_id = record_id
-        self._store_transition_reviews(update_table=False)
-        self._store_transition_points()
+        self._schedule_transition_state_store()
         self._refresh_group_table_row(group_key)
         panel = self._preview_panel
         if panel is not None and panel.current_record_id() == record_id:
@@ -24062,6 +24161,14 @@ class MiniDmaSection(MiniDatabaseSection):
         self._preview_group_count = 1
         self._preview_spacing = 6
         super().__init__(logger, log_callback, parent)
+        self._transition_review_store_timer = QtCore.QTimer(self)
+        self._transition_review_store_timer.setSingleShot(True)
+        self._transition_review_store_timer.setInterval(250)
+        self._transition_review_store_timer.timeout.connect(self._store_transition_reviews)
+        self._transition_table_apply_timer = QtCore.QTimer(self)
+        self._transition_table_apply_timer.setSingleShot(True)
+        self._transition_table_apply_timer.setInterval(300)
+        self._transition_table_apply_timer.timeout.connect(self._apply_transition_reviews_to_table)
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
         self.open_pyplot_button = QtWidgets.QPushButton("Open in PyPlot")
@@ -24501,6 +24608,27 @@ class MiniDmaSection(MiniDatabaseSection):
         except Exception:
             self.logger.exception("Failed to persist TMA transition reviews")
 
+    def _schedule_transition_review_store(self) -> None:
+        self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
+            "schema_version": MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION,
+            "records": self.transition_reviews_snapshot(),
+        }
+        try:
+            self._transition_review_store_timer.start()
+        except Exception:
+            self._store_transition_reviews()
+
+    def _schedule_transition_table_apply(self) -> None:
+        try:
+            self._transition_table_apply_timer.start()
+        except Exception:
+            self._apply_transition_reviews_to_table()
+
+    def export_project_payload(self) -> Dict[str, Any]:  # type: ignore[override]
+        self._store_transition_reviews()
+        self._apply_transition_reviews_to_table()
+        return super().export_project_payload()
+
     def transition_reviews_snapshot(self) -> Dict[str, Dict[str, Any]]:
         snapshot: Dict[str, Dict[str, Any]] = {}
         for record_id, payload in self._transition_reviews.items():
@@ -24587,8 +24715,8 @@ class MiniDmaSection(MiniDatabaseSection):
             self._transition_reviews[str(record_id)] = entry
         else:
             self._transition_reviews.pop(str(record_id), None)
-        self._store_transition_reviews()
-        self._apply_transition_reviews_to_table()
+        self._schedule_transition_review_store()
+        self._schedule_transition_table_apply()
 
     def _apply_transition_reviews_to_table(self) -> None:
         records = self.records_with_reviewed_transitions(self._all_mini_dma_records)
@@ -25099,6 +25227,7 @@ class TransitionsSection(QtWidgets.QWidget):
             "dma": 2,
             "mini_dma": 2,
         }
+        self._dirty_view_indexes: Set[int] = {0, 1, 2}
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tab_widget = QtWidgets.QTabWidget(self)
@@ -25111,24 +25240,38 @@ class TransitionsSection(QtWidgets.QWidget):
         self.tab_widget.currentChanged.connect(lambda _index: self.refresh_current_workspace())
         layout.addWidget(self.tab_widget, 1)
 
-    def refresh_current_workspace(self) -> None:
+    def mark_workspaces_dirty(self, view: str | None = None) -> None:
+        if view is None:
+            self._dirty_view_indexes = set(range(self.tab_widget.count()))
+            return
+        index = self._view_aliases.get(str(view).strip().lower())
+        if index is not None:
+            self._dirty_view_indexes.add(index)
+
+    def refresh_current_workspace(self, *, force: bool = False) -> None:
+        index = self.tab_widget.currentIndex()
+        if not force and index not in self._dirty_view_indexes:
+            return
         widget = self.tab_widget.currentWidget()
         refresher = getattr(widget, "refresh_workspace", None)
         if callable(refresher):
             refresher()
+        self._dirty_view_indexes.discard(index)
 
     def show_view(self, view: str) -> None:
         index = self._view_aliases.get(str(view).strip().lower())
         if index is None:
             return
         if 0 <= index < self.tab_widget.count():
+            previous = self.tab_widget.currentIndex()
             try:
                 if hasattr(self.tab_widget, "isTabVisible") and not self.tab_widget.isTabVisible(index):
                     self.tab_widget.setTabVisible(index, True)
             except Exception:
                 pass
             self.tab_widget.setCurrentIndex(index)
-            self.refresh_current_workspace()
+            if previous == index:
+                self.refresh_current_workspace()
 
     def set_view_visible(self, view: str, visible: bool) -> None:
         index = self._view_aliases.get(str(view).strip().lower())
@@ -38092,6 +38235,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             MiniDatabaseSection._project_load_batch_mode = batch_mode
         transitions = getattr(self, "transitions_section", None)
         if isinstance(transitions, TransitionsSection):
+            transitions.mark_workspaces_dirty()
             transitions.refresh_current_workspace()
 
     def _remember_project_directory(self, directory: Path) -> None:
