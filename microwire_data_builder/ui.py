@@ -6290,6 +6290,27 @@ def _format_mini_dma_transition_review_line(
     return f"{target_label}: {', '.join(parts)}"
 
 
+def _mini_dma_transition_values_from_text(line: object) -> Dict[str, float]:
+    """Parse cached TMA transition-summary text without reloading a raw run."""
+
+    text = str(line or "")
+    if not text:
+        return {}
+    values: Dict[str, float] = {}
+    for label in MINI_DMA_TRANSITION_LABELS:
+        match = re.search(
+            rf"\b{re.escape(label)}\s+([-+]?\d+(?:[.,]\d+)?)\s*mA\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        value = _coerce_finite_float(match.group(1).replace(",", "."))
+        if value is not None:
+            values[label] = value
+    return values
+
+
 class _MiniDmaTransitionEditorControls(QtWidgets.QWidget):
     valuesEdited = QtCore.pyqtSignal(dict)
     valueCleared = QtCore.pyqtSignal(str)
@@ -8100,7 +8121,6 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             pass
         self._refresh_tree()
         QtCore.QTimer.singleShot(0, self._select_initial_run)
-        QtCore.QTimer.singleShot(75, self._load_next_unloaded_run)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._closing = True
@@ -8513,6 +8533,8 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 if unloaded is not None:
                     self._pending_select_unreviewed = True
                     self._ensure_run_loaded(unloaded, select_first=False)
+                else:
+                    self.status_label.setText("No unreviewed TMA targets are currently loaded.")
                 return
             start_position = 0
             if self._current_ref in refs:
@@ -8821,7 +8843,6 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             self._select_next_unreviewed()
         elif self._current_run_key == result.key and not result.entries and not result.error:
             self._show_empty("No supported current-sweep transition targets for this TMA run.")
-        QtCore.QTimer.singleShot(25, self._load_next_unloaded_run)
 
     def _select_first_entry_for_run(self, key: str) -> None:
         entries = self._entries_by_run.get(key, [])
@@ -24891,7 +24912,7 @@ class MiniDmaSection(MiniDatabaseSection):
                     data=record.data,
                     key=record.key,
                     label=record.label,
-                    strain_summary=record.strain_summary,
+                    strain_summary=_mini_dma_peak_strain_summary(record),
                     transition_summary=tuple(reviewed_lines),
                     break_summary=record.break_summary,
                 )
@@ -25011,11 +25032,9 @@ class DmaTransitionsSection(QtWidgets.QWidget):
             reviews = self._mini_dma_section.transition_reviews_snapshot()
         except Exception:
             reviews = {}
-        logger = getattr(self._mini_dma_section, "logger", logging.getLogger(__name__))
-        entries = _mini_dma_transition_review_entries(records, logger)
-        rows: List[Tuple[_MiniDmaTransitionReviewEntry, str, str]] = []
+        rows: List[Tuple[MiniDmaRecord, str, str, str, str, str, Dict[str, float]]] = []
         counts = {
-            "total": len(entries),
+            "total": 0,
             "reviewed": 0,
             "accepted": 0,
             "manual": 0,
@@ -25025,54 +25044,93 @@ class DmaTransitionsSection(QtWidgets.QWidget):
             "auto_candidates": 0,
             "needs_attention": 0,
         }
-        for entry in entries:
-            record_id = _mini_dma_review_record_id(entry.record, entry.target_label)
-            payload = reviews.get(record_id, {}) if isinstance(reviews, Mapping) else {}
-            status_label = _mini_dma_display_status(entry, payload if isinstance(payload, Mapping) else {})
-            auto_status = "Auto candidates" if entry.status == "accepted" else "Needs attention" if entry.status == "partial" else "No auto transition"
-            rows.append((entry, status_label, auto_status))
-            if entry.status == "accepted":
-                counts["auto_candidates"] += 1
-            elif entry.status == "partial":
-                counts["needs_attention"] += 1
-            if status_label == "Accepted":
-                counts["reviewed"] += 1
-                counts["accepted"] += 1
-            elif status_label == "Manual adjusted":
-                counts["reviewed"] += 1
-                counts["manual"] += 1
-            elif status_label == "No transition":
-                counts["reviewed"] += 1
-                counts["no_transition"] += 1
-            elif status_label == "Excluded":
-                counts["reviewed"] += 1
-                counts["excluded"] += 1
-            elif status_label == "Needs attention":
-                counts["needs_attention"] += 1
-                counts["unreviewed"] += 1
-            else:
-                counts["unreviewed"] += 1
+        seen_ids: Set[str] = set()
+        for record in records:
+            cached_targets: Dict[str, Tuple[str, Dict[str, float]]] = {}
+            for line in getattr(record, "transition_summary", ()) or ():
+                target_label = str(line).split(":", 1)[0].strip()
+                if not target_label:
+                    continue
+                cached_targets[target_label] = (str(line), _mini_dma_transition_values_from_text(line))
+            run_id_prefix = f"{_MiniDmaTransitionReviewDialog._run_key(record)}::"
+            if isinstance(reviews, Mapping):
+                for record_id, payload in reviews.items():
+                    if not str(record_id).startswith(run_id_prefix) or not isinstance(payload, Mapping):
+                        continue
+                    target_label = str(payload.get("target_label") or str(record_id).rsplit("::", 1)[-1]).strip()
+                    if target_label:
+                        cached_targets.setdefault(target_label, ("", {}))
+            if not cached_targets:
+                cached_targets["Select in review"] = ("", {})
+            for target_label, (summary_line, auto_values) in cached_targets.items():
+                record_id = _mini_dma_review_record_id(record, target_label)
+                if record_id in seen_ids:
+                    continue
+                seen_ids.add(record_id)
+                payload = reviews.get(record_id, {}) if isinstance(reviews, Mapping) else {}
+                if not isinstance(payload, Mapping):
+                    payload = {}
+                review_status = str(payload.get("status") or "").strip()
+                if review_status == MINI_DMA_REVIEW_STATUS_ACCEPTED and (
+                    _clean_mini_dma_transition_values(payload.get("manual_values_mA"))
+                    or _mini_dma_cleared_transition_labels(payload)
+                ):
+                    status_label = "Manual adjusted"
+                else:
+                    status_label = _mini_dma_review_status_label(review_status)
+                if status_label == "Unreviewed":
+                    if target_label == "Select in review":
+                        status_label = "Unreviewed"
+                    elif auto_values:
+                        status_label = "Auto candidates"
+                    else:
+                        status_label = "Needs attention"
+                observed_values = _clean_mini_dma_transition_values(payload.get("values"))
+                if not observed_values:
+                    observed_values = auto_values
+                if auto_values:
+                    auto_status = "Auto candidates"
+                elif target_label == "Select in review":
+                    auto_status = "Not loaded"
+                elif review_status:
+                    auto_status = "Reviewed"
+                else:
+                    auto_status = "No auto transition"
+                rows.append((record, target_label, status_label, auto_status, summary_line, record_id, observed_values))
+                counts["total"] += 1
+                if auto_values:
+                    counts["auto_candidates"] += 1
+                elif status_label == "Needs attention":
+                    counts["needs_attention"] += 1
+                if status_label == "Accepted":
+                    counts["reviewed"] += 1
+                    counts["accepted"] += 1
+                elif status_label == "Manual adjusted":
+                    counts["reviewed"] += 1
+                    counts["manual"] += 1
+                elif status_label == "No transition":
+                    counts["reviewed"] += 1
+                    counts["no_transition"] += 1
+                elif status_label == "Excluded":
+                    counts["reviewed"] += 1
+                    counts["excluded"] += 1
+                else:
+                    counts["unreviewed"] += 1
         self.summary_table.setRowCount(len(rows))
         counts_text = self._format_counts(counts)
-        for row_index, (entry, status_label, auto_status) in enumerate(rows):
-            key_tuple = getattr(entry.record, "key", None)
+        for row_index, (record, target_label, status_label, auto_status, summary_line, _record_id, values) in enumerate(rows):
+            key_tuple = getattr(record, "key", None)
             if key_tuple:
                 composition, microwire = _microwire_info_from_key((key_tuple[0], key_tuple[1], key_tuple[2], None))
             else:
-                parsed = _microwire_key_from_path(getattr(entry.record, "path", Path()), entry.sample)
-                composition, microwire = _microwire_info_from_key((parsed[0], parsed[1], parsed[2], None)) if parsed else ("", entry.sample)
-            values = _clean_mini_dma_transition_values(
-                (reviews.get(_mini_dma_review_record_id(entry.record, entry.target_label), {}) or {}).get("values")
-                if isinstance(reviews, Mapping)
-                else {}
-            )
-            if not values:
-                values = _mini_dma_transition_values_from_summary(entry.target_summary)
+                parsed = _microwire_key_from_path(getattr(record, "path", Path()), getattr(record, "sample", "") or "")
+                composition, microwire = _microwire_info_from_key((parsed[0], parsed[1], parsed[2], None)) if parsed else ("", getattr(record, "sample", ""))
+            run_label = str(getattr(record, "label", "") or getattr(record, "path", ""))
             row_values = [
                 composition,
                 microwire,
-                entry.run_label,
-                entry.target_label,
+                run_label,
+                target_label,
                 status_label,
                 auto_status,
                 counts_text if row_index == 0 else "",
@@ -25081,8 +25139,14 @@ class DmaTransitionsSection(QtWidgets.QWidget):
                 item = QtWidgets.QTableWidgetItem(str(value))
                 if column == 4:
                     item.setForeground(QtGui.QBrush(QtGui.QColor(_transition_review_status_color(status_label))))
-                if column == 6 and values:
-                    item.setToolTip(", ".join(f"{label}={value:.3g} mA" for label, value in values.items()))
+                if column == 6:
+                    tooltip_parts = []
+                    if values:
+                        tooltip_parts.append(", ".join(f"{label}={value:.3g} mA" for label, value in values.items()))
+                    if summary_line:
+                        tooltip_parts.append(summary_line)
+                    if tooltip_parts:
+                        item.setToolTip("\n".join(tooltip_parts))
                 self.summary_table.setItem(row_index, column, item)
         try:
             self.summary_table.resizeColumnsToContents()
@@ -32591,9 +32655,13 @@ class AssemblySection(QtWidgets.QWidget):
         if not universe:
             return frame
         updated = frame.copy()
-        for column in universe:
-            if column not in updated.columns:
-                updated[column] = None
+        missing_columns = [column for column in universe if column not in updated.columns]
+        if missing_columns:
+            missing_frame = pd.DataFrame(
+                {column: [None] * len(updated.index) for column in missing_columns},
+                index=updated.index,
+            )
+            updated = pd.concat([updated, missing_frame], axis=1)
         ordered = [column for column in universe if column in updated.columns]
         for column in updated.columns:
             if column not in ordered:

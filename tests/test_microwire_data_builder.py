@@ -2700,6 +2700,13 @@ def test_dma_transitions_view_lists_run_target_rows() -> None:
         logging.getLogger("test"),
     )
     assert entries
+    record.transition_summary = tuple(
+        builder_ui._format_mini_dma_transition_review_line(  # noqa: SLF001
+            entry.target_label,
+            builder_ui._mini_dma_transition_values_from_summary(entry.target_summary),  # noqa: SLF001
+        )
+        for entry in entries
+    )
     reviewed_entry = entries[0]
     review_id = builder_ui._mini_dma_review_record_id(reviewed_entry.record, reviewed_entry.target_label)  # noqa: SLF001
     fake_mini_dma_section = SimpleNamespace(
@@ -2730,6 +2737,52 @@ def test_dma_transitions_view_lists_run_target_rows() -> None:
         assert table.item(0, 4).text() == "Accepted"
         assert "total=" in table.item(0, 6).text()
         assert "TMA target row(s)" in section.status_label.text()
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_dma_transitions_view_uses_cached_review_rows_without_raw_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    record = MiniDmaRecord(
+        path=Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 cached_run"),
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="cached_run",
+        transition_summary=("100 MPa / 1.5 g: As 30 mA, Af 70 mA",),
+    )
+    review_id = builder_ui._mini_dma_review_record_id(record, "100 MPa / 1.5 g")  # noqa: SLF001
+    fake_mini_dma_section = SimpleNamespace(
+        logger=logging.getLogger("test"),
+        _all_mini_dma_records=[record],
+        _refresh_record_groups=lambda: None,
+        transition_reviews_snapshot=lambda: {
+            review_id: {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                "sample": record.sample,
+                "run_label": record.label or "",
+                "target_label": "100 MPa / 1.5 g",
+            }
+        },
+        _open_transition_review=lambda: None,
+    )
+
+    def _fail_raw_reload(*_args: object, **_kwargs: object) -> list[object]:
+        raise AssertionError("overview refresh should not parse raw TMA runs")
+
+    monkeypatch.setattr(builder_ui, "_mini_dma_transition_review_entries", _fail_raw_reload)
+    section = builder_ui.DmaTransitionsSection(fake_mini_dma_section)
+    try:
+        section.refresh_data()
+
+        assert section.summary_table.rowCount() == 1
+        assert section.summary_table.item(0, 3).text() == "100 MPa / 1.5 g"
+        assert section.summary_table.item(0, 4).text() == "No transition"
+        assert "1 of 1 TMA target row(s) reviewed" in section.status_label.text()
     finally:
         section.close()
         section.deleteLater()
@@ -2890,6 +2943,50 @@ def test_mini_dma_section_applies_reviewed_transition_values_to_records(
         section._apply_transition_reviews_to_table()  # noqa: SLF001
         assert "Af 64 mA" in str(section.model.frame().iloc[0][MINI_DMA_TRANSITION_COLUMN])
     finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_reviewed_transition_records_keep_recalculated_strain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        record = MiniDmaRecord(
+            path=Path("sample_data/mini dma/Ni50Fe27Ga23 12_2 cached_run"),
+            sample="Ni50Fe27Ga23 12_2",
+            data=pd.DataFrame(),
+            key=("Ni50Fe27Ga23", 12, 2),
+            label="cached_run",
+            strain_summary=("100 MPa / 1.5 g: 0.08% @ 80 mA",),
+            transition_summary=("100 MPa / 1.5 g: As 30 mA, Af 70 mA",),
+        )
+        section._all_mini_dma_records = [record]  # noqa: SLF001
+        record_id = builder_ui._mini_dma_review_record_id(record, "100 MPa / 1.5 g")  # noqa: SLF001
+        section.set_transition_review_for_target(
+            record_id,
+            {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                "sample": record.sample,
+                "run_label": record.label or "",
+                "target_label": "100 MPa / 1.5 g",
+                "values": {"As": 31.0, "Af": 71.0},
+            },
+        )
+        monkeypatch.setattr(
+            builder_ui,
+            "_mini_dma_peak_strain_summary",
+            lambda _record: ("100 MPa / 1.5 g: 10.74% @ 2 mA",),
+        )
+
+        reviewed = section.records_with_reviewed_transitions([record])
+
+        assert reviewed[0].strain_summary == ("100 MPa / 1.5 g: 10.74% @ 2 mA",)
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
