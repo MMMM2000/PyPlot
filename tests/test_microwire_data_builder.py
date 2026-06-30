@@ -8299,6 +8299,65 @@ def test_annealing_transition_review_defers_dependent_refresh() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_annealing_transition_no_transition_defers_next_graph_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+
+    def _record(piece: int) -> MeasurementRecord:
+        name = f"Ni44Fe27Ga23Cu3Co3 1_{piece} 100mA.txt"
+        return MeasurementRecord(
+            path=Path(name),
+            metadata=MeasurementMetadata(
+                composition_token="Ni44Fe27Ga23Cu3Co3",
+                draw_x=1,
+                piece_y=piece,
+                setpoint_mA=100,
+                alt_variant=False,
+                measurement_id=name,
+                file_name=name,
+                relpath=name,
+                timestamp_mtime_utc="2026-06-29T12:00:00+00:00",
+            ),
+            dataframe=pd.DataFrame({"I_mA": [1.0, 100.0], "R_Ohm": [100.0, 120.0]}),
+            sanity_ok=True,
+            sanity_error=0.0,
+        )
+
+    stored: dict[str, dict[str, object]] = {}
+
+    def _set_review(record_id: str, payload: dict[str, object]) -> None:
+        stored[record_id] = dict(payload)
+
+    dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [_record(1), _record(2)],
+        logging.getLogger("test"),
+        transition_reviews_provider=lambda: stored,
+        transition_reviews_setter=_set_review,
+    )
+    render_calls = 0
+
+    def _count_render(*_args: object, **_kwargs: object) -> None:
+        nonlocal render_calls
+        render_calls += 1
+
+    try:
+        monkeypatch.setattr(dialog._display, "set_record", _count_render)  # noqa: SLF001
+        QtWidgets.QApplication.processEvents()
+        render_calls = 0
+
+        dialog._mark_current_no_transition()  # noqa: SLF001
+
+        assert render_calls == 0
+        assert len(stored) == 1
+        assert next(iter(stored.values()))["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert dialog._current_item is dialog._tree.topLevelItem(1)  # noqa: SLF001
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_annealing_transition_view_uses_one_row_per_graph() -> None:
     _ensure_qapp()
     annealing_section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)

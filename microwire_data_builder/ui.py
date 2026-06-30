@@ -6768,6 +6768,8 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._transition_reviews_setter = transition_reviews_setter
         self._current_record_id: Optional[str] = None
         self._current_item: Optional[QtWidgets.QTreeWidgetItem] = None
+        self._review_snapshot: Dict[str, Dict[str, Any]] = self._load_review_snapshot()
+        self._render_generation = 0
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -6863,6 +6865,21 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._summary_label.setText("No current annealing runs are available.")
         self._refresh_counts()
 
+    def _load_review_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        if not callable(self._transition_reviews_provider):
+            return {}
+        try:
+            raw_snapshot = self._transition_reviews_provider()
+        except Exception:
+            return {}
+        if not isinstance(raw_snapshot, dict):
+            return {}
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        for record_id, payload in raw_snapshot.items():
+            if isinstance(record_id, str) and isinstance(payload, dict):
+                snapshot[record_id] = dict(payload)
+        return snapshot
+
     def _populate(self) -> None:
         self._tree.clear()
         for index, entry in enumerate(self._entries):
@@ -6889,16 +6906,8 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             "unreviewed": 0,
             "auto_candidates": 0,
         }
-        snapshot: Dict[str, Any] = {}
-        if callable(self._transition_reviews_provider):
-            try:
-                raw_snapshot = self._transition_reviews_provider()
-            except Exception:
-                raw_snapshot = {}
-            if isinstance(raw_snapshot, dict):
-                snapshot = raw_snapshot
         for entry in self._entries:
-            payload = snapshot.get(entry.record_id, {}) if entry.record_id else {}
+            payload = self._review_snapshot.get(entry.record_id, {}) if entry.record_id else {}
             if not isinstance(payload, dict):
                 payload = {}
             values = self._values_for_entry(entry, payload)
@@ -6944,14 +6953,15 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._counts_label.setText(" | ".join(parts))
 
     def _review_payload_for_id(self, record_id: Optional[str]) -> Dict[str, Any]:
-        if not record_id or not callable(self._transition_reviews_provider):
+        if not record_id:
             return {}
-        try:
-            snapshot = self._transition_reviews_provider()
-        except Exception:
-            return {}
-        payload = snapshot.get(record_id, {}) if isinstance(snapshot, dict) else {}
+        payload = self._review_snapshot.get(record_id, {})
         return dict(payload) if isinstance(payload, dict) else {}
+
+    def _set_cached_review_payload(self, record_id: str, payload: Mapping[str, Any]) -> None:
+        if not record_id:
+            return
+        self._review_snapshot[record_id] = dict(payload)
 
     @staticmethod
     def _values_for_entry(
@@ -7081,13 +7091,33 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._phase_controls.set_values(values)
         self._summary_label.setText(self._summary_text(entry, payload, values))
         self._apply_status_to_item(current, entry, payload, values)
-        self._display.set_record(
-            entry.record,
-            setpoint=_extract_setpoint(entry.record),
-            description="Select an annealing run to review.",
-            reviewed_values=values,
-            auto_values=entry.auto_values,
-        )
+        self._schedule_display_record(entry, values)
+
+    def _schedule_display_record(
+        self,
+        entry: _AnnealingTransitionReviewEntry,
+        values: Mapping[str, Any],
+    ) -> None:
+        self._render_generation += 1
+        generation = self._render_generation
+        reviewed_values = dict(values)
+        auto_values = dict(entry.auto_values)
+        self._display.clear("Loading selected annealing graph...")
+
+        def _render_if_current() -> None:
+            if generation != self._render_generation:
+                return
+            if self._current_record_id != entry.record_id:
+                return
+            self._display.set_record(
+                entry.record,
+                setpoint=_extract_setpoint(entry.record),
+                description="Select an annealing run to review.",
+                reviewed_values=reviewed_values,
+                auto_values=auto_values,
+            )
+
+        QtCore.QTimer.singleShot(25, _render_if_current)
 
     def _current_entry(self) -> Optional[_AnnealingTransitionReviewEntry]:
         item = self._current_item
@@ -7135,6 +7165,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
                 self._transition_reviews_setter(record_id, payload)
             except Exception:
                 return
+            self._set_cached_review_payload(record_id, payload)
             if entry is not None:
                 stored_payload = self._review_payload_for_id(record_id)
                 stored_values = self._values_for_entry(entry, stored_payload)
@@ -7190,6 +7221,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             self._transition_reviews_setter(record_id, payload)
         except Exception:
             return
+        self._set_cached_review_payload(record_id, payload)
         refreshed = self._review_payload_for_id(record_id)
         refreshed_values = self._values_for_entry(entry, refreshed)
         self._phase_controls.set_auto_values(entry.auto_values)
@@ -7290,14 +7322,6 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             if count <= 0:
                 return
             current_row = self._tree.indexOfTopLevelItem(self._current_item) if self._current_item is not None else -1
-            snapshot: Dict[str, Any] = {}
-            if callable(self._transition_reviews_provider):
-                try:
-                    raw_snapshot = self._transition_reviews_provider()
-                except Exception:
-                    raw_snapshot = {}
-                if isinstance(raw_snapshot, dict):
-                    snapshot = raw_snapshot
             for offset in range(1, count + 1):
                 row = (current_row + offset) % count
                 item = self._tree.topLevelItem(row)
@@ -7308,7 +7332,7 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
                     entry = self._entries[int(index)]
                 except Exception:
                     continue
-                payload = snapshot.get(entry.record_id, {}) if entry.record_id else {}
+                payload = self._review_snapshot.get(entry.record_id, {}) if entry.record_id else {}
                 if not isinstance(payload, dict):
                     payload = {}
                 status = str(payload.get("status") or "").strip()
@@ -13631,7 +13655,7 @@ class AnnealingSection(MiniDatabaseSection):
         self._transition_review_store_timer.timeout.connect(self._store_transition_reviews)
         self._transition_review_update_timer = QtCore.QTimer(self)
         self._transition_review_update_timer.setSingleShot(True)
-        self._transition_review_update_timer.setInterval(500)
+        self._transition_review_update_timer.setInterval(5000)
         self._transition_review_update_timer.timeout.connect(self.data_updated.emit)
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, dict):
