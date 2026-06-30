@@ -1485,6 +1485,7 @@ def _prepare_public_extra_export_frame(frame: pd.DataFrame | None) -> tuple[pd.D
 ANNEALING_TRANSITION_EXPORT_SHEET = "Annealing transitions"
 VSM_TRANSITION_EXPORT_SHEET = "VSM transitions"
 TMA_TARGET_EXPORT_SHEET = "TMA targets"
+ANALYSIS_EXPORT_SHEET = "Analysis"
 ANNEALING_TRANSITION_EXPORT_COLUMNS = [
     "Composition",
     "Microwire",
@@ -1523,6 +1524,77 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA Ms",
     "TMA Mf",
 ]
+ANALYSIS_ROW_TYPE_COLUMN = "Analysis row type"
+ANALYSIS_BASE_PREFERRED_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "e/a",
+    "Tt est (°C)",
+    "d (µm)",
+    "D (µm)",
+    "d/D",
+    "Brittle",
+    "Core temperature (°C)",
+    "Glass temperature (°C)",
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    "Underpressure",
+    "Glass pull-off",
+    "Length (m)",
+    "Mass (g)",
+    "Resistance (Ω)",
+]
+ANALYSIS_BASE_EXCLUDED_COLUMNS = {
+    "As (mA)",
+    "Ms (mA)",
+    "As current density (A/mm^2)",
+    "Ms current density (A/mm^2)",
+    "Current annealing transition currents",
+    "Current annealing transition status",
+    "Current annealing transition review counts",
+    "As (°C)",
+    "Af (°C)",
+    "Ms (°C)",
+    "Mf (°C)",
+    "VSM transition temp status",
+    "VSM transition temp review counts",
+    "TMA transition currents by stress/load",
+    "TMA strain by stress/load",
+    "TMA transition status",
+    "TMA transition review counts",
+}
+ANALYSIS_CA_COLUMN_MAP = {
+    "Annealing run": "CA graph",
+    "Annealing current (mA)": "CA current (mA)",
+    "Annealing As1": "CA As1 (mA)",
+    "Annealing Af1": "CA Af1 (mA)",
+    "Annealing Ms1": "CA Ms1 (mA)",
+    "Annealing Mf1": "CA Mf1 (mA)",
+    "Annealing As2": "CA As2 (mA)",
+    "Annealing Af2": "CA Af2 (mA)",
+    "Annealing Ms2": "CA Ms2 (mA)",
+    "Annealing Mf2": "CA Mf2 (mA)",
+}
+ANALYSIS_VSM_COLUMN_MAP = {
+    "VSM scan": "VSM scan",
+    "VSM As": "VSM As (°C)",
+    "VSM Af": "VSM Af (°C)",
+    "VSM Ms": "VSM Ms (°C)",
+    "VSM Mf": "VSM Mf (°C)",
+}
+ANALYSIS_TMA_COLUMN_MAP = {
+    "TMA run": "TMA run",
+    "TMA target": "TMA target",
+    "TMA target type": "TMA target type",
+    "TMA stress (MPa)": "TMA stress (MPa)",
+    "TMA load (g)": "TMA load (g)",
+    "TMA strain (%)": "TMA strain (%)",
+    "TMA strain peak current (mA)": "TMA strain peak current (mA)",
+    "TMA As": "TMA As (mA)",
+    "TMA Af": "TMA Af (mA)",
+    "TMA Ms": "TMA Ms (mA)",
+    "TMA Mf": "TMA Mf (mA)",
+}
 _TRANSITION_REVIEW_FINAL_STATUSES = {"accepted_auto", "manual_adjusted", "no_transition"}
 _TRANSITION_REVIEW_EXCLUDED_STATUSES = {"excluded"}
 _TRANSITION_REVIEW_NO_TRANSITION_STATUSES = {"no_transition", "No transition"}
@@ -2128,6 +2200,124 @@ def _sections_represented_in_builder_project(sections: Mapping[str, object]) -> 
     return sorted(dict.fromkeys(represented))
 
 
+def _analysis_base_columns(frame: pd.DataFrame) -> list[str]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    columns = [str(column) for column in frame.columns]
+    preferred = [column for column in ANALYSIS_BASE_PREFERRED_COLUMNS if column in columns]
+    remaining = [
+        column
+        for column in columns
+        if column not in preferred
+        and column not in ANALYSIS_BASE_EXCLUDED_COLUMNS
+        and not column.startswith("_")
+        and not column.startswith("J_")
+        and "graph" not in column.casefold()
+        and "figure" not in column.casefold()
+        and "origin" not in column.casefold()
+    ]
+    return list(dict.fromkeys([*preferred, *remaining]))
+
+
+def _analysis_identity_key(row: Mapping[str, object]) -> tuple[str, str]:
+    return (
+        str(row.get("Composition") or "").strip(),
+        str(row.get("Microwire") or "").strip(),
+    )
+
+
+def _analysis_rows_from_detail_frame(
+    *,
+    detail_frame: pd.DataFrame | None,
+    base_lookup: Mapping[tuple[str, str], Mapping[str, object]],
+    base_columns: Sequence[str],
+    row_type: str,
+    column_map: Mapping[str, str],
+) -> list[dict[str, object]]:
+    if detail_frame is None or not isinstance(detail_frame, pd.DataFrame) or detail_frame.empty:
+        return []
+    rows: list[dict[str, object]] = []
+    for detail in detail_frame.to_dict(orient="records"):
+        key = _analysis_identity_key(detail)
+        if not key[0] or not key[1]:
+            continue
+        base = dict(base_lookup.get(key, {}))
+        if not base:
+            base = {column: "" for column in base_columns}
+            base["Composition"], base["Microwire"] = key
+        row = {column: base.get(column, "") for column in base_columns}
+        row[ANALYSIS_ROW_TYPE_COLUMN] = row_type
+        for source, target in column_map.items():
+            if source in detail:
+                row[target] = detail.get(source)
+        rows.append(row)
+    return rows
+
+
+def _expanded_analysis_frame(
+    assemble_frame: pd.DataFrame,
+    extra_frames: Mapping[str, pd.DataFrame | None],
+) -> pd.DataFrame:
+    if not isinstance(assemble_frame, pd.DataFrame) or assemble_frame.empty:
+        return pd.DataFrame()
+    base_columns = _analysis_base_columns(assemble_frame)
+    base_lookup: dict[tuple[str, str], dict[str, object]] = {}
+    for base in assemble_frame.to_dict(orient="records"):
+        key = _analysis_identity_key(base)
+        if key[0] and key[1] and key not in base_lookup:
+            base_lookup[key] = {column: base.get(column, "") for column in base_columns}
+
+    rows: list[dict[str, object]] = []
+    rows.extend(
+        _analysis_rows_from_detail_frame(
+            detail_frame=extra_frames.get(ANNEALING_TRANSITION_EXPORT_SHEET),
+            base_lookup=base_lookup,
+            base_columns=base_columns,
+            row_type="Current annealing",
+            column_map=ANALYSIS_CA_COLUMN_MAP,
+        )
+    )
+    rows.extend(
+        _analysis_rows_from_detail_frame(
+            detail_frame=extra_frames.get(VSM_TRANSITION_EXPORT_SHEET),
+            base_lookup=base_lookup,
+            base_columns=base_columns,
+            row_type="VSM",
+            column_map=ANALYSIS_VSM_COLUMN_MAP,
+        )
+    )
+    rows.extend(
+        _analysis_rows_from_detail_frame(
+            detail_frame=extra_frames.get(TMA_TARGET_EXPORT_SHEET),
+            base_lookup=base_lookup,
+            base_columns=base_columns,
+            row_type="TMA",
+            column_map=ANALYSIS_TMA_COLUMN_MAP,
+        )
+    )
+
+    represented = {_analysis_identity_key(row) for row in rows}
+    for key, base in base_lookup.items():
+        if key in represented:
+            continue
+        row = {column: base.get(column, "") for column in base_columns}
+        row[ANALYSIS_ROW_TYPE_COLUMN] = "Sample summary"
+        rows.append(row)
+
+    analysis_columns = list(
+        dict.fromkeys(
+            [
+                *base_columns,
+                ANALYSIS_ROW_TYPE_COLUMN,
+                *ANALYSIS_CA_COLUMN_MAP.values(),
+                *ANALYSIS_VSM_COLUMN_MAP.values(),
+                *ANALYSIS_TMA_COLUMN_MAP.values(),
+            ]
+        )
+    )
+    return pd.DataFrame(rows, columns=analysis_columns)
+
+
 def _current_git_commit() -> str | None:
     try:
         result = subprocess.run(
@@ -2167,6 +2357,7 @@ def _write_assemble_workbook(
         export_frame, public_filters["assemble"] = _prepare_public_assemble_main_frame(frame)
         for sheet_name, sheet_frame in list(export_extra_frames.items()):
             export_extra_frames[sheet_name], public_filters[sheet_name] = _prepare_public_extra_export_frame(sheet_frame)
+    analysis_frame = _expanded_analysis_frame(export_frame, export_extra_frames)
 
     serialised = _serialise_assemble_export_frame(export_frame)
     if preset == "public":
@@ -2194,6 +2385,15 @@ def _write_assemble_workbook(
     hidden_sheets: list[str] = []
     extra_sheets: dict[str, dict[str, object]] = {}
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        analysis_sheet: dict[str, object] | None = None
+        if not analysis_frame.empty:
+            serialised_analysis = _serialise_assemble_export_frame(analysis_frame)
+            serialised_analysis.to_excel(writer, sheet_name=ANALYSIS_EXPORT_SHEET, index=False)
+            analysis_sheet = {
+                "row_count": int(len(serialised_analysis.index)),
+                "column_count": int(len(serialised_analysis.columns)),
+                "columns": [str(column) for column in serialised_analysis.columns],
+            }
         main_frame.to_excel(writer, sheet_name="Assemble", index=False)
         for sheet_name, sheet_frame in export_extra_frames.items():
             if sheet_frame is None or sheet_frame.empty:
@@ -2223,6 +2423,7 @@ def _write_assemble_workbook(
         "dropped_columns": dropped_columns,
         "row_count": int(len(main_frame.index)),
         "column_count": int(len(main_frame.columns)),
+        "analysis_sheet": analysis_sheet,
         "extra_sheets": extra_sheets,
         "public_filters": public_filters,
     }
@@ -2365,6 +2566,7 @@ def _export_builder_assemble_workbook(
         "dropped_columns": workbook_info["dropped_columns"],
         "hidden_sheets": workbook_info["hidden_sheets"],
         "audit_sheet": workbook_info["audit_sheet"],
+        "analysis_sheet": workbook_info["analysis_sheet"],
         "extra_sheets": workbook_info["extra_sheets"],
         "public_filters": workbook_info["public_filters"],
         "rebuild": rebuild_result,
@@ -2441,6 +2643,7 @@ def _run_builder_export_assemble_command(
         "dropped_columns": workbook_info["dropped_columns"],
         "hidden_sheets": workbook_info["hidden_sheets"],
         "audit_sheet": workbook_info["audit_sheet"],
+        "analysis_sheet": workbook_info["analysis_sheet"],
         "extra_sheets": workbook_info["extra_sheets"],
         "public_filters": workbook_info["public_filters"],
         "rebuild": None,
@@ -2457,6 +2660,7 @@ def _run_builder_export_assemble_command(
         "column_count": workbook_info["column_count"],
         "dropped_columns": workbook_info["dropped_columns"],
         "hidden_sheets": workbook_info["hidden_sheets"],
+        "analysis_sheet": workbook_info["analysis_sheet"],
         "extra_sheets": workbook_info["extra_sheets"],
         "public_filters": workbook_info["public_filters"],
     }

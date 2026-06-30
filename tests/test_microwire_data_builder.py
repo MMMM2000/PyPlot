@@ -11445,7 +11445,23 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
         assembly._write_expanded_excel_export(output, frame)  # noqa: SLF001
 
         workbook = openpyxl.load_workbook(output, read_only=True, data_only=True)
-        assert workbook.sheetnames[:2] == ["Assemble", "TMA targets"]
+        assert workbook.sheetnames[:3] == ["Analysis", "Assemble", "TMA targets"]
+        analysis_headers = [cell.value for cell in next(workbook["Analysis"].iter_rows(max_row=1))]
+        assert "Analysis row type" in analysis_headers
+        assert "TMA target type" in analysis_headers
+        assert "TMA As (mA)" in analysis_headers
+        assert "TMA strain (%)" in analysis_headers
+        assert "TMA strain by stress/load" not in analysis_headers
+        analysis_rows = [
+            dict(zip(analysis_headers, row, strict=False))
+            for row in workbook["Analysis"].iter_rows(min_row=2, values_only=True)
+        ]
+        assert [row["Analysis row type"] for row in analysis_rows] == ["TMA", "TMA"]
+        assert [row["TMA target type"] for row in analysis_rows] == [
+            "First overheating",
+            "Stress/load target",
+        ]
+        assert [row["TMA As (mA)"] for row in analysis_rows] == [20, 40]
         assemble_headers = [cell.value for cell in next(workbook["Assemble"].iter_rows(max_row=1))]
         assert "TMA strain by stress/load" not in assemble_headers
         assert "TMA transition currents by stress/load" not in assemble_headers

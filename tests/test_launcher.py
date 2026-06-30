@@ -224,10 +224,42 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert manifest["extra_sheets"]["Annealing transitions"]["row_count"] == 1
     assert manifest["extra_sheets"]["VSM transitions"]["row_count"] == 1
     assert manifest["extra_sheets"]["TMA targets"]["row_count"] == 4
+    assert manifest["analysis_sheet"]["row_count"] == 6
     assert manifest["git_commit"]
 
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames[:5] == [
+        "Analysis",
+        "Assemble",
+        "Annealing transitions",
+        "VSM transitions",
+        "TMA targets",
+    ]
     assert workbook["Assemble audit"].sheet_state == "hidden"
+    analysis_headers = [cell.value for cell in workbook["Analysis"][1]]
+    assert "Analysis row type" in analysis_headers
+    assert "CA As1 (mA)" in analysis_headers
+    assert "VSM As (\u00b0C)" in analysis_headers
+    assert "TMA target type" in analysis_headers
+    assert "TMA As (mA)" in analysis_headers
+    assert "TMA strain (%)" in analysis_headers
+    assert "TMA strain by stress/load" not in analysis_headers
+    analysis_rows = [
+        dict(zip(analysis_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Analysis"].iter_rows(min_row=2)
+    ]
+    assert [row["Analysis row type"] for row in analysis_rows] == [
+        "Current annealing",
+        "VSM",
+        "TMA",
+        "TMA",
+        "TMA",
+        "TMA",
+    ]
+    assert analysis_rows[0]["CA As1 (mA)"] == "No transition"
+    assert analysis_rows[1]["VSM As (\u00b0C)"] == "No transition"
+    assert analysis_rows[2]["TMA target type"] == "Stress/load target"
+    assert analysis_rows[2]["TMA strain (%)"] == 5.16
     headers = [cell.value for cell in workbook["Assemble"][1]]
     assert "Data source" not in headers
     assert "Source label" not in headers
@@ -403,7 +435,16 @@ def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixe
         "excluded_oe_rows": 1,
         "normalised_suffix_rows": 2,
     }
+    assert info["analysis_sheet"]["row_count"] == 2
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    analysis_headers = [cell.value for cell in workbook["Analysis"][1]]
+    analysis_rows = [
+        dict(zip(analysis_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Analysis"].iter_rows(min_row=2)
+    ]
+    assert [row["Microwire"] for row in analysis_rows] == ["5/4", "5/4"]
+    assert [row["Analysis row type"] for row in analysis_rows] == ["TMA", "TMA"]
+    assert [row["TMA target"] for row in analysis_rows] == ["50 MPa / 1 g", "100 MPa / 2 g"]
     headers = [cell.value for cell in workbook["Assemble"][1]]
     rows = [
         dict(zip(headers, [cell.value for cell in row_cells], strict=False))
