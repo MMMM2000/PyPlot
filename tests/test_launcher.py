@@ -219,6 +219,8 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "internal review note" in manifest["dropped_columns"]
     assert "provenance file" in manifest["dropped_columns"]
     assert manifest["hidden_sheets"] == ["Assemble audit"]
+    assert manifest["extra_sheets"]["Annealing transitions"]["row_count"] == 1
+    assert manifest["extra_sheets"]["VSM transitions"]["row_count"] == 1
     assert manifest["extra_sheets"]["TMA targets"]["row_count"] == 4
     assert manifest["git_commit"]
 
@@ -258,6 +260,43 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "Measured" in audit_row
     assert "Ko\u0161ice" in audit_row
     assert "G:/internal/provenance.json" in audit_row
+    annealing_headers = [cell.value for cell in workbook["Annealing transitions"][1]]
+    annealing_rows = [
+        dict(zip(annealing_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Annealing transitions"].iter_rows(min_row=2)
+    ]
+    assert annealing_rows == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/2",
+            "Annealing run": None,
+            "Annealing current (mA)": None,
+            "Annealing As1": "No transition",
+            "Annealing Af1": "No transition",
+            "Annealing Ms1": "No transition",
+            "Annealing Mf1": "No transition",
+            "Annealing As2": "No transition",
+            "Annealing Af2": "No transition",
+            "Annealing Ms2": "No transition",
+            "Annealing Mf2": "No transition",
+        }
+    ]
+    vsm_headers = [cell.value for cell in workbook["VSM transitions"][1]]
+    vsm_rows = [
+        dict(zip(vsm_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["VSM transitions"].iter_rows(min_row=2)
+    ]
+    assert vsm_rows == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/2",
+            "VSM scan": None,
+            "VSM As": "No transition",
+            "VSM Af": "No transition",
+            "VSM Ms": "No transition",
+            "VSM Mf": "No transition",
+        }
+    ]
     tma_headers = [cell.value for cell in workbook["TMA targets"][1]]
     tma_rows = [
         dict(zip(tma_headers, [cell.value for cell in row_cells], strict=False))
@@ -394,6 +433,122 @@ def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixe
     assert [row["Microwire"] for row in tma_rows] == ["5/4", "5/4"]
     assert [row["TMA run"] for row in tma_rows] == ["run-a", "run-b"]
     assert [row["TMA target"] for row in tma_rows] == ["50 MPa / 1 g", "100 MPa / 2 g"]
+
+
+def test_expanded_transition_export_frames_use_review_records() -> None:
+    sections = {
+        "annealing": {
+            "extra": {
+                "transition_reviews": {
+                    "records": {
+                        "anneal-accepted": {
+                            "status": "manual_adjusted",
+                            "composition": "Ni50Fe27Ga23",
+                            "microwire": "12/2",
+                            "graph_label": "Ni50Fe27Ga23 12_2 100mA",
+                            "setpoint_mA": 100,
+                            "final_values_mA": {"As1": 30.0, "Af1": 70.0},
+                        },
+                        "anneal-none": {
+                            "status": "no_transition",
+                            "composition": "Ni50Fe27Ga23",
+                            "microwire": "12/3",
+                            "graph_label": "Ni50Fe27Ga23 12_3 80mA",
+                            "setpoint_mA": 80,
+                        },
+                        "anneal-excluded": {
+                            "status": "excluded",
+                            "composition": "Ni50Fe27Ga23",
+                            "microwire": "12/4",
+                            "graph_label": "excluded",
+                        },
+                    }
+                }
+            }
+        },
+        "vsm_temperature_scan": {
+            "extra": {
+                "transition_reviews": {
+                    "records": {
+                        "vsm-accepted": {
+                            "status": "accepted_auto",
+                            "sample": "Ni50Fe27Ga23 12_2",
+                            "record_label": "VSM 12_2 scan",
+                            "final_values_C": {"As": -20.0, "Af": 15.0, "Ms": 5.0, "Mf": -30.0},
+                        },
+                        "vsm-none": {
+                            "status": "no_transition",
+                            "sample": "Ni50Fe27Ga23 12_3",
+                            "record_label": "VSM 12_3 scan",
+                        },
+                        "vsm-excluded": {
+                            "status": "excluded",
+                            "sample": "Ni50Fe27Ga23 12_4",
+                            "record_label": "excluded",
+                        },
+                    }
+                }
+            }
+        },
+    }
+
+    annealing = launcher_module._expanded_annealing_transition_frame_from_sections(sections)  # noqa: SLF001
+    vsm = launcher_module._expanded_vsm_transition_frame_from_sections(sections)  # noqa: SLF001
+
+    annealing_rows = annealing.to_dict(orient="records")
+    assert annealing_rows[0]["Composition"] == "Ni50Fe27Ga23"
+    assert annealing_rows[0]["Microwire"] == "12/2"
+    assert annealing_rows[0]["Annealing run"] == "Ni50Fe27Ga23 12_2 100mA"
+    assert annealing_rows[0]["Annealing current (mA)"] == 100
+    assert annealing_rows[0]["Annealing As1"] == 30.0
+    assert annealing_rows[0]["Annealing Af1"] == 70.0
+    assert all(
+        pd.isna(annealing_rows[0][column])
+        for column in (
+            "Annealing Ms1",
+            "Annealing Mf1",
+            "Annealing As2",
+            "Annealing Af2",
+            "Annealing Ms2",
+            "Annealing Mf2",
+        )
+    )
+    assert annealing_rows[1:] == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "Annealing run": "Ni50Fe27Ga23 12_3 80mA",
+            "Annealing current (mA)": 80,
+            "Annealing As1": "No transition",
+            "Annealing Af1": "No transition",
+            "Annealing Ms1": "No transition",
+            "Annealing Mf1": "No transition",
+            "Annealing As2": "No transition",
+            "Annealing Af2": "No transition",
+            "Annealing Ms2": "No transition",
+            "Annealing Mf2": "No transition",
+        },
+    ]
+    assert vsm.to_dict(orient="records") == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/2",
+            "VSM scan": "VSM 12_2 scan",
+            "VSM As": -20.0,
+            "VSM Af": 15.0,
+            "VSM Ms": 5.0,
+            "VSM Mf": -30.0,
+        },
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "VSM scan": "VSM 12_3 scan",
+            "VSM As": "No transition",
+            "VSM Af": "No transition",
+            "VSM Ms": "No transition",
+            "VSM Mf": "No transition",
+        },
+    ]
 
 
 def test_tma_target_export_includes_strain_only_record_payloads() -> None:

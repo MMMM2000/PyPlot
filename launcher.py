@@ -1387,7 +1387,7 @@ def _prepare_public_assemble_main_frame(frame: pd.DataFrame) -> tuple[pd.DataFra
     return pd.DataFrame(grouped_rows, columns=list(working.columns)), info
 
 
-def _prepare_public_tma_target_frame(frame: pd.DataFrame | None) -> tuple[pd.DataFrame | None, dict[str, int]]:
+def _prepare_public_extra_export_frame(frame: pd.DataFrame | None) -> tuple[pd.DataFrame | None, dict[str, int]]:
     info = {
         "excluded_oe_rows": 0,
         "normalised_suffix_rows": 0,
@@ -1408,7 +1408,32 @@ def _prepare_public_tma_target_frame(frame: pd.DataFrame | None) -> tuple[pd.Dat
     return working, info
 
 
+ANNEALING_TRANSITION_EXPORT_SHEET = "Annealing transitions"
+VSM_TRANSITION_EXPORT_SHEET = "VSM transitions"
 TMA_TARGET_EXPORT_SHEET = "TMA targets"
+ANNEALING_TRANSITION_EXPORT_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "Annealing run",
+    "Annealing current (mA)",
+    "Annealing As1",
+    "Annealing Af1",
+    "Annealing Ms1",
+    "Annealing Mf1",
+    "Annealing As2",
+    "Annealing Af2",
+    "Annealing Ms2",
+    "Annealing Mf2",
+]
+VSM_TRANSITION_EXPORT_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "VSM scan",
+    "VSM As",
+    "VSM Af",
+    "VSM Ms",
+    "VSM Mf",
+]
 TMA_TARGET_EXPORT_COLUMNS = [
     "Composition",
     "Microwire",
@@ -1423,6 +1448,11 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA Ms",
     "TMA Mf",
 ]
+_TRANSITION_REVIEW_FINAL_STATUSES = {"accepted_auto", "manual_adjusted", "no_transition"}
+_TRANSITION_REVIEW_EXCLUDED_STATUSES = {"excluded"}
+_TRANSITION_REVIEW_NO_TRANSITION_STATUSES = {"no_transition", "No transition"}
+_ANNEALING_LABELS = ("As1", "Af1", "Ms1", "Mf1", "As2", "Af2", "Ms2", "Mf2")
+_VSM_LABELS = ("As", "Af", "Ms", "Mf")
 _TMA_TARGET_RE = re.compile(
     r"(?:^|:\s*)(?P<stress>[-+]?\d+(?:\.\d+)?)\s*MPa"
     r"(?:\s*/\s*(?P<load>[-+]?\d+(?:\.\d+)?)\s*g)?",
@@ -1540,7 +1570,7 @@ def _sample_to_tma_identity(sample: object) -> tuple[str, str]:
 
 
 def _normalise_tma_status(value: object) -> str:
-    return str(value or "").strip().replace("-", "_").casefold()
+    return str(value or "").strip().replace("-", "_").replace(" ", "_").casefold()
 
 
 def _mini_dma_review_records_from_sections(sections: Mapping[str, object]) -> dict[str, dict[str, object]]:
@@ -1599,6 +1629,211 @@ def _compact_tma_export_lines(row: Mapping[str, object], *columns: str) -> tuple
                 return tuple(value)
             return (value,)
     return ()
+
+
+def _normalise_transition_review_status(value: object) -> str:
+    return str(value or "").strip().replace("-", "_").replace(" ", "_").casefold()
+
+
+def _section_extra_mapping(sections: Mapping[str, object], section_name: str) -> Mapping[str, object]:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return {}
+    extra = section.get("extra")
+    return extra if isinstance(extra, Mapping) else {}
+
+
+def _review_records_from_section_extra(
+    sections: Mapping[str, object],
+    section_name: str,
+    extra_key: str = "transition_reviews",
+) -> dict[str, dict[str, object]]:
+    extra = _section_extra_mapping(sections, section_name)
+    raw_reviews = extra.get(extra_key)
+    if isinstance(raw_reviews, Mapping) and isinstance(raw_reviews.get("records"), Mapping):
+        raw_reviews = raw_reviews.get("records")
+    if not isinstance(raw_reviews, Mapping):
+        return {}
+    return {
+        str(record_id): dict(payload)
+        for record_id, payload in raw_reviews.items()
+        if isinstance(record_id, str) and isinstance(payload, Mapping)
+    }
+
+
+def _clean_numeric_transition_values(value: object, labels: Sequence[str]) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    result: dict[str, float] = {}
+    for label in labels:
+        raw = value.get(label)
+        if isinstance(raw, (int, float)) and math.isfinite(float(raw)):
+            result[label] = float(raw)
+    return result
+
+
+def _transition_sample_identity_from_review(
+    review: Mapping[str, object],
+    *,
+    composition_key: str = "composition",
+    microwire_key: str = "microwire",
+    sample_key: str = "sample_key",
+) -> tuple[str, str]:
+    composition = str(review.get(composition_key) or "").strip()
+    microwire = str(review.get(microwire_key) or "").strip()
+    if composition and microwire:
+        return composition, microwire
+    sample = str(review.get("sample") or "").strip()
+    if sample:
+        parts = sample.split()
+        if parts:
+            composition = composition or parts[0]
+        if len(parts) >= 2:
+            microwire = microwire or parts[1].replace("_", "/").replace("-", "/")
+    key = str(review.get(sample_key) or "").strip()
+    if key:
+        parts = key.split("|")
+        if len(parts) >= 3:
+            composition = composition or parts[0]
+            try:
+                microwire = microwire or f"{int(parts[1])}/{int(parts[2])}"
+            except (TypeError, ValueError):
+                microwire = microwire or f"{parts[1]}/{parts[2]}"
+    return composition, microwire
+
+
+def _compact_transition_status_text(row: Mapping[str, object], *columns: str) -> str:
+    for column in columns:
+        value = row.get(column)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _compact_transition_value(row: Mapping[str, object], *columns: str) -> object:
+    for column in columns:
+        value = row.get(column)
+        if not _is_blank_export_value(value):
+            return value
+    return None
+
+
+def _expanded_annealing_transition_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for _record_id, review in _review_records_from_section_extra(sections, "annealing").items():
+        status = _normalise_transition_review_status(review.get("status"))
+        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            continue
+        if status not in _TRANSITION_REVIEW_FINAL_STATUSES:
+            continue
+        composition, microwire = _transition_sample_identity_from_review(review)
+        row: dict[str, object] = {
+            "Composition": composition,
+            "Microwire": microwire,
+            "Annealing run": str(review.get("graph_label") or review.get("source_path") or "").strip(),
+            "Annealing current (mA)": review.get("setpoint_mA"),
+        }
+        if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+            for label in _ANNEALING_LABELS:
+                row[f"Annealing {label}"] = "No transition"
+        else:
+            values = _clean_numeric_transition_values(review.get("final_values_mA"), _ANNEALING_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("manual_values_mA"), _ANNEALING_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("auto_values_mA"), _ANNEALING_LABELS)
+            for label in _ANNEALING_LABELS:
+                if label in values:
+                    row[f"Annealing {label}"] = values[label]
+        rows.append(row)
+
+    if not rows:
+        for compact_row in _assemble_export_frame_from_sections(sections).to_dict(orient="records"):
+            status_text = _compact_transition_status_text(compact_row, "Current annealing transition status")
+            status = _normalise_transition_review_status(status_text)
+            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+                continue
+            has_values = any(
+                not _is_blank_export_value(_compact_transition_value(compact_row, f"{label} (mA)", label))
+                for label in _ANNEALING_LABELS
+            )
+            if status not in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES and not has_values:
+                continue
+            row = {
+                "Composition": compact_row.get("Composition"),
+                "Microwire": compact_row.get("Microwire"),
+                "Annealing run": "",
+                "Annealing current (mA)": "",
+            }
+            if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+                for label in _ANNEALING_LABELS:
+                    row[f"Annealing {label}"] = "No transition"
+            else:
+                for label in _ANNEALING_LABELS:
+                    value = _compact_transition_value(compact_row, f"{label} (mA)", label)
+                    if not _is_blank_export_value(value):
+                        row[f"Annealing {label}"] = value
+            rows.append(row)
+
+    return pd.DataFrame(rows, columns=ANNEALING_TRANSITION_EXPORT_COLUMNS)
+
+
+def _expanded_vsm_transition_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for _record_id, review in _review_records_from_section_extra(sections, "vsm_temperature_scan").items():
+        status = _normalise_transition_review_status(review.get("status"))
+        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            continue
+        if status not in _TRANSITION_REVIEW_FINAL_STATUSES:
+            continue
+        composition, microwire = _transition_sample_identity_from_review(review, sample_key="group_key")
+        row: dict[str, object] = {
+            "Composition": composition,
+            "Microwire": microwire,
+            "VSM scan": str(review.get("record_label") or review.get("record_path") or "").strip(),
+        }
+        if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+            for label in _VSM_LABELS:
+                row[f"VSM {label}"] = "No transition"
+        else:
+            values = _clean_numeric_transition_values(review.get("final_values_C"), _VSM_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("manual_values_C"), _VSM_LABELS)
+            if not values:
+                values = _clean_numeric_transition_values(review.get("auto_values_C"), _VSM_LABELS)
+            for label in _VSM_LABELS:
+                if label in values:
+                    row[f"VSM {label}"] = values[label]
+        rows.append(row)
+
+    if not rows:
+        for compact_row in _assemble_export_frame_from_sections(sections).to_dict(orient="records"):
+            status_text = _compact_transition_status_text(compact_row, "VSM transition temp status")
+            status = _normalise_transition_review_status(status_text)
+            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+                continue
+            has_values = any(
+                not _is_blank_export_value(_compact_transition_value(compact_row, f"{label} (°C)", f"{label} (C)", label))
+                for label in _VSM_LABELS
+            )
+            if status not in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES and not has_values:
+                continue
+            row = {
+                "Composition": compact_row.get("Composition"),
+                "Microwire": compact_row.get("Microwire"),
+                "VSM scan": "",
+            }
+            if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+                for label in _VSM_LABELS:
+                    row[f"VSM {label}"] = "No transition"
+            else:
+                for label in _VSM_LABELS:
+                    value = _compact_transition_value(compact_row, f"{label} (°C)", f"{label} (C)", label)
+                    if not _is_blank_export_value(value):
+                        row[f"VSM {label}"] = value
+            rows.append(row)
+
+    return pd.DataFrame(rows, columns=VSM_TRANSITION_EXPORT_COLUMNS)
 
 
 def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
@@ -1827,15 +2062,21 @@ def _write_assemble_workbook(
     frame: pd.DataFrame,
     preset: str,
     tma_frame: pd.DataFrame | None = None,
+    extra_frames: Mapping[str, pd.DataFrame | None] | None = None,
 ) -> dict[str, Any]:
     output_path = output_path.with_suffix(".xlsx")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_frame = frame
-    export_tma_frame = tma_frame
+    export_extra_frames: dict[str, pd.DataFrame | None] = {}
+    if extra_frames:
+        export_extra_frames.update(dict(extra_frames))
+    if tma_frame is not None and TMA_TARGET_EXPORT_SHEET not in export_extra_frames:
+        export_extra_frames[TMA_TARGET_EXPORT_SHEET] = tma_frame
     public_filters: dict[str, dict[str, int]] = {}
     if preset == "public":
         export_frame, public_filters["assemble"] = _prepare_public_assemble_main_frame(frame)
-        export_tma_frame, public_filters[TMA_TARGET_EXPORT_SHEET] = _prepare_public_tma_target_frame(tma_frame)
+        for sheet_name, sheet_frame in list(export_extra_frames.items()):
+            export_extra_frames[sheet_name], public_filters[sheet_name] = _prepare_public_extra_export_frame(sheet_frame)
 
     serialised = _serialise_assemble_export_frame(export_frame)
     if preset == "public":
@@ -1864,13 +2105,15 @@ def _write_assemble_workbook(
     extra_sheets: dict[str, dict[str, object]] = {}
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         main_frame.to_excel(writer, sheet_name="Assemble", index=False)
-        if export_tma_frame is not None and not export_tma_frame.empty:
-            serialised_tma = _serialise_assemble_export_frame(export_tma_frame)
-            serialised_tma.to_excel(writer, sheet_name=TMA_TARGET_EXPORT_SHEET, index=False)
-            extra_sheets[TMA_TARGET_EXPORT_SHEET] = {
-                "row_count": int(len(serialised_tma.index)),
-                "column_count": int(len(serialised_tma.columns)),
-                "columns": [str(column) for column in serialised_tma.columns],
+        for sheet_name, sheet_frame in export_extra_frames.items():
+            if sheet_frame is None or sheet_frame.empty:
+                continue
+            serialised_extra = _serialise_assemble_export_frame(sheet_frame)
+            serialised_extra.to_excel(writer, sheet_name=sheet_name, index=False)
+            extra_sheets[sheet_name] = {
+                "row_count": int(len(serialised_extra.index)),
+                "column_count": int(len(serialised_extra.columns)),
+                "columns": [str(column) for column in serialised_extra.columns],
             }
         if audit_columns:
             audit_frame = serialised.loc[:, audit_columns].copy()
@@ -1998,13 +2241,17 @@ def _export_builder_assemble_workbook(
         raise _AutomationRecipeError(
             "Builder project has no saved Assemble rows. Re-run with Assemble rebuild enabled."
         )
-    tma_frame = _expanded_tma_export_frame_from_sections(sections)
+    extra_frames = {
+        ANNEALING_TRANSITION_EXPORT_SHEET: _expanded_annealing_transition_frame_from_sections(sections),
+        VSM_TRANSITION_EXPORT_SHEET: _expanded_vsm_transition_frame_from_sections(sections),
+        TMA_TARGET_EXPORT_SHEET: _expanded_tma_export_frame_from_sections(sections),
+    }
 
     workbook_info = _write_assemble_workbook(
         output_path=output_path,
         frame=frame,
         preset=preset,
-        tma_frame=tma_frame,
+        extra_frames=extra_frames,
     )
     manifest_target = manifest_path.expanduser() if manifest_path is not None else output_path.with_suffix(".manifest.json")
     export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -2070,12 +2317,16 @@ def _run_builder_export_assemble_command(
         raise _AutomationRecipeError(
             f"Builder export_assemble command {command_index} has no Assemble rows to export."
         )
-    tma_frame = _expanded_tma_export_frame_from_sections(sections)
+    extra_frames = {
+        ANNEALING_TRANSITION_EXPORT_SHEET: _expanded_annealing_transition_frame_from_sections(sections),
+        VSM_TRANSITION_EXPORT_SHEET: _expanded_vsm_transition_frame_from_sections(sections),
+        TMA_TARGET_EXPORT_SHEET: _expanded_tma_export_frame_from_sections(sections),
+    }
     workbook_info = _write_assemble_workbook(
         output_path=output_path,
         frame=frame,
         preset=preset,
-        tma_frame=tma_frame,
+        extra_frames=extra_frames,
     )
     manifest_target = manifest_path or output_path.with_suffix(".manifest.json")
     payload = _load_json_object(output_project, label="Microwire Data Builder project copy") if output_project.exists() else {}
