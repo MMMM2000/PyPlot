@@ -299,6 +299,135 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
 
 
+def test_public_analysis_export_groups_expanded_rows_by_sample(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "grouped_analysis.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "d (\u00b5m)": 12.5,
+                "D (\u00b5m)": 60.3,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "d (\u00b5m)": 13.9,
+                "D (\u00b5m)": 51.8,
+            },
+        ]
+    )
+    annealing_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Annealing run": "Ni50Fe27Ga23 12_2 100mA.txt",
+                "Annealing current (mA)": 100,
+                "Annealing As1": 29,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "Annealing run": "Ni44Fe27Ga23Cu3Co3 1_2 60mA.txt",
+                "Annealing current (mA)": 60,
+                "Annealing As1": 38,
+            },
+        ]
+    )
+    vsm_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "VSM scan": "scan-a",
+                "VSM As": "No transition",
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "VSM scan": "scan-b",
+                "VSM As": 55,
+            },
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA run": "run-b",
+                "TMA target": "50 MPa / 1 g",
+                "TMA target type": "Stress/load target",
+                "TMA stress (MPa)": 50,
+                "TMA strain (%)": 1.2,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "TMA run": "run-a",
+                "TMA target": "1st: 20MPa / 0.31g",
+                "TMA target type": "First overheating",
+                "TMA stress (MPa)": 20,
+                "TMA strain (%)": 0.3,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "TMA run": "run-a",
+                "TMA target": "20 MPa / 0.31 g",
+                "TMA target type": "Stress/load target",
+                "TMA stress (MPa)": 20,
+                "TMA strain (%)": 0.6,
+            },
+        ]
+    )
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        extra_frames={
+            launcher_module.ANNEALING_TRANSITION_EXPORT_SHEET: annealing_frame,
+            launcher_module.VSM_TRANSITION_EXPORT_SHEET: vsm_frame,
+            launcher_module.TMA_TARGET_EXPORT_SHEET: tma_frame,
+        },
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames == ["Analysis"]
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    rows = [
+        dict(zip(headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in worksheet.iter_rows(min_row=2)
+    ]
+    identities = [(row["Composition"], row["Microwire"]) for row in rows]
+    assert identities == [
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni50Fe27Ga23", "12/2"),
+        ("Ni50Fe27Ga23", "12/2"),
+        ("Ni50Fe27Ga23", "12/2"),
+    ]
+    sample_rows = rows[:4]
+    assert [row["CA graph"] for row in sample_rows] == [
+        "Ni44Fe27Ga23Cu3Co3 1_2 60mA.txt",
+        None,
+        None,
+        None,
+    ]
+    assert sample_rows[1]["VSM scan"] == "scan-a"
+    assert [row["TMA target type"] for row in sample_rows[2:]] == [
+        "First overheating",
+        "Stress/load target",
+    ]
+    assert "Analysis row type" not in headers
+
+
 def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixes(
     tmp_path: Path,
 ) -> None:

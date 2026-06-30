@@ -2262,6 +2262,84 @@ def _analysis_identity_key(row: Mapping[str, object]) -> tuple[str, str]:
     )
 
 
+def _analysis_microwire_sort_key(value: object) -> tuple[object, ...]:
+    parts = _public_microwire_label_parts(value)
+    if parts is None:
+        return (1, str(value or "").strip().casefold())
+    draw, piece, suffix = parts
+    try:
+        draw_value = int(draw)
+        piece_value = int(piece)
+    except ValueError:
+        return (1, str(value or "").strip().casefold())
+    return (0, draw_value, piece_value, suffix.casefold())
+
+
+def _analysis_numeric_sort_value(value: object) -> tuple[int, float]:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return (0, float(value))
+    if isinstance(value, str):
+        text = value.strip().replace(",", ".")
+        if text:
+            try:
+                parsed = float(text)
+            except ValueError:
+                pass
+            else:
+                if math.isfinite(parsed):
+                    return (0, parsed)
+    return (1, 0.0)
+
+
+def _analysis_measurement_rank(row: Mapping[str, object]) -> int:
+    if any(not _is_blank_export_value(row.get(column)) for column in ANALYSIS_CA_COLUMN_MAP.values()):
+        return 0
+    if any(not _is_blank_export_value(row.get(column)) for column in ANALYSIS_VSM_COLUMN_MAP.values()):
+        return 1
+    if any(not _is_blank_export_value(row.get(column)) for column in ANALYSIS_TMA_COLUMN_MAP.values()):
+        return 2
+    return 9
+
+
+def _analysis_tma_target_type_rank(value: object) -> int:
+    text = str(value or "").strip().casefold()
+    if text == "first overheating":
+        return 0
+    if text == "stress/load target":
+        return 1
+    return 9
+
+
+def _analysis_sort_key(row: Mapping[str, object]) -> tuple[object, ...]:
+    rank = _analysis_measurement_rank(row)
+    common = (
+        str(row.get("Composition") or "").strip().casefold(),
+        _analysis_microwire_sort_key(row.get("Microwire")),
+        rank,
+    )
+    if rank == 0:
+        return (
+            *common,
+            _analysis_numeric_sort_value(row.get("CA current (mA)")),
+            str(row.get("CA graph") or "").strip().casefold(),
+        )
+    if rank == 1:
+        return (
+            *common,
+            str(row.get("VSM scan") or "").strip().casefold(),
+        )
+    if rank == 2:
+        return (
+            *common,
+            str(row.get("TMA run") or "").strip().casefold(),
+            _analysis_tma_target_type_rank(row.get("TMA target type")),
+            _analysis_numeric_sort_value(row.get("TMA stress (MPa)")),
+            _analysis_numeric_sort_value(row.get("TMA load (g)")),
+            str(row.get("TMA target") or "").strip().casefold(),
+        )
+    return common
+
+
 _VIDEO_TABLE_EXPORT_COLUMNS = (
     "Production datetime",
     "Length (m)",
@@ -2417,6 +2495,7 @@ def _expanded_analysis_frame(
             ]
         )
     )
+    rows.sort(key=_analysis_sort_key)
     return pd.DataFrame(rows, columns=analysis_columns)
 
 
