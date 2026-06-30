@@ -11407,6 +11407,67 @@ def test_assemble_column_header_move_marks_project_dirty(qtbot) -> None:
         assembly.close()
 
 
+def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path, monkeypatch) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "TMA strain by stress/load": [
+                        "1st: 50MPa / 0.83g: 1.36% @ 7 mA",
+                        "50 MPa / 0.83 g: 5.71% @ 15 mA",
+                    ],
+                    "TMA transition currents by stress/load": [
+                        "1st: 50MPa / 0.83g: As 20 mA, Af 30 mA",
+                        "50 MPa / 0.83 g: As 40 mA, Af 50 mA",
+                    ],
+                }
+            ]
+        )
+        section_payloads = {
+            "assemble": {
+                "columns": list(frame.columns),
+                "rows": frame.to_dict(orient="records"),
+            }
+        }
+        monkeypatch.setattr(
+            assembly,
+            "_current_project_section_payloads",
+            lambda: section_payloads,
+        )
+
+        output = tmp_path / "expanded.xlsx"
+        assembly._write_expanded_excel_export(output, frame)  # noqa: SLF001
+
+        workbook = openpyxl.load_workbook(output, read_only=True, data_only=True)
+        assert workbook.sheetnames[:2] == ["Assemble", "TMA targets"]
+        assemble_headers = [cell.value for cell in next(workbook["Assemble"].iter_rows(max_row=1))]
+        assert "TMA strain by stress/load" not in assemble_headers
+        assert "TMA transition currents by stress/load" not in assemble_headers
+        tma_headers = [cell.value for cell in next(workbook["TMA targets"].iter_rows(max_row=1))]
+        rows = [
+            dict(zip(tma_headers, row, strict=False))
+            for row in workbook["TMA targets"].iter_rows(min_row=2, values_only=True)
+        ]
+        assert [row["TMA target"] for row in rows] == [
+            "1st: 50MPa / 0.83g",
+            "50 MPa / 0.83 g",
+        ]
+        assert [row["TMA target type"] for row in rows] == [
+            "First overheating",
+            "Stress/load target",
+        ]
+        assert rows[0]["TMA As"] == 20
+        assert rows[1]["TMA As"] == 40
+    finally:
+        assembly.close()
+
+
 def test_assemble_preview_status_reports_hidden_oe_rows(qtbot) -> None:
     _ensure_qapp()
     assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)

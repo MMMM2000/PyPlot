@@ -1513,6 +1513,7 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "Microwire",
     "TMA run",
     "TMA target",
+    "TMA target type",
     "TMA stress (MPa)",
     "TMA load (g)",
     "TMA strain (%)",
@@ -1545,7 +1546,8 @@ _TMA_STRAIN_RE = re.compile(
 
 def _parse_tma_target_label(target_label: object) -> dict[str, object]:
     text = str(target_label or "").strip()
-    result: dict[str, object] = {"TMA target": text}
+    target_type = "First overheating" if _tma_target_prefix(text) == "1st" else "Stress/load target"
+    result: dict[str, object] = {"TMA target": text, "TMA target type": target_type}
     match = _TMA_TARGET_RE.search(text)
     if match is None:
         return result
@@ -1560,23 +1562,35 @@ def _parse_tma_target_label(target_label: object) -> dict[str, object]:
     return result
 
 
+def _tma_target_prefix(target_label: object) -> str:
+    text = str(target_label or "").strip()
+    if ":" not in text:
+        return ""
+    prefix = text.split(":", 1)[0].strip().casefold()
+    if prefix in {"1st", "first", "first overheating"}:
+        return "1st"
+    return prefix
+
+
 def _tma_target_identity(target_label: object) -> tuple[object, ...]:
     parsed = _parse_tma_target_label(target_label)
+    prefix = _tma_target_prefix(target_label)
     stress = parsed.get("TMA stress (MPa)")
     load = parsed.get("TMA load (g)")
     if isinstance(stress, (int, float)) and math.isfinite(float(stress)):
         load_value: object = None
         if isinstance(load, (int, float)) and math.isfinite(float(load)):
             load_value = round(float(load), 6)
-        return ("stress_load", round(float(stress), 6), load_value)
-    return ("label", str(target_label or "").strip().casefold())
+        return ("stress_load", prefix, round(float(stress), 6), load_value)
+    return ("label", prefix, str(target_label or "").strip().casefold())
 
 
 def _tma_target_stress_identity(target_label: object) -> tuple[object, ...] | None:
     parsed = _parse_tma_target_label(target_label)
+    prefix = _tma_target_prefix(target_label)
     stress = parsed.get("TMA stress (MPa)")
     if isinstance(stress, (int, float)) and math.isfinite(float(stress)):
-        return ("stress", round(float(stress), 6))
+        return ("stress", prefix, round(float(stress), 6))
     return None
 
 

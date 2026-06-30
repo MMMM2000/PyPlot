@@ -34798,7 +34798,7 @@ class AssemblySection(QtWidgets.QWidget):
                 suffix = ".csv"
         try:
             if suffix == ".xlsx":
-                frame.to_excel(path, index=False)
+                self._write_expanded_excel_export(path, frame)
             else:
                 frame.to_csv(path, index=False)
         except Exception as exc:
@@ -34823,6 +34823,46 @@ class AssemblySection(QtWidgets.QWidget):
             if getattr(series, "dtype", None) == object:
                 export_frame[column] = series.map(self._serialise_preview_value)
         return export_frame
+
+    def _current_project_section_payloads(self) -> Dict[str, Dict[str, Any]]:
+        payloads: Dict[str, Dict[str, Any]] = {}
+        for key, section in self.sections.items():
+            exporter = getattr(section, "export_project_payload", None)
+            if not callable(exporter):
+                continue
+            try:
+                payload = exporter()
+            except Exception:
+                self.logger.exception("Failed to collect %s payload for expanded export", key)
+                continue
+            if isinstance(payload, dict):
+                payloads[str(key)] = payload
+        return payloads
+
+    def _write_expanded_excel_export(self, path: Path, frame: pd.DataFrame) -> None:
+        try:
+            import launcher as launcher_module
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            raise RuntimeError("Expanded workbook exporter is unavailable.") from exc
+
+        section_payloads = self._current_project_section_payloads()
+        extra_frames = {
+            launcher_module.ANNEALING_TRANSITION_EXPORT_SHEET: (
+                launcher_module._expanded_annealing_transition_frame_from_sections(section_payloads)
+            ),
+            launcher_module.VSM_TRANSITION_EXPORT_SHEET: (
+                launcher_module._expanded_vsm_transition_frame_from_sections(section_payloads)
+            ),
+            launcher_module.TMA_TARGET_EXPORT_SHEET: (
+                launcher_module._expanded_tma_export_frame_from_sections(section_payloads)
+            ),
+        }
+        launcher_module._write_assemble_workbook(
+            output_path=path,
+            frame=frame,
+            preset="public",
+            extra_frames=extra_frames,
+        )
 
     def analysis_source_frame(self) -> pd.DataFrame:
         raw_frame = self._raw_preview_frame
@@ -36213,7 +36253,7 @@ class AssemblySection(QtWidgets.QWidget):
         excel_path = exports.get("excel")
         if excel_path is not None:
             try:
-                export_frame.to_excel(excel_path, index=False)
+                self._write_expanded_excel_export(excel_path, export_frame)
             except Exception:
                 self.logger.exception("Failed to rewrite Excel export from Assemble preview")
         if self._export_html:
