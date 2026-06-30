@@ -1175,6 +1175,8 @@ def _run_builder_rebuild_assemble_command_lightweight(
     dataframe = result.dataframe if hasattr(result, "dataframe") else pd.DataFrame()
     if not isinstance(dataframe, pd.DataFrame):
         dataframe = pd.DataFrame()
+    if "videos" in selected:
+        dataframe = _overlay_saved_video_table_values(dataframe, sections)
     if "annealing" in selected:
         dataframe = _overlay_builder_current_density_snapshot(
             builder_ui=builder_ui,
@@ -1549,6 +1551,20 @@ ANALYSIS_BASE_EXCLUDED_COLUMNS = {
     "Ms (mA)",
     "As current density (A/mm^2)",
     "Ms current density (A/mm^2)",
+    "As1 (mA)",
+    "Af1 (mA)",
+    "Ms1 (mA)",
+    "Mf1 (mA)",
+    "As2 (mA)",
+    "Af2 (mA)",
+    "Ms2 (mA)",
+    "Mf2 (mA)",
+    "As2-As1 (mA)",
+    "Af2-Af1 (mA)",
+    "Ms2-Ms1 (mA)",
+    "Mf2-Mf1 (mA)",
+    "Mf1-Af1 (mA)",
+    "Mf2-Af2 (mA)",
     "Current annealing transition currents",
     "Current annealing transition status",
     "Current annealing transition review counts",
@@ -2210,6 +2226,7 @@ def _analysis_base_columns(frame: pd.DataFrame) -> list[str]:
         for column in columns
         if column not in preferred
         and column not in ANALYSIS_BASE_EXCLUDED_COLUMNS
+        and not _assemble_public_drop_column(column)
         and not column.startswith("_")
         and not column.startswith("J_")
         and "graph" not in column.casefold()
@@ -2224,6 +2241,72 @@ def _analysis_identity_key(row: Mapping[str, object]) -> tuple[str, str]:
         str(row.get("Composition") or "").strip(),
         str(row.get("Microwire") or "").strip(),
     )
+
+
+_VIDEO_TABLE_EXPORT_COLUMNS = (
+    "Production datetime",
+    "Length (m)",
+    "Mass (g)",
+    "Resistance (Ω)",
+    "Core temperature (°C)",
+    "Glass temperature (°C)",
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    "Underpressure",
+    "Glass pull-off",
+    "Video end length (m)",
+    "Video wire range (m)",
+    "Notes",
+)
+
+
+def _overlay_saved_video_table_values(
+    dataframe: pd.DataFrame,
+    sections: Mapping[str, object],
+) -> pd.DataFrame:
+    if not isinstance(dataframe, pd.DataFrame) or dataframe.empty:
+        return dataframe
+    rows = _project_section_rows(sections.get("videos") if isinstance(sections, Mapping) else None)
+    if not rows:
+        return dataframe
+    lookup: dict[tuple[str, str], Mapping[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        key = _analysis_identity_key(row)
+        if not key[0] or not key[1]:
+            continue
+        if key not in lookup:
+            lookup[key] = row
+    if not lookup:
+        return dataframe
+
+    result = dataframe.copy()
+    for column in _VIDEO_TABLE_EXPORT_COLUMNS:
+        if column not in result.columns:
+            result[column] = None
+
+    def _is_missing(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        try:
+            return bool(pd.isna(value))
+        except (TypeError, ValueError):
+            return False
+
+    for idx, row in result.iterrows():
+        source = lookup.get(_analysis_identity_key(row))
+        if source is None:
+            continue
+        for column in _VIDEO_TABLE_EXPORT_COLUMNS:
+            candidate = source.get(column)
+            if _is_missing(candidate):
+                continue
+            if _is_missing(result.at[idx, column]):
+                result.at[idx, column] = candidate
+    return result
 
 
 def _analysis_rows_from_detail_frame(
@@ -2343,6 +2426,7 @@ def _write_assemble_workbook(
     preset: str,
     tma_frame: pd.DataFrame | None = None,
     extra_frames: Mapping[str, pd.DataFrame | None] | None = None,
+    analysis_frame: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     output_path = output_path.with_suffix(".xlsx")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2357,7 +2441,12 @@ def _write_assemble_workbook(
         export_frame, public_filters["assemble"] = _prepare_public_assemble_main_frame(frame)
         for sheet_name, sheet_frame in list(export_extra_frames.items()):
             export_extra_frames[sheet_name], public_filters[sheet_name] = _prepare_public_extra_export_frame(sheet_frame)
-    analysis_frame = _expanded_analysis_frame(export_frame, export_extra_frames)
+    analysis_source_frame = analysis_frame if isinstance(analysis_frame, pd.DataFrame) else export_frame
+    if preset == "public" and analysis_source_frame is not export_frame:
+        analysis_source_frame, public_filters["analysis_base"] = _prepare_public_assemble_main_frame(
+            analysis_source_frame
+        )
+    analysis_frame = _expanded_analysis_frame(analysis_source_frame, export_extra_frames)
 
     serialised = _serialise_assemble_export_frame(export_frame)
     if preset == "public":

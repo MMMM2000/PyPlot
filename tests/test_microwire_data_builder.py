@@ -11418,6 +11418,8 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
                 {
                     "Composition": "Ni50Fe27Ga23",
                     "Microwire": "12/2",
+                    "Production datetime": "2026-06-30 09:00",
+                    "Video wire range (m)": "0.10-0.12",
                     "TMA strain by stress/load": [
                         "1st: 50MPa / 0.83g: 1.36% @ 7 mA",
                         "50 MPa / 0.83 g: 5.71% @ 15 mA",
@@ -11429,6 +11431,8 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
                 }
             ]
         )
+        compact_frame = frame.drop(columns=["Production datetime", "Video wire range (m)"])
+        assembly._raw_preview_frame = frame  # noqa: SLF001
         section_payloads = {
             "assemble": {
                 "columns": list(frame.columns),
@@ -11442,7 +11446,7 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
         )
 
         output = tmp_path / "expanded.xlsx"
-        assembly._write_expanded_excel_export(output, frame)  # noqa: SLF001
+        assembly._write_expanded_excel_export(output, compact_frame)  # noqa: SLF001
 
         workbook = openpyxl.load_workbook(output, read_only=True, data_only=True)
         assert workbook.sheetnames[:3] == ["Analysis", "Assemble", "TMA targets"]
@@ -11451,6 +11455,8 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
         assert "TMA target type" in analysis_headers
         assert "TMA As (mA)" in analysis_headers
         assert "TMA strain (%)" in analysis_headers
+        assert "Production datetime" in analysis_headers
+        assert "Video wire range (m)" in analysis_headers
         assert "TMA strain by stress/load" not in analysis_headers
         analysis_rows = [
             dict(zip(analysis_headers, row, strict=False))
@@ -11462,7 +11468,13 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
             "Stress/load target",
         ]
         assert [row["TMA As (mA)"] for row in analysis_rows] == [20, 40]
+        assert [row["Production datetime"] for row in analysis_rows] == [
+            "2026-06-30 09:00",
+            "2026-06-30 09:00",
+        ]
         assemble_headers = [cell.value for cell in next(workbook["Assemble"].iter_rows(max_row=1))]
+        assert "Production datetime" not in assemble_headers
+        assert "Video wire range (m)" not in assemble_headers
         assert "TMA strain by stress/load" not in assemble_headers
         assert "TMA transition currents by stress/load" not in assemble_headers
         tma_headers = [cell.value for cell in next(workbook["TMA targets"].iter_rows(max_row=1))]

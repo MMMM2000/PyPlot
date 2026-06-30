@@ -243,6 +243,9 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "TMA target type" in analysis_headers
     assert "TMA As (mA)" in analysis_headers
     assert "TMA strain (%)" in analysis_headers
+    assert "Data source" not in analysis_headers
+    assert "As1 (mA)" not in analysis_headers
+    assert "Af1 (mA)" not in analysis_headers
     assert "TMA strain by stress/load" not in analysis_headers
     analysis_rows = [
         dict(zip(analysis_headers, [cell.value for cell in row_cells], strict=False))
@@ -473,6 +476,42 @@ def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixe
     assert [row["Microwire"] for row in tma_rows] == ["5/4", "5/4"]
     assert [row["TMA run"] for row in tma_rows] == ["run-a", "run-b"]
     assert [row["TMA target"] for row in tma_rows] == ["50 MPa / 1 g", "100 MPa / 2 g"]
+
+
+def test_saved_video_table_values_overlay_rebuilt_assemble_rows() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Length (m)": None,
+                "Video wire range (m)": None,
+            }
+        ]
+    )
+    sections = {
+        "videos": {
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Production datetime": "2025-07-18 09:35:00",
+                    "Length (m)": 12.56,
+                    "Mass (g)": 2.42,
+                    "Video end length (m)": 120.0,
+                    "Video wire range (m)": "110-120",
+                }
+            ]
+        }
+    }
+
+    result = launcher_module._overlay_saved_video_table_values(frame, sections)  # noqa: SLF001
+
+    assert result.loc[0, "Production datetime"] == "2025-07-18 09:35:00"
+    assert result.loc[0, "Length (m)"] == 12.56
+    assert result.loc[0, "Mass (g)"] == 2.42
+    assert result.loc[0, "Video end length (m)"] == 120.0
+    assert result.loc[0, "Video wire range (m)"] == "110-120"
 
 
 def test_expanded_transition_export_frames_use_review_records() -> None:

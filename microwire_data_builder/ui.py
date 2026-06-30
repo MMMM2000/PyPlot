@@ -34857,11 +34857,15 @@ class AssemblySection(QtWidgets.QWidget):
                 launcher_module._expanded_tma_export_frame_from_sections(section_payloads)
             ),
         }
+        analysis_frame = self._raw_preview_frame
+        if not isinstance(analysis_frame, pd.DataFrame) or analysis_frame.empty:
+            analysis_frame = frame
         launcher_module._write_assemble_workbook(
             output_path=path,
             frame=frame,
             preset="public",
             extra_frames=extra_frames,
+            analysis_frame=analysis_frame,
         )
 
     def analysis_source_frame(self) -> pd.DataFrame:
