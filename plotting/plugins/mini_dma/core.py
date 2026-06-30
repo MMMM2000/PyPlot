@@ -755,11 +755,11 @@ def _strain_axis_label(
     global_l0_mm: float | None = None,
 ) -> str:
     if mode == STRAIN_BASELINE_PER_TARGET_MINIMUM:
-        return "Strain [%] (per-curve lâ‚€)"
+        return "Strain [%] (per-curve l0)"
     l0_mm = global_l0_mm if mode == STRAIN_BASELINE_GLOBAL_MINIMUM else run.initial_length_mm
     if l0_mm is None or not pd.notna(l0_mm) or l0_mm <= 0.0:
         return "Strain [%]"
-    return f"Strain [%] (lâ‚€ = {_format_compact_number(l0_mm, max_decimals=1)} mm)"
+    return f"Strain [%] (l0 = {_format_compact_number(l0_mm, max_decimals=1)} mm)"
 
 
 def _metadata_recipe_mode_values(payload: dict[str, object]) -> set[str]:
@@ -1152,8 +1152,8 @@ def _current_axis_label(run: MiniDmaRun, groups: Iterable[pd.DataFrame]) -> str:
     return (
         "Current [mA] "
         f"({_format_compact_number(max_current_mA, max_decimals=0)} mA = "
-        f"{_format_compact_number(current_density, max_decimals=0)} A/mmÂ², "
-        f"d = {_format_compact_number(diameter_um)} Âµm)"
+        f"{_format_compact_number(current_density, max_decimals=0)} A/mm^2, "
+        f"d = {_format_compact_number(diameter_um)} um)"
     )
 
 

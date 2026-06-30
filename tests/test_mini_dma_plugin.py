@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from plotting.plugins import builtin_plugin_registry
 from plotting.plugins.mini_dma import core
-from plotting.plugins.mini_dma.mini_dma_plugin import MiniDmaPlugin
+from plotting.plugins.mini_dma.mini_dma_plugin import MiniDmaPlugin, TmaPlugin
 from plotting.pyplot.window import PyPlotWindow
 
 
@@ -973,12 +973,14 @@ def test_plugin_is_registered() -> None:
     registry = builtin_plugin_registry()
 
     assert "TMA" in registry
+    assert registry["TMA"] is TmaPlugin
+    assert MiniDmaPlugin is TmaPlugin
 
 
 def test_plugin_defaults_to_global_strain_baseline_and_power_axis() -> None:
     app = _ensure_qapp()
     host = QtWidgets.QWidget()
-    plugin = MiniDmaPlugin(host, "TMA")
+    plugin = TmaPlugin(host, "TMA")
     try:
         plugin.settings_widget()
         assert plugin._strain_baseline_mode() == core.STRAIN_BASELINE_GLOBAL_MINIMUM

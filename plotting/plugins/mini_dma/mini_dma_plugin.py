@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 @register_plugin("TMA")
-class MiniDmaPlugin(PyPlotPlugin):
+class TmaPlugin(PyPlotPlugin):
     """Plot TMA logger output inside PyPlot."""
 
     requires_imported_data = True
@@ -396,3 +396,6 @@ class MiniDmaPlugin(PyPlotPlugin):
         index = combo.findData(mode)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+
+MiniDmaPlugin = TmaPlugin
