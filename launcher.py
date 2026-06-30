@@ -1526,7 +1526,6 @@ TMA_TARGET_EXPORT_COLUMNS = [
     "TMA Ms",
     "TMA Mf",
 ]
-ANALYSIS_ROW_TYPE_COLUMN = "Analysis row type"
 ANALYSIS_BASE_PREFERRED_COLUMNS = [
     "Composition",
     "Microwire",
@@ -1545,7 +1544,21 @@ ANALYSIS_BASE_PREFERRED_COLUMNS = [
     "Length (m)",
     "Mass (g)",
     "Resistance (Ω)",
+    "Production datetime",
+    "Video end length (m)",
+    "Video wire range (m)",
+    "Notes",
 ]
+ANALYSIS_BASE_EXTRA_COLUMNS = set(ANALYSIS_BASE_PREFERRED_COLUMNS) | {
+    "J_As1 (A/mm^2)",
+    "J_Af1 (A/mm^2)",
+    "J_Ms1 (A/mm^2)",
+    "J_Mf1 (A/mm^2)",
+    "J_As2 (A/mm^2)",
+    "J_Af2 (A/mm^2)",
+    "J_Ms2 (A/mm^2)",
+    "J_Mf2 (A/mm^2)",
+}
 ANALYSIS_BASE_EXCLUDED_COLUMNS = {
     "As (mA)",
     "Ms (mA)",
@@ -1610,6 +1623,16 @@ ANALYSIS_TMA_COLUMN_MAP = {
     "TMA Af": "TMA Af (mA)",
     "TMA Ms": "TMA Ms (mA)",
     "TMA Mf": "TMA Mf (mA)",
+}
+ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP = {
+    "J_As1 (A/mm^2)": "CA J_As1 (A/mm^2)",
+    "J_Af1 (A/mm^2)": "CA J_Af1 (A/mm^2)",
+    "J_Ms1 (A/mm^2)": "CA J_Ms1 (A/mm^2)",
+    "J_Mf1 (A/mm^2)": "CA J_Mf1 (A/mm^2)",
+    "J_As2 (A/mm^2)": "CA J_As2 (A/mm^2)",
+    "J_Af2 (A/mm^2)": "CA J_Af2 (A/mm^2)",
+    "J_Ms2 (A/mm^2)": "CA J_Ms2 (A/mm^2)",
+    "J_Mf2 (A/mm^2)": "CA J_Mf2 (A/mm^2)",
 }
 _TRANSITION_REVIEW_FINAL_STATUSES = {"accepted_auto", "manual_adjusted", "no_transition"}
 _TRANSITION_REVIEW_EXCLUDED_STATUSES = {"excluded"}
@@ -2225,13 +2248,9 @@ def _analysis_base_columns(frame: pd.DataFrame) -> list[str]:
         column
         for column in columns
         if column not in preferred
+        and column in ANALYSIS_BASE_EXTRA_COLUMNS
         and column not in ANALYSIS_BASE_EXCLUDED_COLUMNS
         and not _assemble_public_drop_column(column)
-        and not column.startswith("_")
-        and not column.startswith("J_")
-        and "graph" not in column.casefold()
-        and "figure" not in column.casefold()
-        and "origin" not in column.casefold()
     ]
     return list(dict.fromkeys([*preferred, *remaining]))
 
@@ -2314,8 +2333,8 @@ def _analysis_rows_from_detail_frame(
     detail_frame: pd.DataFrame | None,
     base_lookup: Mapping[tuple[str, str], Mapping[str, object]],
     base_columns: Sequence[str],
-    row_type: str,
     column_map: Mapping[str, str],
+    base_column_map: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
     if detail_frame is None or not isinstance(detail_frame, pd.DataFrame) or detail_frame.empty:
         return []
@@ -2328,8 +2347,14 @@ def _analysis_rows_from_detail_frame(
         if not base:
             base = {column: "" for column in base_columns}
             base["Composition"], base["Microwire"] = key
-        row = {column: base.get(column, "") for column in base_columns}
-        row[ANALYSIS_ROW_TYPE_COLUMN] = row_type
+        row = {
+            column: base.get(column, "")
+            for column in base_columns
+            if column not in ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP
+        }
+        for source, target in (base_column_map or {}).items():
+            if source in base:
+                row[target] = base.get(source)
         for source, target in column_map.items():
             if source in detail:
                 row[target] = detail.get(source)
@@ -2356,8 +2381,8 @@ def _expanded_analysis_frame(
             detail_frame=extra_frames.get(ANNEALING_TRANSITION_EXPORT_SHEET),
             base_lookup=base_lookup,
             base_columns=base_columns,
-            row_type="Current annealing",
             column_map=ANALYSIS_CA_COLUMN_MAP,
+            base_column_map=ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP,
         )
     )
     rows.extend(
@@ -2365,7 +2390,6 @@ def _expanded_analysis_frame(
             detail_frame=extra_frames.get(VSM_TRANSITION_EXPORT_SHEET),
             base_lookup=base_lookup,
             base_columns=base_columns,
-            row_type="VSM",
             column_map=ANALYSIS_VSM_COLUMN_MAP,
         )
     )
@@ -2374,25 +2398,20 @@ def _expanded_analysis_frame(
             detail_frame=extra_frames.get(TMA_TARGET_EXPORT_SHEET),
             base_lookup=base_lookup,
             base_columns=base_columns,
-            row_type="TMA",
             column_map=ANALYSIS_TMA_COLUMN_MAP,
         )
     )
 
-    represented = {_analysis_identity_key(row) for row in rows}
-    for key, base in base_lookup.items():
-        if key in represented:
-            continue
-        row = {column: base.get(column, "") for column in base_columns}
-        row[ANALYSIS_ROW_TYPE_COLUMN] = "Sample summary"
-        rows.append(row)
-
     analysis_columns = list(
         dict.fromkeys(
             [
-                *base_columns,
-                ANALYSIS_ROW_TYPE_COLUMN,
+                *[
+                    column
+                    for column in base_columns
+                    if column not in ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP
+                ],
                 *ANALYSIS_CA_COLUMN_MAP.values(),
+                *ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP.values(),
                 *ANALYSIS_VSM_COLUMN_MAP.values(),
                 *ANALYSIS_TMA_COLUMN_MAP.values(),
             ]
@@ -2483,30 +2502,35 @@ def _write_assemble_workbook(
                 "column_count": int(len(serialised_analysis.columns)),
                 "columns": [str(column) for column in serialised_analysis.columns],
             }
-        main_frame.to_excel(writer, sheet_name="Assemble", index=False)
-        for sheet_name, sheet_frame in export_extra_frames.items():
-            if sheet_frame is None or sheet_frame.empty:
-                continue
-            serialised_extra = _serialise_assemble_export_frame(sheet_frame)
-            serialised_extra.to_excel(writer, sheet_name=sheet_name, index=False)
-            extra_sheets[sheet_name] = {
-                "row_count": int(len(serialised_extra.index)),
-                "column_count": int(len(serialised_extra.columns)),
-                "columns": [str(column) for column in serialised_extra.columns],
-            }
-        if audit_columns:
-            audit_frame = serialised.loc[:, audit_columns].copy()
-            audit_frame.to_excel(writer, sheet_name="Assemble audit", index=False)
-            try:
-                writer.book["Assemble audit"].sheet_state = "hidden"
-                hidden_sheets.append("Assemble audit")
-            except Exception:
-                pass
+        if preset == "public":
+            written_frame = serialised_analysis if not analysis_frame.empty else main_frame
+            visible_columns = [str(column) for column in written_frame.columns]
+            main_frame = written_frame
+        else:
+            main_frame.to_excel(writer, sheet_name="Assemble", index=False)
+            for sheet_name, sheet_frame in export_extra_frames.items():
+                if sheet_frame is None or sheet_frame.empty:
+                    continue
+                serialised_extra = _serialise_assemble_export_frame(sheet_frame)
+                serialised_extra.to_excel(writer, sheet_name=sheet_name, index=False)
+                extra_sheets[sheet_name] = {
+                    "row_count": int(len(serialised_extra.index)),
+                    "column_count": int(len(serialised_extra.columns)),
+                    "columns": [str(column) for column in serialised_extra.columns],
+                }
+            if audit_columns:
+                audit_frame = serialised.loc[:, audit_columns].copy()
+                audit_frame.to_excel(writer, sheet_name="Assemble audit", index=False)
+                try:
+                    writer.book["Assemble audit"].sheet_state = "hidden"
+                    hidden_sheets.append("Assemble audit")
+                except Exception:
+                    pass
 
     return {
         "workbook": str(output_path.resolve()),
-        "sheet": "Assemble",
-        "audit_sheet": "Assemble audit" if audit_columns else None,
+        "sheet": ANALYSIS_EXPORT_SHEET if preset == "public" else "Assemble",
+        "audit_sheet": None if preset == "public" else ("Assemble audit" if audit_columns else None),
         "hidden_sheets": hidden_sheets,
         "visible_columns": visible_columns,
         "dropped_columns": dropped_columns,

@@ -210,8 +210,8 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["source_project"] == str(project_path.resolve())
     assert manifest["source_saved_at"] == "2026-06-17 09:30"
-    assert manifest["row_count"] == 1
-    assert manifest["column_count"] == 12
+    assert manifest["source_row_count"] == 1
+    assert manifest["row_count"] == 6
     assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
     assert "Data source" in manifest["dropped_columns"]
     assert "Source label" in manifest["dropped_columns"]
@@ -220,25 +220,17 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "provenance file" in manifest["dropped_columns"]
     assert "TMA transition currents by stress/load" in manifest["dropped_columns"]
     assert "TMA strain by stress/load" in manifest["dropped_columns"]
-    assert manifest["hidden_sheets"] == ["Assemble audit"]
-    assert manifest["extra_sheets"]["Annealing transitions"]["row_count"] == 1
-    assert manifest["extra_sheets"]["VSM transitions"]["row_count"] == 1
-    assert manifest["extra_sheets"]["TMA targets"]["row_count"] == 4
+    assert manifest["hidden_sheets"] == []
+    assert manifest["extra_sheets"] == {}
     assert manifest["analysis_sheet"]["row_count"] == 6
     assert manifest["git_commit"]
 
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
-    assert workbook.sheetnames[:5] == [
-        "Analysis",
-        "Assemble",
-        "Annealing transitions",
-        "VSM transitions",
-        "TMA targets",
-    ]
-    assert workbook["Assemble audit"].sheet_state == "hidden"
+    assert workbook.sheetnames == ["Analysis"]
     analysis_headers = [cell.value for cell in workbook["Analysis"][1]]
-    assert "Analysis row type" in analysis_headers
+    assert "Analysis row type" not in analysis_headers
     assert "CA As1 (mA)" in analysis_headers
+    assert "CA J_As1 (A/mm^2)" in analysis_headers
     assert "VSM As (\u00b0C)" in analysis_headers
     assert "TMA target type" in analysis_headers
     assert "TMA As (mA)" in analysis_headers
@@ -251,19 +243,12 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
         dict(zip(analysis_headers, [cell.value for cell in row_cells], strict=False))
         for row_cells in workbook["Analysis"].iter_rows(min_row=2)
     ]
-    assert [row["Analysis row type"] for row in analysis_rows] == [
-        "Current annealing",
-        "VSM",
-        "TMA",
-        "TMA",
-        "TMA",
-        "TMA",
-    ]
     assert analysis_rows[0]["CA As1 (mA)"] == "No transition"
+    assert analysis_rows[0]["CA J_As1 (A/mm^2)"] == 95.5
     assert analysis_rows[1]["VSM As (\u00b0C)"] == "No transition"
     assert analysis_rows[2]["TMA target type"] == "Stress/load target"
     assert analysis_rows[2]["TMA strain (%)"] == 5.16
-    headers = [cell.value for cell in workbook["Assemble"][1]]
+    headers = analysis_headers
     assert "Data source" not in headers
     assert "Source label" not in headers
     assert "_sources" not in headers
@@ -272,69 +257,18 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "As (mA)" not in headers
     assert "Ms (mA)" not in headers
     assert "As current density (A/mm^2)" not in headers
-    assert "As1 (mA)" in headers
-    assert "Af1 (mA)" in headers
-    assert "J_As1 (A/mm^2)" in headers
-    assert "Current annealing transition status" in headers
-    assert "VSM transition temp status" in headers
-    assert "TMA transition status" in headers
+    assert "As1 (mA)" not in headers
+    assert "Af1 (mA)" not in headers
+    assert "J_As1 (A/mm^2)" not in headers
+    assert "Current annealing transition status" not in headers
+    assert "VSM transition temp status" not in headers
+    assert "TMA transition status" not in headers
     assert "TMA transition currents by stress/load" not in headers
     assert "TMA strain by stress/load" not in headers
-    row = [cell.value for cell in workbook["Assemble"][2]]
-    assert "run01, run02" in row
-    assert row[headers.index("Current annealing transition status")] == "No transition"
-    assert row[headers.index("VSM transition temp status")] == "No transition"
-    assert row[headers.index("TMA transition status")] == "No transition"
-    assert '{"fit": "accepted", "points": 120}' in row
-    audit_headers = [cell.value for cell in workbook["Assemble audit"][1]]
-    audit_row = [cell.value for cell in workbook["Assemble audit"][2]]
-    assert "Data source" in audit_headers
-    assert "Source label" in audit_headers
-    assert "provenance file" in audit_headers
-    assert "Measured" in audit_row
-    assert "Ko\u0161ice" in audit_row
-    assert "G:/internal/provenance.json" in audit_row
-    annealing_headers = [cell.value for cell in workbook["Annealing transitions"][1]]
-    annealing_rows = [
-        dict(zip(annealing_headers, [cell.value for cell in row_cells], strict=False))
-        for row_cells in workbook["Annealing transitions"].iter_rows(min_row=2)
-    ]
-    assert annealing_rows == [
-        {
-            "Composition": "Ni50Fe27Ga23",
-            "Microwire": "12/2",
-            "Annealing run": None,
-            "Annealing current (mA)": None,
-            "Annealing As1": "No transition",
-            "Annealing Af1": "No transition",
-            "Annealing Ms1": "No transition",
-            "Annealing Mf1": "No transition",
-            "Annealing As2": "No transition",
-            "Annealing Af2": "No transition",
-            "Annealing Ms2": "No transition",
-            "Annealing Mf2": "No transition",
-        }
-    ]
-    vsm_headers = [cell.value for cell in workbook["VSM transitions"][1]]
-    vsm_rows = [
-        dict(zip(vsm_headers, [cell.value for cell in row_cells], strict=False))
-        for row_cells in workbook["VSM transitions"].iter_rows(min_row=2)
-    ]
-    assert vsm_rows == [
-        {
-            "Composition": "Ni50Fe27Ga23",
-            "Microwire": "12/2",
-            "VSM scan": None,
-            "VSM As": "No transition",
-            "VSM Af": "No transition",
-            "VSM Ms": "No transition",
-            "VSM Mf": "No transition",
-        }
-    ]
-    tma_headers = [cell.value for cell in workbook["TMA targets"][1]]
+    tma_headers = analysis_headers
     tma_rows = [
         dict(zip(tma_headers, [cell.value for cell in row_cells], strict=False))
-        for row_cells in workbook["TMA targets"].iter_rows(min_row=2)
+        for row_cells in workbook["Analysis"].iter_rows(min_row=4)
     ]
     assert [entry["TMA target"] for entry in tma_rows] == [
         "50 MPa / 1.46 g",
@@ -350,18 +284,18 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert first["TMA load (g)"] == 1.46
     assert first["TMA strain (%)"] == 5.16
     assert first["TMA strain peak current (mA)"] == 15
-    assert first["TMA As"] == 31
-    assert first["TMA Af"] == 71
-    assert first["TMA Ms"] == 66
-    assert first["TMA Mf"] == 26
-    assert {tma_rows[1][label] for label in ("TMA As", "TMA Af", "TMA Ms", "TMA Mf")} == {
+    assert first["TMA As (mA)"] == 31
+    assert first["TMA Af (mA)"] == 71
+    assert first["TMA Ms (mA)"] == 66
+    assert first["TMA Mf (mA)"] == 26
+    assert {tma_rows[1][label] for label in ("TMA As (mA)", "TMA Af (mA)", "TMA Ms (mA)", "TMA Mf (mA)")} == {
         "No transition"
     }
-    assert tma_rows[2]["TMA As"] == 35
-    assert tma_rows[2]["TMA Af"] == 74
-    assert tma_rows[2]["TMA Ms"] == "Not observed"
-    assert tma_rows[2]["TMA Mf"] == "Not observed"
-    assert tma_rows[3]["TMA As"] == 40
+    assert tma_rows[2]["TMA As (mA)"] == 35
+    assert tma_rows[2]["TMA Af (mA)"] == 74
+    assert tma_rows[2]["TMA Ms (mA)"] == "Not observed"
+    assert tma_rows[2]["TMA Mf (mA)"] == "Not observed"
+    assert tma_rows[3]["TMA As (mA)"] == 40
     assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
 
 
@@ -428,7 +362,7 @@ def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixe
         tma_frame=tma_frame,
     )
 
-    assert info["row_count"] == 1
+    assert info["row_count"] == 2
     assert info["public_filters"]["assemble"] == {
         "excluded_oe_rows": 1,
         "normalised_suffix_rows": 1,
@@ -440,42 +374,15 @@ def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixe
     }
     assert info["analysis_sheet"]["row_count"] == 2
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames == ["Analysis"]
     analysis_headers = [cell.value for cell in workbook["Analysis"][1]]
     analysis_rows = [
         dict(zip(analysis_headers, [cell.value for cell in row_cells], strict=False))
         for row_cells in workbook["Analysis"].iter_rows(min_row=2)
     ]
     assert [row["Microwire"] for row in analysis_rows] == ["5/4", "5/4"]
-    assert [row["Analysis row type"] for row in analysis_rows] == ["TMA", "TMA"]
     assert [row["TMA target"] for row in analysis_rows] == ["50 MPa / 1 g", "100 MPa / 2 g"]
-    headers = [cell.value for cell in workbook["Assemble"][1]]
-    rows = [
-        dict(zip(headers, [cell.value for cell in row_cells], strict=False))
-        for row_cells in workbook["Assemble"].iter_rows(min_row=2)
-    ]
-    assert rows == [
-        {
-            "Composition": "Ni50Fe27Ga23",
-            "Microwire": "5/4",
-            "d (\u00b5m)": 12,
-            "D (\u00b5m)": 42,
-        }
-    ]
-    audit_headers = [cell.value for cell in workbook["Assemble audit"][1]]
-    audit_rows = [
-        dict(zip(audit_headers, [cell.value for cell in row_cells], strict=False))
-        for row_cells in workbook["Assemble audit"].iter_rows(min_row=2)
-    ]
-    assert [row["Microwire"] for row in audit_rows] == ["5/4"]
-
-    tma_headers = [cell.value for cell in workbook["TMA targets"][1]]
-    tma_rows = [
-        dict(zip(tma_headers, [cell.value for cell in row_cells], strict=False))
-        for row_cells in workbook["TMA targets"].iter_rows(min_row=2)
-    ]
-    assert [row["Microwire"] for row in tma_rows] == ["5/4", "5/4"]
-    assert [row["TMA run"] for row in tma_rows] == ["run-a", "run-b"]
-    assert [row["TMA target"] for row in tma_rows] == ["50 MPa / 1 g", "100 MPa / 2 g"]
+    assert [row["TMA run"] for row in analysis_rows] == ["run-a", "run-b"]
 
 
 def test_saved_video_table_values_overlay_rebuilt_assemble_rows() -> None:

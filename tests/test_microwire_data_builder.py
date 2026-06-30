@@ -11449,9 +11449,9 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
         assembly._write_expanded_excel_export(output, compact_frame)  # noqa: SLF001
 
         workbook = openpyxl.load_workbook(output, read_only=True, data_only=True)
-        assert workbook.sheetnames[:3] == ["Analysis", "Assemble", "TMA targets"]
+        assert workbook.sheetnames == ["Analysis"]
         analysis_headers = [cell.value for cell in next(workbook["Analysis"].iter_rows(max_row=1))]
-        assert "Analysis row type" in analysis_headers
+        assert "Analysis row type" not in analysis_headers
         assert "TMA target type" in analysis_headers
         assert "TMA As (mA)" in analysis_headers
         assert "TMA strain (%)" in analysis_headers
@@ -11462,7 +11462,6 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
             dict(zip(analysis_headers, row, strict=False))
             for row in workbook["Analysis"].iter_rows(min_row=2, values_only=True)
         ]
-        assert [row["Analysis row type"] for row in analysis_rows] == ["TMA", "TMA"]
         assert [row["TMA target type"] for row in analysis_rows] == [
             "First overheating",
             "Stress/load target",
@@ -11472,26 +11471,10 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
             "2026-06-30 09:00",
             "2026-06-30 09:00",
         ]
-        assemble_headers = [cell.value for cell in next(workbook["Assemble"].iter_rows(max_row=1))]
-        assert "Production datetime" not in assemble_headers
-        assert "Video wire range (m)" not in assemble_headers
-        assert "TMA strain by stress/load" not in assemble_headers
-        assert "TMA transition currents by stress/load" not in assemble_headers
-        tma_headers = [cell.value for cell in next(workbook["TMA targets"].iter_rows(max_row=1))]
-        rows = [
-            dict(zip(tma_headers, row, strict=False))
-            for row in workbook["TMA targets"].iter_rows(min_row=2, values_only=True)
-        ]
-        assert [row["TMA target"] for row in rows] == [
+        assert [row["TMA target"] for row in analysis_rows] == [
             "1st: 50MPa / 0.83g",
             "50 MPa / 0.83 g",
         ]
-        assert [row["TMA target type"] for row in rows] == [
-            "First overheating",
-            "Stress/load target",
-        ]
-        assert rows[0]["TMA As"] == 20
-        assert rows[1]["TMA As"] == 40
     finally:
         assembly.close()
 
