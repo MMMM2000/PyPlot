@@ -1624,6 +1624,12 @@ ANALYSIS_TMA_COLUMN_MAP = {
     "TMA Ms": "TMA Ms (mA)",
     "TMA Mf": "TMA Mf (mA)",
 }
+ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP = {
+    "TMA As (mA)": "TMA J_As (A/mm^2)",
+    "TMA Af (mA)": "TMA J_Af (A/mm^2)",
+    "TMA Ms (mA)": "TMA J_Ms (A/mm^2)",
+    "TMA Mf (mA)": "TMA J_Mf (A/mm^2)",
+}
 ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP = {
     "J_As1 (A/mm^2)": "CA J_As1 (A/mm^2)",
     "J_Af1 (A/mm^2)": "CA J_Af1 (A/mm^2)",
@@ -2291,6 +2297,36 @@ def _analysis_numeric_sort_value(value: object) -> tuple[int, float]:
     return (1, 0.0)
 
 
+def _analysis_numeric_value(value: object) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip().replace(",", ".")
+        if text:
+            try:
+                parsed = float(text)
+            except ValueError:
+                return None
+            if math.isfinite(parsed):
+                return parsed
+    return None
+
+
+def _analysis_tma_current_density_value(current_mA: object, diameter_um: object) -> object:
+    if isinstance(current_mA, str):
+        status = current_mA.strip()
+        if status in {"No transition", "Not observed"}:
+            return status
+    current = _analysis_numeric_value(current_mA)
+    diameter = _analysis_numeric_value(diameter_um)
+    if current is None or diameter is None or diameter <= 0:
+        return None
+    area_mm2 = math.pi * (diameter / 2000.0) ** 2
+    if area_mm2 <= 0:
+        return None
+    return (current / 1000.0) / area_mm2
+
+
 def _analysis_measurement_rank(row: Mapping[str, object]) -> int:
     if any(not _is_blank_export_value(row.get(column)) for column in ANALYSIS_CA_COLUMN_MAP.values()):
         return 0
@@ -2436,6 +2472,12 @@ def _analysis_rows_from_detail_frame(
         for source, target in column_map.items():
             if source in detail:
                 row[target] = detail.get(source)
+        if column_map is ANALYSIS_TMA_COLUMN_MAP:
+            diameter = base.get("d (µm)", base.get("d (Âµm)"))
+            for current_column, density_column in ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP.items():
+                density = _analysis_tma_current_density_value(row.get(current_column), diameter)
+                if density is not None:
+                    row[density_column] = density
         rows.append(row)
     return rows
 
@@ -2492,6 +2534,7 @@ def _expanded_analysis_frame(
                 *ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP.values(),
                 *ANALYSIS_VSM_COLUMN_MAP.values(),
                 *ANALYSIS_TMA_COLUMN_MAP.values(),
+                *ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP.values(),
             ]
         )
     )

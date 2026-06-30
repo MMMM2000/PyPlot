@@ -123,13 +123,14 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                     "Microwire",
                     "Mini DMA graphs",
                     "Mini DMA strain by stress/load",
-                    "Mini DMA transition currents by stress/load",
-                    "Current annealing transition status",
-                    "VSM transition temp status",
-                    "Mini DMA transition status",
-                    "As (C)",
-                    "Af (C)",
-                    "As (mA)",
+                        "Mini DMA transition currents by stress/load",
+                        "Current annealing transition status",
+                        "VSM transition temp status",
+                        "Mini DMA transition status",
+                        "d (\u00b5m)",
+                        "As (C)",
+                        "Af (C)",
+                        "As (mA)",
                     "Ms (mA)",
                     "As1 (mA)",
                     "Af1 (mA)",
@@ -161,6 +162,7 @@ def _write_synthetic_assemble_project(path: Path) -> Path:
                         "Current annealing transition status": "No transition",
                         "VSM transition temp status": "No transition",
                         "Mini DMA transition status": "No transition",
+                        "d (\u00b5m)": 20.0,
                         "As (C)": -23.5,
                         "Af (C)": 18.25,
                         "As (mA)": 30,
@@ -235,6 +237,7 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "TMA target type" in analysis_headers
     assert "TMA As (mA)" in analysis_headers
     assert "TMA strain (%)" in analysis_headers
+    assert "TMA J_As (A/mm^2)" in analysis_headers
     assert "Data source" not in analysis_headers
     assert "As1 (mA)" not in analysis_headers
     assert "Af1 (mA)" not in analysis_headers
@@ -288,13 +291,22 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert first["TMA Af (mA)"] == 71
     assert first["TMA Ms (mA)"] == 66
     assert first["TMA Mf (mA)"] == 26
+    assert first["TMA J_As (A/mm^2)"] == pytest.approx(98.676, rel=1e-3)
+    assert first["TMA J_Af (A/mm^2)"] == pytest.approx(226.0, rel=1e-3)
+    assert first["TMA J_Ms (A/mm^2)"] == pytest.approx(210.085, rel=1e-3)
+    assert first["TMA J_Mf (A/mm^2)"] == pytest.approx(82.761, rel=1e-3)
     assert {tma_rows[1][label] for label in ("TMA As (mA)", "TMA Af (mA)", "TMA Ms (mA)", "TMA Mf (mA)")} == {
+        "No transition"
+    }
+    assert {tma_rows[1][label] for label in ("TMA J_As (A/mm^2)", "TMA J_Af (A/mm^2)", "TMA J_Ms (A/mm^2)", "TMA J_Mf (A/mm^2)")} == {
         "No transition"
     }
     assert tma_rows[2]["TMA As (mA)"] == 35
     assert tma_rows[2]["TMA Af (mA)"] == 74
     assert tma_rows[2]["TMA Ms (mA)"] == "Not observed"
     assert tma_rows[2]["TMA Mf (mA)"] == "Not observed"
+    assert tma_rows[2]["TMA J_Ms (A/mm^2)"] == "Not observed"
+    assert tma_rows[2]["TMA J_Mf (A/mm^2)"] == "Not observed"
     assert tma_rows[3]["TMA As (mA)"] == 40
     assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
 
