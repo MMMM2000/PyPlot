@@ -238,6 +238,10 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "TMA As (mA)" in analysis_headers
     assert "TMA strain (%)" in analysis_headers
     assert "TMA J_As (A/mm^2)" in analysis_headers
+    assert "Video end length (m)" not in analysis_headers
+    assert "Video wire range (m)" not in analysis_headers
+    assert "Notes" not in analysis_headers
+    assert "CA current (mA)" not in analysis_headers
     assert "Data source" not in analysis_headers
     assert "As1 (mA)" not in analysis_headers
     assert "Af1 (mA)" not in analysis_headers
@@ -781,6 +785,55 @@ def test_tma_target_export_includes_strain_only_record_payloads() -> None:
     assert [row["TMA strain (%)"] for row in rows] == [0.86, 0.63, 0.72]
     assert [row["TMA strain peak current (mA)"] for row in rows] == [59.0, 40.0, 42.0]
     assert all(row["TMA As"] is None or row["TMA As"] != row["TMA As"] for row in rows)
+
+
+def test_tma_target_export_recalculates_stale_strain_summary_from_raw_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_run = tmp_path / "Ni50Fe27Ga23 12_2 raw_run"
+    raw_run.mkdir()
+    records = [
+        SimpleNamespace(
+            path=raw_run,
+            sample="Ni50Fe27Ga23 12-2",
+            label="raw run",
+            strain_summary=("50 MPa / 1.46 g: 0.08% @ 80 mA",),
+        ),
+    ]
+    encoded = base64.b64encode(pickle.dumps(records)).decode("ascii")
+
+    def fake_import_module(name: str) -> object:
+        if name != "plotting.plugins.mini_dma.core":
+            return importlib.import_module(name)
+        return SimpleNamespace(
+            load_run=lambda path: SimpleNamespace(path=path),
+            summarize_current_sweep=lambda run: SimpleNamespace(run=run),
+            format_current_sweep_strain_summary=lambda summary: (
+                "50 MPa / 1.46 g: 10.81% @ 4 mA",
+            ),
+        )
+
+    import importlib
+
+    monkeypatch.setattr(launcher_module, "import_module", fake_import_module)
+    frame = launcher_module._expanded_tma_export_frame_from_sections(  # noqa: SLF001
+        {
+            "mini_dma": {
+                "payloads": {
+                    "mini_dma_records": {
+                        "encoding": "pickle-base64",
+                        "value": encoded,
+                    }
+                }
+            }
+        }
+    )
+
+    rows = frame.to_dict(orient="records")
+    assert len(rows) == 1
+    assert rows[0]["TMA strain (%)"] == 10.81
+    assert rows[0]["TMA strain peak current (mA)"] == 4.0
 
 
 def test_builder_automation_recipe_exports_assemble_public_workbook(

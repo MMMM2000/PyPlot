@@ -11456,7 +11456,10 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
         assert "TMA As (mA)" in analysis_headers
         assert "TMA strain (%)" in analysis_headers
         assert "Production datetime" in analysis_headers
-        assert "Video wire range (m)" in analysis_headers
+        assert "Video wire range (m)" not in analysis_headers
+        assert "Video end length (m)" not in analysis_headers
+        assert "Notes" not in analysis_headers
+        assert "CA current (mA)" not in analysis_headers
         assert "TMA strain by stress/load" not in analysis_headers
         analysis_rows = [
             dict(zip(analysis_headers, row, strict=False))

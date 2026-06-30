@@ -1545,9 +1545,6 @@ ANALYSIS_BASE_PREFERRED_COLUMNS = [
     "Mass (g)",
     "Resistance (Ω)",
     "Production datetime",
-    "Video end length (m)",
-    "Video wire range (m)",
-    "Notes",
 ]
 ANALYSIS_BASE_EXTRA_COLUMNS = set(ANALYSIS_BASE_PREFERRED_COLUMNS) | {
     "J_As1 (A/mm^2)",
@@ -1594,7 +1591,6 @@ ANALYSIS_BASE_EXCLUDED_COLUMNS = {
 }
 ANALYSIS_CA_COLUMN_MAP = {
     "Annealing run": "CA graph",
-    "Annealing current (mA)": "CA current (mA)",
     "Annealing As1": "CA As1 (mA)",
     "Annealing Af1": "CA Af1 (mA)",
     "Annealing Ms1": "CA Ms1 (mA)",
@@ -1834,6 +1830,21 @@ def _compact_tma_export_lines(row: Mapping[str, object], *columns: str) -> tuple
                 return tuple(value)
             return (value,)
     return ()
+
+
+def _tma_record_strain_summary_lines(record: object) -> tuple[object, ...]:
+    saved = tuple(getattr(record, "strain_summary", ()) or ())
+    raw_path = Path(str(getattr(record, "path", "") or ""))
+    if not raw_path.exists():
+        return saved
+    try:
+        mini_dma_core = import_module("plotting.plugins.mini_dma.core")
+        run = mini_dma_core.load_run(raw_path)
+        summary = mini_dma_core.summarize_current_sweep(run)
+        recalculated = tuple(mini_dma_core.format_current_sweep_strain_summary(summary))
+    except Exception:
+        return saved
+    return recalculated or saved
 
 
 def _normalise_transition_review_status(value: object) -> str:
@@ -2087,7 +2098,7 @@ def _expanded_tma_export_frame_from_sections(sections: Mapping[str, object]) -> 
         run_label = str(getattr(record, "label", "") or "").strip()
         if not run_label:
             run_label = Path(str(getattr(record, "path", "") or "")).name
-        for raw_line in getattr(record, "strain_summary", ()) or ():
+        for raw_line in _tma_record_strain_summary_lines(record):
             target, strain_values = _parse_tma_strain_line(raw_line)
             if not target or not strain_values:
                 continue
