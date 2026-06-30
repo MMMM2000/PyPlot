@@ -11373,10 +11373,36 @@ def test_assemble_default_visible_columns_do_not_disable_export_sections(qtbot) 
             "Microwire",
             "d (µm)",
             "D (µm)",
-            "TMA strain by stress/load",
         ]
         assert all(assembly._section_states.values())  # noqa: SLF001
         assert len(assembly._selected_sections()) == len(assembly._section_choices)  # noqa: SLF001
+    finally:
+        assembly.close()
+
+
+def test_assemble_column_header_move_marks_project_dirty(qtbot) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        changed: list[bool] = []
+        assembly.data_updated.connect(lambda: changed.append(True))
+        assembly.preview_model.set_frame(
+            pd.DataFrame(
+                [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "d (Âµm)": 12.5,
+                    }
+                ]
+            )
+        )
+
+        assembly._handle_preview_column_moved()  # noqa: SLF001
+
+        assert changed
+        assert assembly._column_order  # noqa: SLF001
     finally:
         assembly.close()
 

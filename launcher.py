@@ -986,6 +986,70 @@ def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _transition_reviews_to_compact_map(
+    reviews: Mapping[str, Mapping[str, object]],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not isinstance(reviews, Mapping):
+        return result
+    for _record_id, review in reviews.items():
+        if not isinstance(review, Mapping):
+            continue
+        key = str(review.get("group_key") or "").strip()
+        if not key:
+            composition, microwire = _transition_sample_identity_from_review(review, sample_key="sample")
+            if composition and microwire:
+                key = f"{composition}|{microwire.replace('/', '|')}"
+        if not key:
+            continue
+        entry = result.setdefault(key, {})
+        counts = entry.setdefault(
+            "__review_counts__",
+            {
+                "total": 0,
+                "accepted": 0,
+                "manual": 0,
+                "no_transition": 0,
+                "excluded": 0,
+                "unreviewed": 0,
+            },
+        )
+        if isinstance(counts, dict):
+            counts["total"] = int(counts.get("total", 0) or 0) + 1
+        status = _normalise_transition_review_status(review.get("status"))
+        if isinstance(counts, dict):
+            if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+                counts["excluded"] = int(counts.get("excluded", 0) or 0) + 1
+            elif status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+                counts["no_transition"] = int(counts.get("no_transition", 0) or 0) + 1
+            elif status == "manual_adjusted":
+                counts["manual"] = int(counts.get("manual", 0) or 0) + 1
+            elif status in {"accepted", "accepted_auto"}:
+                counts["accepted"] = int(counts.get("accepted", 0) or 0) + 1
+            else:
+                counts["unreviewed"] = int(counts.get("unreviewed", 0) or 0) + 1
+        if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
+            entry.setdefault("__review_status__", "Excluded")
+            entry.setdefault("__included__", False)
+            continue
+        if status in _TRANSITION_REVIEW_NO_TRANSITION_STATUSES:
+            entry.setdefault("__review_status__", "No transition")
+            entry.setdefault("__included__", False)
+            continue
+        values = _clean_numeric_transition_values(review.get("final_values_C"), _VSM_LABELS)
+        if not values:
+            values = _clean_numeric_transition_values(review.get("manual_values_C"), _VSM_LABELS)
+        if not values and status in {"accepted", "accepted_auto"}:
+            values = _clean_numeric_transition_values(review.get("auto_values_C"), _VSM_LABELS)
+        if values:
+            entry.update(values)
+            entry["__review_status__"] = (
+                "Manual adjusted" if status == "manual_adjusted" else "Accepted"
+            )
+            entry["__included__"] = True
+    return result
+
+
 def _run_builder_rebuild_assemble_command_lightweight(
     *,
     builder_ui: Any,
@@ -1023,6 +1087,11 @@ def _run_builder_rebuild_assemble_command_lightweight(
     )
     transition_points = _transition_rows_to_map(
         _builder_section_rows_as_frame(sections, "transition_temps")
+    )
+    transition_points.update(
+        _transition_reviews_to_compact_map(
+            _review_records_from_section_extra(sections, "transition_temps")
+        )
     )
     mini_dma_transition_reviews: dict[str, Any] = {}
     mini_dma_section = sections.get("mini_dma")
@@ -1217,6 +1286,11 @@ _ASSEMBLE_PUBLIC_DROP_EXACT = {
     "Ms (mA)",
     "As current density (A/mm^2)",
     "Ms current density (A/mm^2)",
+    "Current annealing transition currents",
+    "TMA strain by stress/load",
+    "Mini DMA strain by stress/load",
+    "TMA transition currents by stress/load",
+    "Mini DMA transition currents by stress/load",
 }
 _ASSEMBLE_PUBLIC_DROP_TOKENS = ("source", "provenance", "internal")
 
@@ -1780,7 +1854,9 @@ def _expanded_annealing_transition_frame_from_sections(sections: Mapping[str, ob
 
 def _expanded_vsm_transition_frame_from_sections(sections: Mapping[str, object]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    for _record_id, review in _review_records_from_section_extra(sections, "vsm_temperature_scan").items():
+    review_records = _review_records_from_section_extra(sections, "vsm_temperature_scan")
+    review_records.update(_review_records_from_section_extra(sections, "transition_temps"))
+    for _record_id, review in review_records.items():
         status = _normalise_transition_review_status(review.get("status"))
         if status in _TRANSITION_REVIEW_EXCLUDED_STATUSES:
             continue

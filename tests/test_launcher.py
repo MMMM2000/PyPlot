@@ -211,13 +211,15 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert manifest["source_project"] == str(project_path.resolve())
     assert manifest["source_saved_at"] == "2026-06-17 09:30"
     assert manifest["row_count"] == 1
-    assert manifest["column_count"] == 14
+    assert manifest["column_count"] == 12
     assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
     assert "Data source" in manifest["dropped_columns"]
     assert "Source label" in manifest["dropped_columns"]
     assert "_sources" in manifest["dropped_columns"]
     assert "internal review note" in manifest["dropped_columns"]
     assert "provenance file" in manifest["dropped_columns"]
+    assert "TMA transition currents by stress/load" in manifest["dropped_columns"]
+    assert "TMA strain by stress/load" in manifest["dropped_columns"]
     assert manifest["hidden_sheets"] == ["Assemble audit"]
     assert manifest["extra_sheets"]["Annealing transitions"]["row_count"] == 1
     assert manifest["extra_sheets"]["VSM transitions"]["row_count"] == 1
@@ -241,13 +243,10 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "Current annealing transition status" in headers
     assert "VSM transition temp status" in headers
     assert "TMA transition status" in headers
-    assert "TMA transition currents by stress/load" in headers
-    assert "TMA strain by stress/load" in headers
+    assert "TMA transition currents by stress/load" not in headers
+    assert "TMA strain by stress/load" not in headers
     row = [cell.value for cell in workbook["Assemble"][2]]
     assert "run01, run02" in row
-    assert "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA" in row[
-        headers.index("TMA transition currents by stress/load")
-    ]
     assert row[headers.index("Current annealing transition status")] == "No transition"
     assert row[headers.index("VSM transition temp status")] == "No transition"
     assert row[headers.index("TMA transition status")] == "No transition"
@@ -543,6 +542,62 @@ def test_expanded_transition_export_frames_use_review_records() -> None:
             "Composition": "Ni50Fe27Ga23",
             "Microwire": "12/3",
             "VSM scan": "VSM 12_3 scan",
+            "VSM As": "No transition",
+            "VSM Af": "No transition",
+            "VSM Ms": "No transition",
+            "VSM Mf": "No transition",
+        },
+    ]
+
+
+def test_vsm_transition_export_reads_transition_temps_section_reviews() -> None:
+    sections = {
+        "transition_temps": {
+            "extra": {
+                "transition_reviews": {
+                    "records": {
+                        "vsm-ts:accepted": {
+                            "status": "manual_adjusted",
+                            "group_key": "Ni50Fe27Ga23|12|2",
+                            "sample": "Ni50Fe27Ga23 12_2",
+                            "record_label": "20260630-TSCN-a000",
+                            "final_values_C": {"As": 30.0, "Af": 65.0},
+                        },
+                        "vsm-ts:none": {
+                            "status": "no_transition",
+                            "group_key": "Ni50Fe27Ga23|12|3",
+                            "sample": "Ni50Fe27Ga23 12_3",
+                            "record_label": "20260630-TSCN-a090",
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    compact = launcher_module._transition_reviews_to_compact_map(  # noqa: SLF001
+        sections["transition_temps"]["extra"]["transition_reviews"]["records"]
+    )
+    assert compact["Ni50Fe27Ga23|12|2"]["As"] == 30.0
+    assert compact["Ni50Fe27Ga23|12|2"]["Af"] == 65.0
+    assert compact["Ni50Fe27Ga23|12|2"]["__review_status__"] == "Manual adjusted"
+    assert compact["Ni50Fe27Ga23|12|3"]["__review_status__"] == "No transition"
+    assert compact["Ni50Fe27Ga23|12|3"]["__included__"] is False
+
+    vsm = launcher_module._expanded_vsm_transition_frame_from_sections(sections)  # noqa: SLF001
+    rows = vsm.to_dict(orient="records")
+    assert rows[0]["Composition"] == "Ni50Fe27Ga23"
+    assert rows[0]["Microwire"] == "12/2"
+    assert rows[0]["VSM scan"] == "20260630-TSCN-a000"
+    assert rows[0]["VSM As"] == 30.0
+    assert rows[0]["VSM Af"] == 65.0
+    assert pd.isna(rows[0]["VSM Ms"])
+    assert pd.isna(rows[0]["VSM Mf"])
+    assert rows[1:] == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "VSM scan": "20260630-TSCN-a090",
             "VSM As": "No transition",
             "VSM Af": "No transition",
             "VSM Ms": "No transition",

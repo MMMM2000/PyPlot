@@ -290,6 +290,21 @@ SUPERSEDED_CURRENT_DENSITY_COLUMNS = {
     CURRENT_DENSITY_AS_DENSITY_COLUMN,
     CURRENT_DENSITY_MS_DENSITY_COLUMN,
 }
+ASSEMBLE_DEFAULT_HIDDEN_COLUMNS = {
+    ANNEALING_TRANSITION_COLUMN,
+    MINI_DMA_STRAIN_COLUMN,
+    MINI_DMA_TRANSITION_COLUMN,
+    LEGACY_MINI_DMA_STRAIN_COLUMN,
+    LEGACY_MINI_DMA_TRANSITION_COLUMN,
+    "Legacy strain",
+    "Calc mode",
+    "Clamp span (mm)",
+    "m",
+    "Legacy stress (MPa)",
+    "M length",
+    "A length",
+    "Broke",
+}
 CURRENT_DENSITY_AS_DELTA_COLUMN = "As2-As1 (mA)"
 CURRENT_DENSITY_AF_DELTA_COLUMN = "Af2-Af1 (mA)"
 CURRENT_DENSITY_MS_DELTA_COLUMN = "Ms2-Ms1 (mA)"
@@ -31011,6 +31026,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._preview_row_index_map: List[int] = []
         self._selected_columns: Optional[Set[str]] = None
         self._column_order: List[str] = []
+        self._applying_column_order = False
         self._sort_spec: List[Tuple[str, bool]] = []
         self._mandatory_columns: Set[str] = {"Composition", "Microwire"}
         self._known_columns: Set[str] = set()
@@ -33376,7 +33392,9 @@ class AssemblySection(QtWidgets.QWidget):
             self._selected_columns = {
                 column
                 for column in column_names
-                if column not in self._graph_columns and not column.startswith("_")
+                if column not in self._graph_columns
+                and column not in ASSEMBLE_DEFAULT_HIDDEN_COLUMNS
+                and not column.startswith("_")
             }
         self._known_columns.update(column_names)
         self._selected_columns.update(self._mandatory_columns)
@@ -34432,6 +34450,7 @@ class AssemblySection(QtWidgets.QWidget):
             self._selected_columns = dialog.selected_columns()
             self._sync_section_states_from_columns(self._selected_columns, columns)
             self._refresh_preview_frame()
+            self._mark_dirty()
 
     def _open_column_order_dialog(self) -> None:
         frame = self.preview_model.frame()
@@ -34448,6 +34467,7 @@ class AssemblySection(QtWidgets.QWidget):
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self._column_order = dialog.ordered_columns()
             self._apply_preview_column_order(self._column_order)
+            self._mark_dirty()
 
     def _open_sort_dialog(self) -> None:
         frame = self._raw_preview_frame
@@ -34476,12 +34496,14 @@ class AssemblySection(QtWidgets.QWidget):
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self._sort_spec = dialog.sort_spec()
             self._refresh_preview_frame()
+            self._mark_dirty()
 
     def _clear_sort(self) -> None:
         if not self._sort_spec:
             return
         self._sort_spec = []
         self._refresh_preview_frame()
+        self._mark_dirty()
 
     def _reset_column_order(self) -> None:
         frame = self.preview_model.frame()
@@ -34489,6 +34511,7 @@ class AssemblySection(QtWidgets.QWidget):
             return
         self._column_order = [str(column) for column in frame.columns]
         self._apply_preview_column_order(self._column_order)
+        self._mark_dirty()
 
     def _add_selected_to_compare(self) -> None:
         compare_section = self._compare_section
@@ -34680,6 +34703,9 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _handle_preview_column_moved(self, *_: Any) -> None:
         self._column_order = self._current_preview_column_order()
+        if self._applying_column_order:
+            return
+        self._mark_dirty()
 
     def _apply_preview_column_order(self, order: Sequence[str]) -> None:
         if not order:
@@ -34689,14 +34715,18 @@ class AssemblySection(QtWidgets.QWidget):
         if header is None or not isinstance(frame, pd.DataFrame):
             return
         mapping = {str(column): idx for idx, column in enumerate(frame.columns)}
-        for target_visual, column_name in enumerate(order):
-            logical = mapping.get(column_name)
-            if logical is None:
-                continue
-            current_visual = header.visualIndex(logical)
-            if current_visual == target_visual:
-                continue
-            header.moveSection(current_visual, target_visual)
+        self._applying_column_order = True
+        try:
+            for target_visual, column_name in enumerate(order):
+                logical = mapping.get(column_name)
+                if logical is None:
+                    continue
+                current_visual = header.visualIndex(logical)
+                if current_visual == target_visual:
+                    continue
+                header.moveSection(current_visual, target_visual)
+        finally:
+            self._applying_column_order = False
 
     def _ordered_preview_frame(self) -> pd.DataFrame:
         frame = self.preview_model.frame()
