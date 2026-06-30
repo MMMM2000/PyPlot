@@ -2360,6 +2360,70 @@ def test_mini_dma_transition_review_status_update_skips_tree_rebuild_without_fil
         QtWidgets.QApplication.processEvents()
 
 
+def test_mini_dma_transition_review_counts_unloaded_saved_reviews() -> None:
+    _ensure_qapp()
+    record = _sample_mini_dma_record()
+    entries = builder_ui._mini_dma_transition_review_entries(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+    )
+    entry = entries[0]
+    record_id = builder_ui._mini_dma_review_record_id(record, entry.target_label)  # noqa: SLF001
+    stored: dict[str, dict[str, object]] = {
+        record_id: {
+            "status": builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+            "sample": entry.sample,
+            "run_label": entry.run_label,
+            "target_label": entry.target_label,
+            "auto_status": entry.status,
+        }
+    }
+
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        review_provider=lambda: stored,
+    )
+    try:
+        assert not dialog._entries_by_run  # noqa: SLF001
+        assert "Done 1" in dialog.status_label.text()
+        run_key = dialog._runs[0].key  # noqa: SLF001
+        run_item = dialog._run_items[run_key]  # noqa: SLF001
+        assert run_item.text(1) == "1 saved review(s)"
+        assert run_item.childCount() == 1
+        assert run_item.child(0).text(0) == entry.target_label
+        assert run_item.child(0).text(1) == "No transition"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_transition_review_next_unreviewed_loads_unloaded_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [_sample_mini_dma_record()],
+        logging.getLogger("test"),
+    )
+    try:
+        loaded_requests: list[tuple[str, bool]] = []
+
+        def _record_load(key: str, *, select_first: bool = False) -> None:
+            loaded_requests.append((key, select_first))
+
+        monkeypatch.setattr(dialog, "_ensure_run_loaded", _record_load)
+        dialog._select_next_unreviewed()  # noqa: SLF001
+
+        assert loaded_requests == [(dialog._runs[0].key, False)]  # noqa: SLF001
+        assert dialog._pending_select_unreviewed is True  # noqa: SLF001
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_mini_dma_transition_review_click_places_manual_target_values() -> None:
     _ensure_qapp()
     stored: dict[str, dict[str, object]] = {}
@@ -3087,6 +3151,72 @@ def test_transition_temps_preview_click_persists_manual_temperature(
     finally:
         section.close()
         section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_transition_temps_project_payload_preserves_review_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    scan = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 temp_scan.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame(
+            {
+                "temperature": [0.0, 20.0, 40.0],
+                "field": [10000.0, 10000.0, 10000.0],
+                "signal": [0.0, 1.0, 0.5],
+                "section_index": [0, 0, 0],
+            }
+        ),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="temp scan",
+    )
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=[scan],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    restored = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    try:
+        section._auto_values_for_record = lambda _record: {"As": 12.0, "Af": 32.0}  # type: ignore[method-assign]  # noqa: SLF001
+        section.refresh_data()
+        source_index = section.model.index(0, 0)
+        proxy_index = section._search_proxy.mapFromSource(source_index)  # noqa: SLF001
+        section.table_view.setCurrentIndex(proxy_index)
+        section.table_view.selectRow(proxy_index.row())
+        section._mark_current_scan_no_transition()  # noqa: SLF001
+
+        payload = section.export_project_payload()
+
+        assert payload["section"] == "transition_temps"
+        records = payload["extra"][builder_ui.VSM_TRANSITION_REVIEW_EXTRA_KEY]["records"]
+        assert len(records) == 1
+
+        restored.import_project_payload(payload)
+
+        restored_reviews = restored.transition_reviews_snapshot()
+        assert len(restored_reviews) == 1
+        review = next(iter(restored_reviews.values()))
+        assert review["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert restored.model.frame().iloc[0]["Review status"] == "No transition"
+    finally:
+        section.close()
+        restored.close()
+        section.deleteLater()
+        restored.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 
