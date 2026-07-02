@@ -582,6 +582,68 @@ def test_prague_scale_ignores_kern_earned_resume_band(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
+def test_kern_latest_sample_change_clears_filtered_signal_lag(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window.spin_diameter.setValue(0.0182)
+        seek_key = (mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0)
+        window._seek_last_filtered_value_by_key[seek_key] = 50.0
+        window._seek_last_latest_signal_value_by_key[seek_key] = 50.0
+        window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = 10.0
+        window._latest_scale_timestamp = 10.05
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=50.05,
+            latest_value=50.5,
+            noise=0.1,
+            slope_per_s=0.0,
+            sample_count=4,
+            timestamp_s=10.05,
+        )
+
+        assert window._filtered_signal_changed_after_last_correction(
+            seek_key,
+            signal,
+            effective_tolerance=1.0,
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_scale_waits_for_filter_window_when_filtered_signal_lags(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText("P")
+        window.edit_scale_terminator.setText("\\r\\n")
+        seek_key = (mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0)
+        window._seek_last_filtered_value_by_key[seek_key] = 50.0
+        window._seek_last_latest_signal_value_by_key[seek_key] = 50.0
+        window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = 10.0
+        window._latest_scale_timestamp = 10.05
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=50.05,
+            latest_value=50.5,
+            noise=0.1,
+            slope_per_s=0.0,
+            sample_count=4,
+            timestamp_s=10.05,
+        )
+
+        assert not window._filtered_signal_changed_after_last_correction(
+            seek_key,
+            signal,
+            effective_tolerance=1.0,
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_load_stress_control_disables_cruise_feedback(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:

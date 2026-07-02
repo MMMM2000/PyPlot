@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.2"
+CONTROL_LOGIC_VERSION = "2026-07-02.3"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -133,6 +133,7 @@ CONTROL_LOGIC_FEATURES = [
     "scale_quantization_aware_current_hold_feedback",
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
     "kern_kcp_current_hold_resume_band_is_response_earned",
+    "kern_kcp_latest_sample_can_clear_filtered_feedback_lag",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -5504,6 +5505,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_time_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_filtered_value_by_key: dict[tuple[str, int, float], float] = {}
+        self._seek_last_latest_signal_value_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_out_of_band_since_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_out_of_band_sign_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_key: dict[tuple[str, int, float], float] = {}
@@ -16626,6 +16628,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.pop(seek_key, None)
         self._seek_last_time_by_key.pop(seek_key, None)
         self._seek_last_filtered_value_by_key.pop(seek_key, None)
+        self._seek_last_latest_signal_value_by_key.pop(seek_key, None)
         self._seek_out_of_band_since_by_key.pop(seek_key, None)
         self._seek_out_of_band_sign_by_key.pop(seek_key, None)
         self._seek_last_scale_timestamp_by_key.pop(seek_key, None)
@@ -16658,6 +16661,22 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if change > required_change:
             return True
+        if self._using_kern_kcp_scale() and seek_key in self._seek_last_latest_signal_value_by_key:
+            quantization_required_change = quantization_band * SCALE_QUANTIZATION_CHANGE_FACTOR
+            if quantization_required_change > 0.0:
+                noise_required_change = abs(float(filtered_signal.noise)) * 0.25
+                latest_required_change = max(
+                    quantization_required_change,
+                    min(
+                        noise_required_change,
+                        quantization_band * SCALE_QUANTIZATION_WORSENING_FACTOR,
+                    ),
+                    1e-9,
+                )
+                previous_latest = self._seek_last_latest_signal_value_by_key[seek_key]
+                latest_change = abs(float(filtered_signal.latest_value) - float(previous_latest))
+                if latest_change > latest_required_change:
+                    return True
         latest_s = self._latest_scale_sample_time_s()
         clock_key = seek_key[0], seek_key[1]
         last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
@@ -18065,6 +18084,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._seek_last_value_by_key[seek_key] = current_value
                     self._seek_last_time_by_key[seek_key] = seek_sample_time_s
                     self._seek_last_filtered_value_by_key[seek_key] = filtered_signal.value
+                    self._seek_last_latest_signal_value_by_key[seek_key] = filtered_signal.latest_value
                     latest_scale_sample_time_s = self._latest_scale_sample_time_s()
                     if latest_scale_sample_time_s is not None:
                         self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
@@ -18340,6 +18360,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_last_time_by_key[seek_key] = seek_sample_time_s
             if filtered_signal is not None:
                 self._seek_last_filtered_value_by_key[seek_key] = filtered_signal.value
+                self._seek_last_latest_signal_value_by_key[seek_key] = filtered_signal.latest_value
             latest_scale_sample_time_s = self._latest_scale_sample_time_s()
             if latest_scale_sample_time_s is not None:
                 self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
@@ -18448,6 +18469,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_time_by_key[seek_key] = seek_sample_time_s
         if filtered_signal is not None:
             self._seek_last_filtered_value_by_key[seek_key] = filtered_signal.value
+            self._seek_last_latest_signal_value_by_key[seek_key] = filtered_signal.latest_value
         latest_scale_sample_time_s = self._latest_scale_sample_time_s()
         if latest_scale_sample_time_s is not None:
             self._seek_last_scale_timestamp_by_key[seek_key] = latest_scale_sample_time_s
@@ -24451,6 +24473,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
         self._seek_last_filtered_value_by_key.clear()
+        self._seek_last_latest_signal_value_by_key.clear()
         self._seek_out_of_band_since_by_key.clear()
         self._seek_out_of_band_sign_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
@@ -25337,6 +25360,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_value_by_key.clear()
         self._seek_last_time_by_key.clear()
         self._seek_last_filtered_value_by_key.clear()
+        self._seek_last_latest_signal_value_by_key.clear()
         self._seek_out_of_band_since_by_key.clear()
         self._seek_out_of_band_sign_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
