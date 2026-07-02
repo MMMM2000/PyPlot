@@ -14114,6 +14114,7 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
     controller.set_target_position(-42, max_speed=12345)
     controller.set_target_velocity(250)
     controller.set_current_position(0)
+    controller.set_step_mode("8")
     controller.set_current_limit_mA(500)
     controller.halt_and_hold()
 
@@ -14128,6 +14129,7 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
         (0x40, 0x83, 0, 0, None),
         (0x40, 0xE3, 250, 0, None),
         (0x40, 0xEC, 0, 0, None),
+        (0x40, 0x94, 3, 0, None),
         (0x40, 0x91, 4, 0, None),
         (0x40, 0x89, 0, 0, None),
     ]
@@ -14149,12 +14151,17 @@ def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatc
             *,
             timeout: int | None = None,
         ) -> bytes:
-            assert (request_type, request, value, index, data_or_wLength) == (0xC0, 0xA1, 0, 0, 0x35)
-            data = bytearray(0x35)
+            assert (request_type, request, value, index, data_or_wLength) == (0xC0, 0xA1, 0, 0, 0x4B)
+            data = bytearray(0x4B)
             data[0x00] = 10
             data[0x02:0x04] = (0).to_bytes(2, "little")
+            data[0x16:0x1A] = (8_000_000).to_bytes(4, "little")
+            data[0x1A:0x1E] = (80_000).to_bytes(4, "little")
+            data[0x1E:0x22] = (90_000).to_bytes(4, "little")
             data[0x22:0x26] = (-42).to_bytes(4, "little", signed=True)
             data[0x33:0x35] = (12345).to_bytes(2, "little")
+            data[0x49] = 3
+            data[0x4A] = 3
             return bytes(data)
 
     device = _FakeDevice()
@@ -14180,6 +14187,11 @@ def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatc
     assert "Operation state: Normal" in status
     assert "Current position: -42" in status
     assert "VIN voltage: 12.35 V" in status
+    assert "Max speed: 8000000" in status
+    assert "Max acceleration: 90000" in status
+    assert "Max deceleration: 80000" in status
+    assert "Step mode: 1/8 step" in status
+    assert "Current limit: 343 mA" in status
     assert "Errors currently stopping the motor: None" in status
 
 
@@ -22363,8 +22375,10 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         assert ok is True
         assert supply.configured == [(2, 12.0, 0.5, True)]
         assert supply.selected == 3
+        assert tic.step_modes == ["8"]
         assert tic.current_limits == [343.0]
         assert "PASS: Motor supply CH2" in window.label_hardware_provisioning_status.text()
+        assert "PASS: Tic step mode" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic current limit 343 mA" in window.label_hardware_provisioning_status.text()
     finally:
         _close_test_window(window)
@@ -22437,6 +22451,39 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
         assert ok is True
         assert not warnings
         assert "Tic current limit already 343 mA" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_apply_tic_configured_step_mode_writes_selected_mode(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeTic:
+        def __init__(self) -> None:
+            self.step_modes: list[str] = []
+            self.current_limits: list[float] = []
+
+        def set_step_mode(self, step_mode: str) -> None:
+            self.step_modes.append(step_mode)
+
+        def set_current_limit_mA(self, target_mA: float) -> int:
+            self.current_limits.append(target_mA)
+            return mini_dma_mod.DEFAULT_TIC_CURRENT_LIMIT_MA
+
+    tic = _FakeTic()
+    try:
+        window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+        window._tic_status_text = "VIN voltage: 12.00 V\nErrors currently stopping the motor: None"
+        window.spin_full_steps_per_mm.setValue(100.0)
+        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
+
+        ok, message = window._apply_tic_configured_step_mode()
+
+        assert ok is True
+        assert "Tic step mode 1/8 step" in message
+        assert tic.step_modes == ["8"]
+        assert tic.current_limits == []
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
     finally:
         _close_test_window(window)
 

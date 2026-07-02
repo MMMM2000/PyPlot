@@ -350,6 +350,7 @@ TIC_CMD_ENERGIZE = 0x85
 TIC_CMD_HALT_AND_HOLD = 0x89
 TIC_CMD_RESET_COMMAND_TIMEOUT = 0x8C
 TIC_CMD_SET_CURRENT_LIMIT = 0x91
+TIC_CMD_SET_STEP_MODE = 0x94
 TIC_CMD_GET_VARIABLES = 0xA1
 TIC_CMD_SET_TARGET_POSITION = 0xE0
 TIC_CMD_SET_TARGET_VELOCITY = 0xE3
@@ -548,6 +549,29 @@ TIC_STEP_MODE_FACTORS = {
     "8": 8,
     "16": 16,
     "32": 32,
+}
+TIC_STEP_MODE_COMMAND_VALUES = {
+    "full": 0,
+    "1": 0,
+    "half": 1,
+    "2": 1,
+    "4": 2,
+    "8": 3,
+    "16": 4,
+    "32": 5,
+    "2_100p": 6,
+}
+TIC_STEP_MODE_LABELS_BY_COMMAND_VALUE = {
+    0: "Full step",
+    1: "1/2 step",
+    2: "1/4 step",
+    3: "1/8 step",
+    4: "1/16 step",
+    5: "1/32 step",
+    6: "1/2 step 100%",
+    7: "1/64 step",
+    8: "1/128 step",
+    9: "1/256 step",
 }
 MOTOR_STEP_CALIBRATION_DEFAULT_INCREMENT_STEPS = 800
 MOTOR_STEP_CALIBRATION_DEFAULT_MOVES = 5
@@ -1013,6 +1037,13 @@ def _extract_tic_current_limit_mA(status_text: str | None) -> int | None:
     return _extract_first_int(value)
 
 
+def _extract_tic_step_mode(status_text: str | None) -> str | None:
+    value = _extract_status_value(status_text or "", "Step mode")
+    if value is None:
+        return None
+    return normalize_tic_step_mode(value)
+
+
 def normalize_tic_step_mode(step_mode: object) -> str | None:
     text = str(step_mode or "").strip().lower()
     if not text:
@@ -1041,6 +1072,13 @@ def tic_step_mode_factor(step_mode: object) -> int | None:
     if normalized is None:
         return None
     return TIC_STEP_MODE_FACTORS.get(normalized)
+
+
+def tic_step_mode_command_value(step_mode: object) -> int:
+    normalized = normalize_tic_step_mode(step_mode)
+    if normalized is None or normalized not in TIC_STEP_MODE_COMMAND_VALUES:
+        raise ValueError(f"Unsupported Tic step mode: {step_mode!r}")
+    return TIC_STEP_MODE_COMMAND_VALUES[normalized]
 
 
 def tic_units_per_mm(full_steps_per_mm: float, step_mode: object) -> float:
@@ -3756,6 +3794,9 @@ class NativeTicUsbController:
     def set_current_position(self, position_steps: int) -> None:
         self._command_u32(TIC_CMD_HALT_AND_SET_POSITION, int(position_steps))
 
+    def set_step_mode(self, step_mode: str) -> None:
+        self._command_7bit(TIC_CMD_SET_STEP_MODE, tic_step_mode_command_value(step_mode))
+
     def set_current_limit_mA(self, target_mA: float) -> int:
         safe_value = safe_tic_current_limit_mA(target_mA)
         self._command_7bit(TIC_CMD_SET_CURRENT_LIMIT, tic_t500_current_limit_code(target_mA))
@@ -3776,15 +3817,26 @@ class NativeTicUsbController:
         self._command_u32(TIC_CMD_SET_TARGET_POSITION, int(position_steps))
 
     def get_status(self) -> str:
-        variables = self._block_read(0x00, 0x35)
+        variables = self._block_read(0x00, 0x4B)
         operation_state = variables[0x00] if len(variables) > 0x00 else 0
         errors = int.from_bytes(variables[0x02:0x04], "little") if len(variables) >= 0x04 else 0
+        max_speed = int.from_bytes(variables[0x16:0x1A], "little") if len(variables) >= 0x1A else 0
+        max_decel = int.from_bytes(variables[0x1A:0x1E], "little") if len(variables) >= 0x1E else 0
+        max_accel = int.from_bytes(variables[0x1E:0x22], "little") if len(variables) >= 0x22 else 0
         current_position = (
             int.from_bytes(variables[0x22:0x26], "little", signed=True)
             if len(variables) >= 0x26
             else 0
         )
         vin_mv = int.from_bytes(variables[0x33:0x35], "little") if len(variables) >= 0x35 else 0
+        step_mode_code = variables[0x49] if len(variables) > 0x49 else None
+        current_limit_code = variables[0x4A] if len(variables) > 0x4A else None
+        step_mode_text = TIC_STEP_MODE_LABELS_BY_COMMAND_VALUE.get(step_mode_code, f"Unknown ({step_mode_code})")
+        current_limit_text = (
+            f"{TIC_T500_CURRENT_LIMITS_MA[current_limit_code]} mA"
+            if current_limit_code is not None and 0 <= int(current_limit_code) < len(TIC_T500_CURRENT_LIMITS_MA)
+            else f"Unknown ({current_limit_code})"
+        )
         operation_text = {
             0: "Reset",
             2: "De-energized",
@@ -3799,6 +3851,11 @@ class NativeTicUsbController:
                 f"VIN voltage: {vin_mv / 1000.0:.2f} V",
                 f"Operation state: {operation_text}",
                 f"Current position: {current_position}",
+                f"Max speed: {max_speed}",
+                f"Max acceleration: {max_accel}",
+                f"Max deceleration: {max_decel}",
+                f"Step mode: {step_mode_text}",
+                f"Current limit: {current_limit_text}",
                 f"Errors currently stopping the motor: {error_text}",
                 "Transport: native USB",
             ]
@@ -4034,6 +4091,26 @@ class TicController:
         normalized = normalize_tic_step_mode(step_mode)
         if normalized is None:
             raise ValueError(f"Unsupported Tic step mode: {step_mode!r}")
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_step_mode(normalized)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_step_mode(normalized)
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only() or not self._fallback_allowed():
+                        raise
+                    self._log_ticcmd_fallback(f"native step-mode command failed: {exc}")
         self.run("--step-mode", normalized)
 
     def set_current_limit_mA(self, target_mA: float) -> int:
@@ -13285,6 +13362,38 @@ class MainWindow(QtWidgets.QMainWindow):
             parts.append(f"current limit {current_limit}")
         self.label_tic_settings_summary.setText("Live Tic settings: " + " | ".join(parts))
 
+    def _apply_tic_configured_step_mode(self) -> tuple[bool, str]:
+        requested_step_mode = self._selected_tic_step_mode()
+        requested_label = _tic_step_mode_label(requested_step_mode)
+        try:
+            requested_units_per_mm = tic_units_per_mm(float(self.spin_full_steps_per_mm.value()), requested_step_mode)
+        except ValueError as exc:
+            return False, f"FAIL: Tic step mode is invalid ({exc})."
+        reported_step_mode = _extract_tic_step_mode(self._tic_status_text)
+        if reported_step_mode == normalize_tic_step_mode(requested_step_mode):
+            self._set_tic_units_per_mm(requested_units_per_mm)
+            return True, f"PASS: Tic step mode already {requested_label}."
+        try:
+            self._build_tic_controller().set_step_mode(requested_step_mode)
+        except Exception as exc:
+            reported_step_mode = _extract_tic_step_mode(self._tic_status_text)
+            if reported_step_mode == normalize_tic_step_mode(requested_step_mode):
+                self._set_tic_units_per_mm(requested_units_per_mm)
+                return (
+                    True,
+                    f"PASS: Tic step mode already {requested_label} "
+                    f"(write skipped because the controller handle was busy: {exc}).",
+                )
+            return False, f"FAIL: Tic step mode could not be set ({exc})."
+        self._set_tic_units_per_mm(requested_units_per_mm)
+        self._refresh_tic_settings_summary()
+        return (
+            True,
+            f"PASS: Tic step mode {requested_label}; "
+            f"{float(self.spin_full_steps_per_mm.value()):.4g} full steps/mm -> "
+            f"{requested_units_per_mm:.3f} Tic units/mm.",
+        )
+
     def _apply_tic_step_mode(self, _checked: bool = False, *, confirm: bool = True) -> bool:
         if self._automation_active or self._session_active or self._manual_jog_timer.isActive():
             QtWidgets.QMessageBox.warning(
@@ -21911,6 +22020,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
                     )
             if not issues and self._recipe_requires_tic(steps):
+                tic_step_ok, tic_step_message = self._apply_tic_configured_step_mode()
+                self._log(f"Recipe preflight: {tic_step_message}")
+                if not tic_step_ok:
+                    issues.append(tic_step_message.replace("FAIL: ", "", 1))
+            if not issues and self._recipe_requires_tic(steps):
                 tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
                 self._log(f"Recipe preflight: {tic_limit_message}")
                 if not tic_limit_ok:
@@ -22005,14 +22119,17 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             statuses.append("PASS: Scale serial preset connected/responding.")
 
-        tic_ok, tic_message = self._apply_tic_current_limit()
-        statuses.append(tic_message)
-        ok = ok and tic_ok
         if not self._ensure_tic_ready_for_recipe():
             statuses.append("FAIL: Tic status/VIN check failed.")
             ok = False
         else:
             statuses.append("PASS: Tic status/VIN check passed.")
+            tic_step_ok, tic_step_message = self._apply_tic_configured_step_mode()
+            statuses.append(tic_step_message)
+            ok = ok and tic_step_ok
+            tic_ok, tic_message = self._apply_tic_current_limit()
+            statuses.append(tic_message)
+            ok = ok and tic_ok
 
         status_text = "\n".join(statuses)
         self.label_hardware_provisioning_status.setText(status_text)
