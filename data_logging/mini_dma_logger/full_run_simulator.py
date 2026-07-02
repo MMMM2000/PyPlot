@@ -1370,7 +1370,8 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 "Ni49Fe26Ga23Co2 3/6 mounted wire geometry, fast USB/KCP feedback, and "
                 "0.01 g quantized scale readback. The app polls every 50 ms, but the "
                 "observed full-session raw sample rate is about 16 Hz once request/response "
-                "and UI work are included."
+                "and UI work are included. The KERN profile keeps the base current-hold "
+                "correction small and only opens the adaptive cap after response is earned."
             ),
             wire=replace(
                 base.wire,
@@ -1409,7 +1410,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             scale_feedback=ScaleFeedbackConfig(name="kosice_kern", readability_g=0.01),
             zero_compression_stress=True,
             max_correction_strain_pct=0.08,
-            adaptive_correction_cap_max_scale=1.0,
+            adaptive_correction_cap_max_scale=1.25,
             reported_strain_motor_scale=1.0,
             reported_strain_offset_pct=0.0,
             transformation_profile="stepped",

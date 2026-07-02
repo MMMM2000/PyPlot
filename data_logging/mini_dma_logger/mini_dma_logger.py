@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.12"
+CONTROL_LOGIC_VERSION = "2026-07-03.2"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -130,8 +130,10 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_large_error_uses_geometry_base_cap_before_response",
     "current_hold_response_stiffness_requires_error_improvement",
     "current_hold_adaptive_cap_growth_is_response_earned",
+    "current_hold_adaptive_large_error_floor_scales_with_band",
     "scale_quantization_aware_current_hold_feedback",
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
+    "kern_kcp_adaptive_hold_cap_is_response_earned",
     "kern_kcp_current_hold_resume_band_is_response_earned",
     "kern_kcp_current_hold_runaway_drift_bypasses_volatile_wait",
     "kern_kcp_runaway_drift_uses_bounded_noise_band",
@@ -625,11 +627,16 @@ SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA = 25.0
 SERVO_CURRENT_SWEEP_TARGET_RAMP_TRUST_FRACTION = 0.15
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION = 0.50
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
-SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR = 4.0
+SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_TARGET_FRACTION = 0.05
 SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.24
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
 KERN_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.08
-KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.092
+KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_SCALE = 1.25
+KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = (
+    KERN_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
+    * KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_SCALE
+)
 KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_ENTRY_FRACTION = 0.28
 KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION = 0.75
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH = 1.35
@@ -14519,9 +14526,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 and max_cap > 0.0
                 and error_abs > near_threshold
             ):
+                adaptive_large_error_floor = (
+                    self._current_sweep_hold_adaptive_large_error_floor_for_basis(
+                        basis,
+                        near_threshold,
+                        seek_key=seek_key,
+                    )
+                )
                 large_error = max(
                     0.0,
-                    error_abs - max(near_threshold, SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA),
+                    error_abs - max(near_threshold, adaptive_large_error_floor),
                 )
                 fraction = SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION + (
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION
@@ -14603,6 +14617,38 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._using_kern_kcp_scale():
             return KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
         return SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+
+    def _current_sweep_hold_adaptive_large_error_floor_for_basis(
+        self,
+        basis: str,
+        base_floor: float,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> float:
+        floors: list[float] = []
+        base = abs(float(base_floor))
+        if math.isfinite(base) and base > 0.0:
+            floors.append(base * SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR)
+        quantized = self._scale_quantization_band_for_basis(basis)
+        if math.isfinite(float(quantized)) and quantized > 0.0:
+            floors.append(
+                abs(float(quantized))
+                * SCALE_QUANTIZATION_WORSENING_FACTOR
+                * SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR
+            )
+        if seek_key is not None and len(seek_key) >= 3:
+            try:
+                target_value = abs(float(seek_key[2]))
+            except (TypeError, ValueError):
+                target_value = 0.0
+            if math.isfinite(target_value) and target_value > 0.0:
+                floors.append(
+                    target_value
+                    * SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_TARGET_FRACTION
+                )
+        if not floors:
+            return 0.0
+        return max(floors)
 
     def _current_sweep_hold_base_command_cap_mm(self) -> float:
         strain_cap_mm = self._strain_pct_to_stage_mm(
@@ -16753,9 +16799,14 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if hold_cap_value is None or not math.isfinite(float(hold_cap_value)) or float(hold_cap_value) <= 0.0:
             hold_cap_value = current_abs
+        adaptive_large_error_floor = self._current_sweep_hold_adaptive_large_error_floor_for_basis(
+            basis,
+            large_error_floor,
+            seek_key=seek_key,
+        )
         large_error = max(
             0.0,
-            current_abs - max(large_error_floor, SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA),
+            current_abs - max(large_error_floor, adaptive_large_error_floor),
         )
         fraction = SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION + (
             SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION
@@ -20697,7 +20748,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_sweep_dynamic_scale_mpa": SERVO_CURRENT_SWEEP_DYNAMIC_SCALE_MPA,
                 "current_hold_adaptive_min_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MIN_FRACTION,
                 "current_hold_adaptive_max_fraction": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION,
-                "current_hold_adaptive_large_error_mpa": SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA,
+                "current_hold_adaptive_large_error_band_factor": (
+                    SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR
+                ),
+                "current_hold_adaptive_large_error_target_fraction": (
+                    SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_TARGET_FRACTION
+                ),
                 "current_hold_base_command_strain_pct": (
                     SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
                 ),

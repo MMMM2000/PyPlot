@@ -70,7 +70,8 @@ Known and measured settings for the KERN TEWJ 600-2M/B bench balance:
 - The scale can provide much faster request/reply cadence than the Prague G&G balance. On the 2026-07-02 Kosice run, `scale_raw.csv` showed median reply spacing near `50 ms`, p95 near `101 ms`, and many repeated adjacent display values.
 - The 0.01 g readability is a meaningful control floor. For the mounted 18.2 um wire on 2026-07-02, one display count was about `0.377 MPa`.
 - TMA therefore treats KERN feedback as fast but quantized: the control loop can react sooner than with the Prague balance, but it must not classify a single display count as a confirmed worsened response.
-- KERN KCP fast-feedback runs use a smaller current-hold command cap than the Prague/G&G profile: `0.08%` base correction strain and `0.092%` adaptive ceiling. The older Prague/G&G caps remain `0.24%` and `0.35%`.
+- KERN KCP fast-feedback runs use a smaller current-hold command cap than the Prague/G&G profile: `0.08%` base correction strain and a response-earned `1.25x` adaptive ceiling (`0.10%` strain). The older Prague/G&G caps remain `0.24%` and `0.35%`.
+- Current-hold adaptive large-error recovery is derived from the active hold band, scale readability, and target fraction, not a fixed MPa cutoff.
 - KERN current-hold resume is response-earned: the app can relax resume only as a fraction of the actual hold-entry error, and only after filtered feedback improves without drifting away from the target. Do not replace this with fixed MPa pause/resume values for one sample.
 - Raw scale sidecar logging remains important. Use `scale_raw.csv` to distinguish real load changes from repeated display-count values.
 

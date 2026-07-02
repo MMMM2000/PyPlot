@@ -456,7 +456,7 @@ def test_kern_scale_uses_conservative_fast_feedback_hold_caps(tmp_path: Path, qt
         window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
 
         assert window._current_sweep_hold_base_command_strain_pct() == pytest.approx(0.08)
-        assert window._current_sweep_hold_adaptive_max_command_strain_pct() == pytest.approx(0.092)
+        assert window._current_sweep_hold_adaptive_max_command_strain_pct() == pytest.approx(0.10)
     finally:
         _close_test_window(window)
 
@@ -21020,6 +21020,47 @@ def test_current_sweep_hold_large_error_without_response_uses_geometry_base_cap(
         _close_test_window(window)
 
 
+def test_current_sweep_hold_adaptive_large_error_floor_scales_with_band_target_and_quantization(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._scale_quantization_band_for_basis = lambda _basis: 0.0  # type: ignore[method-assign]
+        floor_50_mpa = window._current_sweep_hold_adaptive_large_error_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            2.0,
+            seek_key=(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0),
+        )
+        floor_500_mpa = window._current_sweep_hold_adaptive_large_error_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            2.0,
+            seek_key=(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 500.0),
+        )
+
+        assert floor_50_mpa == pytest.approx(
+            2.0 * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR
+        )
+        assert floor_500_mpa == pytest.approx(
+            500.0 * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_TARGET_FRACTION
+        )
+
+        window._scale_quantization_band_for_basis = lambda _basis: 4.0  # type: ignore[method-assign]
+        quantized_floor = window._current_sweep_hold_adaptive_large_error_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            2.0,
+            seek_key=(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0),
+        )
+        assert quantized_floor == pytest.approx(
+            4.0
+            * mini_dma_mod.SCALE_QUANTIZATION_WORSENING_FACTOR
+            * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_uses_adaptive_response_stiffness_for_large_errors(
     tmp_path: Path,
     qtbot,
@@ -21052,7 +21093,7 @@ def test_current_sweep_hold_uses_adaptive_response_stiffness_for_large_errors(
         )
 
         assert correction_mm is not None
-        assert correction_mm == pytest.approx(0.059, rel=0.08)
+        assert correction_mm == pytest.approx(0.064, rel=0.05)
         assert correction_mm < (20.0 / 300.0)
     finally:
         _close_test_window(window)
@@ -23782,7 +23823,9 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_hold_large_error_uses_geometry_base_cap_before_response" in first_logic["features"]
         assert "current_hold_response_stiffness_requires_error_improvement" in first_logic["features"]
         assert "current_hold_adaptive_cap_growth_is_response_earned" in first_logic["features"]
+        assert "current_hold_adaptive_large_error_floor_scales_with_band" in first_logic["features"]
         assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
+        assert "control_constants" in first_logic["fingerprint_fields"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]
