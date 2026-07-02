@@ -5,3 +5,4 @@
 - Live-tested a noise-gated KERN latest-sample lag-clear variant and left the latest-sample bypass disabled after it ran slower with worse p95 than the earned-resume controller.
 - Refreshed the Mini DMA shared-HMP verification helper so it runs the current broker auto-start and correction-travel tests instead of an obsolete correction-travel abort test.
 - Added a KERN-only current-hold runaway-drift recovery path so fast KCP scale feedback can send bounded dynamic corrections when filtered stress/load is still moving away from target, without changing Prague-scale volatile-response waits.
+- Applied the KERN earned-resume band inside the held-current recovery loop itself, so Košice runs can restart the current ramp after stable proportional recovery instead of waiting for exact near-target seek acceptance.

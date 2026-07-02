@@ -582,6 +582,115 @@ def test_prague_scale_ignores_kern_earned_resume_band(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
+def test_kern_held_recovery_uses_earned_resume_band_before_exact_seek(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_started_s = 90.0
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+        window._current_sweep_ramp_hold_entry_pause_band = 8.0
+        window._current_sweep_ramp_hold_in_band_since_s = 100.0
+        monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 101.0)
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=101.0,
+        )
+        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (4.0, 4.0, 1.0, 0.2)
+        )
+        window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+        window._seek_distribution_target = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("exact seek should not run"))
+        )
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        assert window._handle_current_sweep_held_recovery(
+            step,
+            plateau_index=1,
+            tolerance=1.0,
+        ) is False
+
+        assert resumed
+        assert "adaptive resume band" in resumed[-1]
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_held_recovery_ignores_kern_earned_resume_shortcut(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText("P")
+        window.edit_scale_terminator.setText("\\r\\n")
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_started_s = 90.0
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+        window._current_sweep_ramp_hold_entry_pause_band = 8.0
+        window._current_sweep_ramp_hold_in_band_since_s = 100.0
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=101.0,
+        )
+        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (4.0, 4.0, 1.0, 0.2)
+        )
+        window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        assert window._maybe_resume_current_sweep_held_recovery_from_adaptive_band(
+            step,
+            now_s=101.0,
+        ) is False
+
+        assert resumed == []
+    finally:
+        _close_test_window(window)
+
+
 def test_kern_scale_waits_for_filter_window_when_filtered_signal_lags(
     tmp_path: Path,
     qtbot,

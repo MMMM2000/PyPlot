@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.8"
+CONTROL_LOGIC_VERSION = "2026-07-02.9"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -134,6 +134,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
     "kern_kcp_current_hold_resume_band_is_response_earned",
     "kern_kcp_current_hold_runaway_drift_bypasses_volatile_wait",
+    "kern_kcp_held_recovery_uses_earned_resume_band",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -27012,6 +27013,71 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_ramp_hold_in_band_since_s = None
         return True, False
 
+    def _maybe_resume_current_sweep_held_recovery_from_adaptive_band(
+        self,
+        step: AutomationStep,
+        *,
+        now_s: float,
+    ) -> bool:
+        if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        error_state = self._current_sweep_target_error_and_tolerance(step, filtered=True)
+        if error_state is None:
+            self._current_sweep_ramp_hold_in_band_since_s = None
+            return False
+        signed_error, resume_error, tolerance, noise_value = error_state
+        filtered_signal = self._scale_control_signal_for_basis(step.basis)
+        resume_factor = self._current_sweep_hold_resume_factor(step)
+        resume_window_spans_target = self._current_sweep_filtered_window_spans_target(
+            step.basis,
+            float(step.target_value),
+            tolerance,
+        )
+        resume_noise_band = (
+            max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
+            if resume_window_spans_target
+            else 0.0
+        )
+        resume_band = max(
+            tolerance * resume_factor,
+            resume_noise_band,
+            self._current_sweep_hold_min_band_for_basis(
+                step.basis,
+                self._current_sweep_hold_min_resume_stress_mpa(),
+            ),
+        )
+        active_resume_band = self._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=signed_error,
+            resume_band=resume_band,
+            pause_band=(
+                self._current_sweep_ramp_hold_entry_pause_band
+                if self._current_sweep_ramp_hold_entry_pause_band is not None
+                else resume_band
+            ),
+            filtered_signal=filtered_signal,
+        )
+        if active_resume_band <= resume_band + 1e-12 or resume_error > active_resume_band:
+            self._current_sweep_ramp_hold_in_band_since_s = None
+            return False
+        if self._current_sweep_ramp_hold_in_band_since_s is None:
+            self._current_sweep_ramp_hold_in_band_since_s = now_s
+        stable_s = self._current_sweep_hold_resume_stable_s(step)
+        if now_s - self._current_sweep_ramp_hold_in_band_since_s >= stable_s:
+            self._resume_current_sweep_ramp_from_hold(
+                now_s=now_s,
+                reason=(
+                    f"held-current filtered target error {_format_compact_number(resume_error)} "
+                    f"is inside adaptive resume band {_format_compact_number(active_resume_band)}"
+                ),
+            )
+        else:
+            self._log_waiting_for_feedback(
+                "Held-current recovery is inside the adaptive KERN resume band; "
+                "confirming stable recovery before resuming current."
+            )
+        return True
+
     def _handle_current_sweep_held_recovery(
         self,
         step: AutomationStep,
@@ -27025,6 +27091,9 @@ class MainWindow(QtWidgets.QMainWindow):
             target_value=step.target_value,
             plateau_index=plateau_index,
         )
+        now_s = time.monotonic()
+        if self._maybe_resume_current_sweep_held_recovery_from_adaptive_band(step, now_s=now_s):
+            return False
         point_count_before_seek = len(self._session_points)
         try:
             target_recovered = self._seek_distribution_target(step.basis, step.target_value, tolerance)
