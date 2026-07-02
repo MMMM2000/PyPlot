@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.10"
+CONTROL_LOGIC_VERSION = "2026-07-02.11"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -15928,6 +15928,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_travel_during_interval_mm(speed_mm_s, basis),
         )
 
+    def _setup_preload_speed_limited_step_mm(self, basis: str | None, speed_mm_s: float) -> float:
+        interval_s = max(
+            self._seek_decision_interval_s(basis),
+            DEFAULT_SCALE_REQUEST_INTERVAL_MS / 1000.0,
+        )
+        speed = max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
+        profile_travel = self._motion_profile_travel_mm(speed, interval_s)
+        if profile_travel is not None:
+            return max(self._motor_step_mm(), max(0.0, profile_travel))
+        return max(self._motor_step_mm(), speed * interval_s)
+
     def _seek_travel_during_interval_mm(self, speed_mm_s: float, basis: str | None) -> float:
         interval_s = self._seek_decision_interval_s(basis)
         speed = max(self._minimum_held_speed_mm_s(), abs(float(speed_mm_s)))
@@ -16428,19 +16439,14 @@ class MainWindow(QtWidgets.QMainWindow):
         max_step_mm = self._seek_nudge_mm()
         if self._automation_step_note == "setup_preload" and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             correction_caps = [
-                self._seek_speed_limited_step_mm(
+                self._setup_preload_speed_limited_step_mm(
                     basis,
                     self._motion_speed_for_current_context(manual_jog=False),
                 )
             ]
-            stress_cap_mm = self._current_sweep_max_stress_correction_mm(
-                basis,
-                sensitivity,
-                error_value=error_value,
-                seek_key=seek_key,
-            )
-            if stress_cap_mm is not None:
-                correction_caps.append(stress_cap_mm)
+            setup_cap_mm = self._setup_preload_max_slack_takeup_step_mm(basis, seek_key=seek_key)
+            if setup_cap_mm is not None:
+                correction_caps.append(setup_cap_mm)
             max_step_mm = max(self._motor_step_mm(), min(correction_caps))
         elif self._automation_step_note in {"setup_preload", "setup_return_zero"}:
             max_step_mm = self._seek_speed_limited_step_mm(
@@ -18100,7 +18106,7 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_key=seek_key,
         )
         if setup_preload_takeup:
-            nudge_mm = self._seek_speed_limited_step_mm(
+            nudge_mm = self._setup_preload_speed_limited_step_mm(
                 basis,
                 min(
                     self._motion_speed_for_current_context(manual_jog=False),

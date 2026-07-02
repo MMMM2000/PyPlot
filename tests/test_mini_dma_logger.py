@@ -17850,6 +17850,48 @@ def test_setup_preload_tiny_baseline_load_uses_stiffness_capped_slack_takeup(
         _close_test_window(window)
 
 
+def test_setup_preload_fast_scale_quantization_does_not_collapse_to_single_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.spin_steps_per_mm.setValue(800.0)
+        window.spin_diameter.setValue(0.0182)
+        window.spin_scale_interval.setValue(50)
+        window.spin_motion_speed_mm_s.setValue(0.1)
+        window.spin_setup_slack_step_cap_stress_mpa.setValue(50.0)
+        window._automation_interval_ms = 50
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            note="setup_preload",
+        )
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+        apparent_sensitivity_mpa_per_mm = 520.0
+        apparent_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+            apparent_sensitivity_mpa_per_mm,
+            window.spin_diameter.value(),
+        )
+        assert apparent_stiffness_g_per_mm is not None
+        window._seek_live_stiffness_by_key[seek_key] = apparent_stiffness_g_per_mm
+
+        correction_mm = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            error_value=4.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+            seek_key=seek_key,
+        )
+
+        assert correction_mm == pytest.approx(4.0 / apparent_sensitivity_mpa_per_mm * 0.75)
+        assert correction_mm > window._motor_step_mm() * 3.0
+    finally:
+        _close_test_window(window)
+
+
 def test_setup_return_zero_uses_return_time_speed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.check_tension_load_positive.setChecked(True)
