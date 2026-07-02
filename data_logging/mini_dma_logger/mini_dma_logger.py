@@ -22381,6 +22381,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _apply_tic_motion_limits(self) -> tuple[bool, str]:
         targets = self._selected_tic_motion_limits()
+        try:
+            self._refresh_tic_status()
+        except Exception:
+            pass
         readbacks = self._tic_motion_limit_readbacks()
         if self._tic_motion_limits_match(readbacks, targets):
             return True, f"PASS: Tic motion limits already {self._format_tic_motion_limits(targets)}."
@@ -22426,6 +22430,18 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self._refresh_tic_settings_summary()
         return True, f"PASS: Tic motion limits {self._format_tic_motion_limits(targets)}."
+
+    def _restore_idle_tic_motion_limits(self) -> None:
+        if self._automation_active or self._motor_step_calibration_active:
+            return
+        manual_timer = getattr(self, "_manual_jog_timer", None)
+        if manual_timer is not None and manual_timer.isActive():
+            return
+        ok, message = self._apply_tic_motion_limits()
+        if ok:
+            self._log(f"Restored Tic idle motion limits: {message.removeprefix('PASS: ')}")
+        else:
+            self._log(f"Tic idle motion-limit restore skipped: {message}")
 
     def _provision_bench_hardware(self, _checked: bool = False) -> bool:
         statuses: list[str] = []
@@ -25649,6 +25665,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reset_timed_step_state()
         self._stop_automation_control_loop()
         self._stop_tic_keepalive()
+        self._restore_idle_tic_motion_limits()
         if self._is_ui_thread():
             self._sync_manual_motion_base_from_current_position()
         else:

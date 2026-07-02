@@ -22927,6 +22927,65 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         _close_test_window(window)
 
 
+def test_restore_idle_tic_motion_limits_refreshes_after_dynamic_move(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeTic:
+        def __init__(self) -> None:
+            self.max_speed = 1_156_981
+            self.max_accel = 100_000
+            self.max_decel = 100_000
+            self.calls: list[tuple[int, int, int]] = []
+
+        def set_motion_limits(
+            self,
+            *,
+            max_speed: int | None = None,
+            max_accel: int | None = None,
+            max_decel: int | None = None,
+        ) -> None:
+            self.max_speed = int(max_speed if max_speed is not None else self.max_speed)
+            self.max_accel = int(max_accel if max_accel is not None else self.max_accel)
+            self.max_decel = int(max_decel if max_decel is not None else self.max_decel)
+            self.calls.append((self.max_speed, self.max_accel, self.max_decel))
+
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Step mode: 1/8 step",
+                    f"Max speed: {self.max_speed}",
+                    f"Max acceleration: {self.max_accel}",
+                    f"Max deceleration: {self.max_decel}",
+                    "Current limit: 343 mA",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    tic = _FakeTic()
+    window._tic_status_text = "\n".join(
+        [
+            "VIN voltage: 12.00 V",
+            "Step mode: 1/8 step",
+            "Max speed: 10000000",
+            "Max acceleration: 100000",
+            "Max deceleration: 100000",
+            "Current limit: 343 mA",
+            "Errors currently stopping the motor: None",
+        ]
+    )
+    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: setattr(window, "_tic_status_text", tic.get_status()) or True  # type: ignore[method-assign]
+
+    try:
+        window._restore_idle_tic_motion_limits()
+
+        assert tic.calls == [(10_000_000, 100_000, 100_000)]
+        assert "Restored Tic idle motion limits" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_recipe_preflight_blocks_start_when_tic_current_limit_fails(
     tmp_path: Path,
     qtbot,
