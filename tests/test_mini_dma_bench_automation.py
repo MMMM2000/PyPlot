@@ -137,8 +137,15 @@ def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) 
                 "kind": "mini_dma_bench_sequence",
                 "hardware": {
                     "supply_profile": "shared_hmp_broker",
+                    "supply_port": "COM4",
+                    "supply_baud": 115200,
                     "shared_broker_host": "127.0.0.1",
                     "shared_broker_port": 8765,
+                    "scale_port": "COM5",
+                    "scale_baud": 256000,
+                    "scale_request_command": "SI",
+                    "scale_line_ending": "\\r\\n",
+                    "scale_poll_interval_ms": 50,
                     "current_sweep_channel": 4,
                     "motor_supply_enabled": True,
                     "motor_supply_channel": 3,
@@ -157,8 +164,15 @@ def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) 
 
     assert summary["hardware"] == {
         "supply_profile": "shared_hmp_broker",
+        "supply_port": "COM4",
+        "supply_baud": 115200,
         "shared_broker_host": "127.0.0.1",
         "shared_broker_port": 8765,
+        "scale_port": "COM5",
+        "scale_baud": 256000,
+        "scale_request_command": "SI",
+        "scale_line_ending": "\\r\\n",
+        "scale_poll_interval_ms": 50,
         "current_sweep_channel": 4,
         "motor_supply_enabled": True,
         "motor_supply_channel": 3,
@@ -385,8 +399,15 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
                 },
                 "hardware": {
                     "supply_profile": "shared_hmp_broker",
+                    "supply_port": "COM4",
+                    "supply_baud": 115200,
                     "shared_broker_host": "127.0.0.1",
                     "shared_broker_port": 8765,
+                    "scale_port": "COM5",
+                    "scale_baud": 256000,
+                    "scale_request_command": "SI",
+                    "scale_line_ending": "\\r\\n",
+                    "scale_poll_interval_ms": 50,
                     "current_sweep_channel": 4,
                     "motor_supply_enabled": True,
                     "motor_supply_channel": 3,
@@ -410,6 +431,12 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
         def findData(self, value: object) -> int:
             try:
                 return self.values.index(value)
+            except ValueError:
+                return -1
+
+        def findText(self, value: str) -> int:
+            try:
+                return [str(item) for item in self.values].index(str(value))
             except ValueError:
                 return -1
 
@@ -451,8 +478,15 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
             self._session_active = False
             self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
             self.combo_supply_profile = _FakeCombo(["hmp4040", "shared_hmp_broker"])
+            self.combo_supply_port = _FakeCombo(["COM3", "COM4"])
+            self.combo_supply_baud = _FakeCombo(["9600", "115200"])
             self.edit_shared_broker_host = _FakeLineEdit()
             self.spin_shared_broker_port = _FakeSpin()
+            self.combo_scale_port = _FakeCombo(["COM5", "COM6"])
+            self.combo_scale_baud = _FakeCombo(["9600", "256000"])
+            self.edit_scale_request = _FakeLineEdit()
+            self.edit_scale_terminator = _FakeLineEdit()
+            self.spin_scale_interval = _FakeSpin()
             self.combo_current_sweep_supply_channel = _FakeCombo([0, 1, 2, 3, 4])
             self.check_motor_supply_power = _FakeCheck()
             self.combo_motor_supply_channel = _FakeCombo([0, 1, 2, 3, 4])
@@ -490,7 +524,14 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
 
     assert summary["runs"][0]["status"] == "completed"
     assert events.index(("combo", "shared_hmp_broker")) < events.index(("start", None))
+    assert ("combo", "COM4") in events
+    assert ("combo", "115200") in events
     assert ("text", "127.0.0.1") in events
+    assert ("combo", "COM5") in events
+    assert ("combo", "256000") in events
+    assert ("text", "SI") in events
+    assert ("text", "\\r\\n") in events
+    assert ("spin", 50) in events
     assert ("combo", 4) in events
     assert ("check", True) in events
     assert ("combo", 3) in events

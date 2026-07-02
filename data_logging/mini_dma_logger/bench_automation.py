@@ -70,8 +70,15 @@ class MiniDmaBenchLockConfig:
 @dataclass(frozen=True)
 class MiniDmaHardwareConfig:
     supply_profile: str | None = None
+    supply_port: str | None = None
+    supply_baud: int | None = None
     shared_broker_host: str | None = None
     shared_broker_port: int | None = None
+    scale_port: str | None = None
+    scale_baud: int | None = None
+    scale_request_command: str | None = None
+    scale_line_ending: str | None = None
+    scale_poll_interval_ms: int | None = None
     current_sweep_channel: int | None = None
     motor_supply_enabled: bool | None = None
     motor_supply_channel: int | None = None
@@ -255,11 +262,24 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         raise MiniDmaBenchAutomationError("TMA bench plan field 'hardware' must be an object.")
     hardware = MiniDmaHardwareConfig(
         supply_profile=None if raw_hardware.get("supply_profile") is None else str(raw_hardware["supply_profile"]),
+        supply_port=None if raw_hardware.get("supply_port") is None else str(raw_hardware["supply_port"]),
+        supply_baud=None if raw_hardware.get("supply_baud") is None else int(raw_hardware["supply_baud"]),
         shared_broker_host=(
             None if raw_hardware.get("shared_broker_host") is None else str(raw_hardware["shared_broker_host"])
         ),
         shared_broker_port=(
             None if raw_hardware.get("shared_broker_port") is None else int(raw_hardware["shared_broker_port"])
+        ),
+        scale_port=None if raw_hardware.get("scale_port") is None else str(raw_hardware["scale_port"]),
+        scale_baud=None if raw_hardware.get("scale_baud") is None else int(raw_hardware["scale_baud"]),
+        scale_request_command=(
+            None if raw_hardware.get("scale_request_command") is None else str(raw_hardware["scale_request_command"])
+        ),
+        scale_line_ending=(
+            None if raw_hardware.get("scale_line_ending") is None else str(raw_hardware["scale_line_ending"])
+        ),
+        scale_poll_interval_ms=(
+            None if raw_hardware.get("scale_poll_interval_ms") is None else int(raw_hardware["scale_poll_interval_ms"])
         ),
         current_sweep_channel=(
             None
@@ -443,6 +463,21 @@ def _set_combo_data_if_present(window: Any, attr_name: str, value: object | None
     set_current_index(int(index))
 
 
+def _set_combo_text_if_present(window: Any, attr_name: str, value: object | None) -> None:
+    if value is None:
+        return
+    combo = getattr(window, attr_name, None)
+    find_text = getattr(combo, "findText", None)
+    set_current_index = getattr(combo, "setCurrentIndex", None)
+    if not callable(find_text) or not callable(set_current_index):
+        return
+    text = str(value)
+    index = find_text(text)
+    if index is None or int(index) < 0:
+        raise MiniDmaBenchAutomationError(f"Could not select {attr_name} text {text!r}.")
+    set_current_index(int(index))
+
+
 def _set_spin_value_if_present(window: Any, attr_name: str, value: float | int | None) -> None:
     if value is None:
         return
@@ -454,8 +489,15 @@ def _set_spin_value_if_present(window: Any, attr_name: str, value: float | int |
 
 def _apply_hardware_config(window: Any, hardware: MiniDmaHardwareConfig) -> None:
     _set_combo_data_if_present(window, "combo_supply_profile", hardware.supply_profile)
+    _set_combo_data_if_present(window, "combo_supply_port", hardware.supply_port)
+    _set_combo_text_if_present(window, "combo_supply_baud", hardware.supply_baud)
     _set_text_if_present(window, "edit_shared_broker_host", hardware.shared_broker_host)
     _set_spin_value_if_present(window, "spin_shared_broker_port", hardware.shared_broker_port)
+    _set_combo_data_if_present(window, "combo_scale_port", hardware.scale_port)
+    _set_combo_text_if_present(window, "combo_scale_baud", hardware.scale_baud)
+    _set_text_if_present(window, "edit_scale_request", hardware.scale_request_command)
+    _set_text_if_present(window, "edit_scale_terminator", hardware.scale_line_ending)
+    _set_spin_value_if_present(window, "spin_scale_interval", hardware.scale_poll_interval_ms)
     _set_combo_data_if_present(window, "combo_current_sweep_supply_channel", hardware.current_sweep_channel)
     checkbox = getattr(window, "check_motor_supply_power", None)
     set_checked = getattr(checkbox, "setChecked", None)
@@ -879,8 +921,15 @@ def run_mini_dma_bench_plan(
             },
             "hardware": {
                 "supply_profile": plan.hardware.supply_profile,
+                "supply_port": plan.hardware.supply_port,
+                "supply_baud": plan.hardware.supply_baud,
                 "shared_broker_host": plan.hardware.shared_broker_host,
                 "shared_broker_port": plan.hardware.shared_broker_port,
+                "scale_port": plan.hardware.scale_port,
+                "scale_baud": plan.hardware.scale_baud,
+                "scale_request_command": plan.hardware.scale_request_command,
+                "scale_line_ending": plan.hardware.scale_line_ending,
+                "scale_poll_interval_ms": plan.hardware.scale_poll_interval_ms,
                 "current_sweep_channel": plan.hardware.current_sweep_channel,
                 "motor_supply_enabled": plan.hardware.motor_supply_enabled,
                 "motor_supply_channel": plan.hardware.motor_supply_channel,
