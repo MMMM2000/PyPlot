@@ -9593,6 +9593,103 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Automatic scale detection did not find a responding serial balance.")
         return False
 
+    def _fast_probe_scale_candidate(self, port_name: str) -> dict[str, Any] | None:
+        trials: list[tuple[int, str, str]] = []
+        try:
+            trials.append(
+                (
+                    int(self.combo_scale_baud.currentText()),
+                    self.edit_scale_request.text(),
+                    self.edit_scale_terminator.text(),
+                )
+            )
+        except Exception:
+            pass
+        trials.extend(
+            [
+                (KERN_KCP_SCALE_PREFERRED_BAUD, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
+                (KERN_KCP_SCALE_PREFERRED_BAUD, "S", KERN_KCP_SCALE_TERMINATOR),
+                (GNG_SCALE_PREFERRED_BAUD, GNG_SCALE_REQUEST, GNG_SCALE_TERMINATOR),
+            ]
+        )
+        seen: set[tuple[int, str, str]] = set()
+        for baudrate, request_command, terminator in trials:
+            key = (int(baudrate), str(request_command), str(terminator))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                raw = _read_serial_bytes(
+                    port_name,
+                    baudrate=key[0],
+                    payload=_decode_escape_text(key[1]) + _decode_escape_text(key[2]),
+                    timeout_s=0.18,
+                    total_wait_s=0.45,
+                )
+            except Exception:
+                continue
+            raw_text = raw.decode("utf-8", errors="ignore").strip()
+            if _parse_first_float(raw_text) is None:
+                continue
+            return {
+                "port": port_name,
+                "baudrate": key[0],
+                "request_command": key[1],
+                "terminator": key[2],
+                "raw_text": raw_text,
+            }
+        return None
+
+    def _scale_auto_connect_candidate_ports(self) -> list[str]:
+        candidates: list[str] = []
+        selected = str(self.combo_scale_port.currentData() or "").strip()
+        if selected:
+            candidates.append(selected)
+        if list_ports is None:
+            return candidates
+        port_infos = list(list_ports.comports())
+
+        def _priority(port: object) -> tuple[int, str]:
+            description = str(getattr(port, "description", "") or "").lower()
+            device = str(getattr(port, "device", "") or "")
+            if any(token in description for token in ("ch340", "usb-serial", "usb serial")):
+                return (0, device)
+            if any(token in description for token in ("prolific", "pl2303", "hameg", "hmp")):
+                return (2, device)
+            return (1, device)
+
+        for port in sorted(port_infos, key=_priority):
+            device = str(getattr(port, "device", "") or "").strip()
+            if device and device not in candidates:
+                candidates.append(device)
+        return candidates
+
+    def _apply_detected_scale_match(self, match: Mapping[str, Any]) -> None:
+        index = self.combo_scale_port.findData(str(match["port"]))
+        if index >= 0:
+            self.combo_scale_port.setCurrentIndex(index)
+        if self.combo_scale_baud.findText(str(match["baudrate"])) >= 0:
+            self.combo_scale_baud.setCurrentText(str(match["baudrate"]))
+        self.edit_scale_request.setText(str(match["request_command"]))
+        self.edit_scale_terminator.setText(str(match["terminator"]))
+        self.spin_scale_interval.setValue(_scale_interval_ms_for_probe_match(match))
+
+    def _fast_auto_detect_scale_port(self) -> bool:
+        if not str(self.combo_scale_port.currentData() or "").strip():
+            self._refresh_scale_ports()
+        for port_name in self._scale_auto_connect_candidate_ports():
+            match = self._fast_probe_scale_candidate(port_name)
+            if match is None:
+                continue
+            self._apply_detected_scale_match(match)
+            self._log(
+                f"Auto-detected scale on {match['port']} at {match['baudrate']} baud "
+                f"(sample reply: {match['raw_text']})."
+            )
+            return True
+        self._log("Fast scale auto-detect did not find a responding serial balance.")
+        return False
+
     def _refresh_scale_ports(self) -> None:
         current = self.combo_scale_port.currentData() or self.settings.value("scale_port", "", type=str)
         self.combo_scale_port.clear()
@@ -9607,11 +9704,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if current and port.device == current:
                 seen = True
             description = port.description.lower()
-            if "prolific" in description or "pl2303" in description:
+            if "ch340" in description or "usb-serial" in description or "usb serial" in description:
                 preferred_index = self.combo_scale_port.count() - 1
-            elif preferred_index < 0 and port.device.upper() == "COM4":
+            elif preferred_index < 0 and not ("prolific" in description or "pl2303" in description):
                 preferred_index = self.combo_scale_port.count() - 1
-        if current and seen:
+        if current and seen and preferred_index < 0:
             index = self.combo_scale_port.findData(current)
             if index >= 0:
                 self.combo_scale_port.setCurrentIndex(index)
@@ -10095,6 +10192,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if changed:
             self._log(
                 "Shared HMP TMA bench defaults applied for Tic preflight: "
+                + ", ".join(changed)
+                + "."
+            )
+
+    def _apply_direct_hmp_bench_defaults_for_tic_preflight(self) -> None:
+        if self._using_shared_broker_supply():
+            return
+        profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
+        profile = SUPPLY_PROFILES.get(profile_id, {})
+        if profile.get("shared_broker") or int(profile.get("channel_count", 1) or 1) < 2:
+            return
+        changed: list[str] = []
+        current_channel = int(profile.get("channel_select", 0) or 0)
+        if self._current_sweep_supply_channel() is None and current_channel > 0:
+            if self._select_combo_data(self.combo_current_sweep_supply_channel, current_channel):
+                changed.append(f"current-sweep CH{current_channel}")
+        motor_channel = int(profile.get("motor_supply_channel", 0) or 0)
+        if self._motor_supply_channel() is None and motor_channel > 0:
+            if self._select_combo_data(self.combo_motor_supply_channel, motor_channel):
+                changed.append(f"motor-supply CH{motor_channel}")
+        if motor_channel > 0 and not self.check_motor_supply_power.isChecked():
+            self.check_motor_supply_power.setChecked(True)
+            changed.append("motor supply enabled")
+        if changed:
+            self._log(
+                "Direct HMP TMA bench defaults applied for Tic preflight: "
                 + ", ".join(changed)
                 + "."
             )
@@ -19216,6 +19339,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _run_manual_auto_connect_hardware(self) -> None:
         self._apply_shared_broker_bench_defaults_for_tic_preflight()
+        self._apply_direct_hmp_bench_defaults_for_tic_preflight()
         connected = True
         issues: list[str] = []
         connect_ir = self._manual_auto_connect_should_connect_ir()
@@ -21706,9 +21830,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._scale_thread is not None:
             return True
         self._log("Preflight: scale is not connected, trying auto-detect/connect.")
-        if not str(self.combo_scale_port.currentData() or "").strip():
-            self._refresh_scale_ports()
-        self._auto_detect_scale_port()
+        self._fast_auto_detect_scale_port()
         return self._connect_scale(show_errors=False)
 
     def _ensure_supply_ready_for_recipe(self) -> bool:
@@ -21748,6 +21870,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep], *, show_progress: bool = False) -> bool:
         if self._recipe_requires_tic(steps):
             self._apply_shared_broker_bench_defaults_for_tic_preflight()
+            self._apply_direct_hmp_bench_defaults_for_tic_preflight()
         started_progress = False
         preflight_steps = 4
         if show_progress and self._recipe_preflight_needs_progress(steps):

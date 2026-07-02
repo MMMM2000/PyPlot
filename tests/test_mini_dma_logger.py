@@ -3401,6 +3401,7 @@ def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot)
     window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -3424,6 +3425,7 @@ def test_manual_auto_connect_button_disables_while_queued(tmp_path: Path, qtbot)
     window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -3458,6 +3460,39 @@ def test_manual_auto_connect_enables_motor_supply_before_tic_status(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_direct_hmp_manual_auto_connect_applies_ch2_motor_defaults_before_tic_status(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: called.append("motor") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+
+    try:
+        profile_index = window.combo_supply_profile.findData("hmp4030")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(0)
+        )
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(0))
+        window.check_motor_supply_power.setChecked(False)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert window.combo_current_sweep_supply_channel.currentData() == 3
+        assert window.combo_motor_supply_channel.currentData() == 2
+        assert window.check_motor_supply_power.isChecked()
+        assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
+        assert "Direct HMP TMA bench defaults applied for Tic preflight" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_preserves_live_stress_conversion(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     called: list[str] = []
@@ -3465,6 +3500,7 @@ def test_manual_auto_connect_preserves_live_stress_conversion(tmp_path: Path, qt
     window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.spin_zero_load_scale_g.setValue(21.2)
     window.spin_diameter.setValue(0.01)
@@ -3495,6 +3531,7 @@ def test_manual_auto_connect_connects_selected_ir_without_hardware_steal(tmp_pat
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         window.combo_ir_port.addItem("Synthetic IR", "COM_IR")
@@ -3518,6 +3555,7 @@ def test_manual_auto_connect_skips_disabled_optional_ir(tmp_path: Path, qtbot) -
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         window.combo_ir_port.addItem("Synthetic IR", "COM_IR")
@@ -3540,6 +3578,7 @@ def test_manual_auto_connect_leaves_active_ir_connection_alone(tmp_path: Path, q
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         window._ir_thread = QtCore.QThread(window)
@@ -23624,6 +23663,53 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
         assert window.edit_scale_request.text() == "\\x1bp"
         assert window.edit_scale_terminator.text() == ""
         assert window.spin_scale_interval.value() == 250
+    finally:
+        _close_test_window(window)
+
+
+def test_fast_scale_auto_connect_prefers_ch340_scale_over_saved_prolific_port(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.list_ports,
+            "comports",
+            lambda: [
+                SimpleNamespace(device="COM4", description="Prolific PL2303GT USB Serial COM Port"),
+                SimpleNamespace(device="COM5", description="USB-SERIAL CH340"),
+            ],
+        )
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM4 - Prolific", "COM4")
+        window.combo_scale_port.addItem("COM5 - CH340", "COM5")
+        window.combo_scale_port.setCurrentIndex(window.combo_scale_port.findData("COM4"))
+        probes: list[str] = []
+
+        def _probe(port_name: str):
+            probes.append(port_name)
+            if port_name == "COM5":
+                return {
+                    "port": "COM5",
+                    "baudrate": 256000,
+                    "request_command": mini_dma_mod.KERN_KCP_SCALE_REQUEST,
+                    "terminator": mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
+                    "raw_text": "S S      57.13 g",
+                }
+            return None
+
+        monkeypatch.setattr(window, "_fast_probe_scale_candidate", _probe)
+
+        detected = window._fast_auto_detect_scale_port()
+
+        assert detected is True
+        assert probes == ["COM4", "COM5"]
+        assert window.combo_scale_port.currentData() == "COM5"
+        assert window.combo_scale_baud.currentText() == "256000"
+        assert window.spin_scale_interval.value() == 50
     finally:
         _close_test_window(window)
 
