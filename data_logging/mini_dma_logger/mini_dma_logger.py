@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.7"
+CONTROL_LOGIC_VERSION = "2026-07-02.8"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -133,6 +133,7 @@ CONTROL_LOGIC_FEATURES = [
     "scale_quantization_aware_current_hold_feedback",
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
     "kern_kcp_current_hold_resume_band_is_response_earned",
+    "kern_kcp_current_hold_runaway_drift_bypasses_volatile_wait",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -14807,6 +14808,56 @@ class MainWindow(QtWidgets.QMainWindow):
         moving_away = float(error_value) * float(filtered_signal.slope_per_s) < 0.0
         return moving_away and abs(float(filtered_signal.slope_per_s)) >= slope_threshold
 
+    def _current_sweep_hold_kern_runaway_drift_recovery_active(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        filtered_signal: ScaleControlSignal | None,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> bool:
+        if not self._using_kern_kcp_scale():
+            return False
+        if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if seek_key is None or filtered_signal is None:
+            return False
+        previous_error = self._seek_last_error_by_key.get(seek_key)
+        if previous_error is None:
+            return False
+        if float(previous_error) * float(error_value) <= 0.0:
+            return False
+        current_abs = abs(float(error_value))
+        previous_abs = abs(float(previous_error))
+        worsening_floor = self._current_sweep_worsening_floor_for_basis(
+            basis,
+            tolerance,
+            filtered_signal,
+        )
+        if current_abs <= previous_abs + worsening_floor:
+            return False
+        slope = float(filtered_signal.slope_per_s)
+        if not math.isfinite(slope) or float(error_value) * slope >= 0.0:
+            return False
+        adaptive_band = max(
+            self._current_sweep_hold_entry_band_for_basis(tolerance),
+            self._current_sweep_hold_min_band_for_basis(
+                basis,
+                self._current_sweep_hold_min_pause_stress_mpa(),
+            ),
+            abs(float(filtered_signal.noise)) * self._current_sweep_hold_noise_sigma(),
+            self._scale_quantization_band_for_basis(basis) * SCALE_QUANTIZATION_WORSENING_FACTOR,
+            abs(float(tolerance)),
+        )
+        if current_abs <= adaptive_band:
+            return False
+        slope_floor = max(
+            self._current_sweep_hold_min_slope_for_basis(basis),
+            adaptive_band / max(self._current_sweep_hold_filter_window_s() * 2.0, 1e-9),
+        )
+        return abs(slope) >= slope_floor
+
     def _current_sweep_hold_volatile_response_unsettled(
         self,
         basis: str,
@@ -14817,6 +14868,14 @@ class MainWindow(QtWidgets.QMainWindow):
         seek_key: tuple[str, int, float] | None,
     ) -> bool:
         if not self._current_sweep_hold_volatile_response_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
+            return False
+        if self._current_sweep_hold_kern_runaway_drift_recovery_active(
             basis,
             error_value,
             tolerance,
@@ -14847,6 +14906,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
         if seek_key is None:
+            return False
+        if self._current_sweep_hold_kern_runaway_drift_recovery_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
             return False
         if self._current_sweep_hold_volatile_response_active(
             basis,
@@ -16581,6 +16648,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_hold_adaptive_command_cap_mm_for_response(seek_key),
             max(self._motor_step_mm(), drift_step_mm),
         )
+        if self._current_sweep_hold_kern_runaway_drift_recovery_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
+            return max(self._motor_step_mm(), hard_cap_mm)
         minimum_escape_mm = max(abs(float(base_step_mm)), self._motor_step_mm() * 1.25)
         if hard_cap_mm <= minimum_escape_mm:
             return None
@@ -17211,11 +17286,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if abs(float(error_value)) <= very_near_value:
             return 2
         required_samples = 1
+        filtered_signal = self._seek_filtered_control_signal(basis)
         if self._current_sweep_hold_volatile_response_active(
             basis,
             error_value,
             tolerance,
-            self._seek_filtered_control_signal(basis),
+            filtered_signal,
+            seek_key=seek_key,
+        ) and not self._current_sweep_hold_kern_runaway_drift_recovery_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
             seek_key=seek_key,
         ):
             required_samples = max(
