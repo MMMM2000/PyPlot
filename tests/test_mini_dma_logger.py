@@ -8451,7 +8451,7 @@ def test_kern_kcp_scale_preset_uses_standard_request() -> None:
             self.current_text = ""
 
         def findText(self, text: str) -> int:  # noqa: N802 - Qt-style test double
-            return 0 if text == "9600" else -1
+            return 0 if text == "256000" else -1
 
         def setCurrentText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
             self.current_text = text
@@ -8472,7 +8472,7 @@ def test_kern_kcp_scale_preset_uses_standard_request() -> None:
 
     window._apply_kern_kcp_scale_preset()
 
-    assert window.combo_scale_baud.current_text == "9600"
+    assert window.combo_scale_baud.current_text == "256000"
     assert window.edit_scale_request.text_value == mini_dma_mod.KERN_KCP_SCALE_REQUEST
     assert window.edit_scale_terminator.text_value == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
     assert "KERN KCP" in messages[-1]
@@ -8491,7 +8491,7 @@ def test_scale_auto_detect_accepts_kern_kcp_reply(monkeypatch: pytest.MonkeyPatc
     ) -> bytes:
         del port_name, total_wait_s
         calls.append((baudrate, payload))
-        if payload == b"SI\r\n" and baudrate == 9600:
+        if payload == b"SI\r\n" and baudrate == 256000:
             return b"S S +12.34 g\r\n"
         return b""
 
@@ -8502,12 +8502,12 @@ def test_scale_auto_detect_accepts_kern_kcp_reply(monkeypatch: pytest.MonkeyPatc
 
     assert match == {
         "port": "COM4",
-        "baudrate": 9600,
+        "baudrate": 256000,
         "request_command": mini_dma_mod.KERN_KCP_SCALE_REQUEST,
         "terminator": mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
         "raw_text": "S S +12.34 g",
     }
-    assert calls[0] == (9600, b"SI\r\n")
+    assert calls[0] == (256000, b"SI\r\n")
 
 
 def test_supply_scientific_notation_current_reply_is_parsed_as_amps() -> None:

@@ -326,7 +326,7 @@ FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
-KERN_KCP_SUPPORTED_BAUDS = (9600, 19200, 38400, 115200)
+KERN_KCP_SUPPORTED_BAUDS = (256000, 128000, 115200, 57600, 38400, 19200, 9600)
 KERN_KCP_SCALE_REQUEST = "SI"
 KERN_KCP_SCALE_TERMINATOR = "\\r\\n"
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
@@ -6334,7 +6334,19 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_advanced_form.addRow("Port", port_row)
 
         self.combo_scale_baud = QtWidgets.QComboBox(scale_advanced_box)
-        for baud in ("600", "1200", "2400", "4800", "9600", "19200", "38400", "115200"):
+        for baud in (
+            "600",
+            "1200",
+            "2400",
+            "4800",
+            "9600",
+            "19200",
+            "38400",
+            "57600",
+            "115200",
+            "128000",
+            "256000",
+        ):
             self.combo_scale_baud.addItem(baud)
         self.combo_scale_baud.setCurrentText("600")
         scale_advanced_form.addRow("Baud", self.combo_scale_baud)
@@ -9496,12 +9508,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_banner.setText(message)
 
     def _probe_scale_candidate(self, port_name: str) -> dict[str, Any] | None:
+        kern_trials = tuple(
+            (baudrate, command, KERN_KCP_SCALE_TERMINATOR)
+            for baudrate in KERN_KCP_SUPPORTED_BAUDS
+            for command in (KERN_KCP_SCALE_REQUEST, "S")
+        )
         trials = (
-            (9600, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
-            (9600, "S", KERN_KCP_SCALE_TERMINATOR),
-            (19200, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
-            (38400, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
-            (115200, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
+            *kern_trials,
             (9600, "\\x1bp", ""),
             (9600, "\\x1bp", "\\r\\n"),
             (600, "\\x1bp", ""),
@@ -12667,11 +12680,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Applied G&G E-series scale preset: 600 baud, ESC+p request, no extra terminator.")
 
     def _apply_kern_kcp_scale_preset(self) -> None:
-        if self.combo_scale_baud.findText("9600") >= 0:
-            self.combo_scale_baud.setCurrentText("9600")
+        preferred_baud = str(KERN_KCP_SUPPORTED_BAUDS[0])
+        if self.combo_scale_baud.findText(preferred_baud) >= 0:
+            self.combo_scale_baud.setCurrentText(preferred_baud)
         self.edit_scale_request.setText(KERN_KCP_SCALE_REQUEST)
         self.edit_scale_terminator.setText(KERN_KCP_SCALE_TERMINATOR)
-        self._log("Applied KERN KCP scale preset: 9600 baud, SI request, CRLF terminator.")
+        self._log(f"Applied KERN KCP scale preset: {preferred_baud} baud, SI request, CRLF terminator.")
 
     def _build_sample_name(self) -> str:
         wire_display = MicrowireLineEdit.to_display_text(self.edit_name_wire.text()) or self.edit_name_wire.text().strip()
