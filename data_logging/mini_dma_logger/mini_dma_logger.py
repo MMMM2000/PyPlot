@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.6"
+CONTROL_LOGIC_VERSION = "2026-07-02.7"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -133,8 +133,6 @@ CONTROL_LOGIC_FEATURES = [
     "scale_quantization_aware_current_hold_feedback",
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
     "kern_kcp_current_hold_resume_band_is_response_earned",
-    "kern_kcp_latest_sample_can_clear_filtered_feedback_lag",
-    "kern_kcp_latest_sample_change_is_quantization_noise_gated",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -16662,35 +16660,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if change > required_change:
             return True
-        if self._using_kern_kcp_scale() and seek_key in self._seek_last_latest_signal_value_by_key:
-            quantization_required_change = quantization_band * SCALE_QUANTIZATION_CHANGE_FACTOR
-            if quantization_required_change > 0.0:
-                noise_required_change = abs(float(filtered_signal.noise)) * 0.50
-                latest_required_change = max(
-                    quantization_required_change,
-                    quantization_band * SCALE_QUANTIZATION_WORSENING_FACTOR,
-                    min(
-                        noise_required_change,
-                        quantization_band * SCALE_QUANTIZATION_WORSENING_FACTOR * 2.0,
-                    ),
-                    1e-9,
-                )
-                previous_latest = self._seek_last_latest_signal_value_by_key[seek_key]
-                latest_value = float(filtered_signal.latest_value)
-                previous_latest_value = float(previous_latest)
-                latest_change = abs(latest_value - previous_latest_value)
-                target_value = float(seek_key[2])
-                previous_latest_error = previous_latest_value - target_value
-                latest_error = latest_value - target_value
-                error_change = abs(latest_error) - abs(previous_latest_error)
-                crossed_target = previous_latest_error * latest_error <= 0.0 and latest_change > latest_required_change
-                error_changed_meaningfully = abs(error_change) > latest_required_change
-                large_raw_change = latest_change > max(
-                    latest_required_change * 2.0,
-                    abs(float(effective_tolerance)),
-                )
-                if crossed_target or error_changed_meaningfully or large_raw_change:
-                    return True
         latest_s = self._latest_scale_sample_time_s()
         clock_key = seek_key[0], seek_key[1]
         last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
