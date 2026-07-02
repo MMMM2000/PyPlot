@@ -1104,11 +1104,15 @@ def _read_serial_bytes(
     if serial is None:
         raise RuntimeError("pyserial is not available.")
 
-    with serial.Serial(port_name, baudrate=baudrate, timeout=timeout_s, write_timeout=timeout_s) as port:
+    port = _open_scale_serial_port(
+        port_name,
+        baudrate=baudrate,
+        timeout=timeout_s,
+        write_timeout=timeout_s,
+    )
+    try:
         port.reset_input_buffer()
         port.reset_output_buffer()
-        port.rts = False
-        port.dtr = False
         time.sleep(0.08)
         if payload:
             port.write(payload)
@@ -1122,6 +1126,43 @@ def _read_serial_bytes(
             if chunk:
                 chunks.append(chunk)
         return b"".join(chunks)
+    finally:
+        try:
+            port.close()
+        except Exception:
+            pass
+
+
+def _open_scale_serial_port(
+    port_name: str,
+    *,
+    baudrate: int,
+    timeout: float,
+    write_timeout: float,
+) -> Any:
+    if serial is None:
+        raise RuntimeError("pyserial is not available.")
+    port = serial.Serial()
+    port.port = port_name
+    port.baudrate = baudrate
+    port.timeout = timeout
+    port.write_timeout = write_timeout
+    port.rtscts = False
+    port.dsrdtr = False
+    try:
+        port.rts = False
+        port.dtr = False
+    except Exception:
+        pass
+    open_method = getattr(port, "open", None)
+    if callable(open_method):
+        open_method()
+    try:
+        port.rts = False
+        port.dtr = False
+    except Exception:
+        pass
+    return port
 
 
 def strain_percent(
@@ -2506,9 +2547,9 @@ class ScaleWorker(QtCore.QObject):
             timeout_s = self._read_timeout_s()
             request_payload = _decode_escape_text(self.request_command)
             terminator_payload = _decode_escape_text(self.request_terminator)
-            port = serial.Serial(
+            port = _open_scale_serial_port(
                 self.port_name,
-                self.baudrate,
+                baudrate=self.baudrate,
                 timeout=timeout_s,
                 write_timeout=0.2,
             )
@@ -12467,16 +12508,20 @@ class MainWindow(QtWidgets.QMainWindow):
         request_text = self.edit_scale_request.text() if request_command is None else request_command
         terminator_text = self.edit_scale_terminator.text() if terminator is None else terminator
         payload = _decode_escape_text(request_text) + _decode_escape_text(terminator_text)
-        with serial.Serial(port_name, baudrate=baudrate, timeout=0.4, write_timeout=0.4) as port:
+        port = _open_scale_serial_port(port_name, baudrate=baudrate, timeout=0.4, write_timeout=0.4)
+        try:
             port.reset_input_buffer()
             port.reset_output_buffer()
-            port.rts = False
-            port.dtr = False
             time.sleep(0.08)
             if payload:
                 port.write(payload)
                 port.flush()
             raw_text = port.readline().decode("utf-8", errors="ignore").strip()
+        finally:
+            try:
+                port.close()
+            except Exception:
+                pass
         return _parse_first_float(raw_text), raw_text
 
     def _zero_load_scale_reference_g(self) -> float:
@@ -12582,15 +12627,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if was_connected:
             self._disconnect_scale()
         try:
-            with serial.Serial(port_name, baudrate=baudrate, timeout=0.4, write_timeout=0.4) as port:
+            port = _open_scale_serial_port(port_name, baudrate=baudrate, timeout=0.4, write_timeout=0.4)
+            try:
                 port.reset_input_buffer()
                 port.reset_output_buffer()
-                port.rts = False
-                port.dtr = False
                 time.sleep(0.08)
                 port.write(b"\x1bt")
                 port.flush()
                 time.sleep(0.25)
+            finally:
+                try:
+                    port.close()
+                except Exception:
+                    pass
             value_g, raw_text = self._query_scale_now(port_name=port_name, baudrate=baudrate)
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, APP_NAME, f"Hardware tare failed: {exc}")
