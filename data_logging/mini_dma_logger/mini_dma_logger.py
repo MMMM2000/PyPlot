@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.4"
+CONTROL_LOGIC_VERSION = "2026-07-02.5"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -134,7 +134,6 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
     "kern_kcp_current_hold_resume_band_is_response_earned",
     "kern_kcp_latest_sample_can_clear_filtered_feedback_lag",
-    "kern_kcp_current_hold_reentry_hysteresis_is_entry_scaled",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -625,7 +624,6 @@ KERN_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.08
 KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.092
 KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_ENTRY_FRACTION = 0.28
 KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION = 0.75
-KERN_CURRENT_SWEEP_HOLD_REENTRY_ENTRY_FRACTION = 0.75
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH = 1.35
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH = 1.6
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH = 2.0
@@ -5683,11 +5681,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_candidate_step_index: int | None = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s: float | None = None
-        self._current_sweep_ramp_hold_recent_step_index: int | None = None
-        self._current_sweep_ramp_hold_recent_resumed_feedback_s: float | None = None
-        self._current_sweep_ramp_hold_recent_entry_abs_error: float | None = None
-        self._current_sweep_ramp_hold_recent_entry_signed_error: float | None = None
-        self._current_sweep_ramp_hold_recent_entry_pause_band: float | None = None
         self._current_sweep_voltage_limit_step_index: int | None = None
         self._current_sweep_voltage_limit_started_s: float | None = None
         self._current_sweep_voltage_limit_start_mA = 0.0
@@ -20538,9 +20531,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "kern_current_hold_earned_resume_max_pause_fraction": (
                     KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION
                 ),
-                "kern_current_hold_reentry_entry_fraction": (
-                    KERN_CURRENT_SWEEP_HOLD_REENTRY_ENTRY_FRACTION
-                ),
                 "effective_current_hold_base_command_strain_pct": (
                     self._current_sweep_hold_base_command_strain_pct()
                 ),
@@ -26421,14 +26411,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return steps, summary, control_interval_ms
 
-    def _clear_current_sweep_ramp_hold_recent_resume(self) -> None:
-        self._current_sweep_ramp_hold_recent_step_index = None
-        self._current_sweep_ramp_hold_recent_resumed_feedback_s = None
-        self._current_sweep_ramp_hold_recent_entry_abs_error = None
-        self._current_sweep_ramp_hold_recent_entry_signed_error = None
-        self._current_sweep_ramp_hold_recent_entry_pause_band = None
-
-    def _clear_current_sweep_ramp_hold(self, *, keep_recent_resume: bool = False) -> None:
+    def _clear_current_sweep_ramp_hold(self) -> None:
         self._current_sweep_ramp_hold_step_index = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s = None
@@ -26439,41 +26422,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
-        if not keep_recent_resume:
-            self._clear_current_sweep_ramp_hold_recent_resume()
 
-    def _resume_current_sweep_ramp_from_hold(
-        self,
-        *,
-        now_s: float,
-        reason: str,
-        feedback_timestamp_s: float | None = None,
-    ) -> None:
+    def _resume_current_sweep_ramp_from_hold(self, *, now_s: float, reason: str) -> None:
         held_s = max(0.0, float(now_s) - self._current_sweep_ramp_hold_started_s)
-        recent_feedback_s = feedback_timestamp_s
-        if recent_feedback_s is None:
-            recent_feedback_s = self._latest_scale_timestamp
-        if (
-            self._current_sweep_ramp_hold_step_index is not None
-            and self._current_sweep_ramp_hold_entry_abs_error is not None
-            and self._current_sweep_ramp_hold_entry_signed_error is not None
-            and self._current_sweep_ramp_hold_entry_pause_band is not None
-            and recent_feedback_s is not None
-            and math.isfinite(float(recent_feedback_s))
-        ):
-            self._current_sweep_ramp_hold_recent_step_index = self._current_sweep_ramp_hold_step_index
-            self._current_sweep_ramp_hold_recent_resumed_feedback_s = float(recent_feedback_s)
-            self._current_sweep_ramp_hold_recent_entry_abs_error = abs(
-                float(self._current_sweep_ramp_hold_entry_abs_error)
-            )
-            self._current_sweep_ramp_hold_recent_entry_signed_error = float(
-                self._current_sweep_ramp_hold_entry_signed_error
-            )
-            self._current_sweep_ramp_hold_recent_entry_pause_band = abs(
-                float(self._current_sweep_ramp_hold_entry_pause_band)
-            )
-        else:
-            self._clear_current_sweep_ramp_hold_recent_resume()
         self._active_current_sweep_started_s += held_s
         if (
             self._current_sweep_voltage_limit_step_index
@@ -26489,7 +26440,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         else:
             self._current_sweep_post_hold_throttle_until_s = 0.0
-        self._clear_current_sweep_ramp_hold(keep_recent_resume=True)
+        self._clear_current_sweep_ramp_hold()
         self._log(f"Resumed current ramp after holding for {held_s:.2f} s; {reason}.")
 
     def _apply_current_sweep_post_hold_ramp_throttle(self, *, now_s: float) -> None:
@@ -26716,72 +26667,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
 
-    def _kern_current_sweep_recent_resume_blocks_reentry(
-        self,
-        step: AutomationStep,
-        step_index: int,
-        *,
-        signed_error: float,
-        entry_band: float,
-        pause_band: float,
-        filtered_signal: ScaleControlSignal | None,
-    ) -> bool:
-        if not self._using_kern_kcp_scale():
-            return False
-        if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
-            return False
-        if filtered_signal is None:
-            return False
-        if self._current_sweep_ramp_hold_recent_step_index != step_index:
-            return False
-        resumed_feedback_s = self._current_sweep_ramp_hold_recent_resumed_feedback_s
-        recent_abs = self._current_sweep_ramp_hold_recent_entry_abs_error
-        recent_signed = self._current_sweep_ramp_hold_recent_entry_signed_error
-        recent_pause = self._current_sweep_ramp_hold_recent_entry_pause_band
-        if (
-            resumed_feedback_s is None
-            or recent_abs is None
-            or recent_signed is None
-            or recent_pause is None
-        ):
-            return False
-        resumed_feedback_s = float(resumed_feedback_s)
-        recent_abs = abs(float(recent_abs))
-        recent_signed = float(recent_signed)
-        recent_pause = abs(float(recent_pause))
-        if (
-            not math.isfinite(resumed_feedback_s)
-            or not math.isfinite(recent_abs)
-            or not math.isfinite(recent_signed)
-            or not math.isfinite(recent_pause)
-            or recent_abs <= 0.0
-            or recent_signed == 0.0
-        ):
-            return False
-        signal_s = float(filtered_signal.timestamp_s)
-        if not math.isfinite(signal_s):
-            return False
-        elapsed_feedback_s = signal_s - resumed_feedback_s
-        reentry_window_s = max(
-            SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_S,
-            self._current_sweep_hold_filter_window_s(),
-            self._current_sweep_hold_resume_stable_s(step),
-        )
-        if elapsed_feedback_s < -1e-9 or elapsed_feedback_s > reentry_window_s:
-            return False
-        if float(signed_error) * recent_signed <= 0.0:
-            return False
-        current_abs = abs(float(signed_error))
-        if not math.isfinite(current_abs):
-            return False
-        reentry_band = max(
-            abs(float(entry_band)),
-            abs(float(pause_band)),
-            recent_pause,
-            recent_abs * KERN_CURRENT_SWEEP_HOLD_REENTRY_ENTRY_FRACTION,
-        )
-        return current_abs <= reentry_band
-
     def _current_sweep_hold_filtered_value_and_noise(self, basis: str) -> tuple[float, float] | None:
         current_value = self._current_distribution_value(basis, require_after_last_move=False)
         if current_value is None:
@@ -26893,16 +26778,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._reset_current_sweep_ramp_hold_candidate()
             return True
         if abs(float(signed_error)) <= entry_band:
-            self._reset_current_sweep_ramp_hold_candidate()
-            return False
-        if self._kern_current_sweep_recent_resume_blocks_reentry(
-            step,
-            step_index,
-            signed_error=signed_error,
-            entry_band=entry_band,
-            pause_band=pause_band,
-            filtered_signal=filtered_signal,
-        ):
             self._reset_current_sweep_ramp_hold_candidate()
             return False
         slope = float(filtered_signal.slope_per_s)
@@ -27062,7 +26937,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     band_label = "adaptive resume band"
                 self._resume_current_sweep_ramp_from_hold(
                     now_s=now_s,
-                    feedback_timestamp_s=filtered_signal.timestamp_s if filtered_signal is not None else None,
                     reason=(
                         f"filtered target error {_format_compact_number(resume_error)} "
                         f"is inside {band_label} {_format_compact_number(active_resume_band)}"
@@ -27101,7 +26975,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if recovered_s - self._current_sweep_ramp_hold_seek_accepted_since_s >= stable_s:
                 self._resume_current_sweep_ramp_from_hold(
                     now_s=recovered_s,
-                    feedback_timestamp_s=self._latest_scale_timestamp,
                     reason=(
                         "held-current recovery seek stayed accepted for "
                         f"{stable_s:.2f} s"
