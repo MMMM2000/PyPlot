@@ -42,8 +42,12 @@ New-Item -ItemType Directory -Force $env:TEMP, $env:UV_CACHE_DIR, $env:MPLCONFIG
     tests\test_mini_dma_logger.py::test_motor_supply_enable_fails_when_output_readback_stays_off `
     tests\test_mini_dma_logger.py::test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down `
     tests\test_mini_dma_logger.py::test_shared_broker_preflight_connects_without_serial_auto_detect `
+    tests\test_mini_dma_logger.py::test_shared_broker_preflight_repairs_bad_endpoint_without_serial_fallback `
+    tests\test_mini_dma_logger.py::test_shared_broker_preflight_auto_starts_owned_broker_when_default_broker_is_down `
+    tests\test_mini_dma_logger.py::test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_profile `
     tests\test_mini_dma_logger.py::test_current_sweep_large_overshoot_falls_back_to_single_motor_step `
-    tests\test_mini_dma_logger.py::test_current_sweep_stops_when_correction_travel_exceeds_limit `
+    tests\test_mini_dma_logger.py::test_current_sweep_ignores_accumulated_correction_travel_limit `
+    tests\test_mini_dma_logger.py::test_current_sweep_hold_ignores_correction_travel_limit `
     tests\test_mini_dma_logger.py::test_current_sweep_hold_pauses_despite_large_transient_noise `
     tests\test_mini_dma_logger.py::test_current_sweep_hold_does_not_accept_large_error_as_noise_band `
     tests\test_mini_dma_logger.py::test_native_tic_usb_controller_sends_control_transfers `
