@@ -84,6 +84,12 @@ class MiniDmaHardwareConfig:
     motor_supply_channel: int | None = None
     motor_supply_voltage_v: float | None = None
     motor_supply_current_limit_a: float | None = None
+    tic_full_steps_per_mm: float | None = None
+    tic_step_mode: str | None = None
+    tic_current_limit_mA: int | None = None
+    tic_max_speed: int | None = None
+    tic_max_accel: int | None = None
+    tic_max_decel: int | None = None
     supply_voltage_limit_v: float | None = None
     manual_current_mA: float | None = None
 
@@ -296,6 +302,14 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         ),
         motor_supply_voltage_v=_optional_float(raw_hardware, "motor_supply_voltage_v"),
         motor_supply_current_limit_a=_optional_float(raw_hardware, "motor_supply_current_limit_a"),
+        tic_full_steps_per_mm=_optional_float(raw_hardware, "tic_full_steps_per_mm"),
+        tic_step_mode=None if raw_hardware.get("tic_step_mode") is None else str(raw_hardware["tic_step_mode"]),
+        tic_current_limit_mA=(
+            None if raw_hardware.get("tic_current_limit_mA") is None else int(raw_hardware["tic_current_limit_mA"])
+        ),
+        tic_max_speed=None if raw_hardware.get("tic_max_speed") is None else int(raw_hardware["tic_max_speed"]),
+        tic_max_accel=None if raw_hardware.get("tic_max_accel") is None else int(raw_hardware["tic_max_accel"]),
+        tic_max_decel=None if raw_hardware.get("tic_max_decel") is None else int(raw_hardware["tic_max_decel"]),
         supply_voltage_limit_v=_optional_float(raw_hardware, "supply_voltage_limit_v"),
         manual_current_mA=_optional_float(raw_hardware, "manual_current_mA"),
     )
@@ -506,6 +520,15 @@ def _apply_hardware_config(window: Any, hardware: MiniDmaHardwareConfig) -> None
     _set_combo_data_if_present(window, "combo_motor_supply_channel", hardware.motor_supply_channel)
     _set_spin_value_if_present(window, "spin_motor_supply_voltage", hardware.motor_supply_voltage_v)
     _set_spin_value_if_present(window, "spin_motor_supply_current_limit", hardware.motor_supply_current_limit_a)
+    _set_spin_value_if_present(window, "spin_full_steps_per_mm", hardware.tic_full_steps_per_mm)
+    _set_combo_data_if_present(window, "combo_tic_step_mode", hardware.tic_step_mode)
+    sync_tic_units = getattr(window, "_sync_tic_units_per_mm_from_full_steps", None)
+    if callable(sync_tic_units) and (hardware.tic_full_steps_per_mm is not None or hardware.tic_step_mode is not None):
+        sync_tic_units(persist=False)
+    _set_spin_value_if_present(window, "spin_tic_current_limit_mA", hardware.tic_current_limit_mA)
+    _set_spin_value_if_present(window, "spin_tic_max_speed", hardware.tic_max_speed)
+    _set_spin_value_if_present(window, "spin_tic_max_accel", hardware.tic_max_accel)
+    _set_spin_value_if_present(window, "spin_tic_max_decel", hardware.tic_max_decel)
     _set_spin_value_if_present(window, "spin_supply_voltage_limit", hardware.supply_voltage_limit_v)
     _set_spin_value_if_present(window, "spin_supply_manual_current", hardware.manual_current_mA)
     persist = getattr(window, "_persist_settings_if_enabled", None)
@@ -935,6 +958,12 @@ def run_mini_dma_bench_plan(
                 "motor_supply_channel": plan.hardware.motor_supply_channel,
                 "motor_supply_voltage_v": plan.hardware.motor_supply_voltage_v,
                 "motor_supply_current_limit_a": plan.hardware.motor_supply_current_limit_a,
+                "tic_full_steps_per_mm": plan.hardware.tic_full_steps_per_mm,
+                "tic_step_mode": plan.hardware.tic_step_mode,
+                "tic_current_limit_mA": plan.hardware.tic_current_limit_mA,
+                "tic_max_speed": plan.hardware.tic_max_speed,
+                "tic_max_accel": plan.hardware.tic_max_accel,
+                "tic_max_decel": plan.hardware.tic_max_decel,
                 "supply_voltage_limit_v": plan.hardware.supply_voltage_limit_v,
                 "manual_current_mA": plan.hardware.manual_current_mA,
             },

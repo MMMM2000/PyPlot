@@ -151,6 +151,12 @@ def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) 
                     "motor_supply_channel": 3,
                     "motor_supply_voltage_v": 12.0,
                     "motor_supply_current_limit_a": 0.5,
+                    "tic_full_steps_per_mm": 100.0,
+                    "tic_step_mode": "8",
+                    "tic_current_limit_mA": 343,
+                    "tic_max_speed": 10000000,
+                    "tic_max_accel": 100000,
+                    "tic_max_decel": 100000,
                     "supply_voltage_limit_v": 32.05,
                     "manual_current_mA": 1.0,
                 },
@@ -178,6 +184,12 @@ def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) 
         "motor_supply_channel": 3,
         "motor_supply_voltage_v": 12.0,
         "motor_supply_current_limit_a": 0.5,
+        "tic_full_steps_per_mm": 100.0,
+        "tic_step_mode": "8",
+        "tic_current_limit_mA": 343,
+        "tic_max_speed": 10000000,
+        "tic_max_accel": 100000,
+        "tic_max_decel": 100000,
         "supply_voltage_limit_v": 32.05,
         "manual_current_mA": 1.0,
     }
@@ -413,6 +425,12 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
                     "motor_supply_channel": 3,
                     "motor_supply_voltage_v": 12.0,
                     "motor_supply_current_limit_a": 0.5,
+                    "tic_full_steps_per_mm": 100.0,
+                    "tic_step_mode": "8",
+                    "tic_current_limit_mA": 343,
+                    "tic_max_speed": 10000000,
+                    "tic_max_accel": 100000,
+                    "tic_max_decel": 100000,
                     "supply_voltage_limit_v": 32.05,
                     "manual_current_mA": 1.0,
                 },
@@ -492,8 +510,17 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
             self.combo_motor_supply_channel = _FakeCombo([0, 1, 2, 3, 4])
             self.spin_motor_supply_voltage = _FakeSpin()
             self.spin_motor_supply_current_limit = _FakeSpin()
+            self.spin_full_steps_per_mm = _FakeSpin()
+            self.combo_tic_step_mode = _FakeCombo(["full", "2", "4", "8"])
+            self.spin_tic_current_limit_mA = _FakeSpin()
+            self.spin_tic_max_speed = _FakeSpin()
+            self.spin_tic_max_accel = _FakeSpin()
+            self.spin_tic_max_decel = _FakeSpin()
             self.spin_supply_voltage_limit = _FakeSpin()
             self.spin_supply_manual_current = _FakeSpin()
+
+        def _sync_tic_units_per_mm_from_full_steps(self, *, persist: bool = True) -> None:
+            events.append(("sync_tic_units", persist))
 
         def _persist_settings_if_enabled(self) -> None:
             events.append(("persist", None))
@@ -537,6 +564,12 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
     assert ("combo", 3) in events
     assert ("spin", 12.0) in events
     assert ("spin", 0.5) in events
+    assert ("spin", 100.0) in events
+    assert ("combo", "8") in events
+    assert ("sync_tic_units", False) in events
+    assert ("spin", 343) in events
+    assert ("spin", 10000000) in events
+    assert events.count(("spin", 100000)) >= 2
 
 
 def test_mini_dma_bench_plan_records_startup_log_when_not_started(tmp_path: Path) -> None:
