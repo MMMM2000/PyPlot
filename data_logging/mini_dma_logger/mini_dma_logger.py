@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-06-29.1"
+CONTROL_LOGIC_VERSION = "2026-07-02.1"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -130,6 +130,8 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_large_error_uses_geometry_base_cap_before_response",
     "current_hold_response_stiffness_requires_error_improvement",
     "current_hold_adaptive_cap_growth_is_response_earned",
+    "scale_quantization_aware_current_hold_feedback",
+    "kern_kcp_scale_uses_fast_feedback_hold_caps",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -330,11 +332,15 @@ GNG_SCALE_PREFERRED_BAUD = 9600
 GNG_SCALE_REQUEST = "\\x1bp"
 GNG_SCALE_TERMINATOR = ""
 GNG_SCALE_INTERVAL_MS = 250
+GNG_SCALE_READABILITY_G = 0.005
 KERN_KCP_SUPPORTED_BAUDS = (256000, 128000, 115200, 57600, 38400, 19200, 9600)
 KERN_KCP_SCALE_PREFERRED_BAUD = 256000
 KERN_KCP_SCALE_REQUEST = "SI"
 KERN_KCP_SCALE_TERMINATOR = "\\r\\n"
 KERN_KCP_SCALE_INTERVAL_MS = 50
+KERN_KCP_SCALE_READABILITY_G = 0.01
+SCALE_QUANTIZATION_CHANGE_FACTOR = 0.75
+SCALE_QUANTIZATION_WORSENING_FACTOR = 1.5
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
@@ -612,6 +618,8 @@ SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_FRACTION = 0.80
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_MPA = 10.0
 SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.24
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
+KERN_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.08
+KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.092
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH = 1.35
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH = 1.6
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH = 2.0
@@ -1221,6 +1229,22 @@ def _scale_interval_ms_for_probe_match(match: Mapping[str, Any]) -> int:
     if request == GNG_SCALE_REQUEST:
         return GNG_SCALE_INTERVAL_MS
     return DEFAULT_SCALE_REQUEST_INTERVAL_MS
+
+
+def _scale_readability_g_for_settings(
+    baudrate: int,
+    request_command: str,
+    terminator: str,
+) -> float | None:
+    request = str(request_command or "")
+    ending = str(terminator or "")
+    baud = int(baudrate or 0)
+    if ending == KERN_KCP_SCALE_TERMINATOR and baud in KERN_KCP_SUPPORTED_BAUDS:
+        if request in {KERN_KCP_SCALE_REQUEST, "S"}:
+            return KERN_KCP_SCALE_READABILITY_G
+    if request == GNG_SCALE_REQUEST:
+        return GNG_SCALE_READABILITY_G
+    return None
 
 
 def strain_percent(
@@ -3584,6 +3608,10 @@ class MiniDmaControlConfig:
     preload_threshold_g: float
     backlash_mm: float
     scale_interval_ms: int
+    scale_baudrate: int
+    scale_request_command: str
+    scale_terminator: str
+    scale_readability_g: float | None
     control_interval_ms: int
     log_interval_ms: int
     soft_limits_enabled: bool
@@ -5924,6 +5952,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _freeze_control_config(self) -> MiniDmaControlConfig:
         raw_limit = self._raw_scale_display_limit_g(live_widget=True)
+        try:
+            scale_baudrate = int(self.combo_scale_baud.currentText())
+        except Exception:
+            scale_baudrate = 0
+        scale_request_command = self.edit_scale_request.text()
+        scale_terminator = self.edit_scale_terminator.text()
+        scale_readability_g = _scale_readability_g_for_settings(
+            scale_baudrate,
+            scale_request_command,
+            scale_terminator,
+        )
         if self._supply_controller is not None:
             supply_resolution = self._supply_controller.current_resolution_mA()
         else:
@@ -5939,6 +5978,10 @@ class MainWindow(QtWidgets.QMainWindow):
             preload_threshold_g=float(self.spin_preload_threshold_g.value()),
             backlash_mm=float(self.spin_backlash_mm.value()),
             scale_interval_ms=int(self.spin_scale_interval.value()),
+            scale_baudrate=scale_baudrate,
+            scale_request_command=scale_request_command,
+            scale_terminator=scale_terminator,
+            scale_readability_g=scale_readability_g,
             control_interval_ms=self._control_interval_ms(),
             log_interval_ms=self._log_interval_ms(),
             soft_limits_enabled=self.check_soft_limits.isChecked(),
@@ -14447,9 +14490,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _current_sweep_hold_adaptive_command_cap_mm(self) -> float:
         return self._current_sweep_hold_adaptive_command_cap_mm_for_response(None)
 
+    def _current_sweep_hold_base_command_strain_pct(self) -> float:
+        if self._using_kern_kcp_scale():
+            return KERN_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
+        return SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
+
+    def _current_sweep_hold_adaptive_max_command_strain_pct(self) -> float:
+        if self._using_kern_kcp_scale():
+            return KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+        return SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+
     def _current_sweep_hold_base_command_cap_mm(self) -> float:
         strain_cap_mm = self._strain_pct_to_stage_mm(
-            SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
+            self._current_sweep_hold_base_command_strain_pct()
         )
         return max(
             self._motor_step_mm(),
@@ -14462,7 +14515,7 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> float:
         base_cap_mm = self._current_sweep_hold_base_command_cap_mm()
         strain_cap_mm = self._strain_pct_to_stage_mm(
-            SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+            self._current_sweep_hold_adaptive_max_command_strain_pct()
         )
         max_cap_mm = max(
             self._motor_step_mm(),
@@ -16590,9 +16643,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         previous_value = self._seek_last_filtered_value_by_key[seek_key]
         change = abs(float(filtered_signal.value) - float(previous_value))
+        quantization_band = self._scale_quantization_band_for_basis(seek_key[0])
         required_change = max(
             abs(float(effective_tolerance)) * 0.25,
             abs(float(filtered_signal.noise)) * 0.25,
+            quantization_band * SCALE_QUANTIZATION_CHANGE_FACTOR,
             1e-9,
         )
         if change > required_change:
@@ -18075,7 +18130,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{self._distribution_units(basis)[0]}; switching to fine correction steps."
             )
         elif previous_error is not None:
-            error_worsened = abs(delta_value) > abs(previous_error) + max(effective_tolerance * 0.2, 1e-9)
+            worsening_floor = self._current_sweep_worsening_floor_for_basis(
+                basis,
+                effective_tolerance,
+                filtered_signal,
+            )
+            error_worsened = abs(delta_value) > abs(previous_error) + worsening_floor
             if error_worsened:
                 drift_recovery_step_mm = self._current_sweep_hold_drift_recovery_step_mm(
                     basis,
@@ -20431,9 +20491,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_adaptive_max_command_strain_pct": (
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
                 ),
+                "kern_current_hold_base_command_strain_pct": (
+                    KERN_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT
+                ),
+                "kern_current_hold_adaptive_max_command_strain_pct": (
+                    KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
+                ),
+                "effective_current_hold_base_command_strain_pct": (
+                    self._current_sweep_hold_base_command_strain_pct()
+                ),
+                "effective_current_hold_adaptive_max_command_strain_pct": (
+                    self._current_sweep_hold_adaptive_max_command_strain_pct()
+                ),
                 "current_hold_adaptive_command_growth": (
                     SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH
                 ),
+                "scale_quantization_change_factor": SCALE_QUANTIZATION_CHANGE_FACTOR,
+                "scale_quantization_worsening_factor": SCALE_QUANTIZATION_WORSENING_FACTOR,
                 "current_hold_improving_step_growth": SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH,
                 "current_hold_improving_strong_step_growth": (
                     SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH
@@ -20630,6 +20704,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "poll_interval_ms": int(self.spin_scale_interval.value()),
                 "request_command": self.edit_scale_request.text(),
                 "line_ending": self.edit_scale_terminator.text(),
+                "readability_g": self._scale_readability_g(),
                 "recent_sample_rate_hz": self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
             },
             "ir_thermometer": {
@@ -26399,6 +26474,66 @@ class MainWindow(QtWidgets.QMainWindow):
             load_g = load_g_from_stress_mpa(abs(float(stress_mpa)), diameter_mm)
             return 0.0 if load_g is None else abs(float(load_g))
         return 0.0
+
+    def _scale_readability_g(self) -> float | None:
+        config = self._control_config()
+        if config is not None:
+            return config.scale_readability_g
+        try:
+            baudrate = int(self.combo_scale_baud.currentText())
+        except Exception:
+            baudrate = 0
+        return _scale_readability_g_for_settings(
+            baudrate,
+            self.edit_scale_request.text(),
+            self.edit_scale_terminator.text(),
+        )
+
+    def _using_kern_kcp_scale(self) -> bool:
+        config = self._control_config()
+        if config is not None:
+            baudrate = config.scale_baudrate
+            request = config.scale_request_command
+            terminator = config.scale_terminator
+        else:
+            try:
+                baudrate = int(self.combo_scale_baud.currentText())
+            except Exception:
+                baudrate = 0
+            request = self.edit_scale_request.text()
+            terminator = self.edit_scale_terminator.text()
+        return (
+            int(baudrate or 0) in KERN_KCP_SUPPORTED_BAUDS
+            and str(terminator or "") == KERN_KCP_SCALE_TERMINATOR
+            and str(request or "") in {KERN_KCP_SCALE_REQUEST, "S"}
+        )
+
+    def _scale_quantization_band_for_basis(self, basis: str) -> float:
+        readability_g = self._scale_readability_g()
+        if readability_g is None or readability_g <= 0.0:
+            return 0.0
+        if basis == HSW_BASIS_LOAD_G:
+            return abs(float(readability_g))
+        if basis == HSW_BASIS_STRESS_MPA:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            stress_mpa = stress_mpa_from_load_g(abs(float(readability_g)), diameter_mm)
+            return 0.0 if stress_mpa is None else abs(float(stress_mpa))
+        return 0.0
+
+    def _current_sweep_worsening_floor_for_basis(
+        self,
+        basis: str,
+        tolerance: float,
+        filtered_signal: ScaleControlSignal | None,
+    ) -> float:
+        noise_value = 0.0 if filtered_signal is None else abs(float(filtered_signal.noise))
+        return max(
+            abs(float(tolerance)) * 0.2,
+            noise_value * 0.5,
+            self._scale_quantization_band_for_basis(basis) * SCALE_QUANTIZATION_WORSENING_FACTOR,
+            1e-9,
+        )
 
     def _current_sweep_hold_noise_cap_for_basis(self, tolerance: float) -> float:
         tolerance = abs(float(tolerance))

@@ -52,6 +52,14 @@ def load_g_from_stress_mpa(stress_mpa: float, diameter_mm: float) -> float:
     return force_n * 1000.0 / GRAVITY_MS2
 
 
+def stress_mpa_from_load_g(load_g: float, diameter_mm: float) -> float:
+    if diameter_mm <= 0.0:
+        return 0.0
+    area_mm2 = math.pi * diameter_mm * diameter_mm / 4.0
+    force_n = load_g * GRAVITY_MS2 / 1000.0
+    return force_n / area_mm2
+
+
 def _median_absolute_deviation(values: list[float], center: float) -> float:
     if not values:
         return 0.0

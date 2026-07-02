@@ -346,6 +346,9 @@ def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path,
         window.check_max_load.setChecked(True)
         window.spin_max_load_g.setValue(30.0)
         window.spin_raw_scale_limit_g.setValue(45.0)
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
 
         window._start_auto_ramp()
         assert window._active_control_config is not None
@@ -370,6 +373,10 @@ def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path,
         assert config.current_sweep_hold_noise_sigma == pytest.approx(4.0)
         assert config.max_load_g == pytest.approx(30.0)
         assert config.raw_scale_limit_g == pytest.approx(45.0)
+        assert config.scale_baudrate == 256000
+        assert config.scale_request_command == mini_dma_mod.KERN_KCP_SCALE_REQUEST
+        assert config.scale_terminator == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
+        assert config.scale_readability_g == pytest.approx(0.01)
         assert window._raw_scale_display_limit_g() == pytest.approx(45.0)
         assert window._motor_step_mm() == pytest.approx(1.0 / 800.0)
         assert window._setup_motion_speed_cap_mm_s() == pytest.approx(0.75)
@@ -414,6 +421,44 @@ def test_current_sweep_hold_bands_are_bounded_processed_signal_multipliers() -> 
     assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR == pytest.approx(3.0)
     assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR == pytest.approx(3.0)
     assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR == pytest.approx(4.0)
+
+
+def test_kern_scale_quantization_sets_worsening_evidence_floor(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window.spin_diameter.setValue(0.0182)
+
+        one_count_mpa = window._scale_quantization_band_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        floor = window._current_sweep_worsening_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            tolerance=0.171,
+            filtered_signal=None,
+        )
+
+        assert one_count_mpa == pytest.approx(0.3769537067)
+        assert one_count_mpa < floor
+        assert one_count_mpa * 2.0 > floor
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_scale_uses_conservative_fast_feedback_hold_caps(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert window._current_sweep_hold_base_command_strain_pct() == pytest.approx(0.24)
+        assert window._current_sweep_hold_adaptive_max_command_strain_pct() == pytest.approx(0.35)
+
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+
+        assert window._current_sweep_hold_base_command_strain_pct() == pytest.approx(0.08)
+        assert window._current_sweep_hold_adaptive_max_command_strain_pct() == pytest.approx(0.092)
+    finally:
+        _close_test_window(window)
 
 
 def test_current_sweep_load_stress_control_disables_cruise_feedback(tmp_path: Path, qtbot) -> None:

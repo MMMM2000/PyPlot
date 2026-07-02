@@ -29,6 +29,7 @@ from .wire_simulator import (
     decide_robust_center,
     load_g_from_stress_mpa,
     processed_control_signal,
+    stress_mpa_from_load_g,
     transformation_fraction,
 )
 
@@ -37,6 +38,7 @@ FULL_RUN_SCENARIOS = (
     "baseline_first_overheating",
     "realistic_first_overheating",
     "realistic_run32_first_target",
+    "kosice_kern_first_overheating",
     "bad_co6_first_overheating",
     "low_strain_noisy_first_overheating",
     "noisy_centered_first_overheating",
@@ -46,6 +48,23 @@ FULL_RUN_SCENARIOS = (
     "thin_wire_delayed_feedback",
     "stress_ladder_50_100_after_unwind",
 )
+
+
+@dataclass(frozen=True)
+class ScaleFeedbackConfig:
+    """Balance feedback characteristics applied to the raw controller signal."""
+
+    name: str = "prague_gng"
+    readability_g: float | None = 0.005
+
+    def validated(self) -> "ScaleFeedbackConfig":
+        if not self.name:
+            raise ValueError("scale feedback name is required")
+        if self.readability_g is not None and self.readability_g <= 0.0:
+            raise ValueError("scale readability_g must be positive when configured")
+        if self.readability_g is not None:
+            _finite(float(self.readability_g))
+        return self
 
 
 @dataclass(frozen=True)
@@ -66,6 +85,7 @@ class FullRunConfig:
     endpoint_hold_timeout_s: float = 90.0
     max_ticks: int = 5000
     scale_latency_s: float = 0.2
+    scale_feedback: ScaleFeedbackConfig = field(default_factory=ScaleFeedbackConfig)
     zero_compression_stress: bool = False
     current_resume_requires_target_crossing: bool = False
     max_correction_strain_pct: float | None = None
@@ -87,6 +107,7 @@ class FullRunConfig:
         self.wire.validated()
         self.controller.validated()
         self.sweep.validated()
+        self.scale_feedback.validated()
         if self.target_ramp_timeout_s <= 0.0:
             raise ValueError("target_ramp_timeout_s must be positive")
         if self.target_ramp_rate_mpa_s <= 0.0:
@@ -298,6 +319,8 @@ class FullRunTrace:
             "target_ramp_max_lead_fraction": self.config.target_ramp_max_lead_fraction,
             "inter_target_free_length_shift_mm": self.config.inter_target_free_length_shift_mm,
             "scale_latency_s": self.config.scale_latency_s,
+            "scale_feedback_name": self.config.scale_feedback.name,
+            "scale_readability_g": self.config.scale_feedback.readability_g,
             "current_resume_requires_target_crossing": self.config.current_resume_requires_target_crossing,
             "sample_hz": self.config.sweep.sample_hz,
             "sample_count": len(self.samples),
@@ -497,6 +520,13 @@ class _FullRunState:
         if self.config.zero_compression_stress and stress < 0.0:
             stress = 0.0
         raw_stress = stress
+        raw_load_g = load_g_from_stress_mpa(raw_stress, wire.diameter_mm)
+        readability_g = self.config.scale_feedback.readability_g
+        if readability_g is not None and raw_load_g is not None:
+            quantum = abs(float(readability_g))
+            if quantum > 0.0:
+                raw_load_g = round(float(raw_load_g) / quantum) * quantum
+                raw_stress = stress_mpa_from_load_g(raw_load_g, wire.diameter_mm) or raw_stress
         status = "ok"
         safety_reason = ""
         strain_pct = (
@@ -519,7 +549,7 @@ class _FullRunState:
             stress_mpa=stress,
             raw_stress_mpa=raw_stress,
             load_g=load_g_from_stress_mpa(stress, wire.diameter_mm),
-            raw_load_g=load_g_from_stress_mpa(raw_stress, wire.diameter_mm),
+            raw_load_g=raw_load_g,
             strain_pct=strain_pct,
             status=status,
             safety_reason=safety_reason,
@@ -1275,6 +1305,70 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             free_strain_fluctuation_cycles=10.0,
             seed=9203,
         ),
+        "kosice_kern_first_overheating": replace(
+            base,
+            name="kosice_kern_first_overheating",
+            description=(
+                "Kosice KERN TEWJ 600-2M/B 50 MPa first-overheating run using today's "
+                "Ni49Fe26Ga23Co2 3/6 mounted wire geometry, fast USB/KCP feedback, and "
+                "0.01 g quantized scale readback."
+            ),
+            wire=replace(
+                base.wire,
+                length_mm=36.931,
+                diameter_mm=0.0182,
+                initial_motor_mm=0.0,
+                elastic_stiffness_mpa_per_mm=95.0,
+                transformation_onset_ma=24.0,
+                transformation_end_ma=60.0,
+                transformation_contraction_mm=36.931 * 8.5 / 100.0,
+                transformation_hysteresis_ma=8.0,
+                fluctuation_mpa=0.0,
+                fluctuation_cycles=7.0,
+                noise_mpa=0.65,
+            ),
+            controller=replace(
+                base.controller,
+                target_stress_mpa=50.0,
+                tolerance_mpa=1.0,
+                min_recovery_mpa=2.0,
+                motor_step_mm=1.0 / 800.0,
+                max_correction_mm=0.050,
+                safety_min_stress_mpa=None,
+                safety_max_stress_mpa=220.0,
+                stale_feedback_s=0.45,
+            ),
+            sweep=CurrentSweepConfig(start_ma=1.0, end_ma=60.0, rate_ma_s=1.0, sample_hz=16.5),
+            target_ramp_start_mpa=0.0,
+            target_ramp_rate_mpa_s=8.0,
+            target_ramp_timeout_s=80.0,
+            endpoint_hold_timeout_s=240.0,
+            max_ticks=9000,
+            scale_latency_s=0.085,
+            scale_feedback=ScaleFeedbackConfig(name="kosice_kern", readability_g=0.01),
+            zero_compression_stress=True,
+            max_correction_strain_pct=0.08,
+            adaptive_correction_cap_max_scale=1.0,
+            reported_strain_motor_scale=1.0,
+            reported_strain_offset_pct=0.0,
+            transformation_profile="stepped",
+            rising_transformation_steps=(
+                (24.0, 2.0, 0.08),
+                (32.0, 0.45, 0.34),
+                (45.0, 0.40, 0.42),
+                (58.0, 1.5, 0.16),
+            ),
+            falling_transformation_steps=(
+                (18.0, 2.0, 0.05),
+                (29.0, 0.55, 0.32),
+                (42.0, 0.45, 0.48),
+                (52.0, 1.5, 0.15),
+            ),
+            transformation_kinetic_tau_s=2.0,
+            free_strain_fluctuation_pct=0.10,
+            free_strain_fluctuation_cycles=8.0,
+            seed=7306,
+        ),
         "noisy_centered_first_overheating": replace(
             base,
             name="noisy_centered_first_overheating",
@@ -1821,6 +1915,7 @@ CONTROL_VALIDATION_POLICIES = (
     "moderate_response",
     "aggressive_cap",
     "crossing_moderate",
+    "kern_fast_quantized",
 )
 
 
@@ -1831,6 +1926,7 @@ def run_control_validation_suite(
     """Compare production-candidate control policies on realistic full-run cases."""
 
     base_configs = [full_run_scenario_by_name("realistic_run32_first_target")]
+    base_configs.append(full_run_scenario_by_name("kosice_kern_first_overheating"))
     base_configs.extend(trace.config for trace in run_stress_ladder_matrix())
     traces: list[FullRunTrace] = []
     for policy_index, policy in enumerate(policies, start=1):
@@ -1863,10 +1959,17 @@ def _control_validation_config(
     cap_scale = 1.35
     adaptive_scale = 2.0
     requires_crossing = False
+    seed_policy_index = policy_index
     if policy == "aggressive_cap":
         cap_scale = 2.0
     elif policy == "crossing_moderate":
         requires_crossing = True
+    elif policy == "kern_fast_quantized":
+        if config.scale_feedback.name == "kosice_kern":
+            cap_scale = 1.15
+            adaptive_scale = 1.25
+        else:
+            seed_policy_index = CONTROL_VALIDATION_POLICIES.index("moderate_response") + 1
 
     lead_fraction = config.target_ramp_max_lead_fraction
     if config.target_stress_sequence_mpa:
@@ -1878,7 +1981,7 @@ def _control_validation_config(
         max_correction_strain_pct=base_cap_pct * cap_scale,
         adaptive_correction_cap_max_scale=adaptive_scale,
         current_resume_requires_target_crossing=requires_crossing,
-        seed=config.seed + 310000 + policy_index * 10000 + case_index,
+        seed=config.seed + 310000 + seed_policy_index * 10000 + case_index,
     )
 
 

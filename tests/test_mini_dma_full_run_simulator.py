@@ -179,6 +179,25 @@ def test_realistic_run32_first_target_matches_reference_segment_scale() -> None:
     assert all(trace.invariants.values())
 
 
+def test_kosice_kern_first_overheating_models_fast_quantized_scale_feedback() -> None:
+    trace = run_full_mini_dma_simulation(full_run_scenario_by_name("kosice_kern_first_overheating"))
+    summary = trace.summary()
+
+    assert trace.stop_reason == "completed"
+    assert summary["scale_feedback_name"] == "kosice_kern"
+    assert summary["scale_readability_g"] == 0.01
+    assert summary["sample_hz"] == 16.5
+    assert summary["scale_latency_s"] == 0.085
+    assert summary["diameter_mm"] == 0.0182
+    assert summary["length_mm"] == 36.931
+    assert any(abs(sample.raw_stress_mpa - sample.stress_mpa) > 1e-6 for sample in trace.samples)
+    assert all(
+        abs(sample.raw_load_g / 0.01 - round(sample.raw_load_g / 0.01)) <= 1e-9
+        for sample in trace.samples
+    )
+    assert all(trace.invariants.values())
+
+
 def test_bad_co6_first_overheating_exercises_early_failure_case() -> None:
     trace = run_full_mini_dma_simulation(full_run_scenario_by_name("bad_co6_first_overheating"))
     summary = trace.summary()
@@ -486,26 +505,28 @@ def test_current_resume_target_crossing_is_opt_in_tradeoff() -> None:
 
 def test_control_validation_suite_ranks_policy_tradeoffs(tmp_path: Path) -> None:
     traces = run_control_validation_suite(
-        policies=("baseline", "moderate_response", "aggressive_cap", "crossing_moderate")
+        policies=("baseline", "moderate_response", "aggressive_cap", "crossing_moderate", "kern_fast_quantized")
     )
     summaries = [trace.summary() for trace in traces]
 
     paths = write_sweep_outputs(traces, tmp_path)
 
-    assert len(traces) == 36
+    assert len(traces) == 50
     assert {item["scenario"].split("__", 1)[0] for item in summaries} == {
         "validation_baseline",
         "validation_moderate_response",
         "validation_aggressive_cap",
         "validation_crossing_moderate",
+        "validation_kern_fast_quantized",
     }
     assert any(item["scenario"].endswith("realistic_run32_first_target") for item in summaries)
+    assert any(item["scenario"].endswith("kosice_kern_first_overheating") for item in summaries)
     ladder_summaries = [
         item
         for item in summaries
         if item["target_stress_sequence_mpa"] == [50.0, 100.0]
     ]
-    assert len(ladder_summaries) == 32
+    assert len(ladder_summaries) == 40
     assert any(item["scenario"].endswith("ladder_thin_delayed_tiny_load") for item in ladder_summaries)
     assert all(
         trace.config.target_ramp_start_mpa == 0.0
@@ -520,8 +541,9 @@ def test_control_validation_suite_ranks_policy_tradeoffs(tmp_path: Path) -> None
         "moderate_response",
         "aggressive_cap",
         "crossing_moderate",
+        "kern_fast_quantized",
     }
-    assert all(item["case_count"] == 9 for item in rank)
+    assert all(item["case_count"] == 10 for item in rank)
     ranked = {item["policy"]: item for item in rank}
     assert ranked["moderate_response"]["quality_score_sum"] <= ranked["baseline"]["quality_score_sum"]
     assert ranked["crossing_moderate"]["hold_time_sum_s"] >= ranked["moderate_response"]["hold_time_sum_s"]
