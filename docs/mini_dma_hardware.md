@@ -65,6 +65,7 @@ Known and measured settings for the KERN TEWJ 600-2M/B bench balance:
 - Readability `d`: 0.01 g.
 - Verified TMA profile: USB serial on Windows, `SI` request, CRLF line ending, `256000` baud, and `50 ms` poll interval.
 - The same KERN KCP profile also probes `S` requests and lower KERN-supported baud rates for auto-detect fallback, but the preferred bench setting is `256000` baud.
+- TMA can apply and auto-detect the PC-side serial preset, but the scale-side menu settings used for the fast stream/readout behavior, such as `prMode`, `triG`, `cont`, speed, zero, and stability filtering, are treated as persistent balance setup. Do not assume the app can rewrite those balance menu values unless a KERN-supported remote configuration command has been verified on this exact model.
 - The scale can provide much faster request/reply cadence than the Prague G&G balance. On the 2026-07-02 Kosice run, `scale_raw.csv` showed median reply spacing near `50 ms`, p95 near `101 ms`, and many repeated adjacent display values.
 - The 0.01 g readability is a meaningful control floor. For the mounted 18.2 um wire on 2026-07-02, one display count was about `0.377 MPa`.
 - TMA therefore treats KERN feedback as fast but quantized: the control loop can react sooner than with the Prague balance, but it must not classify a single display count as a confirmed worsened response.

@@ -463,8 +463,8 @@ SUPPLY_PROFILES: dict[str, dict[str, Any]] = {
         "start_current_mA": 1.0,
         "min_start_current_mA": 1.0,
         "max_voltage": 32.05,
-        "channel_select": 0,
-        "motor_supply_channel": 0,
+        "channel_select": 3,
+        "motor_supply_channel": 2,
         "channel_count": 4,
         "baudrate": 0,
         "reset_on_start": False,
@@ -10399,14 +10399,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_shared_broker_bench_defaults_for_tic_preflight(self) -> None:
         if not self._using_shared_broker_supply():
             return
+        profile = SUPPLY_PROFILES.get("shared_hmp_broker", {})
         changed: list[str] = []
-        if self._current_sweep_supply_channel() is None and self._select_combo_data(
-            self.combo_current_sweep_supply_channel,
-            4,
-        ):
-            changed.append("current-sweep CH4")
-        if self._motor_supply_channel() is None and self._select_combo_data(self.combo_motor_supply_channel, 3):
-            changed.append("motor-supply CH3")
+        current_channel = int(profile.get("channel_select", 0) or 0)
+        if current_channel > 0 and self._current_sweep_supply_channel() is None:
+            if self._select_combo_data(self.combo_current_sweep_supply_channel, current_channel):
+                changed.append(f"current-sweep CH{current_channel}")
+        motor_channel = int(profile.get("motor_supply_channel", 0) or 0)
+        if motor_channel > 0 and self._motor_supply_channel() is None:
+            if self._select_combo_data(self.combo_motor_supply_channel, motor_channel):
+                changed.append(f"motor-supply CH{motor_channel}")
         if not self.check_motor_supply_power.isChecked():
             self.check_motor_supply_power.setChecked(True)
             changed.append("motor supply enabled")

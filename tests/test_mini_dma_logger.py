@@ -3967,7 +3967,7 @@ def test_manual_auto_connect_leaves_active_ir_connection_alone(tmp_path: Path, q
         _close_test_window(window)
 
 
-def test_shared_broker_manual_auto_connect_applies_ch3_ch4_defaults_before_tic_status(
+def test_shared_broker_manual_auto_connect_applies_kosice_ch2_ch3_defaults_before_tic_status(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -3989,8 +3989,8 @@ def test_shared_broker_manual_auto_connect_applies_ch3_ch4_defaults_before_tic_s
 
         window._run_manual_auto_connect_hardware()
 
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.combo_current_sweep_supply_channel.currentData() == 3
+        assert window.combo_motor_supply_channel.currentData() == 2
         assert window.check_motor_supply_power.isChecked()
         assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
         assert "Shared HMP TMA bench defaults applied for Tic preflight" in window.log_output.toPlainText()
@@ -22511,6 +22511,11 @@ def test_hmp4030_defaults_keep_safe_voltage_and_require_manual_channel_selection
         assert window.spin_tic_current_limit_mA.value() == 343
     finally:
         _close_test_window(window)
+
+
+def test_shared_broker_defaults_match_current_kosice_hmp4030_wiring() -> None:
+    assert mini_dma_mod.SUPPLY_PROFILES["shared_hmp_broker"]["channel_select"] == 3
+    assert mini_dma_mod.SUPPLY_PROFILES["shared_hmp_broker"]["motor_supply_channel"] == 2
 
 
 def test_tic_current_limit_keeps_cool_bench_default() -> None:
