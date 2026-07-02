@@ -640,6 +640,64 @@ def test_kern_held_recovery_uses_earned_resume_band_before_exact_seek(
         _close_test_window(window)
 
 
+def test_kern_held_recovery_preserves_base_resume_confirmation(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_started_s = 90.0
+        window._current_sweep_ramp_hold_entry_abs_error = None
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            current_start_mA=1.0,
+            current_end_mA=60.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=50.8,
+            latest_value=50.8,
+            noise=0.05,
+            slope_per_s=0.0,
+            sample_count=8,
+            timestamp_s=100.0,
+        )
+        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (0.8, 0.8, 0.25, 0.05)
+        )
+        window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        assert window._update_current_sweep_ramp_hold(step, 1, now_s=100.0) == (True, False)
+        assert window._current_sweep_ramp_hold_in_band_since_s == pytest.approx(100.0)
+
+        assert window._maybe_resume_current_sweep_held_recovery_from_adaptive_band(
+            step,
+            now_s=100.0,
+        ) is False
+        assert window._current_sweep_ramp_hold_in_band_since_s == pytest.approx(100.0)
+
+        assert window._update_current_sweep_ramp_hold(step, 1, now_s=100.6) == (False, False)
+
+        assert resumed
+        assert "resume band" in resumed[-1]
+    finally:
+        _close_test_window(window)
+
+
 def test_prague_held_recovery_ignores_kern_earned_resume_shortcut(
     tmp_path: Path,
     qtbot,

@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.9"
+CONTROL_LOGIC_VERSION = "2026-07-02.10"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -135,6 +135,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_current_hold_resume_band_is_response_earned",
     "kern_kcp_current_hold_runaway_drift_bypasses_volatile_wait",
     "kern_kcp_held_recovery_uses_earned_resume_band",
+    "kern_kcp_held_recovery_preserves_base_resume_confirmation",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -27255,7 +27256,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             filtered_signal=filtered_signal,
         )
-        if active_resume_band <= resume_band + 1e-12 or resume_error > active_resume_band:
+        if active_resume_band <= resume_band + 1e-12:
+            return False
+        if resume_error > active_resume_band:
             self._current_sweep_ramp_hold_in_band_since_s = None
             return False
         if self._current_sweep_ramp_hold_in_band_since_s is None:
