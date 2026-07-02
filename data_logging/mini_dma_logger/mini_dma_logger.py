@@ -365,6 +365,8 @@ TIC_CMD_GET_VARIABLES = 0xA1
 TIC_CMD_SET_TARGET_POSITION = 0xE0
 TIC_CMD_SET_TARGET_VELOCITY = 0xE3
 TIC_CMD_SET_MAX_SPEED = 0xE6
+TIC_CMD_SET_MAX_DECEL = 0xE9
+TIC_CMD_SET_MAX_ACCEL = 0xEA
 TIC_CMD_HALT_AND_SET_POSITION = 0xEC
 TIC_KEEPALIVE_INTERVAL_MS = 500
 DEFAULT_TIC_STATUS_INTERVAL_MS = 1000
@@ -499,11 +501,14 @@ CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
 CALIBRATION_DEFAULTS_VERSION = 4
-MOTOR_DEFAULTS_VERSION = 3
+MOTOR_DEFAULTS_VERSION = 4
 DEFAULT_FULL_STEPS_PER_MM = 100.0
 DEFAULT_TIC_STEP_MODE = "8"
 DEFAULT_STEPS_PER_MM = 800.0
 DEFAULT_TIC_CURRENT_LIMIT_MA = 343
+DEFAULT_TIC_MAX_SPEED = 10_000_000
+DEFAULT_TIC_MAX_ACCEL = 100_000
+DEFAULT_TIC_MAX_DECEL = 100_000
 DEFAULT_MOTOR_SUPPLY_CURRENT_LIMIT_A = 0.5
 TIC_CURRENT_LIMIT_STEP_MA = 1
 TIC_T500_CURRENT_LIMITS_MA: tuple[int, ...] = (
@@ -3836,6 +3841,20 @@ class NativeTicUsbController:
         self._command_7bit(TIC_CMD_SET_CURRENT_LIMIT, tic_t500_current_limit_code(target_mA))
         return safe_value
 
+    def set_motion_limits(
+        self,
+        *,
+        max_speed: int | None = None,
+        max_accel: int | None = None,
+        max_decel: int | None = None,
+    ) -> None:
+        if max_speed is not None:
+            self._command_u32(TIC_CMD_SET_MAX_SPEED, max(0, int(max_speed)))
+        if max_accel is not None:
+            self._command_u32(TIC_CMD_SET_MAX_ACCEL, max(100, int(max_accel)))
+        if max_decel is not None:
+            self._command_u32(TIC_CMD_SET_MAX_DECEL, max(100, int(max_decel)))
+
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
         self._quick_command(TIC_CMD_ENERGIZE)
         self._quick_command(TIC_CMD_RESET_COMMAND_TIMEOUT)
@@ -4169,6 +4188,48 @@ class TicController:
                         raise
                     self._log_ticcmd_fallback(f"native current-limit command failed: {exc}")
             return apply_tic_current_limit_mA(self, target_mA)
+
+    def set_motion_limits(
+        self,
+        *,
+        max_speed: int | None = None,
+        max_accel: int | None = None,
+        max_decel: int | None = None,
+    ) -> None:
+        if max_speed is None and max_accel is None and max_decel is None:
+            return
+        with self._transport_lock:
+            native = self._native_controller()
+            if native is not None:
+                try:
+                    native.set_motion_limits(max_speed=max_speed, max_accel=max_accel, max_decel=max_decel)
+                    self._log_native_success_once()
+                    return
+                except Exception as exc:
+                    retry_native = self._native_retry_after_failure(exc)
+                    if retry_native is not None:
+                        try:
+                            retry_native.set_motion_limits(
+                                max_speed=max_speed,
+                                max_accel=max_accel,
+                                max_decel=max_decel,
+                            )
+                            self._log_native_success_once()
+                            return
+                        except Exception as retry_exc:
+                            self._native_error = retry_exc
+                            exc = retry_exc
+                    if self._native_only() or not self._fallback_allowed():
+                        raise
+                    self._log_ticcmd_fallback(f"native motion-limit command failed: {exc}")
+            args: list[str] = []
+            if max_speed is not None:
+                args.extend(["--max-speed", str(max(0, int(max_speed)))])
+            if max_accel is not None:
+                args.extend(["--max-accel", str(max(100, int(max_accel)))])
+            if max_decel is not None:
+                args.extend(["--max-decel", str(max(100, int(max_decel)))])
+            self.run(*args)
 
     def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
         with self._transport_lock:
@@ -6637,6 +6698,36 @@ class MainWindow(QtWidgets.QMainWindow):
             "Tic motor winding current limit. This is separate from the HMP motor-supply rail current limit."
         )
         motion_advanced_form.addRow("Tic motor current limit", self.spin_tic_current_limit_mA)
+
+        self.spin_tic_max_speed = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_tic_max_speed.setRange(0, 500_000_000)
+        self.spin_tic_max_speed.setSingleStep(100_000)
+        self.spin_tic_max_speed.setValue(DEFAULT_TIC_MAX_SPEED)
+        self.spin_tic_max_speed.setToolTip(
+            "Temporary Tic runtime max speed in microsteps per 10000 s. "
+            "Preflight applies this before recipes so the controller does not depend on its stored profile."
+        )
+        motion_advanced_form.addRow("Tic max speed", self.spin_tic_max_speed)
+
+        self.spin_tic_max_accel = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_tic_max_accel.setRange(100, 2_147_483_647)
+        self.spin_tic_max_accel.setSingleStep(10_000)
+        self.spin_tic_max_accel.setValue(DEFAULT_TIC_MAX_ACCEL)
+        self.spin_tic_max_accel.setToolTip(
+            "Temporary Tic runtime max acceleration in microsteps per 100 s^2. "
+            "The Prague/Kosice default is 100000."
+        )
+        motion_advanced_form.addRow("Tic max acceleration", self.spin_tic_max_accel)
+
+        self.spin_tic_max_decel = QtWidgets.QSpinBox(motion_advanced_box)
+        self.spin_tic_max_decel.setRange(100, 2_147_483_647)
+        self.spin_tic_max_decel.setSingleStep(10_000)
+        self.spin_tic_max_decel.setValue(DEFAULT_TIC_MAX_DECEL)
+        self.spin_tic_max_decel.setToolTip(
+            "Temporary Tic runtime max deceleration in microsteps per 100 s^2. "
+            "Preflight applies this together with max speed and max acceleration."
+        )
+        motion_advanced_form.addRow("Tic max deceleration", self.spin_tic_max_decel)
 
         self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
         self.spin_steps_per_mm.setDecimals(3)
@@ -22207,6 +22298,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Recipe preflight: {tic_limit_message}")
                 if not tic_limit_ok:
                     issues.append(tic_limit_message.replace("FAIL: ", "", 1))
+            if not issues and self._recipe_requires_tic(steps):
+                tic_motion_ok, tic_motion_message = self._apply_tic_motion_limits()
+                self._log(f"Recipe preflight: {tic_motion_message}")
+                if not tic_motion_ok:
+                    issues.append(tic_motion_message.replace("FAIL: ", "", 1))
             self._set_manual_auto_connect_progress("Checking scale...", 3, preflight_steps)
             if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
                 issues.append(
@@ -22250,6 +22346,86 @@ class MainWindow(QtWidgets.QMainWindow):
         if applied_mA != safe_mA:
             return False, f"FAIL: Tic current limit returned {applied_mA} mA, expected {safe_mA} mA."
         return True, f"PASS: Tic current limit {applied_mA} mA."
+
+    def _tic_motion_limit_readbacks(self, status_text: str | None = None) -> dict[str, int | None]:
+        text = self._tic_status_text if status_text is None else status_text
+
+        def _limit(label: str) -> int | None:
+            value = _extract_status_float(text or "", label)
+            if value is None or not math.isfinite(float(value)):
+                return None
+            return int(round(float(value)))
+
+        return {
+            "max_speed": _limit("Max speed"),
+            "max_accel": _limit("Max acceleration"),
+            "max_decel": _limit("Max deceleration"),
+        }
+
+    def _selected_tic_motion_limits(self) -> dict[str, int]:
+        return {
+            "max_speed": int(self.spin_tic_max_speed.value()),
+            "max_accel": int(self.spin_tic_max_accel.value()),
+            "max_decel": int(self.spin_tic_max_decel.value()),
+        }
+
+    def _tic_motion_limits_match(self, readbacks: Mapping[str, int | None], targets: Mapping[str, int]) -> bool:
+        return all(readbacks.get(key) == int(targets[key]) for key in ("max_speed", "max_accel", "max_decel"))
+
+    def _format_tic_motion_limits(self, values: Mapping[str, int | None]) -> str:
+        return (
+            f"speed {values.get('max_speed')}, "
+            f"accel {values.get('max_accel')}, "
+            f"decel {values.get('max_decel')}"
+        )
+
+    def _apply_tic_motion_limits(self) -> tuple[bool, str]:
+        targets = self._selected_tic_motion_limits()
+        readbacks = self._tic_motion_limit_readbacks()
+        if self._tic_motion_limits_match(readbacks, targets):
+            return True, f"PASS: Tic motion limits already {self._format_tic_motion_limits(targets)}."
+        try:
+            controller = self._build_tic_controller()
+            method = getattr(controller, "set_motion_limits", None)
+            if callable(method):
+                method(
+                    max_speed=targets["max_speed"],
+                    max_accel=targets["max_accel"],
+                    max_decel=targets["max_decel"],
+                )
+            else:
+                controller.run(
+                    "--max-speed",
+                    str(targets["max_speed"]),
+                    "--max-accel",
+                    str(targets["max_accel"]),
+                    "--max-decel",
+                    str(targets["max_decel"]),
+                )
+        except Exception as exc:
+            readbacks = self._tic_motion_limit_readbacks()
+            if self._tic_motion_limits_match(readbacks, targets):
+                return (
+                    True,
+                    "PASS: Tic motion limits already "
+                    f"{self._format_tic_motion_limits(targets)} "
+                    f"(write skipped because the controller handle was busy: {exc}).",
+                )
+            return False, f"FAIL: Tic motion limits could not be set ({exc})."
+        try:
+            self._refresh_tic_status()
+            readbacks = self._tic_motion_limit_readbacks()
+        except Exception:
+            readbacks = {}
+        if readbacks and not self._tic_motion_limits_match(readbacks, targets):
+            return (
+                False,
+                "FAIL: Tic motion limits read back as "
+                f"{self._format_tic_motion_limits(readbacks)}, expected "
+                f"{self._format_tic_motion_limits(targets)}."
+            )
+        self._refresh_tic_settings_summary()
+        return True, f"PASS: Tic motion limits {self._format_tic_motion_limits(targets)}."
 
     def _provision_bench_hardware(self, _checked: bool = False) -> bool:
         statuses: list[str] = []
@@ -22308,6 +22484,9 @@ class MainWindow(QtWidgets.QMainWindow):
             tic_ok, tic_message = self._apply_tic_current_limit()
             statuses.append(tic_message)
             ok = ok and tic_ok
+            tic_motion_ok, tic_motion_message = self._apply_tic_motion_limits()
+            statuses.append(tic_motion_message)
+            ok = ok and tic_motion_ok
 
         status_text = "\n".join(statuses)
         self.label_hardware_provisioning_status.setText(status_text)
@@ -28555,6 +28734,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("tic_native_usb_preferred", self.check_tic_native_usb.isChecked())
         self.settings.setValue("tic_serial", self.edit_tic_serial.text())
         self.settings.setValue("tic_current_limit_mA", self.spin_tic_current_limit_mA.value())
+        self.settings.setValue("tic_max_speed", self.spin_tic_max_speed.value())
+        self.settings.setValue("tic_max_accel", self.spin_tic_max_accel.value())
+        self.settings.setValue("tic_max_decel", self.spin_tic_max_decel.value())
         self.settings.setValue("tic_status_interval_ms", self._tic_status_interval_ms())
         self.settings.setValue("tic_keepalive_interval_ms", self._tic_keepalive_interval_ms())
         self.settings.setValue("full_steps_per_mm", self.spin_full_steps_per_mm.value())
@@ -28921,6 +29103,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_tic_serial.setText(self.settings.value("tic_serial", "", type=str))
         self.spin_tic_current_limit_mA.setValue(
             int(float(self.settings.value("tic_current_limit_mA", DEFAULT_TIC_CURRENT_LIMIT_MA)))
+        )
+        self.spin_tic_max_speed.setValue(
+            int(float(self.settings.value("tic_max_speed", DEFAULT_TIC_MAX_SPEED)))
+        )
+        self.spin_tic_max_accel.setValue(
+            int(float(self.settings.value("tic_max_accel", DEFAULT_TIC_MAX_ACCEL)))
+        )
+        self.spin_tic_max_decel.setValue(
+            int(float(self.settings.value("tic_max_decel", DEFAULT_TIC_MAX_DECEL)))
         )
         self.spin_tic_status_interval.setValue(
             int(self.settings.value("tic_status_interval_ms", DEFAULT_TIC_STATUS_INTERVAL_MS))

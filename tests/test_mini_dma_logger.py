@@ -4046,7 +4046,10 @@ def test_recipe_preflight_shows_auto_connect_progress_when_requested(
     )
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = _fail_scale  # type: ignore[method-assign]
     window._tic_motor_power_ok = None
     window._scale_thread = None
@@ -4081,7 +4084,10 @@ def test_recipe_preflight_does_not_show_auto_connect_progress_by_default(
     window._show_manual_auto_connect_progress = lambda: shown.append(True)  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
 
     try:
@@ -10241,7 +10247,10 @@ def test_recipe_preflight_restores_real_gram_zero_load_reference_before_setup(tm
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+        window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
 
         ok = window._preflight_recipe_hardware(
             [
@@ -14349,6 +14358,39 @@ def test_tic_controller_sets_step_mode_with_ticcmd(monkeypatch: pytest.MonkeyPat
     assert calls == [["ticcmd.exe", "-d", "00501366", "--step-mode", "4"]]
 
 
+def test_tic_controller_sets_motion_limits_with_ticcmd(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_motion_limits(max_speed=10_000_000, max_accel=100_000, max_decel=100_000)
+
+    assert calls == [
+        [
+            "ticcmd.exe",
+            "-d",
+            "00501366",
+            "--max-speed",
+            "10000000",
+            "--max-accel",
+            "100000",
+            "--max-decel",
+            "100000",
+        ]
+    ]
+
+
 def test_tic_controller_run_hides_ticcmd_console_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -14492,6 +14534,7 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
     controller.set_current_position(0)
     controller.set_step_mode("8")
     controller.set_current_limit_mA(500)
+    controller.set_motion_limits(max_speed=10_000_000, max_accel=100_000, max_decel=100_000)
     controller.halt_and_hold()
 
     assert transfers == [
@@ -14507,6 +14550,9 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
         (0x40, 0xEC, 0, 0, None),
         (0x40, 0x94, 3, 0, None),
         (0x40, 0x91, 4, 0, None),
+        (0x40, 0xE6, 0x9680, 0x0098, None),
+        (0x40, 0xEA, 0x86A0, 0x0001, None),
+        (0x40, 0xE9, 0x86A0, 0x0001, None),
         (0x40, 0x89, 0, 0, None),
     ]
 
@@ -22434,7 +22480,9 @@ def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: P
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
 
     try:
         ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
@@ -22814,6 +22862,10 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         def __init__(self) -> None:
             self.current_limits: list[float] = []
             self.step_modes: list[str] = []
+            self.max_speed = 800_000
+            self.max_accel = 40_000
+            self.max_decel = 40_000
+            self.motion_limit_calls: list[tuple[str, ...]] = []
 
         def set_step_mode(self, step_mode: str) -> None:
             self.step_modes.append(step_mode)
@@ -22821,6 +22873,11 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         def run(self, *args: str, timeout_s: float = 5.0) -> str:
             if args and args[0] == "--current":
                 self.current_limits.append(float(args[1]))
+            if args and args[0] == "--max-speed":
+                self.motion_limit_calls.append(tuple(args))
+                self.max_speed = int(args[1])
+                self.max_accel = int(args[3])
+                self.max_decel = int(args[5])
             return ""
 
         def get_status(self) -> str:
@@ -22828,6 +22885,9 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
                 [
                     "VIN voltage: 12.00 V",
                     "Step mode: 1/8 step",
+                    f"Max speed: {self.max_speed}",
+                    f"Max acceleration: {self.max_accel}",
+                    f"Max deceleration: {self.max_decel}",
                     "Current limit: 343 mA",
                     "Errors currently stopping the motor: None",
                 ]
@@ -22854,9 +22914,15 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         assert supply.selected == 3
         assert tic.step_modes == ["8"]
         assert tic.current_limits == [343.0]
+        assert tic.motion_limit_calls == [
+            ("--max-speed", "10000000", "--max-accel", "100000", "--max-decel", "100000")
+        ]
         assert "PASS: Motor supply CH2" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic step mode" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic current limit 343 mA" in window.label_hardware_provisioning_status.text()
+        assert "PASS: Tic motion limits speed 10000000, accel 100000, decel 100000" in (
+            window.label_hardware_provisioning_status.text()
+        )
     finally:
         _close_test_window(window)
 
@@ -22878,6 +22944,8 @@ def test_recipe_preflight_blocks_start_when_tic_current_limit_fails(
         window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._apply_tic_current_limit = lambda: (False, "FAIL: Tic current limit could not be set.")  # type: ignore[method-assign]
 
         ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
@@ -22913,11 +22981,16 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
         window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._build_tic_controller = lambda: _BusyTic()  # type: ignore[method-assign]
         window._tic_status_text = "\n".join(
             [
                 "VIN voltage: 12.00 V",
                 "Step mode: 1/8 step",
+                "Max speed: 10000000",
+                "Max acceleration: 100000",
+                "Max deceleration: 100000",
                 "Current limit: 343 mA",
                 "Errors currently stopping the motor: None",
             ]
