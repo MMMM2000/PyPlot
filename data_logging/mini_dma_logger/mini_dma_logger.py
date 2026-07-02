@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.1"
+CONTROL_LOGIC_VERSION = "2026-07-02.2"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -132,6 +132,7 @@ CONTROL_LOGIC_FEATURES = [
     "current_hold_adaptive_cap_growth_is_response_earned",
     "scale_quantization_aware_current_hold_feedback",
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
+    "kern_kcp_current_hold_resume_band_is_response_earned",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -620,6 +621,8 @@ SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.24
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.35
 KERN_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT = 0.08
 KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT = 0.092
+KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_ENTRY_FRACTION = 0.28
+KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION = 0.75
 SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_COMMAND_GROWTH = 1.35
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STEP_GROWTH = 1.6
 SERVO_CURRENT_SWEEP_HOLD_IMPROVING_STRONG_STEP_GROWTH = 2.0
@@ -5670,6 +5673,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
         self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
+        self._current_sweep_ramp_hold_entry_abs_error: float | None = None
+        self._current_sweep_ramp_hold_entry_signed_error: float | None = None
+        self._current_sweep_ramp_hold_entry_pause_band: float | None = None
         self._current_sweep_ramp_hold_candidate_step_index: int | None = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s: float | None = None
@@ -20497,6 +20503,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 "kern_current_hold_adaptive_max_command_strain_pct": (
                     KERN_CURRENT_SWEEP_HOLD_ADAPTIVE_MAX_COMMAND_STRAIN_PCT
                 ),
+                "kern_current_hold_earned_resume_entry_fraction": (
+                    KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_ENTRY_FRACTION
+                ),
+                "kern_current_hold_earned_resume_max_pause_fraction": (
+                    KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION
+                ),
                 "effective_current_hold_base_command_strain_pct": (
                     self._current_sweep_hold_base_command_strain_pct()
                 ),
@@ -26380,6 +26392,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s = None
         self._current_sweep_ramp_hold_seek_accepted_since_s = None
+        self._current_sweep_ramp_hold_entry_abs_error = None
+        self._current_sweep_ramp_hold_entry_signed_error = None
+        self._current_sweep_ramp_hold_entry_pause_band = None
         self._current_sweep_ramp_hold_candidate_step_index = None
         self._current_sweep_ramp_hold_candidate_sign = 0.0
         self._current_sweep_ramp_hold_candidate_since_s = None
@@ -26573,6 +26588,55 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return 0.0 if load_slope is None else abs(float(load_slope))
         return 0.0
+
+    def _current_sweep_hold_earned_resume_band(
+        self,
+        step: AutomationStep,
+        *,
+        signed_error: float,
+        resume_band: float,
+        pause_band: float,
+        filtered_signal: ScaleControlSignal | None,
+    ) -> float:
+        """Allow fast KERN holds to resume after proportional, observed recovery.
+
+        The band is derived from the hold's own entry error, so it scales with
+        target, wire stiffness, transformation size, and scale feedback rather
+        than encoding a fixed MPa allowance.
+        """
+        if not self._using_kern_kcp_scale():
+            return float(resume_band)
+        if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return float(resume_band)
+        if filtered_signal is None:
+            return float(resume_band)
+        entry_error = self._current_sweep_ramp_hold_entry_abs_error
+        if entry_error is None:
+            return float(resume_band)
+        entry_error = abs(float(entry_error))
+        if not math.isfinite(entry_error) or entry_error <= 0.0:
+            return float(resume_band)
+        current_error = abs(float(signed_error))
+        if not math.isfinite(current_error) or current_error >= entry_error:
+            return float(resume_band)
+        earned_band = entry_error * KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_ENTRY_FRACTION
+        if current_error > earned_band:
+            return float(resume_band)
+        slope = float(filtered_signal.slope_per_s)
+        away_slope_floor = self._current_sweep_hold_min_slope_for_basis(step.basis)
+        if step.basis == HSW_BASIS_LOAD_G:
+            config = self._control_config()
+            diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+            slope_mpa = stress_mpa_from_load_g(slope, diameter_mm)
+            slope = 0.0 if slope_mpa is None else float(slope_mpa)
+            away_slope_floor = SERVO_CURRENT_SWEEP_HOLD_MIN_AWAY_SLOPE_MPA_S
+        if float(signed_error) * slope > 0.0 and abs(slope) >= away_slope_floor:
+            return float(resume_band)
+        max_from_pause = abs(float(pause_band)) * KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION
+        if max_from_pause <= 0.0:
+            return float(resume_band)
+        earned_band = min(earned_band, max_from_pause)
+        return max(float(resume_band), earned_band)
 
     def _reset_current_sweep_ramp_hold_candidate(self) -> None:
         self._current_sweep_ramp_hold_candidate_step_index = None
@@ -26814,6 +26878,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_ramp_hold_step_index = step_index
             self._current_sweep_ramp_hold_started_s = now_s
             self._current_sweep_ramp_hold_in_band_since_s = None
+            self._current_sweep_ramp_hold_entry_abs_error = float(error_value)
+            self._current_sweep_ramp_hold_entry_signed_error = float(signed_error)
+            self._current_sweep_ramp_hold_entry_pause_band = float(pause_band)
             self._reset_current_sweep_ramp_hold_candidate()
             setpoint = self._active_current_sweep_last_setpoint_mA
             self._log(
@@ -26829,16 +26896,26 @@ class MainWindow(QtWidgets.QMainWindow):
             return False, False
 
         held_s = max(0.0, now_s - self._current_sweep_ramp_hold_started_s)
-        if resume_error <= resume_band:
+        active_resume_band = self._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=signed_error,
+            resume_band=resume_band,
+            pause_band=pause_band,
+            filtered_signal=filtered_signal,
+        )
+        if resume_error <= active_resume_band:
             if self._current_sweep_ramp_hold_in_band_since_s is None:
                 self._current_sweep_ramp_hold_in_band_since_s = now_s
             stable_s = self._current_sweep_hold_resume_stable_s(step)
             if now_s - self._current_sweep_ramp_hold_in_band_since_s >= stable_s:
+                band_label = "resume band"
+                if active_resume_band > resume_band + 1e-12:
+                    band_label = "adaptive resume band"
                 self._resume_current_sweep_ramp_from_hold(
                     now_s=now_s,
                     reason=(
                         f"filtered target error {_format_compact_number(resume_error)} "
-                        f"is inside resume band {_format_compact_number(resume_band)}"
+                        f"is inside {band_label} {_format_compact_number(active_resume_band)}"
                     ),
                 )
                 return False, False

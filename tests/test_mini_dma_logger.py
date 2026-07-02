@@ -461,6 +461,127 @@ def test_kern_scale_uses_conservative_fast_feedback_hold_caps(tmp_path: Path, qt
         _close_test_window(window)
 
 
+def test_kern_hold_earned_resume_band_scales_from_entry_error(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        step = mini_dma_mod.AutomationStep(
+            "current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+
+        band = window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=4.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=signal,
+        )
+
+        assert band == pytest.approx(
+            20.0 * mini_dma_mod.KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_ENTRY_FRACTION
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_hold_earned_resume_requires_improvement_and_non_away_slope(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        step = mini_dma_mod.AutomationStep(
+            "current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+        improving_signal = mini_dma_mod.ScaleControlSignal(
+            value=58.0,
+            latest_value=58.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+        away_signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+
+        not_improved_enough = window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=8.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=improving_signal,
+        )
+        moving_away = window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=4.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=away_signal,
+        )
+
+        assert not_improved_enough == pytest.approx(1.0)
+        assert moving_away == pytest.approx(1.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_scale_ignores_kern_earned_resume_band(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText("P")
+        window.edit_scale_terminator.setText("\\r\\n")
+        step = mini_dma_mod.AutomationStep(
+            "current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+
+        assert window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=4.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=signal,
+        ) == pytest.approx(1.0)
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_load_stress_control_disables_cruise_feedback(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
