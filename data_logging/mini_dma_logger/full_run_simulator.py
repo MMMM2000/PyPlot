@@ -85,6 +85,8 @@ class FullRunConfig:
     endpoint_hold_timeout_s: float = 90.0
     max_ticks: int = 5000
     scale_latency_s: float = 0.2
+    current_hold_feedback_wait_s: float = 0.0
+    current_hold_correction_feedback_wait_s: float = 0.0
     scale_feedback: ScaleFeedbackConfig = field(default_factory=ScaleFeedbackConfig)
     zero_compression_stress: bool = False
     current_resume_requires_target_crossing: bool = False
@@ -120,6 +122,10 @@ class FullRunConfig:
             raise ValueError("max_ticks must be positive")
         if self.scale_latency_s < 0.0:
             raise ValueError("scale_latency_s must be non-negative")
+        if self.current_hold_feedback_wait_s < 0.0:
+            raise ValueError("current_hold_feedback_wait_s must be non-negative")
+        if self.current_hold_correction_feedback_wait_s < 0.0:
+            raise ValueError("current_hold_correction_feedback_wait_s must be non-negative")
         if self.max_correction_strain_pct is not None and self.max_correction_strain_pct <= 0.0:
             raise ValueError("max_correction_strain_pct must be positive")
         if self.adaptive_correction_cap_max_scale < 1.0:
@@ -153,6 +159,8 @@ class FullRunConfig:
         _finite(self.free_strain_fluctuation_pct)
         _finite(self.free_strain_fluctuation_cycles)
         _finite(self.inter_target_free_length_shift_mm)
+        _finite(self.current_hold_feedback_wait_s)
+        _finite(self.current_hold_correction_feedback_wait_s)
         _finite(self.adaptive_correction_cap_max_scale)
         _finite(self.adaptive_correction_cap_growth)
         if self.target_ramp_max_lead_fraction is not None:
@@ -226,6 +234,7 @@ class FullRunTrace:
         final = self.events[-1] if self.events else None
         total_time_s = self.samples[-1].elapsed_s if self.samples else 0.0
         hold_events = [event for event in self.events if event.phase == "current_hold"]
+        event_durations = _event_durations_s(self.events, 1.0 / self.config.sweep.sample_hz)
         target_ramp_events = [event for event in self.events if event.phase == "target_ramp"]
         targets = _target_sequence(self.config)
         first_target = targets[0] if targets else self.config.controller.target_stress_mpa
@@ -280,7 +289,11 @@ class FullRunTrace:
             _material_state_for_sample(self.config, sample)["free_transformation_strain_pct"]
             for sample in self.samples
         ]
-        current_hold_time_s = len(hold_events) / self.config.sweep.sample_hz
+        current_hold_time_s = sum(
+            duration
+            for event, duration in zip(self.events, event_durations, strict=False)
+            if event.phase == "current_hold"
+        )
         free_strain_range_pct = max(free_strain_values, default=0.0) - min(free_strain_values, default=0.0)
         max_abs_tracking_error_pct = max((abs(value) for value in tracking_errors), default=0.0)
         mean_abs_tracking_error_pct = (
@@ -319,6 +332,8 @@ class FullRunTrace:
             "target_ramp_max_lead_fraction": self.config.target_ramp_max_lead_fraction,
             "inter_target_free_length_shift_mm": self.config.inter_target_free_length_shift_mm,
             "scale_latency_s": self.config.scale_latency_s,
+            "current_hold_feedback_wait_s": self.config.current_hold_feedback_wait_s,
+            "current_hold_correction_feedback_wait_s": self.config.current_hold_correction_feedback_wait_s,
             "scale_feedback_name": self.config.scale_feedback.name,
             "scale_readability_g": self.config.scale_feedback.readability_g,
             "current_resume_requires_target_crossing": self.config.current_resume_requires_target_crossing,
@@ -345,9 +360,10 @@ class FullRunTrace:
             "p95_abs_current_sweep_error_fraction_of_target": p95_abs_current_error / max_target_mpa,
             "p95_abs_later_target_ramp_error_fraction_of_target": p95_abs_later_target_ramp_error / max_target_mpa,
             "time_outside_recovery_band_s": sum(
-                1 for event in self.events if abs(event.error_mpa) > recovery_band
-            )
-            / self.config.sweep.sample_hz,
+                duration
+                for event, duration in zip(self.events, event_durations, strict=False)
+                if abs(event.error_mpa) > recovery_band
+            ),
             "strain_min_pct": min(strain_values, default=0.0),
             "strain_max_pct": max(strain_values, default=0.0),
             "strain_range_pct": max(strain_values, default=0.0) - min(strain_values, default=0.0),
@@ -375,7 +391,11 @@ class FullRunTrace:
             "current_hold_fraction_of_measurement": (
                 current_hold_time_s / total_time_s if total_time_s > 0.0 else 0.0
             ),
-            "current_hold_periods": _current_hold_periods(self.events, self.config.sweep.sample_hz),
+            "current_hold_periods": _current_hold_periods(
+                self.events,
+                event_durations,
+                1.0 / self.config.sweep.sample_hz,
+            ),
             "max_recovery_time_s": max(recovery_times, default=0.0),
             "mean_recovery_time_s": statistics.fmean(recovery_times) if recovery_times else 0.0,
             "endpoint_hold_count": sum(
@@ -573,8 +593,19 @@ class _FullRunState:
             self.actual_transformation_fraction = _clamp(self.actual_transformation_fraction, 0.0, 1.0)
         return self.actual_transformation_fraction
 
-    def advance_time(self) -> None:
-        self.elapsed_s += self.dt_s
+    def advance_time(self, duration_s: float | None = None) -> None:
+        self.elapsed_s += self.dt_s if duration_s is None else max(0.0, float(duration_s))
+
+    def advance_with_passive_samples(self, duration_s: float, phase: str, *, rising: bool) -> float:
+        remaining_s = max(0.0, float(duration_s))
+        advanced_s = 0.0
+        while remaining_s > 1e-12:
+            step_s = min(self.dt_s, remaining_s)
+            self.advance_time(step_s)
+            self.sample(phase, rising=rising)
+            advanced_s += step_s
+            remaining_s -= step_s
+        return advanced_s
 
     def start_target_ramp(self, start: float, final: float) -> None:
         self.ramp_start_stress_mpa = start
@@ -922,27 +953,44 @@ def _recovery_times_s(events: list[FullRunEvent], recovery_band_mpa: float) -> l
     return recovery_times
 
 
-def _current_hold_periods(events: list[FullRunEvent], sample_hz: float) -> list[dict[str, float]]:
+def _event_durations_s(events: list[FullRunEvent], default_duration_s: float) -> list[float]:
+    durations: list[float] = []
+    for index, event in enumerate(events):
+        if index + 1 < len(events):
+            duration = max(0.0, events[index + 1].elapsed_s - event.elapsed_s)
+        else:
+            duration = max(0.0, float(default_duration_s))
+        durations.append(duration)
+    return durations
+
+
+def _current_hold_periods(
+    events: list[FullRunEvent],
+    event_durations_s: list[float],
+    default_duration_s: float,
+) -> list[dict[str, float]]:
     periods: list[dict[str, float]] = []
     active: dict[str, float] | None = None
-    sample_dt = 1.0 / sample_hz
-    for event in events:
+    for event, duration_s in zip(events, event_durations_s, strict=False):
+        duration_s = max(0.0, float(duration_s))
         if event.phase == "current_hold":
             if active is None:
                 active = {
                     "start_s": event.elapsed_s,
-                    "end_s": event.elapsed_s + sample_dt,
+                    "end_s": event.elapsed_s + duration_s,
                     "current_ma": event.current_ma,
                     "max_abs_error_mpa": abs(event.error_mpa),
                 }
             else:
-                active["end_s"] = event.elapsed_s + sample_dt
+                active["end_s"] = event.elapsed_s + duration_s
                 active["max_abs_error_mpa"] = max(active["max_abs_error_mpa"], abs(event.error_mpa))
         elif active is not None:
             active["duration_s"] = max(0.0, active["end_s"] - active["start_s"])
             periods.append(active)
             active = None
     if active is not None:
+        if active["end_s"] <= active["start_s"]:
+            active["end_s"] = active["start_s"] + max(0.0, float(default_duration_s))
         active["duration_s"] = max(0.0, active["end_s"] - active["start_s"])
         periods.append(active)
     return periods
@@ -1020,9 +1068,18 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
             if stop is not None:
                 return stop
             if not recovered:
-                current_hold_s += state.dt_s
+                hold_extra_wait_s = config.current_hold_feedback_wait_s
+                if abs(correction) > 0.0:
+                    hold_extra_wait_s += config.current_hold_correction_feedback_wait_s
+                if hold_extra_wait_s > 0.0:
+                    hold_extra_wait_s = state.advance_with_passive_samples(
+                        hold_extra_wait_s,
+                        phase,
+                        rising=rising,
+                    )
+                current_hold_s += state.dt_s + hold_extra_wait_s
                 if at_endpoint:
-                    endpoint_hold_s += state.dt_s
+                    endpoint_hold_s += state.dt_s + hold_extra_wait_s
                 if current_hold_s >= config.endpoint_hold_timeout_s:
                     return "current_hold_timeout"
                 state.advance_time()
@@ -1315,17 +1372,17 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             ),
             wire=replace(
                 base.wire,
-                length_mm=36.931,
+                length_mm=37.0,
                 diameter_mm=0.0182,
                 initial_motor_mm=0.0,
                 elastic_stiffness_mpa_per_mm=95.0,
                 transformation_onset_ma=24.0,
                 transformation_end_ma=60.0,
-                transformation_contraction_mm=36.931 * 8.5 / 100.0,
+                transformation_contraction_mm=37.0 * 6.3 / 100.0,
                 transformation_hysteresis_ma=8.0,
                 fluctuation_mpa=0.0,
                 fluctuation_cycles=7.0,
-                noise_mpa=0.65,
+                noise_mpa=3.0,
             ),
             controller=replace(
                 base.controller,
@@ -1338,13 +1395,15 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 safety_max_stress_mpa=220.0,
                 stale_feedback_s=0.45,
             ),
-            sweep=CurrentSweepConfig(start_ma=1.0, end_ma=60.0, rate_ma_s=1.0, sample_hz=16.5),
+            sweep=CurrentSweepConfig(start_ma=1.0, end_ma=60.0, rate_ma_s=1.0, sample_hz=20.0),
             target_ramp_start_mpa=0.0,
             target_ramp_rate_mpa_s=8.0,
             target_ramp_timeout_s=80.0,
             endpoint_hold_timeout_s=240.0,
             max_ticks=9000,
-            scale_latency_s=0.085,
+            scale_latency_s=0.05,
+            current_hold_feedback_wait_s=0.35,
+            current_hold_correction_feedback_wait_s=0.20,
             scale_feedback=ScaleFeedbackConfig(name="kosice_kern", readability_g=0.01),
             zero_compression_stress=True,
             max_correction_strain_pct=0.08,
@@ -1365,7 +1424,7 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 (52.0, 1.5, 0.15),
             ),
             transformation_kinetic_tau_s=2.0,
-            free_strain_fluctuation_pct=0.10,
+            free_strain_fluctuation_pct=1.20,
             free_strain_fluctuation_cycles=8.0,
             seed=7306,
         ),

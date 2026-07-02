@@ -186,10 +186,15 @@ def test_kosice_kern_first_overheating_models_fast_quantized_scale_feedback() ->
     assert trace.stop_reason == "completed"
     assert summary["scale_feedback_name"] == "kosice_kern"
     assert summary["scale_readability_g"] == 0.01
-    assert summary["sample_hz"] == 16.5
-    assert summary["scale_latency_s"] == 0.085
+    assert summary["sample_hz"] == 20.0
+    assert summary["scale_latency_s"] == 0.05
+    assert summary["current_hold_feedback_wait_s"] > 0.0
+    assert summary["current_hold_correction_feedback_wait_s"] > 0.0
     assert summary["diameter_mm"] == 0.0182
-    assert summary["length_mm"] == 36.931
+    assert summary["length_mm"] == 37.0
+    assert 5.8 <= summary["strain_range_pct"] <= 7.0
+    assert 0.70 <= summary["current_hold_fraction_of_measurement"] <= 0.85
+    assert 18.0 <= summary["p95_abs_current_sweep_error_mpa"] <= 32.0
     assert any(abs(sample.raw_stress_mpa - sample.stress_mpa) > 1e-6 for sample in trace.samples)
     assert all(
         abs(sample.raw_load_g / 0.01 - round(sample.raw_load_g / 0.01)) <= 1e-9
