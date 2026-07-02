@@ -1368,7 +1368,9 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             description=(
                 "Kosice KERN TEWJ 600-2M/B 50 MPa first-overheating run using today's "
                 "Ni49Fe26Ga23Co2 3/6 mounted wire geometry, fast USB/KCP feedback, and "
-                "0.01 g quantized scale readback."
+                "0.01 g quantized scale readback. The app polls every 50 ms, but the "
+                "observed full-session raw sample rate is about 16 Hz once request/response "
+                "and UI work are included."
             ),
             wire=replace(
                 base.wire,
@@ -1395,13 +1397,13 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
                 safety_max_stress_mpa=220.0,
                 stale_feedback_s=0.45,
             ),
-            sweep=CurrentSweepConfig(start_ma=1.0, end_ma=60.0, rate_ma_s=1.0, sample_hz=20.0),
+            sweep=CurrentSweepConfig(start_ma=1.0, end_ma=60.0, rate_ma_s=1.0, sample_hz=16.0),
             target_ramp_start_mpa=0.0,
             target_ramp_rate_mpa_s=8.0,
             target_ramp_timeout_s=80.0,
             endpoint_hold_timeout_s=240.0,
             max_ticks=9000,
-            scale_latency_s=0.05,
+            scale_latency_s=1.0 / 16.0,
             current_hold_feedback_wait_s=0.35,
             current_hold_correction_feedback_wait_s=0.20,
             scale_feedback=ScaleFeedbackConfig(name="kosice_kern", readability_g=0.01),

@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -39,6 +40,25 @@ def _float_or_none(value: Any) -> float | None:
 
 def _truthy_text(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _fs_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    text = str(path)
+    if text.startswith("\\\\?\\"):
+        return path
+    resolved = path.resolve(strict=False)
+    resolved_text = str(resolved)
+    if resolved_text.startswith("\\\\?\\"):
+        return resolved
+    if resolved_text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + resolved_text.lstrip("\\"))
+    return Path("\\\\?\\" + resolved_text)
+
+
+def _write_text(path: Path, text: str) -> None:
+    _fs_path(path).write_text(text, encoding="utf-8")
 
 
 def _requested_acceptance_tolerance(
@@ -204,15 +224,16 @@ def analyze_control_trace(
 
 def _write_replay_csv(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     rows = list(rows)
+    fs_path = _fs_path(path)
     if not rows:
-        path.write_text("", encoding="utf-8")
+        fs_path.write_text("", encoding="utf-8")
         return
     fieldnames: list[str] = []
     for row in rows:
         for key in row:
             if key not in fieldnames:
                 fieldnames.append(key)
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    with fs_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
@@ -274,17 +295,17 @@ Stop detail: {summary.stop_detail or "not recorded"}
 
 {_markdown_table(step_rows, columns)}
 """
-    path.write_text(text, encoding="utf-8")
+    _write_text(path, text)
 
 
 def write_replay_outputs(result: TraceReplayResult, output_dir: Path | str) -> dict[str, Path]:
     out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    _fs_path(out).mkdir(parents=True, exist_ok=True)
     csv_path = out / "control_trace_replay.csv"
     json_path = out / "control_trace_replay_summary.json"
     md_path = out / "control_trace_replay.md"
     _write_replay_csv(csv_path, result.rows)
-    json_path.write_text(json.dumps(result.summary.to_dict(), indent=2), encoding="utf-8")
+    _write_text(json_path, json.dumps(result.summary.to_dict(), indent=2))
     write_markdown_report(md_path, result)
     return {"csv": csv_path, "json": json_path, "markdown": md_path}
 

@@ -186,8 +186,8 @@ def test_kosice_kern_first_overheating_models_fast_quantized_scale_feedback() ->
     assert trace.stop_reason == "completed"
     assert summary["scale_feedback_name"] == "kosice_kern"
     assert summary["scale_readability_g"] == 0.01
-    assert summary["sample_hz"] == 20.0
-    assert summary["scale_latency_s"] == 0.05
+    assert summary["sample_hz"] == 16.0
+    assert summary["scale_latency_s"] == 1.0 / 16.0
     assert summary["current_hold_feedback_wait_s"] > 0.0
     assert summary["current_hold_correction_feedback_wait_s"] > 0.0
     assert summary["diameter_mm"] == 0.0182

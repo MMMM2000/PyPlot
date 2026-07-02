@@ -97,7 +97,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-02.11"
+CONTROL_LOGIC_VERSION = "2026-07-02.12"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -134,6 +134,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_scale_uses_fast_feedback_hold_caps",
     "kern_kcp_current_hold_resume_band_is_response_earned",
     "kern_kcp_current_hold_runaway_drift_bypasses_volatile_wait",
+    "kern_kcp_runaway_drift_uses_bounded_noise_band",
     "kern_kcp_held_recovery_uses_earned_resume_band",
     "kern_kcp_held_recovery_preserves_base_resume_confirmation",
     "separate_setup_preload_and_zero_settle",
@@ -14941,7 +14942,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis,
                 self._current_sweep_hold_min_pause_stress_mpa(),
             ),
-            abs(float(filtered_signal.noise)) * self._current_sweep_hold_noise_sigma(),
+            self._current_sweep_hold_drift_noise_band(
+                basis,
+                abs(float(filtered_signal.noise)),
+                tolerance,
+            ),
             self._scale_quantization_band_for_basis(basis) * SCALE_QUANTIZATION_WORSENING_FACTOR,
             abs(float(tolerance)),
         )
@@ -16705,9 +16710,19 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         previous_abs = abs(float(previous_error))
         current_abs = abs(float(error_value))
+        noise_growth_margin = abs(float(filtered_signal.noise)) * 0.5
+        if self._using_kern_kcp_scale():
+            noise_growth_margin = min(
+                noise_growth_margin,
+                self._current_sweep_bounded_noise_band(
+                    basis,
+                    abs(float(filtered_signal.noise)),
+                    tolerance,
+                ),
+            )
         growth_margin = max(
             abs(float(tolerance)) * 0.2,
-            abs(float(filtered_signal.noise)) * 0.5,
+            noise_growth_margin,
             1e-9,
         )
         if current_abs <= previous_abs + growth_margin:
@@ -16718,7 +16733,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 basis,
                 self._current_sweep_hold_min_pause_stress_mpa(),
             ),
-            abs(float(filtered_signal.noise)) * self._current_sweep_hold_noise_sigma(),
+            self._current_sweep_hold_drift_noise_band(
+                basis,
+                abs(float(filtered_signal.noise)),
+                tolerance,
+            ),
         )
         if current_abs <= large_error_floor:
             return None
@@ -26838,9 +26857,15 @@ class MainWindow(QtWidgets.QMainWindow):
         filtered_signal: ScaleControlSignal | None,
     ) -> float:
         noise_value = 0.0 if filtered_signal is None else abs(float(filtered_signal.noise))
+        noise_floor = noise_value * 0.5
+        if self._automation_phase == "current_hold" and self._using_kern_kcp_scale():
+            noise_floor = min(
+                noise_floor,
+                self._current_sweep_bounded_noise_band(basis, noise_value, tolerance),
+            )
         return max(
             abs(float(tolerance)) * 0.2,
-            noise_value * 0.5,
+            noise_floor,
             self._scale_quantization_band_for_basis(basis) * SCALE_QUANTIZATION_WORSENING_FACTOR,
             1e-9,
         )
@@ -26870,6 +26895,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if cap <= 0.0:
             return noise_band
         return min(noise_band, cap)
+
+    def _current_sweep_hold_drift_noise_band(
+        self,
+        basis: str,
+        noise_value: float,
+        tolerance: float,
+    ) -> float:
+        noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
+        if not self._using_kern_kcp_scale():
+            return noise_band
+        return self._current_sweep_bounded_noise_band(basis, noise_value, tolerance)
 
     def _current_sweep_hold_min_slope_for_basis(self, basis: str) -> float:
         if basis == HSW_BASIS_STRESS_MPA:
