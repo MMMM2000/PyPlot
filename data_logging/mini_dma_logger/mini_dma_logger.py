@@ -326,7 +326,7 @@ FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
-GNG_SCALE_PREFERRED_BAUD = 600
+GNG_SCALE_PREFERRED_BAUD = 9600
 GNG_SCALE_REQUEST = "\\x1bp"
 GNG_SCALE_TERMINATOR = ""
 GNG_SCALE_INTERVAL_MS = 250
@@ -9533,14 +9533,19 @@ class MainWindow(QtWidgets.QMainWindow):
             for command in (KERN_KCP_SCALE_REQUEST, "S")
             if baudrate != KERN_KCP_SCALE_PREFERRED_BAUD
         )
+        gng_fallback_trials = tuple(
+            (baudrate, GNG_SCALE_REQUEST, terminator)
+            for baudrate in GNG_SUPPORTED_BAUDS
+            for terminator in (GNG_SCALE_TERMINATOR, "\\r\\n")
+            if baudrate != GNG_SCALE_PREFERRED_BAUD
+        )
         trials = (
             (KERN_KCP_SCALE_PREFERRED_BAUD, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
             (KERN_KCP_SCALE_PREFERRED_BAUD, "S", KERN_KCP_SCALE_TERMINATOR),
             (GNG_SCALE_PREFERRED_BAUD, GNG_SCALE_REQUEST, GNG_SCALE_TERMINATOR),
             (GNG_SCALE_PREFERRED_BAUD, GNG_SCALE_REQUEST, "\\r\\n"),
             *kern_fallback_trials,
-            (9600, GNG_SCALE_REQUEST, GNG_SCALE_TERMINATOR),
-            (9600, GNG_SCALE_REQUEST, "\\r\\n"),
+            *gng_fallback_trials,
         )
         for baudrate, request_command, terminator in trials:
             try:
@@ -12784,7 +12789,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         composition = parts[0]
         wire = MicrowireLineEdit.to_display_text(parts[1]) or parts[1].replace("_", "/")
-        return bool(re.fullmatch(r"[A-Z][A-Za-z0-9]*", composition) and re.fullmatch(r"\d+/\d+", wire))
+        if not re.fullmatch(r"[A-Z][A-Za-z0-9]*", composition):
+            return False
+        if re.fullmatch(r"\d+/\d+", wire):
+            return True
+        return len(parts) >= 3 and bool(re.fullmatch(r"\d+", parts[1]) and re.fullmatch(r"\d+", parts[2]))
 
     def _sync_auto_name_fields(self) -> None:
         if self._sync_name_fields_in_progress:

@@ -5618,6 +5618,22 @@ def test_naming_fields_always_autofill_sample_and_filename(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_stale_split_wire_sample_name_updates_from_naming_fields(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_sample_name.setText("Ni50Mn25Ga25 4 2 demo")
+        window.edit_name_composition.setText("Ni49Fe26Ga23Co2")
+        window.edit_name_wire.setText("3/6")
+        window.edit_name_condition.setText("Kosice test")
+
+        assert window.edit_sample_name.text() == "Ni49Fe26Ga23Co2 3/6 Kosice test"
+        assert window.label_recipe_sample.text().startswith("Sample: Ni49Fe26Ga23Co2 3/6 Kosice test")
+        assert window.edit_log_name.text() == "Ni49Fe26Ga23Co2 3_6 Kosice test"
+    finally:
+        _close_test_window(window)
+
+
 def test_saved_sample_fields_and_builder_project_autoimport_diameter(tmp_path: Path, qtbot) -> None:
     _ensure_app()
     snapshot = _snapshot_settings()
@@ -8493,7 +8509,7 @@ def test_gng_scale_preset_preserves_prague_cadence() -> None:
             self.current_text = ""
 
         def findText(self, text: str) -> int:  # noqa: N802 - Qt-style test double
-            return 0 if text == "600" else -1
+            return 0 if text == "9600" else -1
 
         def setCurrentText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
             self.current_text = text
@@ -8522,7 +8538,7 @@ def test_gng_scale_preset_preserves_prague_cadence() -> None:
 
     window._apply_gng_scale_preset()
 
-    assert window.combo_scale_baud.current_text == "600"
+    assert window.combo_scale_baud.current_text == "9600"
     assert window.edit_scale_request.text_value == "\\x1bp"
     assert window.edit_scale_terminator.text_value == ""
     assert window.spin_scale_interval.value_set == 250
@@ -8574,7 +8590,7 @@ def test_scale_auto_detect_falls_back_to_gng_prompt(monkeypatch: pytest.MonkeyPa
     ) -> bytes:
         del port_name, total_wait_s
         calls.append((baudrate, payload))
-        if payload == b"\x1bp" and baudrate == 600:
+        if payload == b"\x1bp" and baudrate == 9600:
             return b"   +12.34 g\r\n"
         return b""
 
@@ -8585,12 +8601,12 @@ def test_scale_auto_detect_falls_back_to_gng_prompt(monkeypatch: pytest.MonkeyPa
 
     assert match == {
         "port": "COM4",
-        "baudrate": 600,
+        "baudrate": 9600,
         "request_command": "\\x1bp",
         "terminator": "",
         "raw_text": "+12.34 g",
     }
-    assert calls[:3] == [(256000, b"SI\r\n"), (256000, b"S\r\n"), (600, b"\x1bp")]
+    assert calls[:3] == [(256000, b"SI\r\n"), (256000, b"S\r\n"), (9600, b"\x1bp")]
 
 
 def test_supply_scientific_notation_current_reply_is_parsed_as_amps() -> None:
