@@ -97,7 +97,7 @@ class MiniDmaBenchPlan:
 
 def _load_json_object(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except OSError as exc:
         raise MiniDmaBenchAutomationError(f"Could not read TMA bench plan {path}: {exc}") from exc
     except json.JSONDecodeError as exc:

@@ -103,6 +103,18 @@ def test_yaml_campaign_template_parses() -> None:
     assert payload["run_plan"]["stages"][0]["id"] == "baseline_0p8"
 
 
+def test_campaign_manifest_accepts_utf8_bom(tmp_path: Path) -> None:
+    manifest = tmp_path / "campaign.json"
+    root = tmp_path / "campaign-root"
+    root.mkdir()
+    _write_manifest(manifest, root)
+    manifest.write_bytes(b"\xef\xbb\xbf" + manifest.read_bytes())
+
+    result = validate_campaign(manifest, skip_git=True)
+
+    assert result.ok
+
+
 def test_mini_dma_report_generates_standard_outputs(tmp_path: Path) -> None:
     run_dir = tmp_path / "raw_runs" / "run01"
     run_dir.mkdir(parents=True)

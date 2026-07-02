@@ -109,6 +109,23 @@ def test_mini_dma_bench_plan_dry_run_validates_recipe_paths(tmp_path: Path) -> N
     assert summary_path.exists()
 
 
+def test_mini_dma_bench_plan_accepts_utf8_bom(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    payload = {
+        "schema_version": 1,
+        "kind": "mini_dma_bench_sequence",
+        "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+    }
+    plan_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
+
+    summary = bench_automation.run_mini_dma_bench_plan(plan_path)
+
+    assert summary["mode"] == "dry_run"
+    assert summary["runs"][0]["status"] == "validated"
+
+
 def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
