@@ -326,9 +326,15 @@ FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
+GNG_SCALE_PREFERRED_BAUD = 600
+GNG_SCALE_REQUEST = "\\x1bp"
+GNG_SCALE_TERMINATOR = ""
+GNG_SCALE_INTERVAL_MS = 250
 KERN_KCP_SUPPORTED_BAUDS = (256000, 128000, 115200, 57600, 38400, 19200, 9600)
+KERN_KCP_SCALE_PREFERRED_BAUD = 256000
 KERN_KCP_SCALE_REQUEST = "SI"
 KERN_KCP_SCALE_TERMINATOR = "\\r\\n"
+KERN_KCP_SCALE_INTERVAL_MS = 50
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
@@ -1163,6 +1169,19 @@ def _open_scale_serial_port(
     except Exception:
         pass
     return port
+
+
+def _scale_interval_ms_for_probe_match(match: Mapping[str, Any]) -> int:
+    request = str(match.get("request_command") or "")
+    terminator = str(match.get("terminator") or "")
+    baudrate = int(match.get("baudrate") or 0)
+    if request == KERN_KCP_SCALE_REQUEST and terminator == KERN_KCP_SCALE_TERMINATOR:
+        return KERN_KCP_SCALE_INTERVAL_MS
+    if request == "S" and terminator == KERN_KCP_SCALE_TERMINATOR and baudrate in KERN_KCP_SUPPORTED_BAUDS:
+        return KERN_KCP_SCALE_INTERVAL_MS
+    if request == GNG_SCALE_REQUEST:
+        return GNG_SCALE_INTERVAL_MS
+    return DEFAULT_SCALE_REQUEST_INTERVAL_MS
 
 
 def strain_percent(
@@ -6378,9 +6397,9 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_advanced_box,
         )
         self.label_scale_hint.setWordWrap(True)
-        gng_button = QtWidgets.QPushButton("Apply G&G E-series preset", scale_advanced_box)
+        gng_button = QtWidgets.QPushButton("Apply Prague G&G preset", scale_advanced_box)
         gng_button.clicked.connect(self._apply_gng_scale_preset)
-        kern_button = QtWidgets.QPushButton("Apply KERN KCP preset", scale_advanced_box)
+        kern_button = QtWidgets.QPushButton("Apply Košice KERN preset", scale_advanced_box)
         kern_button.clicked.connect(self._apply_kern_kcp_scale_preset)
         probe_button = QtWidgets.QPushButton("Probe scale", scale_advanced_box)
         probe_button.clicked.connect(self._probe_scale_port)
@@ -9508,17 +9527,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_banner.setText(message)
 
     def _probe_scale_candidate(self, port_name: str) -> dict[str, Any] | None:
-        kern_trials = tuple(
+        kern_fallback_trials = tuple(
             (baudrate, command, KERN_KCP_SCALE_TERMINATOR)
             for baudrate in KERN_KCP_SUPPORTED_BAUDS
             for command in (KERN_KCP_SCALE_REQUEST, "S")
+            if baudrate != KERN_KCP_SCALE_PREFERRED_BAUD
         )
         trials = (
-            *kern_trials,
-            (9600, "\\x1bp", ""),
-            (9600, "\\x1bp", "\\r\\n"),
-            (600, "\\x1bp", ""),
-            (600, "\\x1bp", "\\r\\n"),
+            (KERN_KCP_SCALE_PREFERRED_BAUD, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
+            (KERN_KCP_SCALE_PREFERRED_BAUD, "S", KERN_KCP_SCALE_TERMINATOR),
+            (GNG_SCALE_PREFERRED_BAUD, GNG_SCALE_REQUEST, GNG_SCALE_TERMINATOR),
+            (GNG_SCALE_PREFERRED_BAUD, GNG_SCALE_REQUEST, "\\r\\n"),
+            *kern_fallback_trials,
+            (9600, GNG_SCALE_REQUEST, GNG_SCALE_TERMINATOR),
+            (9600, GNG_SCALE_REQUEST, "\\r\\n"),
         )
         for baudrate, request_command, terminator in trials:
             try:
@@ -9557,6 +9579,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.combo_scale_baud.setCurrentText(str(match["baudrate"]))
             self.edit_scale_request.setText(str(match["request_command"]))
             self.edit_scale_terminator.setText(str(match["terminator"]))
+            self.spin_scale_interval.setValue(_scale_interval_ms_for_probe_match(match))
             self._log(
                 f"Auto-detected scale on {match['port']} at {match['baudrate']} baud "
                 f"(sample reply: {match['raw_text']})."
@@ -12673,19 +12696,28 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _apply_gng_scale_preset(self) -> None:
-        if self.combo_scale_baud.findText("600") >= 0:
-            self.combo_scale_baud.setCurrentText("600")
-        self.edit_scale_request.setText("\\x1bp")
-        self.edit_scale_terminator.setText("")
-        self._log("Applied G&G E-series scale preset: 600 baud, ESC+p request, no extra terminator.")
+        preferred_baud = str(GNG_SCALE_PREFERRED_BAUD)
+        if self.combo_scale_baud.findText(preferred_baud) >= 0:
+            self.combo_scale_baud.setCurrentText(preferred_baud)
+        self.edit_scale_request.setText(GNG_SCALE_REQUEST)
+        self.edit_scale_terminator.setText(GNG_SCALE_TERMINATOR)
+        self.spin_scale_interval.setValue(GNG_SCALE_INTERVAL_MS)
+        self._log(
+            f"Applied Prague G&G E-series scale preset: {preferred_baud} baud, "
+            f"ESC+p request, {GNG_SCALE_INTERVAL_MS} ms interval."
+        )
 
     def _apply_kern_kcp_scale_preset(self) -> None:
-        preferred_baud = str(KERN_KCP_SUPPORTED_BAUDS[0])
+        preferred_baud = str(KERN_KCP_SCALE_PREFERRED_BAUD)
         if self.combo_scale_baud.findText(preferred_baud) >= 0:
             self.combo_scale_baud.setCurrentText(preferred_baud)
         self.edit_scale_request.setText(KERN_KCP_SCALE_REQUEST)
         self.edit_scale_terminator.setText(KERN_KCP_SCALE_TERMINATOR)
-        self._log(f"Applied KERN KCP scale preset: {preferred_baud} baud, SI request, CRLF terminator.")
+        self.spin_scale_interval.setValue(KERN_KCP_SCALE_INTERVAL_MS)
+        self._log(
+            f"Applied Košice KERN KCP scale preset: {preferred_baud} baud, "
+            f"SI request, CRLF terminator, {KERN_KCP_SCALE_INTERVAL_MS} ms interval."
+        )
 
     def _build_sample_name(self) -> str:
         wire_display = MicrowireLineEdit.to_display_text(self.edit_name_wire.text()) or self.edit_name_wire.text().strip()

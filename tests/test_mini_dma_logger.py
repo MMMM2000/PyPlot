@@ -8463,10 +8463,18 @@ def test_kern_kcp_scale_preset_uses_standard_request() -> None:
         def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
             self.text_value = text
 
+    class _FakeSpin:
+        def __init__(self) -> None:
+            self.value_set = 0
+
+        def setValue(self, value: int) -> None:  # noqa: N802 - Qt-style test double
+            self.value_set = int(value)
+
     window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
     window.combo_scale_baud = _FakeCombo()
     window.edit_scale_request = _FakeEdit()
     window.edit_scale_terminator = _FakeEdit()
+    window.spin_scale_interval = _FakeSpin()
     messages: list[str] = []
     window._log = messages.append  # type: ignore[method-assign]
 
@@ -8475,7 +8483,50 @@ def test_kern_kcp_scale_preset_uses_standard_request() -> None:
     assert window.combo_scale_baud.current_text == "256000"
     assert window.edit_scale_request.text_value == mini_dma_mod.KERN_KCP_SCALE_REQUEST
     assert window.edit_scale_terminator.text_value == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
-    assert "KERN KCP" in messages[-1]
+    assert window.spin_scale_interval.value_set == 50
+    assert "Košice KERN KCP" in messages[-1]
+
+
+def test_gng_scale_preset_preserves_prague_cadence() -> None:
+    class _FakeCombo:
+        def __init__(self) -> None:
+            self.current_text = ""
+
+        def findText(self, text: str) -> int:  # noqa: N802 - Qt-style test double
+            return 0 if text == "600" else -1
+
+        def setCurrentText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.current_text = text
+
+    class _FakeEdit:
+        def __init__(self) -> None:
+            self.text_value = ""
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.text_value = text
+
+    class _FakeSpin:
+        def __init__(self) -> None:
+            self.value_set = 0
+
+        def setValue(self, value: int) -> None:  # noqa: N802 - Qt-style test double
+            self.value_set = int(value)
+
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+    window.combo_scale_baud = _FakeCombo()
+    window.edit_scale_request = _FakeEdit()
+    window.edit_scale_terminator = _FakeEdit()
+    window.spin_scale_interval = _FakeSpin()
+    messages: list[str] = []
+    window._log = messages.append  # type: ignore[method-assign]
+
+    window._apply_gng_scale_preset()
+
+    assert window.combo_scale_baud.current_text == "600"
+    assert window.edit_scale_request.text_value == "\\x1bp"
+    assert window.edit_scale_terminator.text_value == ""
+    assert window.spin_scale_interval.value_set == 250
+    assert "Prague G&G" in messages[-1]
 
 
 def test_scale_auto_detect_accepts_kern_kcp_reply(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8508,6 +8559,38 @@ def test_scale_auto_detect_accepts_kern_kcp_reply(monkeypatch: pytest.MonkeyPatc
         "raw_text": "S S +12.34 g",
     }
     assert calls[0] == (256000, b"SI\r\n")
+
+
+def test_scale_auto_detect_falls_back_to_gng_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, bytes]] = []
+
+    def _fake_read_serial_bytes(
+        port_name: str,
+        *,
+        baudrate: int,
+        payload: bytes = b"",
+        total_wait_s: float = 0.8,
+        **_kwargs: object,
+    ) -> bytes:
+        del port_name, total_wait_s
+        calls.append((baudrate, payload))
+        if payload == b"\x1bp" and baudrate == 600:
+            return b"   +12.34 g\r\n"
+        return b""
+
+    monkeypatch.setattr(mini_dma_mod, "_read_serial_bytes", _fake_read_serial_bytes)
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+
+    match = window._probe_scale_candidate("COM4")
+
+    assert match == {
+        "port": "COM4",
+        "baudrate": 600,
+        "request_command": "\\x1bp",
+        "terminator": "",
+        "raw_text": "+12.34 g",
+    }
+    assert calls[:3] == [(256000, b"SI\r\n"), (256000, b"S\r\n"), (600, b"\x1bp")]
 
 
 def test_supply_scientific_notation_current_reply_is_parsed_as_amps() -> None:
@@ -23524,6 +23607,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
         assert window.combo_scale_baud.currentText() == "9600"
         assert window.edit_scale_request.text() == "\\x1bp"
         assert window.edit_scale_terminator.text() == ""
+        assert window.spin_scale_interval.value() == 250
     finally:
         _close_test_window(window)
 
