@@ -340,6 +340,7 @@ STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
 TIC_MOTOR_POWER_STALE_GRACE_S = 30.0
 MANUAL_JOG_TIC_STATUS_FRESH_S = 2.0
+MANUAL_JOG_MAX_TIMER_ELAPSED_S = 0.075
 TIC_USB_VENDOR_ID = 0x1FFB
 TIC_USB_TRANSPORT_NATIVE = "native-usb"
 TIC_USB_TRANSPORT_ALIASES = {TIC_USB_TRANSPORT_NATIVE, "usb", "pyusb"}
@@ -19355,6 +19356,8 @@ class MainWindow(QtWidgets.QMainWindow):
             and 0.0 < elapsed_s
             and (continuous_hold or elapsed_s < 0.5)
         ):
+            if continuous_hold:
+                elapsed_s = min(elapsed_s, MANUAL_JOG_MAX_TIMER_ELAPSED_S)
             self._manual_jog_pending_mm += abs(float(self.spin_motion_speed_mm_s.value()) * elapsed_s)
             min_step_mm = 1.0 / max(1.0, float(self.spin_steps_per_mm.value()))
             if self._manual_jog_pending_mm < min_step_mm:

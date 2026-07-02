@@ -3316,7 +3316,7 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
         _close_test_window(window)
 
 
-def test_held_manual_jog_keeps_speed_when_timer_tick_is_delayed(
+def test_held_manual_jog_caps_delayed_timer_tick(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -3344,7 +3344,43 @@ def test_held_manual_jog_keeps_speed_when_timer_tick_is_delayed(
         window._handle_manual_jog_timer()
         _wait_for_tic_commands(window)
 
-        assert controller.targets == [-80]
+        assert controller.targets == [-7]
+    finally:
+        window._manual_jog_timer.stop()
+        _close_test_window(window)
+
+
+def test_manual_jog_delayed_timer_does_not_batch_large_move(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 10.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_jog_mm.setValue(0.00625)
+    window.spin_motion_speed_mm_s.setValue(0.1)
+
+    try:
+        window._start_manual_jog(1.0)
+        clock["now"] = 20.0
+        window._handle_manual_jog_timer()
+        _wait_for_tic_commands(window)
+
+        assert controller.targets == [6]
+        assert "1000.00 um" not in window.log_output.toPlainText()
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)
