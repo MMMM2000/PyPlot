@@ -8445,6 +8445,71 @@ def test_scale_worker_request_mode_uses_response_timeout() -> None:
     assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.06) == pytest.approx(0.0)
 
 
+def test_kern_kcp_scale_preset_uses_standard_request() -> None:
+    class _FakeCombo:
+        def __init__(self) -> None:
+            self.current_text = ""
+
+        def findText(self, text: str) -> int:  # noqa: N802 - Qt-style test double
+            return 0 if text == "9600" else -1
+
+        def setCurrentText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.current_text = text
+
+    class _FakeEdit:
+        def __init__(self) -> None:
+            self.text_value = ""
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.text_value = text
+
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+    window.combo_scale_baud = _FakeCombo()
+    window.edit_scale_request = _FakeEdit()
+    window.edit_scale_terminator = _FakeEdit()
+    messages: list[str] = []
+    window._log = messages.append  # type: ignore[method-assign]
+
+    window._apply_kern_kcp_scale_preset()
+
+    assert window.combo_scale_baud.current_text == "9600"
+    assert window.edit_scale_request.text_value == mini_dma_mod.KERN_KCP_SCALE_REQUEST
+    assert window.edit_scale_terminator.text_value == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
+    assert "KERN KCP" in messages[-1]
+
+
+def test_scale_auto_detect_accepts_kern_kcp_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, bytes]] = []
+
+    def _fake_read_serial_bytes(
+        port_name: str,
+        *,
+        baudrate: int,
+        payload: bytes = b"",
+        total_wait_s: float = 0.8,
+        **_kwargs: object,
+    ) -> bytes:
+        del port_name, total_wait_s
+        calls.append((baudrate, payload))
+        if payload == b"SI\r\n" and baudrate == 9600:
+            return b"S S +12.34 g\r\n"
+        return b""
+
+    monkeypatch.setattr(mini_dma_mod, "_read_serial_bytes", _fake_read_serial_bytes)
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+
+    match = window._probe_scale_candidate("COM4")
+
+    assert match == {
+        "port": "COM4",
+        "baudrate": 9600,
+        "request_command": mini_dma_mod.KERN_KCP_SCALE_REQUEST,
+        "terminator": mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
+        "raw_text": "S S +12.34 g",
+    }
+    assert calls[0] == (9600, b"SI\r\n")
+
+
 def test_supply_scientific_notation_current_reply_is_parsed_as_amps() -> None:
     assert mini_dma_mod._parse_first_float("2.150E-2") == pytest.approx(0.0215)
     assert mini_dma_mod._parse_first_float("+1.00e-3 A") == pytest.approx(0.001)

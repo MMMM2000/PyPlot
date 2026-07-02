@@ -326,6 +326,9 @@ FLOAT_PATTERN = re.compile(r"[-+]?(?:(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][-+]?\d+)
 RUN_SUFFIX_PATTERN = re.compile(r"(?:_run\d{2,})+$")
 WINDOWS: list[QtWidgets.QWidget] = []
 GNG_SUPPORTED_BAUDS = (600, 1200, 2400, 4800, 9600)
+KERN_KCP_SUPPORTED_BAUDS = (9600, 19200, 38400, 115200)
+KERN_KCP_SCALE_REQUEST = "SI"
+KERN_KCP_SCALE_TERMINATOR = "\\r\\n"
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
 STALE_SCALE_AFTER_S = 2.0
 TIC_MOTOR_POWER_MIN_V = 4.5
@@ -6317,12 +6320,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_scale_raw.setWordWrap(True)
         self.label_scale_hint = QtWidgets.QLabel(
             "G&G RS232 note: these balances often need a DB9 null modem crossover between the "
-            "USB-serial adapter and the scale.",
+            "USB-serial adapter and the scale. KERN KCP balances usually answer SI/S requests "
+            "over RS-232 or USB-device serial.",
             scale_advanced_box,
         )
         self.label_scale_hint.setWordWrap(True)
         gng_button = QtWidgets.QPushButton("Apply G&G E-series preset", scale_advanced_box)
         gng_button.clicked.connect(self._apply_gng_scale_preset)
+        kern_button = QtWidgets.QPushButton("Apply KERN KCP preset", scale_advanced_box)
+        kern_button.clicked.connect(self._apply_kern_kcp_scale_preset)
         probe_button = QtWidgets.QPushButton("Probe scale", scale_advanced_box)
         probe_button.clicked.connect(self._probe_scale_port)
         remote_tare_button = QtWidgets.QPushButton("Diagnostic remote tare scale", scale_advanced_box)
@@ -6342,6 +6348,7 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_advanced_form.addRow("", self.label_scale_hint)
         preset_row = QtWidgets.QHBoxLayout()
         preset_row.addWidget(gng_button)
+        preset_row.addWidget(kern_button)
         preset_row.addWidget(probe_button)
         scale_advanced_form.addRow("", preset_row)
         scale_advanced_form.addRow("", remote_tare_button)
@@ -9449,6 +9456,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _probe_scale_candidate(self, port_name: str) -> dict[str, Any] | None:
         trials = (
+            (9600, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
+            (9600, "S", KERN_KCP_SCALE_TERMINATOR),
+            (19200, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
+            (38400, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
+            (115200, KERN_KCP_SCALE_REQUEST, KERN_KCP_SCALE_TERMINATOR),
             (9600, "\\x1bp", ""),
             (9600, "\\x1bp", "\\r\\n"),
             (600, "\\x1bp", ""),
@@ -12604,6 +12616,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_scale_request.setText("\\x1bp")
         self.edit_scale_terminator.setText("")
         self._log("Applied G&G E-series scale preset: 600 baud, ESC+p request, no extra terminator.")
+
+    def _apply_kern_kcp_scale_preset(self) -> None:
+        if self.combo_scale_baud.findText("9600") >= 0:
+            self.combo_scale_baud.setCurrentText("9600")
+        self.edit_scale_request.setText(KERN_KCP_SCALE_REQUEST)
+        self.edit_scale_terminator.setText(KERN_KCP_SCALE_TERMINATOR)
+        self._log("Applied KERN KCP scale preset: 9600 baud, SI request, CRLF terminator.")
 
     def _build_sample_name(self) -> str:
         wire_display = MicrowireLineEdit.to_display_text(self.edit_name_wire.text()) or self.edit_name_wire.text().strip()
@@ -18742,6 +18761,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         trials = [
+            ("KERN KCP immediate", 9600, b"SI\r\n"),
+            ("KERN KCP stable", 9600, b"S\r\n"),
+            ("KERN KCP immediate", 19200, b"SI\r\n"),
+            ("KERN KCP immediate", 38400, b"SI\r\n"),
+            ("KERN KCP immediate", 115200, b"SI\r\n"),
             ("Passive listen", 600, b""),
             ("G&G request", 600, b"\x1bp"),
             ("G&G request", 9600, b"\x1bp"),
@@ -18776,10 +18800,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for line in errors:
             self._log(f"Scale probe: {line}")
         supported = ", ".join(str(value) for value in GNG_SUPPORTED_BAUDS)
+        kern_supported = ", ".join(str(value) for value in KERN_KCP_SUPPORTED_BAUDS)
         self._log(
-            "Scale probe found no serial response on the selected port. Tested passive listen plus ESC+p "
-            f"requests at 600 and 9600 baud. G&G docs list supported rates {supported} and warn that the "
-            "balance needs a null modem crossover instead of a straight-through DB9 link."
+            "Scale probe found no serial response on the selected port. Tested KERN KCP SI/S requests "
+            f"at {kern_supported} baud, passive listen, and ESC+p requests at 600 and 9600 baud. "
+            f"G&G docs list supported rates {supported} and warn that the balance needs a null modem "
+            "crossover instead of a straight-through DB9 link; KERN KCP balances must expose either "
+            "their RS-232 or USB-device serial interface to Windows."
         )
 
     def _append_return_to_origin(self, steps: list[AutomationStep]) -> list[AutomationStep]:

@@ -11,7 +11,7 @@ The measurement roadmap, copper-wire bring-up plan, and saved-recipe design note
 The logger is intended to bring three subsystems into one session:
 
 - motion control through the Pololu `Tic T500`
-- force/load acquisition from the G&G balance over serial
+- force/load acquisition from a serial balance, including the G&G request-mode balance and KERN KCP balances
 - current annealing / electrical heating control in the same run
 
 ## Code Location
@@ -37,7 +37,7 @@ Current intended hardware stack:
 
 - `Pololu Tic T500` stepper controller over USB, preferably driven by the native PyUSB/libusb backend with `ticcmd` kept as fallback
 - StepperOnline captive linear stepper actuator
-- G&G balance over RS232 via USB serial adapter
+- serial balance over RS232 or USB serial adapter
 - current annealing supply path, modeled after the existing current annealing logger
 
 ## What Is Already Implemented
@@ -125,14 +125,14 @@ Current intended hardware stack:
 ### Scale
 
 - serial port enumeration and selection
-- G&G-oriented serial settings
-- automatic scale-port detection based on a live G&G serial response
-- scale probe / diagnostics
+- G&G and KERN KCP serial presets
+- automatic scale-port detection based on a live G&G or KERN KCP serial response
+- scale probe / diagnostics, including KERN KCP `SI`/`S` read requests
 - one normal `Capture zero-load` action that records the current real balance reading as the `0 g` applied-load reference without changing the scale display
 - an occasional-use `Tare scale` action in the Hardware tab that sends the physical balance tare command and resets TMA's zero-load reference to `0 g`
 - optional session-start capture of the zero-load reference, for use only when the current raw balance reading is definitely unloaded
 - applied tensile load is displayed and logged as the positive tensile magnitude in `Load` / `load_g` using `zero-load scale reading - current scale reading` for the current hanging-weight rig; signed raw balance remains available as `raw_load_g` for diagnostics
-- the current G&G request/response scale on `COM6` at `9600` baud does not stream passively; it replies to `ESC+p` at about 5 Hz, so request-mode scale polling defaults to 250 ms and feeds a rolling signal buffer
+- the current G&G request/response scale on `COM6` at `9600` baud does not stream passively; it replies to `ESC+p` at about 5 Hz, so request-mode scale polling defaults to 250 ms and feeds a rolling signal buffer. KERN KCP balances can use the KERN preset (`SI` plus CRLF, typically 9600 baud) when the balance exposes its RS-232 or USB-device serial interface.
 - main CSV rows include interval load mean, standard deviation, min/max, sample count, and achieved scale sample rate
 - raw scale sidecars preserve every real balance reading during a session with both raw grams and applied wire load on one continuous elapsed-time axis across setup and recipe logging, so transition fluctuations can be inspected without forcing the main log to run at the hardware polling rate
 - setup and recovery popups plot live samples when fresh scale replies arrive; recovery explicitly restarts that lightweight timer after a stopped session so displacement and load remain visible during manual return-to-zero moves
