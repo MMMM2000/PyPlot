@@ -618,6 +618,51 @@ def test_mini_dma_folder_import_skips_generic_sidecar_workbook_import(
         app.processEvents()
 
 
+def test_current_annealing_folder_import_skips_metadata_sidecar_workbook_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench(initial_plotter="Current Annealing")
+    run_name = "Ni49Fe26Ga23Co2 3_6 100mA test1 2loops"
+    data_path = tmp_path / f"{run_name}.txt"
+    data_path.write_text("0.02 0.10 5\n0.05 0.25 5\n0.10 0.50 5\n")
+    sidecar_path = tmp_path / "metadata" / run_name / "metadata.json"
+    sidecar_path.parent.mkdir(parents=True)
+    sidecar_path.write_text('{"sample": "Ni49Fe26Ga23Co2", "max_current_mA": 100}\n')
+    information_calls: list[str] = []
+    warning_calls: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda _parent, _title, message: information_calls.append(str(message)),
+    )
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warning_calls.append(str(message)),
+    )
+    try:
+        window._select_directories = (  # type: ignore[assignment]
+            lambda _parent=None, *, title, start_dir: [str(tmp_path)]
+        )
+
+        window._import_data_from_folder()
+
+        plugin = window._current_plugin  # noqa: SLF001 - test hook
+        assert list(plugin._data_by_file) == [str(data_path.resolve())]  # noqa: SLF001
+        assert all("metadata.json" not in key for key in window._workbooks)  # noqa: SLF001
+        assert sidecar_path.resolve() not in [  # noqa: SLF001
+            workbook.source for workbook in window._workbooks.values()
+        ]
+        assert information_calls == []
+        assert warning_calls == []
+    finally:
+        window._clear_project_dirty()  # noqa: SLF001 - avoid close prompt in headless tests
+        window.close()
+        app.processEvents()
+
+
 def test_origin_power_top_axis_uses_metadata_scale_and_label() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
