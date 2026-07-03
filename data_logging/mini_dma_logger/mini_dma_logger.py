@@ -4812,6 +4812,25 @@ class SharedBrokerSupplyController:
             return self.motor_voltage_limit_v, self.motor_current_limit_a
         return self.max_voltage_v, self.current_limit_a
 
+    @staticmethod
+    def _broker_limit_value(raw_config: object, key: str) -> float | None:
+        if not isinstance(raw_config, dict):
+            return None
+        value = raw_config.get(key)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _current_limit_needs_clearing(raw_config: object, current_limit_a: float | None) -> bool:
+        return current_limit_a is None and SharedBrokerSupplyController._broker_limit_value(
+            raw_config,
+            "current_limit_a",
+        ) is not None
+
     def _ensure_confirmed_role(self, channel: int) -> None:
         client = self._require_client()
         role = self._role_for_channel(channel)
@@ -4822,7 +4841,11 @@ class SharedBrokerSupplyController:
         raw_config = raw_channels.get(str(channel), {}) if isinstance(raw_channels, dict) else {}
         configured_role = str(raw_config.get("role") or "unused") if isinstance(raw_config, dict) else "unused"
         confirmed = bool(raw_config.get("confirmed", False)) if isinstance(raw_config, dict) else False
-        if configured_role == role and confirmed:
+        if (
+            configured_role == role
+            and confirmed
+            and not self._current_limit_needs_clearing(raw_config, current_limit_a)
+        ):
             return
         if configured_role not in {"unused", role}:
             raise RuntimeError(f"Shared HMP broker CH{channel} is assigned to {configured_role}, not {role}.")
@@ -10181,7 +10204,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 max_voltage_v=float(self.spin_supply_voltage_limit.value()),
                 current_channel=self._current_sweep_supply_channel(),
                 motor_channel=self._motor_supply_channel(),
-                current_limit_a=self._planned_current_sweep_limit_mA() / 1000.0,
+                current_limit_a=None,
                 motor_voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
                 motor_current_limit_a=float(self.spin_motor_supply_current_limit.value()),
             )
@@ -10347,7 +10370,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 role=ROLE_MINI_DMA_CURRENT,
                 confirmed=True,
                 voltage_limit_v=float(self.spin_supply_voltage_limit.value()),
-                current_limit_a=self._planned_current_sweep_limit_mA() / 1000.0,
+                current_limit_a=None,
             )
             if motor_channel is not None:
                 broker.assign_role(

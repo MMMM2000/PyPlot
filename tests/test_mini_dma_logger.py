@@ -13507,6 +13507,78 @@ def test_shared_broker_supply_controller_does_not_rewrite_confirmed_channel_limi
     assert controller.current_limit_a == pytest.approx(0.06)
 
 
+def test_shared_broker_supply_controller_clears_confirmed_current_channel_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "snapshot":
+                return {
+                    "ok": True,
+                    "snapshot": {
+                        "model": "hmp4040",
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.06,
+                                }
+                            }
+                        },
+                    },
+                }
+            return {"ok": True}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": "lease-4"}
+
+        def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            self.calls.append(
+                ("set_current", {"channel": channel, "lease_id": lease_id, "current_mA": current_mA})
+            )
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=None,
+    )
+
+    controller.connect()
+    controller.set_current_mA(80.0)
+
+    assign_calls = [call for call in clients[0].calls if call[0] == "assign_role"]
+    assert assign_calls == [
+        (
+            "assign_role",
+            {
+                "channel": 4,
+                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                "confirmed": True,
+                "voltage_limit_v": 32.05,
+                "current_limit_a": None,
+            },
+        )
+    ]
+    assert ("set_current", {"channel": 4, "lease_id": "lease-4", "current_mA": 80.0}) in clients[0].calls
+
+
 def test_shared_broker_supply_controller_rolls_back_refused_current_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -13729,7 +13801,7 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
         assert controller.selected_channel() == 4
         assert controller.motor_channel == 3
         assert controller.max_voltage_v == pytest.approx(30.0)
-        assert controller.current_limit_a == pytest.approx(0.06)
+        assert controller.current_limit_a is None
         assert controller.motor_voltage_limit_v == pytest.approx(12.0)
         assert controller.motor_current_limit_a == pytest.approx(0.5)
     finally:
@@ -14011,7 +14083,7 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
         assert getattr(started["broker"], "driver").identify_calls == 2
         broker_profile = getattr(started["broker"], "bench_profile")
         assert broker_profile.channels[4].voltage_limit_v == pytest.approx(1.0)
-        assert broker_profile.channels[4].current_limit_a == pytest.approx(0.04)
+        assert broker_profile.channels[4].current_limit_a is None
         assert broker_profile.channels[3].voltage_limit_v == pytest.approx(12.0)
         assert broker_profile.channels[3].current_limit_a == pytest.approx(0.4)
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
