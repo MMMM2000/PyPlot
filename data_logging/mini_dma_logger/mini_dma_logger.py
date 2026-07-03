@@ -98,7 +98,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-03.2"
+CONTROL_LOGIC_VERSION = "2026-07-03.3"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -140,6 +140,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_runaway_drift_uses_bounded_noise_band",
     "kern_kcp_held_recovery_uses_earned_resume_band",
     "kern_kcp_held_recovery_preserves_base_resume_confirmation",
+    "kern_kcp_earned_resume_ignores_noise_inflated_pause_band",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -27270,6 +27271,29 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0.0
         return tolerance * SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR
 
+    def _current_sweep_hold_noise_independent_pause_band(
+        self,
+        step: AutomationStep,
+        tolerance: float,
+    ) -> float:
+        pause_factor = max(
+            1e-12,
+            self._current_sweep_hold_setting(
+                step.current_hold_pause_tolerance_factor,
+                self._control_config().current_sweep_hold_pause_factor
+                if self._control_config() is not None
+                else float(self.spin_current_sweep_hold_pause_factor.value()),
+                CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+            ),
+        )
+        return max(
+            abs(float(tolerance)) * pause_factor,
+            self._current_sweep_hold_min_band_for_basis(
+                step.basis,
+                self._current_sweep_hold_min_pause_stress_mpa(),
+            ),
+        )
+
     def _current_sweep_bounded_noise_band(
         self,
         basis: str,
@@ -27352,6 +27376,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if float(signed_error) * slope > 0.0 and abs(slope) >= away_slope_floor:
             return float(resume_band)
         max_from_pause = abs(float(pause_band)) * KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION
+        noise_independent_pause_band = self._current_sweep_hold_noise_independent_pause_band(
+            step,
+            self._automation_tolerance_for_step(step),
+        )
+        if noise_independent_pause_band > 0.0:
+            max_from_pause = min(
+                max_from_pause,
+                noise_independent_pause_band
+                * KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION,
+            )
         if max_from_pause <= 0.0:
             return float(resume_band)
         earned_band = min(earned_band, max_from_pause)
@@ -27542,24 +27576,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             else None
         )
-        pause_factor = max(
-            1e-12,
-            self._current_sweep_hold_setting(
-                step.current_hold_pause_tolerance_factor,
-                self._control_config().current_sweep_hold_pause_factor
-                if self._control_config() is not None
-                else float(self.spin_current_sweep_hold_pause_factor.value()),
-                CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
-            ),
-        )
         resume_factor = self._current_sweep_hold_resume_factor(step)
         pause_band = max(
-            tolerance * pause_factor,
+            self._current_sweep_hold_noise_independent_pause_band(step, tolerance),
             self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance),
-            self._current_sweep_hold_min_band_for_basis(
-                step.basis,
-                self._current_sweep_hold_min_pause_stress_mpa(),
-            ),
         )
         resume_window_spans_target = self._current_sweep_filtered_window_spans_target(
             step.basis,
