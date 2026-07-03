@@ -8990,6 +8990,31 @@ def test_scale_worker_request_mode_uses_response_timeout() -> None:
     assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.06) == pytest.approx(0.0)
 
 
+def _install_timing_preset_fakes(window: object, fake_spin_type: type) -> dict[str, object]:
+    spinners = {
+        "control": fake_spin_type(),
+        "log": fake_spin_type(),
+        "ui": fake_spin_type(),
+        "graph": fake_spin_type(),
+        "scale": fake_spin_type(),
+        "tic_status": fake_spin_type(),
+        "tic_keepalive": fake_spin_type(),
+        "supply": fake_spin_type(),
+    }
+    window.spin_control_interval = spinners["control"]
+    window.spin_log_interval = spinners["log"]
+    window.spin_ui_interval = spinners["ui"]
+    window.spin_graph_interval = spinners["graph"]
+    window.spin_scale_interval = spinners["scale"]
+    window.spin_tic_status_interval = spinners["tic_status"]
+    window.spin_tic_keepalive_interval = spinners["tic_keepalive"]
+    window.spin_supply_read_interval = spinners["supply"]
+    window._apply_ui_refresh_interval = lambda: None
+    window._apply_hardware_timer_intervals = lambda: None
+    window._update_recipe_mode_ui = lambda: None
+    return spinners
+
+
 def test_kern_kcp_scale_preset_uses_standard_request() -> None:
     class _FakeCombo:
         def __init__(self) -> None:
@@ -9019,7 +9044,7 @@ def test_kern_kcp_scale_preset_uses_standard_request() -> None:
     window.combo_scale_baud = _FakeCombo()
     window.edit_scale_request = _FakeEdit()
     window.edit_scale_terminator = _FakeEdit()
-    window.spin_scale_interval = _FakeSpin()
+    spinners = _install_timing_preset_fakes(window, _FakeSpin)
     messages: list[str] = []
     window._log = messages.append  # type: ignore[method-assign]
 
@@ -9028,7 +9053,9 @@ def test_kern_kcp_scale_preset_uses_standard_request() -> None:
     assert window.combo_scale_baud.current_text == "256000"
     assert window.edit_scale_request.text_value == mini_dma_mod.KERN_KCP_SCALE_REQUEST
     assert window.edit_scale_terminator.text_value == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
-    assert window.spin_scale_interval.value_set == 50
+    assert spinners["control"].value_set == 50
+    assert spinners["scale"].value_set == 50
+    assert "SI immediate request" in messages[-1]
     assert "Košice KERN KCP" in messages[-1]
 
 
@@ -9061,7 +9088,7 @@ def test_gng_scale_preset_preserves_prague_cadence() -> None:
     window.combo_scale_baud = _FakeCombo()
     window.edit_scale_request = _FakeEdit()
     window.edit_scale_terminator = _FakeEdit()
-    window.spin_scale_interval = _FakeSpin()
+    spinners = _install_timing_preset_fakes(window, _FakeSpin)
     messages: list[str] = []
     window._log = messages.append  # type: ignore[method-assign]
 
@@ -9070,7 +9097,8 @@ def test_gng_scale_preset_preserves_prague_cadence() -> None:
     assert window.combo_scale_baud.current_text == "9600"
     assert window.edit_scale_request.text_value == "\\x1bp"
     assert window.edit_scale_terminator.text_value == ""
-    assert window.spin_scale_interval.value_set == 250
+    assert spinners["control"].value_set == 250
+    assert spinners["scale"].value_set == 250
     assert "Prague G&G" in messages[-1]
 
 
@@ -9104,6 +9132,23 @@ def test_scale_auto_detect_accepts_kern_kcp_reply(monkeypatch: pytest.MonkeyPatc
         "raw_text": "S S +12.34 g",
     }
     assert calls[0] == (256000, b"SI\r\n")
+
+
+def test_kern_stable_probe_match_is_normalized_to_immediate_runtime_request() -> None:
+    match = {
+        "port": "COM9",
+        "baudrate": 256000,
+        "request_command": "S",
+        "terminator": mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
+        "raw_text": "S S      57.13 g",
+    }
+
+    normalized = mini_dma_mod._normalize_scale_match_for_runtime(match)
+
+    assert normalized["request_command"] == mini_dma_mod.KERN_KCP_SCALE_REQUEST
+    assert normalized["terminator"] == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
+    assert mini_dma_mod._scale_interval_ms_for_probe_match(match) == mini_dma_mod.DEFAULT_SCALE_REQUEST_INTERVAL_MS
+    assert mini_dma_mod._scale_interval_ms_for_probe_match(normalized) == mini_dma_mod.KERN_KCP_SCALE_INTERVAL_MS
 
 
 def test_scale_auto_detect_falls_back_to_gng_prompt(monkeypatch: pytest.MonkeyPatch) -> None:

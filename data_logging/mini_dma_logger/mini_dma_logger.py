@@ -403,6 +403,12 @@ DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
 DEFAULT_UI_HEARTBEAT_INTERVAL_MS = 16
 DEFAULT_GRAPH_REFRESH_INTERVAL_MS = 500
+PRAGUE_SCALE_CONTROL_INTERVAL_MS = 250
+PRAGUE_SCALE_UI_REFRESH_INTERVAL_MS = 250
+PRAGUE_SCALE_GRAPH_REFRESH_INTERVAL_MS = 500
+KOSICE_SCALE_CONTROL_INTERVAL_MS = 50
+KOSICE_SCALE_UI_REFRESH_INTERVAL_MS = 200
+KOSICE_SCALE_GRAPH_REFRESH_INTERVAL_MS = 500
 SESSION_DATA_FLUSH_INTERVAL_S = 2.0
 SESSION_METADATA_WRITE_INTERVAL_S = 5.0
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
@@ -1267,10 +1273,30 @@ def _scale_interval_ms_for_probe_match(match: Mapping[str, Any]) -> int:
     if request == KERN_KCP_SCALE_REQUEST and terminator == KERN_KCP_SCALE_TERMINATOR:
         return KERN_KCP_SCALE_INTERVAL_MS
     if request == "S" and terminator == KERN_KCP_SCALE_TERMINATOR and baudrate in KERN_KCP_SUPPORTED_BAUDS:
-        return KERN_KCP_SCALE_INTERVAL_MS
+        return DEFAULT_SCALE_REQUEST_INTERVAL_MS
     if request == GNG_SCALE_REQUEST:
         return GNG_SCALE_INTERVAL_MS
     return DEFAULT_SCALE_REQUEST_INTERVAL_MS
+
+
+def _is_kern_kcp_scale_match(match: Mapping[str, Any]) -> bool:
+    request = str(match.get("request_command") or "")
+    terminator = str(match.get("terminator") or "")
+    baudrate = int(match.get("baudrate") or 0)
+    return (
+        terminator == KERN_KCP_SCALE_TERMINATOR
+        and baudrate in KERN_KCP_SUPPORTED_BAUDS
+        and request in {KERN_KCP_SCALE_REQUEST, "S"}
+    )
+
+
+def _normalize_scale_match_for_runtime(match: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(match)
+    if _is_kern_kcp_scale_match(normalized):
+        normalized["request_command"] = KERN_KCP_SCALE_REQUEST
+        normalized["terminator"] = KERN_KCP_SCALE_TERMINATOR
+        normalized["baudrate"] = int(normalized.get("baudrate") or KERN_KCP_SCALE_PREFERRED_BAUD)
+    return normalized
 
 
 def _scale_readability_g_for_settings(
@@ -6260,6 +6286,25 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_read_interval.setSuffix(" ms")
         form.addRow("Supply readback interval", supply_read_interval)
         layout.addLayout(form)
+        preset_row = QtWidgets.QHBoxLayout()
+        prague_button = QtWidgets.QPushButton("Prague G&G preset", dialog)
+        kosice_button = QtWidgets.QPushButton("Košice KERN preset", dialog)
+        preset_row.addWidget(prague_button)
+        preset_row.addWidget(kosice_button)
+        layout.addLayout(preset_row)
+
+        def apply_dialog_values(values: Mapping[str, int]) -> None:
+            control_interval.setValue(int(values["control_interval_ms"]))
+            log_interval.setValue(int(values["log_interval_ms"]))
+            ui_interval.setValue(int(values["ui_refresh_interval_ms"]))
+            graph_interval.setValue(int(values["graph_refresh_interval_ms"]))
+            scale_interval.setValue(int(values["scale_interval_ms"]))
+            tic_status_interval.setValue(int(values["tic_status_interval_ms"]))
+            tic_keepalive_interval.setValue(int(values["tic_keepalive_interval_ms"]))
+            supply_read_interval.setValue(int(values["supply_read_interval_ms"]))
+
+        prague_button.clicked.connect(lambda _checked=False: apply_dialog_values(self._prague_scale_timing_values()))
+        kosice_button.clicked.connect(lambda _checked=False: apply_dialog_values(self._kosice_scale_timing_values()))
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
             parent=dialog,
@@ -6280,6 +6325,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_ui_refresh_interval()
         self._apply_hardware_timer_intervals()
         self._update_recipe_mode_ui()
+
+    def _prague_scale_timing_values(self) -> dict[str, int]:
+        return {
+            "control_interval_ms": PRAGUE_SCALE_CONTROL_INTERVAL_MS,
+            "log_interval_ms": DEFAULT_LOG_INTERVAL_MS,
+            "ui_refresh_interval_ms": PRAGUE_SCALE_UI_REFRESH_INTERVAL_MS,
+            "graph_refresh_interval_ms": PRAGUE_SCALE_GRAPH_REFRESH_INTERVAL_MS,
+            "scale_interval_ms": GNG_SCALE_INTERVAL_MS,
+            "tic_status_interval_ms": DEFAULT_TIC_STATUS_INTERVAL_MS,
+            "tic_keepalive_interval_ms": TIC_KEEPALIVE_INTERVAL_MS,
+            "supply_read_interval_ms": DEFAULT_SUPPLY_READ_INTERVAL_MS,
+        }
+
+    def _kosice_scale_timing_values(self) -> dict[str, int]:
+        return {
+            "control_interval_ms": KOSICE_SCALE_CONTROL_INTERVAL_MS,
+            "log_interval_ms": DEFAULT_LOG_INTERVAL_MS,
+            "ui_refresh_interval_ms": KOSICE_SCALE_UI_REFRESH_INTERVAL_MS,
+            "graph_refresh_interval_ms": KOSICE_SCALE_GRAPH_REFRESH_INTERVAL_MS,
+            "scale_interval_ms": KERN_KCP_SCALE_INTERVAL_MS,
+            "tic_status_interval_ms": DEFAULT_TIC_STATUS_INTERVAL_MS,
+            "tic_keepalive_interval_ms": TIC_KEEPALIVE_INTERVAL_MS,
+            "supply_read_interval_ms": DEFAULT_SUPPLY_READ_INTERVAL_MS,
+        }
+
+    def _apply_timing_values(self, values: Mapping[str, int]) -> None:
+        self.spin_control_interval.setValue(int(values["control_interval_ms"]))
+        self.spin_log_interval.setValue(int(values["log_interval_ms"]))
+        self.spin_ui_interval.setValue(int(values["ui_refresh_interval_ms"]))
+        self.spin_graph_interval.setValue(int(values["graph_refresh_interval_ms"]))
+        self.spin_scale_interval.setValue(int(values["scale_interval_ms"]))
+        self.spin_tic_status_interval.setValue(int(values["tic_status_interval_ms"]))
+        self.spin_tic_keepalive_interval.setValue(int(values["tic_keepalive_interval_ms"]))
+        self.spin_supply_read_interval.setValue(int(values["supply_read_interval_ms"]))
+        self._apply_ui_refresh_interval()
+        self._apply_hardware_timer_intervals()
+        self._update_recipe_mode_ui()
+
+    def _apply_prague_scale_timing_preset(self, *, log: bool = True) -> None:
+        self._apply_timing_values(self._prague_scale_timing_values())
+        if log:
+            self._log(
+                "Applied Prague scale timing preset: "
+                f"control {PRAGUE_SCALE_CONTROL_INTERVAL_MS} ms, scale {GNG_SCALE_INTERVAL_MS} ms."
+            )
+
+    def _apply_kosice_scale_timing_preset(self, *, log: bool = True) -> None:
+        self._apply_timing_values(self._kosice_scale_timing_values())
+        if log:
+            self._log(
+                "Applied Košice scale timing preset: "
+                f"control {KOSICE_SCALE_CONTROL_INTERVAL_MS} ms, scale {KERN_KCP_SCALE_INTERVAL_MS} ms."
+            )
 
     def _show_current_sweep_advanced_settings_dialog(self) -> None:
         if self._current_sweep_advanced_dialog is None:
@@ -9910,6 +10008,7 @@ class MainWindow(QtWidgets.QMainWindow):
             match = self._probe_scale_candidate(port.device)
             if match is None:
                 continue
+            match = _normalize_scale_match_for_runtime(match)
             index = self.combo_scale_port.findData(match["port"])
             if index >= 0:
                 self.combo_scale_port.setCurrentIndex(index)
@@ -9918,6 +10017,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_scale_request.setText(str(match["request_command"]))
             self.edit_scale_terminator.setText(str(match["terminator"]))
             self.spin_scale_interval.setValue(_scale_interval_ms_for_probe_match(match))
+            if _is_kern_kcp_scale_match(match):
+                self._apply_kosice_scale_timing_preset(log=False)
+            elif str(match.get("request_command") or "") == GNG_SCALE_REQUEST:
+                self._apply_prague_scale_timing_preset(log=False)
             self._log(
                 f"Auto-detected scale on {match['port']} at {match['baudrate']} baud "
                 f"(sample reply: {match['raw_text']})."
@@ -9998,6 +10101,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return candidates
 
     def _apply_detected_scale_match(self, match: Mapping[str, Any]) -> None:
+        match = _normalize_scale_match_for_runtime(match)
         index = self.combo_scale_port.findData(str(match["port"]))
         if index >= 0:
             self.combo_scale_port.setCurrentIndex(index)
@@ -10006,6 +10110,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_scale_request.setText(str(match["request_command"]))
         self.edit_scale_terminator.setText(str(match["terminator"]))
         self.spin_scale_interval.setValue(_scale_interval_ms_for_probe_match(match))
+        if _is_kern_kcp_scale_match(match):
+            self._apply_kosice_scale_timing_preset(log=False)
+        elif str(match.get("request_command") or "") == GNG_SCALE_REQUEST:
+            self._apply_prague_scale_timing_preset(log=False)
 
     def _fast_auto_detect_scale_port(self) -> bool:
         if not str(self.combo_scale_port.currentData() or "").strip():
@@ -13166,10 +13274,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_baud.setCurrentText(preferred_baud)
         self.edit_scale_request.setText(GNG_SCALE_REQUEST)
         self.edit_scale_terminator.setText(GNG_SCALE_TERMINATOR)
-        self.spin_scale_interval.setValue(GNG_SCALE_INTERVAL_MS)
+        self._apply_prague_scale_timing_preset(log=False)
         self._log(
             f"Applied Prague G&G E-series scale preset: {preferred_baud} baud, "
-            f"ESC+p request, {GNG_SCALE_INTERVAL_MS} ms interval."
+            f"ESC+p request, control {PRAGUE_SCALE_CONTROL_INTERVAL_MS} ms, "
+            f"scale {GNG_SCALE_INTERVAL_MS} ms."
         )
 
     def _apply_kern_kcp_scale_preset(self) -> None:
@@ -13178,10 +13287,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_baud.setCurrentText(preferred_baud)
         self.edit_scale_request.setText(KERN_KCP_SCALE_REQUEST)
         self.edit_scale_terminator.setText(KERN_KCP_SCALE_TERMINATOR)
-        self.spin_scale_interval.setValue(KERN_KCP_SCALE_INTERVAL_MS)
+        self._apply_kosice_scale_timing_preset(log=False)
         self._log(
             f"Applied Košice KERN KCP scale preset: {preferred_baud} baud, "
-            f"SI request, CRLF terminator, {KERN_KCP_SCALE_INTERVAL_MS} ms interval."
+            f"SI immediate request, CRLF terminator, control {KOSICE_SCALE_CONTROL_INTERVAL_MS} ms, "
+            f"scale {KERN_KCP_SCALE_INTERVAL_MS} ms."
         )
 
     def _build_sample_name(self) -> str:
@@ -29415,6 +29525,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_baud.setCurrentText(baud)
             scale_request = "\\x1bp"
             scale_terminator = ""
+        try:
+            saved_scale_baud_int = int(baud)
+        except (TypeError, ValueError):
+            saved_scale_baud_int = 0
+        if (
+            saved_scale_baud_int in KERN_KCP_SUPPORTED_BAUDS
+            and scale_terminator == KERN_KCP_SCALE_TERMINATOR
+            and scale_request.strip() in {KERN_KCP_SCALE_REQUEST, "S"}
+        ):
+            scale_request = KERN_KCP_SCALE_REQUEST
+            scale_terminator = KERN_KCP_SCALE_TERMINATOR
+            saved_scale_interval_ms = KERN_KCP_SCALE_INTERVAL_MS
         if scale_request.strip() == "\\x1bp" and saved_scale_interval_ms < DEFAULT_SCALE_REQUEST_INTERVAL_MS:
             saved_scale_interval_ms = DEFAULT_SCALE_REQUEST_INTERVAL_MS
         self.spin_scale_interval.setValue(saved_scale_interval_ms)
