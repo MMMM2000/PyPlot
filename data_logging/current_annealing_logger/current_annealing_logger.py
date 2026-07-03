@@ -753,6 +753,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_client: Any = None
         self._shared_broker_lease_id: str | None = None
         self._shared_broker_owner = "current_annealing_logger"
+        self._shared_broker_role_checked_channel: int | None = None
         self._shared_broker_current_limit_mA: float | None = None
         self._shared_broker_limit_warning_shown = False
         self._owned_shared_broker_server: Any = None
@@ -2816,8 +2817,66 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return self._shared_broker_client
 
+    def _shared_broker_channel_payload(
+        self,
+        snapshot: dict[str, Any] | None,
+        channel: int,
+    ) -> dict[str, Any] | None:
+        if not isinstance(snapshot, dict):
+            return None
+        bench_profile = snapshot.get("bench_profile")
+        if not isinstance(bench_profile, dict):
+            return None
+        channels = bench_profile.get("channels")
+        if not isinstance(channels, dict):
+            return None
+        payload = channels.get(str(channel))
+        return payload if isinstance(payload, dict) else None
+
+    def _shared_broker_current_limit_needs_clearing(self, payload: dict[str, Any] | None) -> bool:
+        return isinstance(payload, dict) and payload.get("current_limit_a") is not None
+
+    def _ensure_shared_broker_channel_role(self, snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        channel = int(getattr(self, "channel_select", 0) or 0)
+        if channel <= 0:
+            return snapshot
+        if self._shared_broker_role_checked_channel == channel:
+            return snapshot
+        client = self._get_shared_broker_client()
+        if snapshot is None:
+            snapshot = client.snapshot()
+        payload = self._shared_broker_channel_payload(snapshot, channel)
+        if payload is None:
+            return snapshot
+        configured_role = str(payload.get("role") or "unused")
+        confirmed = bool(payload.get("confirmed", False))
+        needs_current_limit_clear = self._shared_broker_current_limit_needs_clearing(payload)
+        if configured_role == ROLE_CURRENT_ANNEALING and confirmed and not needs_current_limit_clear:
+            self._shared_broker_role_checked_channel = channel
+            return snapshot
+        if configured_role not in {"unused", ROLE_CURRENT_ANNEALING}:
+            raise RuntimeError(f"Shared HMP broker CH{channel} is assigned to {configured_role}, not current annealing.")
+        request = getattr(client, "request", None)
+        if not callable(request):
+            return snapshot
+        request(
+            "assign_role",
+            channel=channel,
+            role=ROLE_CURRENT_ANNEALING,
+            confirmed=True,
+            voltage_limit_v=None,
+            current_limit_a=None,
+        )
+        self._shared_broker_role_checked_channel = channel
+        try:
+            return client.snapshot()
+        except Exception:
+            self._shared_broker_current_limit_mA = None
+            return snapshot
+
     def handle_broker_settings_changed(self) -> None:
         self._shared_broker_client = None
+        self._shared_broker_role_checked_channel = None
         try:
             self.settings.setValue("shared_broker_host", self._shared_broker_host())
             self.settings.setValue("shared_broker_port", self._shared_broker_port())
@@ -2891,6 +2950,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_detected_hmp_profile(HMP4030_PROFILE, selected=selected_channel)
         elif profile_id == HMP4040_PROFILE.profile_id:
             self._set_detected_hmp_profile(HMP4040_PROFILE, selected=selected_channel)
+        snapshot = self._ensure_shared_broker_channel_role(snapshot) or snapshot
         self._remember_shared_broker_channel_limit(snapshot)
         self.is_connected = True
         self.ui.pushButton_connect_port.setText("Disconnect broker")
@@ -3220,6 +3280,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_safe_end_commands()
         self._shared_broker_client = None
         self._shared_broker_lease_id = None
+        self._shared_broker_role_checked_channel = None
         self._shared_broker_current_limit_mA = None
         self._stop_owned_shared_broker()
         self.is_connected = False
@@ -3235,6 +3296,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._shared_broker_lease_id:
             return self._shared_broker_lease_id
         channel = self._shared_broker_channel()
+        self._ensure_shared_broker_channel_role()
         lease = self._get_shared_broker_client().lease(
             channel=channel,
             owner=self._shared_broker_owner,
@@ -4666,6 +4728,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 value = 0
         self.channel_select = value
+        self._shared_broker_role_checked_channel = None
         spin = getattr(self.ui, 'spinBox_channel', None)
         if isinstance(spin, QtWidgets.QSpinBox):
             spin.blockSignals(True)

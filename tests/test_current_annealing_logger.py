@@ -1200,6 +1200,131 @@ def test_shared_broker_connect_preserves_confirmed_channel(qtbot) -> None:
     assert window.ui.comboBox_channel.currentData() == 1
 
 
+def test_shared_broker_connect_assigns_unused_channel_on_existing_tma_broker(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    class _ExistingTmaBrokerClient(_FakeBrokerClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self._channel_1 = {
+                "role": "unused",
+                "confirmed": False,
+                "voltage_limit_v": None,
+                "current_limit_a": None,
+            }
+
+        def snapshot(self) -> dict[str, object]:
+            self.calls.append(("snapshot", {}))
+            return {
+                "profile": {"profile_id": "hmp4040", "channel_count": 4},
+                "bench_profile": {
+                    "channels": {
+                        "1": dict(self._channel_1),
+                        "3": {
+                            "role": "mini_dma_motor",
+                            "confirmed": True,
+                            "voltage_limit_v": 12.0,
+                            "current_limit_a": 0.5,
+                        },
+                        "4": {
+                            "role": "mini_dma_current_sweep",
+                            "confirmed": True,
+                            "voltage_limit_v": 32.05,
+                            "current_limit_a": None,
+                        },
+                    }
+                },
+            }
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "assign_role":
+                self._channel_1 = {
+                    "role": payload["role"],
+                    "confirmed": payload["confirmed"],
+                    "voltage_limit_v": payload["voltage_limit_v"],
+                    "current_limit_a": payload["current_limit_a"],
+                }
+            return {"ok": True}
+
+    fake = _ExistingTmaBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    window._connect_shared_broker_mode()
+    window._initialize_shared_broker_output()
+
+    assert window.is_connected is True
+    assert fake.calls[:4] == [
+        ("snapshot", {}),
+        (
+            "assign_role",
+            {
+                "channel": 1,
+                "role": "current_annealing",
+                "confirmed": True,
+                "voltage_limit_v": None,
+                "current_limit_a": None,
+            },
+        ),
+        ("snapshot", {}),
+        ("lease", {"channel": 1, "owner": "current_annealing_logger", "role": "current_annealing"}),
+    ]
+
+
+def test_shared_broker_connect_clears_stale_current_annealing_limit(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    class _StaleCurrentLimitBrokerClient(_FakeBrokerClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self._limit: float | None = 0.03
+
+        def snapshot(self) -> dict[str, object]:
+            self.calls.append(("snapshot", {}))
+            return {
+                "profile": {"profile_id": "hmp4040", "channel_count": 4},
+                "bench_profile": {
+                    "channels": {
+                        "1": {
+                            "role": "current_annealing",
+                            "confirmed": True,
+                            "voltage_limit_v": None,
+                            "current_limit_a": self._limit,
+                        }
+                    }
+                },
+            }
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "assign_role":
+                self._limit = None
+            return {"ok": True}
+
+    fake = _StaleCurrentLimitBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    window._connect_shared_broker_mode()
+
+    assert window._shared_broker_current_limit_mA is None
+    assert (
+        "assign_role",
+        {
+            "channel": 1,
+            "role": "current_annealing",
+            "confirmed": True,
+            "voltage_limit_v": None,
+            "current_limit_a": None,
+        },
+    ) in fake.calls
+
+
 def test_shared_broker_connect_falls_back_to_standard_port(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
@@ -1948,7 +2073,8 @@ def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbo
 
     window.send_init_commands()
 
-    assert fake.calls[:2] == [
+    assert fake.calls[:3] == [
+        ("snapshot", {}),
         ("lease", {"channel": 1, "owner": "current_annealing_logger", "role": "current_annealing"}),
         (
             "configure_channel",
