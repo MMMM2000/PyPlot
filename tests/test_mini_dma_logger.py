@@ -875,6 +875,91 @@ def test_prague_scale_waits_for_filter_window_when_filtered_signal_lags(
         _close_test_window(window)
 
 
+def _raw_scale_for_stress_sample(window: mini_dma_mod.MainWindow, stress_mpa: float) -> float:
+    load_g = mini_dma_mod.load_g_from_stress_mpa(float(stress_mpa), window.spin_diameter.value())
+    assert load_g is not None
+    zero_g = float(window.spin_zero_load_scale_g.value())
+    return zero_g - load_g if window.check_tension_load_positive.isChecked() else zero_g + load_g
+
+
+def test_kern_iso_current_transition_settle_accepts_processed_near_target(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window.spin_diameter.setValue(0.0182)
+        window.spin_steps_per_mm.setValue(100.0)
+        window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+        window._set_automation_context(
+            phase="settle",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            plateau_index=1,
+            note="1:transition_settle",
+        )
+        start_s = time.time() - 0.30
+        for index, stress_mpa in enumerate((9.08, 9.48, 9.53, 9.56, 9.58)):
+            raw_g = _raw_scale_for_stress_sample(window, stress_mpa)
+            window._handle_scale_measurement(raw_g, f"{raw_g:.5f} g", start_s + index * 0.05)
+
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is True
+        assert moves == []
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_iso_current_transition_settle_keeps_existing_latest_sample_gate(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText("P")
+        window.edit_scale_terminator.setText("\\r\\n")
+        window.spin_diameter.setValue(0.0182)
+        window.spin_steps_per_mm.setValue(100.0)
+        window._move_to_position_mm = lambda target_mm, **_kwargs: moves.append(target_mm) or True  # type: ignore[method-assign]
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+        window._set_automation_context(
+            phase="settle",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            plateau_index=1,
+            note="1:transition_settle",
+        )
+        start_s = time.time() - 0.30
+        for index, stress_mpa in enumerate((9.08, 9.48, 9.53, 9.56, 9.58)):
+            raw_g = _raw_scale_for_stress_sample(window, stress_mpa)
+            window._handle_scale_measurement(raw_g, f"{raw_g:.5f} g", start_s + index * 0.05)
+
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+        )
+
+        assert reached is False
+        assert moves
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_load_stress_control_disables_cruise_feedback(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:

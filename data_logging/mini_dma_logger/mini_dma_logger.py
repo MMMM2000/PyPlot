@@ -17256,12 +17256,76 @@ class MainWindow(QtWidgets.QMainWindow):
             timestamp_s=float(latest.timestamp_s),
         )
 
+    def _is_kern_iso_current_transition_settle(self, basis: str | None) -> bool:
+        return (
+            basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and self._using_kern_kcp_scale()
+            and self._is_iso_current_mode(self._automation_name)
+            and self._automation_phase == "settle"
+            and str(self._automation_step_note or "").endswith("transition_settle")
+        )
+
     def _seek_filtered_control_signal(self, basis: str) -> ScaleControlSignal | None:
-        if not self._is_current_sweep_mode(self._automation_name):
-            return None
-        if self._automation_phase not in {"current", "current_hold"}:
+        if self._is_kern_iso_current_transition_settle(basis):
+            return self._scale_control_signal_for_basis(basis)
+        if not (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_phase in {"current", "current_hold"}
+        ):
             return None
         return self._scale_control_signal_for_basis(basis)
+
+    def _kern_iso_current_transition_settle_acceptance_band(
+        self,
+        basis: str,
+        requested_tolerance: float,
+        *,
+        seek_key: tuple[str, int, float],
+        filtered_signal: ScaleControlSignal | None,
+    ) -> float | None:
+        if not self._is_kern_iso_current_transition_settle(basis):
+            return None
+        if filtered_signal is None or int(filtered_signal.sample_count) < 3:
+            return None
+        base_tolerance = self._seek_effective_tolerance(
+            basis,
+            requested_tolerance,
+            seek_key=seek_key,
+        )
+        quantization_band = (
+            self._scale_quantization_band_for_basis(basis)
+            * SCALE_QUANTIZATION_WORSENING_FACTOR
+        )
+        noise_band = max(0.0, float(filtered_signal.noise)) * self._current_sweep_hold_noise_sigma()
+        noise_cap_basis = max(abs(float(base_tolerance)), abs(float(quantization_band)))
+        noise_cap = self._current_sweep_hold_noise_cap_for_basis(noise_cap_basis)
+        if noise_cap > 0.0:
+            noise_band = min(noise_band, noise_cap)
+        return max(
+            abs(float(base_tolerance)),
+            abs(float(quantization_band)),
+            abs(float(noise_band)),
+        )
+
+    def _kern_iso_current_transition_settle_reached(
+        self,
+        basis: str,
+        error_value: float,
+        acceptance_band: float | None,
+        filtered_signal: ScaleControlSignal | None,
+    ) -> bool:
+        if acceptance_band is None or filtered_signal is None:
+            return False
+        error = float(error_value)
+        band = abs(float(acceptance_band))
+        if not math.isfinite(error) or not math.isfinite(band) or abs(error) > band:
+            return False
+        slope = float(filtered_signal.slope_per_s)
+        if math.isfinite(slope) and error * slope < 0.0:
+            moving_away_floor = self._current_sweep_hold_min_slope_for_basis(basis)
+            if abs(slope) >= moving_away_floor:
+                return False
+        return True
 
     def _current_sweep_filtered_window_spans_target(
         self,
@@ -18220,21 +18284,31 @@ class MainWindow(QtWidgets.QMainWindow):
                     result="reached",
                 )
                 return True
+        kern_transition_band = self._kern_iso_current_transition_settle_acceptance_band(
+            basis,
+            tolerance,
+            seek_key=seek_key,
+            filtered_signal=filtered_signal,
+        )
         if filtered_signal is not None:
             noise_component = filtered_signal.noise * self._current_sweep_hold_noise_sigma()
+            min_recovery_band = 0.0
             if self._is_current_sweep_mode(self._automation_name):
                 noise_component = self._current_sweep_bounded_noise_band(
                     basis,
                     filtered_signal.noise,
                     acceptance_tolerance,
                 )
+                min_recovery_band = self._current_sweep_hold_min_band_for_basis(
+                    basis,
+                    self._current_sweep_hold_min_resume_stress_mpa(),
+                )
+            elif kern_transition_band is not None:
+                noise_component = kern_transition_band
             noise_band = max(
                 acceptance_tolerance,
                 noise_component,
-                self._current_sweep_hold_min_band_for_basis(
-                    basis,
-                    self._current_sweep_hold_min_resume_stress_mpa(),
-                ),
+                min_recovery_band,
             )
             if (
                 abs(delta_value) <= noise_band
@@ -18258,6 +18332,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     reason="filtered_control_signal",
                 )
                 return True
+        if (
+            self._kern_iso_current_transition_settle_reached(
+                basis,
+                delta_value,
+                kern_transition_band,
+                filtered_signal,
+            )
+            and not iso_current_stress_ramp_driving
+        ):
+            self._clear_seek_state(seek_key)
+            self._write_control_trace(
+                decision="accept",
+                basis=basis,
+                target_value=target_value,
+                current_value=current_value,
+                error_value=delta_value,
+                tolerance=kern_transition_band,
+                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
+                result="kern_transition_settle",
+                reason="kern_iso_current_processed_settle",
+            )
+            return True
         if abs(delta_value) <= acceptance_tolerance and self._zero_return_requires_true_zero(basis, target_value):
             pass
         elif abs(delta_value) <= acceptance_tolerance and not iso_current_stress_ramp_driving:
