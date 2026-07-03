@@ -4056,12 +4056,60 @@ def test_shared_broker_manual_auto_connect_applies_kosice_ch2_ch3_defaults_befor
         _close_test_window(window)
 
 
+def test_manual_auto_connect_applies_tic_settings_after_status(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+
+    def _tic_ready() -> bool:
+        called.append("tic")
+        window._tic_status_text = "\n".join(
+            [
+                "VIN voltage: 12.00 V",
+                "Step mode: 1/8 step",
+                "Max speed: 10000000",
+                "Max acceleration: 100000",
+                "Max deceleration: 100000",
+                "Current limit: 343 mA",
+                "Errors currently stopping the motor: None",
+            ]
+        )
+        return True
+
+    window._ensure_tic_ready_for_recipe = _tic_ready  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = (  # type: ignore[method-assign]
+        lambda: called.append("step") or (True, "PASS: Tic step mode 1/8 step")
+    )
+    window._apply_tic_current_limit = (  # type: ignore[method-assign]
+        lambda: called.append("current_limit") or (True, "PASS: Tic current limit 343 mA.")
+    )
+    window._apply_tic_motion_limits = (  # type: ignore[method-assign]
+        lambda: called.append("motion")
+        or (True, "PASS: Tic motion limits speed 10000000, accel 100000, decel 100000.")
+    )
+
+    try:
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "tic", "step", "current_limit", "motion"]
+        log_text = window.log_output.toPlainText()
+        assert "Manual hardware auto-connect: PASS: Tic step mode 1/8 step" in log_text
+        assert "Manual hardware auto-connect: PASS: Tic current limit 343 mA." in log_text
+        assert "Manual hardware auto-connect: PASS: Tic motion limits speed 10000000" in log_text
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._prepare_current_sweep_supply_channel = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -4190,6 +4238,7 @@ def test_manual_auto_connect_prepares_current_sweep_channel_without_enabling_out
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
     window._supply_controller = _FakeSupply()  # type: ignore[assignment]
     window.combo_supply_profile.setCurrentIndex(window.combo_supply_profile.findData("hmp4040"))
     window.combo_current_sweep_supply_channel.setCurrentIndex(
@@ -4222,6 +4271,7 @@ def test_manual_auto_connect_warns_when_a_step_fails(tmp_path: Path, qtbot) -> N
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_supply_ready_for_recipe = lambda: False  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
         original_warning = QtWidgets.QMessageBox.warning
         QtWidgets.QMessageBox.warning = (  # type: ignore[method-assign]
             lambda _parent, _title, message: warnings.append(str(message))

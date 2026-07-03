@@ -19809,6 +19809,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if not self._ensure_tic_ready_for_recipe():
                 issues.append("Motor controller is not ready.")
                 connected = False
+            else:
+                tic_ok, tic_messages = self._apply_manual_auto_connect_tic_settings()
+                for message in tic_messages:
+                    self._log(f"Manual hardware auto-connect: {message}")
+                if not tic_ok:
+                    issues.extend(
+                        message.replace("FAIL: ", "", 1)
+                        for message in tic_messages
+                        if message.startswith("FAIL: ")
+                    )
+                    connected = False
             completed_steps += 1
             if connect_ir:
                 self._set_manual_auto_connect_progress("Connecting IR camera/thermometer...", completed_steps, steps)
@@ -19836,6 +19847,23 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "button_manual_auto_connect"):
                 self.button_manual_auto_connect.setEnabled(True)
                 self.button_manual_auto_connect.setText("Auto-connect hardware")
+
+    def _apply_manual_auto_connect_tic_settings(self) -> tuple[bool, list[str]]:
+        if not self._tic_status_text:
+            return True, []
+        messages: list[str] = []
+        ok = True
+        for apply_settings in (
+            self._apply_tic_configured_step_mode,
+            self._apply_tic_current_limit,
+            self._apply_tic_motion_limits,
+        ):
+            setting_ok, message = apply_settings()
+            messages.append(message)
+            ok = ok and setting_ok
+            if not setting_ok:
+                break
+        return ok, messages
 
     def _manual_auto_connect_should_connect_ir(self) -> bool:
         if not self._ir_enabled():
