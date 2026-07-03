@@ -10141,9 +10141,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 max_voltage_v=float(self.spin_supply_voltage_limit.value()),
                 current_channel=self._current_sweep_supply_channel(),
                 motor_channel=self._motor_supply_channel(),
-                current_limit_a=None,
+                current_limit_a=self._planned_current_sweep_limit_mA() / 1000.0,
                 motor_voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
-                motor_current_limit_a=None,
+                motor_current_limit_a=float(self.spin_motor_supply_current_limit.value()),
             )
         return PowerSupplyController(
             port_name=str(self.combo_supply_port.currentData() or "").strip(),
@@ -10306,16 +10306,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 channel=current_channel,
                 role=ROLE_MINI_DMA_CURRENT,
                 confirmed=True,
-                voltage_limit_v=None,
-                current_limit_a=None,
+                voltage_limit_v=float(self.spin_supply_voltage_limit.value()),
+                current_limit_a=self._planned_current_sweep_limit_mA() / 1000.0,
             )
             if motor_channel is not None:
                 broker.assign_role(
                     channel=motor_channel,
                     role=ROLE_MINI_DMA_MOTOR,
                     confirmed=True,
-                    voltage_limit_v=None,
-                    current_limit_a=None,
+                    voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
+                    current_limit_a=float(self.spin_motor_supply_current_limit.value()),
                 )
             broker.confirm_profile(name="TMA auto-started shared HMP broker")
             server, thread = start_broker_server(

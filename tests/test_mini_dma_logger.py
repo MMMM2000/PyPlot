@@ -13650,6 +13650,10 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
             window.combo_current_sweep_supply_channel.findData(4)
         )
         window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        window.spin_supply_voltage_limit.setValue(30.0)
+        window.spin_current_sweep_end_mA.setValue(60.0)
+        window.spin_motor_supply_voltage.setValue(12.0)
+        window.spin_motor_supply_current_limit.setValue(0.5)
 
         controller = window._build_supply_controller()
 
@@ -13658,6 +13662,10 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
         assert controller.port == 9999
         assert controller.selected_channel() == 4
         assert controller.motor_channel == 3
+        assert controller.max_voltage_v == pytest.approx(30.0)
+        assert controller.current_limit_a == pytest.approx(0.06)
+        assert controller.motor_voltage_limit_v == pytest.approx(12.0)
+        assert controller.motor_current_limit_a == pytest.approx(0.5)
     finally:
         _close_test_window(window)
 
@@ -13935,6 +13943,11 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
         assert started["host"] == "127.0.0.1"
         assert started["port"] == 8765
         assert getattr(started["broker"], "driver").identify_calls == 2
+        broker_profile = getattr(started["broker"], "bench_profile")
+        assert broker_profile.channels[4].voltage_limit_v == pytest.approx(1.0)
+        assert broker_profile.channels[4].current_limit_a == pytest.approx(0.04)
+        assert broker_profile.channels[3].voltage_limit_v == pytest.approx(12.0)
+        assert broker_profile.channels[3].current_limit_a == pytest.approx(0.4)
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
         assert "Started shared HMP broker" in window.log_output.toPlainText()
         assert "Supply connected through shared HMP broker" in window.log_output.toPlainText()

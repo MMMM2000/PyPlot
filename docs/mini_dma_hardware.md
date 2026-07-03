@@ -23,6 +23,7 @@ TMA includes a bench-provisioning action for copying the setup to a second bench
 - Tic step mode: `1/8 step`, with `100 full steps/mm` and `800 Tic units/mm`.
 - Tic runtime motion limits: default max speed `10000000`, max acceleration `100000`, and max deceleration `100000` in Tic units. TMA applies these temporary controller settings during manual auto-connect, recipe preflight, and provisioning so the bench does not depend on the Tic's stored profile.
 - Unattended bench plans can pin the same Tic values explicitly with `tic_full_steps_per_mm`, `tic_step_mode`, `tic_current_limit_mA`, `tic_max_speed`, `tic_max_accel`, and `tic_max_decel` so automation does not depend on saved GUI settings.
+- Shared HMP broker roles carry voltage/current limits for each leased channel; the broker rejects over-limit configure/current commands instead of relying only on the client recipe to stay inside limits.
 
 Keep the two current limits separate in UI, docs, and troubleshooting. The HMP motor-supply current limit protects the 12 V supply rail feeding the Tic; the current bench mostly ran at `0.4 A`, but one long sweep showed Tic VIN sag while CH2 was configured that way, so the copied-bench default is `0.5 A`. The Tic current limit controls the motor winding current and is the value that most directly affects motor heating and torque.
 

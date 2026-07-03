@@ -182,7 +182,7 @@ def test_broker_serializes_channel_selection_and_commands() -> None:
     ]
 
 
-def test_broker_profile_current_limit_does_not_block_leased_owner_commands() -> None:
+def test_broker_profile_limits_block_over_limit_leased_owner_commands() -> None:
     driver = _driver()
     broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
     broker.assign_role(
@@ -198,19 +198,26 @@ def test_broker_profile_current_limit_does_not_block_leased_owner_commands() -> 
     broker.configure_channel(
         channel=4,
         lease_id=lease.lease_id,
-        voltage_v=12.0,
-        current_a=0.025,
+        voltage_v=1.0,
+        current_a=0.0005,
         output_on=True,
     )
-    broker.set_current(channel=4, lease_id=lease.lease_id, current_mA=40.0)
+    with pytest.raises(PermissionError, match="requested current exceeds CH4 limit"):
+        broker.set_current(channel=4, lease_id=lease.lease_id, current_mA=40.0)
+    with pytest.raises(PermissionError, match="requested voltage exceeds CH4 limit"):
+        broker.configure_channel(
+            channel=4,
+            lease_id=lease.lease_id,
+            voltage_v=12.0,
+            current_a=0.0005,
+            output_on=True,
+        )
 
     assert driver.command_log() == [
         "INST:NSEL 4",
-        "VOLT 12.000",
-        "CURR 0.0250",
+        "VOLT 1.000",
+        "CURR 0.0005",
         "OUTP ON",
-        "INST:NSEL 4",
-        "CURR 0.0400",
     ]
 
 
