@@ -163,6 +163,7 @@ CONTROL_LOGIC_FEATURES = [
     "length_setup_commits_run_zero_load_reference",
     "automation_controller_boundary",
     "current_sweep_accumulated_correction_travel_no_abort",
+    "remote_debugging_observability",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -180,6 +181,13 @@ CONTROL_TRACE_FIELDNAMES = [
     "filtered_slope_per_s",
     "filtered_noise",
     "filtered_sample_count",
+    "latest_scale_age_s",
+    "scale_recent_rate_hz",
+    "raw_scale_sample_count",
+    "raw_scale_max_gap_s",
+    "ui_actual_interval_ms",
+    "ui_handler_duration_ms",
+    "ui_heartbeat_interval_ms",
     "sensitivity_per_mm",
     "motor_step_mm",
     "correction_mm",
@@ -221,11 +229,25 @@ UI_TELEMETRY_FIELDNAMES = [
     "live_plot_sample_recorded",
     "dashboard_plot_refreshed",
     "latest_scale_age_s",
+    "scale_recent_rate_hz",
+    "raw_scale_sample_count",
+    "raw_scale_session_rate_hz",
+    "raw_scale_max_gap_s",
     "session_points",
     "live_plot_points",
 ]
+RAW_SCALE_CSV_FIELDNAMES = [
+    "elapsed_s",
+    "timestamp_utc",
+    "sample_index",
+    "host_interval_ms",
+    "raw_load_g",
+    "applied_load_g",
+    "raw_text",
+]
 RUN_LOG_FLUSH_INTERVAL_MS = 100
 RUN_LOG_MAX_BATCH_LINES = 80
+REMOTE_DEBUG_HEALTH_LOG_INTERVAL_S = 5.0
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
 UNITS = ("mm", "g", "%", "MPa")
@@ -5688,9 +5710,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_detail: str | None = None
         self._session_stop_recorded_utc: str | None = None
         self._session_raw_scale_count = 0
+        self._session_last_raw_scale_wall_s: float | None = None
+        self._session_raw_scale_max_gap_s = 0.0
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s: float | None = None
+        self._last_ui_refresh_interval_ms: float | None = None
+        self._last_ui_handler_duration_ms: float | None = None
+        self._last_remote_debug_health_log_s = 0.0
         self._last_session_data_flush_s = 0.0
         self._last_session_metadata_write_s = 0.0
         self._session_metadata_dirty = False
@@ -17408,6 +17435,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_feedback_wait_log_s = now_s
             self._log(message)
 
+    def _scale_feedback_diagnostic_text(self) -> str:
+        age_s = self._scale_reading_age_s()
+        recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
+
+        def _fmt(value: float | None, suffix: str = "", *, decimals: int = 3) -> str:
+            if value is None:
+                return "-"
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return "-"
+            if not math.isfinite(numeric):
+                return "-"
+            return f"{numeric:.{decimals}f}{suffix}"
+
+        return (
+            f"scale age {_fmt(age_s, ' s')}, recent rate {_fmt(recent_rate_hz, ' Hz')}, "
+            f"raw samples {self._session_raw_scale_count}, "
+            f"max raw gap {_fmt(self._session_raw_scale_max_gap_s if self._session_raw_scale_max_gap_s > 0 else None, ' s')}, "
+            f"stale threshold {STALE_SCALE_AFTER_S:.1f} s, abort threshold {CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S:.1f} s"
+        )
+
     def _latest_scale_sample_time_s(self) -> float | None:
         timestamp_s = self._latest_scale_timestamp
         if timestamp_s is None:
@@ -17901,11 +17950,12 @@ class MainWindow(QtWidgets.QMainWindow):
             age_s = self._scale_reading_age_s()
             if age_s is None or age_s > CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S:
                 raise RuntimeError(
-                    "Scale feedback is stale; fix the scale connection before closed-loop load/stress control."
+                    "Scale feedback is stale; fix the scale connection before closed-loop load/stress control "
+                    f"({self._scale_feedback_diagnostic_text()})."
                 )
             self._log_waiting_for_feedback(
                 "Scale feedback is temporarily stale; waiting for fresh scale data before the next "
-                "load/stress correction."
+                f"load/stress correction ({self._scale_feedback_diagnostic_text()})."
             )
             self._write_control_trace(
                 decision="wait",
@@ -20575,13 +20625,7 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_csv_handle.flush()
         raw_scale_writer = csv.DictWriter(
             raw_scale_handle,
-            fieldnames=[
-                "elapsed_s",
-                "timestamp_utc",
-                "raw_load_g",
-                "applied_load_g",
-                "raw_text",
-            ],
+            fieldnames=RAW_SCALE_CSV_FIELDNAMES,
         )
         raw_scale_writer.writeheader()
         raw_scale_handle.flush()
@@ -21125,6 +21169,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "setup_csv": None if self._session_setup_csv_path is None else self._session_setup_csv_path.name,
                 "raw_scale_sample_count": int(self._session_raw_scale_count),
                 "raw_scale_session_rate_hz": self._session_raw_scale_rate_hz(),
+                "raw_scale_max_gap_s": (
+                    None if self._session_raw_scale_max_gap_s <= 0.0 else self._session_raw_scale_max_gap_s
+                ),
                 "ir_temperature_sample_count": int(self._session_ir_temperature_count),
                 "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
@@ -21469,9 +21516,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_recorded_utc = None
         self._session_recovery_path = None
         self._session_raw_scale_count = 0
+        self._session_last_raw_scale_wall_s = None
+        self._session_raw_scale_max_gap_s = 0.0
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
         self._ui_refresh_last_monotonic_s = None
+        self._last_ui_refresh_interval_ms = None
+        self._last_ui_handler_duration_ms = None
+        self._last_remote_debug_health_log_s = 0.0
         self._last_session_data_flush_s = 0.0
         self._last_session_metadata_write_s = 0.0
         self._session_metadata_dirty = False
@@ -21506,6 +21558,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_stop_session.setEnabled(True)
         self.label_session_status.setText(f"Session running -> {txt_path.parent.name}")
         self._log(f"Session started: {txt_path.parent}")
+        self._log(
+            "Remote debug logging active: "
+            f"{SESSION_RUN_LOG_TXT}, {SESSION_RAW_SCALE_CSV}, {SESSION_UI_TELEMETRY_CSV}, "
+            f"and {SESSION_CONTROL_TRACE_CSV} are written into this run folder."
+        )
+        self._log(
+            "Scale debug config: "
+            f"port={self.combo_scale_port.currentData() or '-'}, "
+            f"baud={self.combo_scale_baud.currentText()}, "
+            f"poll_interval={int(self.spin_scale_interval.value())} ms, "
+            f"request={self.edit_scale_request.text()!r}, "
+            f"terminator={self.edit_scale_terminator.text()!r}, "
+            f"read_timeout_min={SCALE_REQUEST_TIMEOUT_MIN_S:.2f} s."
+        )
         self._prepare_heating_for_session()
         self._apply_ui_refresh_interval()
         self._ui_refresh_timer.start()
@@ -21747,6 +21813,8 @@ class MainWindow(QtWidgets.QMainWindow):
         filtered_signal: ScaleControlSignal | None = None
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             filtered_signal = self._seek_filtered_control_signal(basis)
+        scale_age_s = self._scale_reading_age_s()
+        scale_recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
         try:
             voltage_limit_v = float(self.spin_supply_voltage_limit.value())
         except (AttributeError, RuntimeError, TypeError, ValueError):
@@ -21773,6 +21841,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     "filtered_sample_count": (
                         "" if filtered_signal is None else int(filtered_signal.sample_count)
                     ),
+                    "latest_scale_age_s": _number(scale_age_s),
+                    "scale_recent_rate_hz": _number(scale_recent_rate_hz),
+                    "raw_scale_sample_count": int(self._session_raw_scale_count),
+                    "raw_scale_max_gap_s": _number(
+                        None if self._session_raw_scale_max_gap_s <= 0.0 else self._session_raw_scale_max_gap_s
+                    ),
+                    "ui_actual_interval_ms": _number(self._last_ui_refresh_interval_ms),
+                    "ui_handler_duration_ms": _number(self._last_ui_handler_duration_ms),
+                    "ui_heartbeat_interval_ms": _number(self._ui_heartbeat_interval_ms),
                     "sensitivity_per_mm": _number(sensitivity_per_mm),
                     "motor_step_mm": _number(self._motor_step_mm()),
                     "correction_mm": _number(correction_mm),
@@ -21816,16 +21893,26 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         started_s = self._session_raw_scale_start_wall_s or self._session_start_wall_s
         elapsed_s = max(0.0, sample.timestamp_s - started_s)
+        previous_sample_s = self._session_last_raw_scale_wall_s
+        sample_interval_ms: float | None = None
+        if previous_sample_s is not None:
+            sample_gap_s = max(0.0, float(sample.timestamp_s) - float(previous_sample_s))
+            sample_interval_ms = sample_gap_s * 1000.0
+            self._session_raw_scale_max_gap_s = max(self._session_raw_scale_max_gap_s, sample_gap_s)
+        self._session_last_raw_scale_wall_s = float(sample.timestamp_s)
+        sample_index = self._session_raw_scale_count + 1
         self._session_raw_scale_writer.writerow(
             {
                 "elapsed_s": f"{elapsed_s:.6f}",
                 "timestamp_utc": _utc_timestamp_from_epoch(sample.timestamp_s),
+                "sample_index": sample_index,
+                "host_interval_ms": "" if sample_interval_ms is None else f"{sample_interval_ms:.3f}",
                 "raw_load_g": f"{sample.raw_g:.6f}",
                 "applied_load_g": f"{sample.applied_load_g:.6f}",
                 "raw_text": sample.raw_text,
             }
         )
-        self._session_raw_scale_count += 1
+        self._session_raw_scale_count = sample_index
         self._session_raw_scale_handle.flush()
 
     def _session_accepts_recipe_log_samples(self) -> bool:
@@ -22158,7 +22245,10 @@ class MainWindow(QtWidgets.QMainWindow):
             require_fresh_after_move = self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
         after_s = self._motion_feedback_ready_after_s() if require_fresh_after_move else None
         if self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading(after_s=after_s):
-            self._log("Point not recorded because load/stress feedback is stale after the last move.")
+            self._log(
+                "Point not recorded because load/stress feedback is stale after the last move "
+                f"({self._scale_feedback_diagnostic_text()})."
+            )
             if self._automation_active:
                 self._stop_auto_ramp(log_completion=False, offer_recovery=True)
             return False
@@ -22240,7 +22330,10 @@ class MainWindow(QtWidgets.QMainWindow):
             and self._automation_basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
         ):
-            self._log_waiting_for_feedback("Waiting for a fresh scale reading before logging the next load/stress point.")
+            self._log_waiting_for_feedback(
+                "Waiting for a fresh scale reading before logging the next load/stress point "
+                f"({self._scale_feedback_diagnostic_text()})."
+            )
             return True
         return self._record_current_point(
             quiet=quiet,
@@ -28491,6 +28584,11 @@ class MainWindow(QtWidgets.QMainWindow):
         actual_interval_ms = None if previous_ui_s is None else max(0.0, (started_s - previous_ui_s) * 1000.0)
         ui_fps = None if not actual_interval_ms or actual_interval_ms <= 0.0 else 1000.0 / actual_interval_ms
         scale_age_s = self._scale_reading_age_s()
+        handler_duration_ms = max(0.0, (finished_s - started_s) * 1000.0)
+        self._last_ui_refresh_interval_ms = actual_interval_ms
+        self._last_ui_handler_duration_ms = handler_duration_ms
+        scale_recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
+        raw_scale_session_rate_hz = self._session_raw_scale_rate_hz()
 
         def _number(value: float | None, *, decimals: int = 6) -> str:
             if value is None or not math.isfinite(float(value)):
@@ -28506,7 +28604,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ui_fps": _number(ui_fps, decimals=3),
                 "ui_heartbeat_interval_ms": _number(self._ui_heartbeat_interval_ms, decimals=3),
                 "ui_heartbeat_fps": _number(self._ui_heartbeat_fps, decimals=3),
-                "handler_duration_ms": _number(max(0.0, (finished_s - started_s) * 1000.0), decimals=3),
+                "handler_duration_ms": _number(handler_duration_ms, decimals=3),
                 "graph_refresh_interval_ms": int(self._graph_refresh_interval_ms()),
                 "task_text": self._current_task_summary(),
                 "automation_active": int(bool(self._automation_active)),
@@ -28519,6 +28617,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 "live_plot_sample_recorded": int(bool(live_plot_sample_recorded)),
                 "dashboard_plot_refreshed": int(bool(dashboard_plot_refreshed)),
                 "latest_scale_age_s": _number(scale_age_s, decimals=3),
+                "scale_recent_rate_hz": _number(scale_recent_rate_hz, decimals=3),
+                "raw_scale_sample_count": int(self._session_raw_scale_count),
+                "raw_scale_session_rate_hz": _number(raw_scale_session_rate_hz, decimals=3),
+                "raw_scale_max_gap_s": _number(
+                    None if self._session_raw_scale_max_gap_s <= 0.0 else self._session_raw_scale_max_gap_s,
+                    decimals=3,
+                ),
                 "session_points": len(self._session_points),
                 "live_plot_points": len(self._live_plot_points),
             }
@@ -28526,6 +28631,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ui_telemetry_count += 1
         if self._session_ui_telemetry_count % 10 == 0:
             self._session_ui_telemetry_handle.flush()
+        self._maybe_log_remote_debug_health(
+            scale_age_s=scale_age_s,
+            scale_recent_rate_hz=scale_recent_rate_hz,
+            raw_scale_session_rate_hz=raw_scale_session_rate_hz,
+            actual_interval_ms=actual_interval_ms,
+            handler_duration_ms=handler_duration_ms,
+            dashboard_plot_refreshed=dashboard_plot_refreshed,
+            live_plot_sample_recorded=live_plot_sample_recorded,
+        )
+
+    def _maybe_log_remote_debug_health(
+        self,
+        *,
+        scale_age_s: float | None,
+        scale_recent_rate_hz: float | None,
+        raw_scale_session_rate_hz: float | None,
+        actual_interval_ms: float | None,
+        handler_duration_ms: float | None,
+        dashboard_plot_refreshed: bool,
+        live_plot_sample_recorded: bool,
+    ) -> None:
+        if not self._session_active:
+            return
+        now_s = time.monotonic()
+        if now_s - self._last_remote_debug_health_log_s < REMOTE_DEBUG_HEALTH_LOG_INTERVAL_S:
+            return
+        self._last_remote_debug_health_log_s = now_s
+
+        def _fmt(value: float | None, suffix: str = "", *, decimals: int = 3) -> str:
+            if value is None:
+                return "-"
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return "-"
+            if not math.isfinite(numeric):
+                return "-"
+            return f"{numeric:.{decimals}f}{suffix}"
+
+        task = self._current_task_summary()
+        freshness = "none" if scale_age_s is None else ("stale" if scale_age_s > STALE_SCALE_AFTER_S else "fresh")
+        self._log(
+            "Remote debug health: "
+            f"task={task}; scale={freshness}, age={_fmt(scale_age_s, ' s')}, "
+            f"recent_rate={_fmt(scale_recent_rate_hz, ' Hz')}, "
+            f"raw_count={self._session_raw_scale_count}, "
+            f"raw_session_rate={_fmt(raw_scale_session_rate_hz, ' Hz')}, "
+            f"raw_max_gap={_fmt(self._session_raw_scale_max_gap_s if self._session_raw_scale_max_gap_s > 0 else None, ' s')}; "
+            f"ui_interval={_fmt(actual_interval_ms, ' ms')}, "
+            f"ui_handler={_fmt(handler_duration_ms, ' ms')}, "
+            f"heartbeat={_fmt(self._ui_heartbeat_interval_ms, ' ms')}; "
+            f"points={len(self._session_points)}, live_points={len(self._live_plot_points)}, "
+            f"live_plot_sample={int(bool(live_plot_sample_recorded))}, "
+            f"plot_refresh={int(bool(dashboard_plot_refreshed))}."
+        )
 
     def _record_live_plot_sample_from_ui_refresh(self) -> tuple[bool, bool]:
         if (

@@ -24199,18 +24199,58 @@ def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
     try:
         window._start_session()
         window._log("diagnostic line for shared run folder")
+        now_s = time.time()
+        window._handle_scale_measurement(57.10, "S S      57.10 g", now_s)
+        window._handle_scale_measurement(57.09, "S S      57.09 g", now_s + 0.05)
+        window._write_control_trace(
+            decision="wait",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            result="waiting",
+            reason="test_remote_debug",
+        )
+        window._write_ui_telemetry_sample(
+            started_s=time.monotonic(),
+            finished_s=time.monotonic(),
+            previous_ui_s=None,
+            scale_sample_changed=True,
+            dialog_sample_recorded=False,
+            live_plot_sample_recorded=True,
+            dashboard_plot_refreshed=False,
+        )
         run_log_path = window._session_run_log_path
+        raw_scale_path = window._session_raw_scale_path
+        control_trace_path = window._session_control_trace_path
+        ui_telemetry_path = window._session_ui_telemetry_path
         window._stop_session(reason="recipe_completed", detail="Recipe completed.")
 
         assert run_log_path is not None
         assert run_log_path.name == mini_dma_mod.SESSION_RUN_LOG_TXT
         text = run_log_path.read_text(encoding="utf-8")
         assert "Session started" in text
+        assert "Remote debug logging active" in text
+        assert "Scale debug config" in text
+        assert "Remote debug health" in text
         assert "diagnostic line for shared run folder" in text
         assert "Session stopped" in text
+        assert raw_scale_path is not None
+        raw_rows = list(csv.DictReader(raw_scale_path.open("r", encoding="utf-8")))
+        assert raw_rows[-1]["sample_index"] == "2"
+        assert float(raw_rows[-1]["host_interval_ms"]) == pytest.approx(50.0, abs=0.01)
+        assert control_trace_path is not None
+        trace_rows = list(csv.DictReader(control_trace_path.open("r", encoding="utf-8")))
+        assert trace_rows[-1]["latest_scale_age_s"] != ""
+        assert "scale_recent_rate_hz" in trace_rows[-1]
+        assert trace_rows[-1]["raw_scale_sample_count"] == "2"
+        assert ui_telemetry_path is not None
+        telemetry_rows = list(csv.DictReader(ui_telemetry_path.open("r", encoding="utf-8")))
+        assert "scale_recent_rate_hz" in telemetry_rows[-1]
+        assert telemetry_rows[-1]["raw_scale_sample_count"] == "2"
         assert window._session_json_path is not None
         payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
         assert payload["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+        assert payload["logging"]["raw_scale_max_gap_s"] == pytest.approx(0.05)
+        assert "remote_debugging_observability" in payload["control_logic"]["features"]
     finally:
         _close_test_window(window)
 
