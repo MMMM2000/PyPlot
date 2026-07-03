@@ -98,7 +98,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-03.3"
+CONTROL_LOGIC_VERSION = "2026-07-03.4"
 CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -141,6 +141,7 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_held_recovery_uses_earned_resume_band",
     "kern_kcp_held_recovery_preserves_base_resume_confirmation",
     "kern_kcp_earned_resume_ignores_noise_inflated_pause_band",
+    "kern_kcp_iso_current_settle_uses_processed_timed_recovery",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -3677,7 +3678,7 @@ class MiniDmaAutomationController:
             return
         if setup_settle_phase and setup_points_before == len(host._length_setup_points):
             host._record_length_setup_point()
-        current_sweep_timed_settle = host._is_current_sweep_mode(host._automation_name)
+        current_sweep_timed_settle = host._settle_uses_timed_target_recovery()
         if setup_settle_phase:
             current_sweep_timed_settle = False
         if not settle_target_reached and not current_sweep_timed_settle:
@@ -15573,6 +15574,17 @@ class MainWindow(QtWidgets.QMainWindow):
             ELASTOCALORIC_EFFECT,
         }
 
+    def _kern_iso_current_uses_processed_seek_signal(self, mode: str | None = None) -> bool:
+        return self._using_kern_kcp_scale() and self._is_iso_current_mode(mode)
+
+    def _seek_uses_processed_scale_signal(self) -> bool:
+        return self._is_current_sweep_mode(self._automation_name) or self._kern_iso_current_uses_processed_seek_signal(
+            self._automation_name
+        )
+
+    def _settle_uses_timed_target_recovery(self) -> bool:
+        return self._is_current_sweep_mode(self._automation_name) or self._is_iso_current_mode(self._automation_name)
+
     def _is_calibration_mode(self, mode: str | None = None) -> bool:
         default_mode = self.combo_recipe_mode.currentData() if hasattr(self, "combo_recipe_mode") else self._automation_name
         return str(mode if mode is not None else default_mode or "") in CALIBRATION_MODES
@@ -17257,9 +17269,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _seek_filtered_control_signal(self, basis: str) -> ScaleControlSignal | None:
-        if not self._is_current_sweep_mode(self._automation_name):
+        if not self._seek_uses_processed_scale_signal():
             return None
-        if self._automation_phase not in {"current", "current_hold"}:
+        allowed_phases = {"current", "current_hold"}
+        if self._kern_iso_current_uses_processed_seek_signal(self._automation_name):
+            allowed_phases |= {"target_ramp", "settle"}
+        if self._automation_phase not in allowed_phases:
             return None
         return self._scale_control_signal_for_basis(basis)
 
@@ -18222,7 +18237,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 return True
         if filtered_signal is not None:
             noise_component = filtered_signal.noise * self._current_sweep_hold_noise_sigma()
-            if self._is_current_sweep_mode(self._automation_name):
+            if (
+                self._is_current_sweep_mode(self._automation_name)
+                or self._kern_iso_current_uses_processed_seek_signal(self._automation_name)
+            ):
                 noise_component = self._current_sweep_bounded_noise_band(
                     basis,
                     filtered_signal.noise,

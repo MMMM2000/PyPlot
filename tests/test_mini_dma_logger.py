@@ -12371,6 +12371,111 @@ def test_current_sweep_settle_advances_after_timed_recovery_even_if_target_is_no
         _close_test_window(window)
 
 
+def test_iso_current_settle_advances_after_timed_recovery_even_if_target_is_noisy(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    attempts = {"count": 0}
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    def _fake_seek(*_args: object, **_kwargs: object) -> bool:
+        attempts["count"] += 1
+        return False
+
+    window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=10.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            duration_s=1.0,
+            note="1:transition_settle",
+        )
+    ]
+    window._automation_total_steps = 1
+    window._automation_index = 0
+
+    try:
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 0
+        assert window._active_timed_step_index == 0
+
+        now_s[0] = 101.2
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 1
+        assert window._active_timed_step_index is None
+        assert attempts["count"] == 2
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_kern_iso_current_settle_uses_processed_window_instead_of_latest_spike(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        moves.append(target_mm)
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.combo_scale_baud.setCurrentText("256000")
+    window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+    window.spin_diameter.setValue(0.0182)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+    window._set_automation_context(
+        phase="settle",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=10.0,
+    )
+    for index, stress_mpa in enumerate((9.8, 10.0, 10.1, 10.2, 65.0)):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.05
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            tolerance=0.3,
+        )
+
+        assert reached is True
+        assert moves == []
+        assert trace_rows[-1]["decision"] == "accept"
+        assert trace_rows[-1]["current_value"] == pytest.approx(10.1)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_setup_preload_settle_locks_motor_instead_of_chasing_target(
     tmp_path: Path,
     qtbot,
