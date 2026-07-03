@@ -78,6 +78,7 @@ SESSION_METADATA_JSON = "metadata.json"
 SESSION_RAW_SCALE_CSV = "scale_raw.csv"
 SESSION_IR_TEMPERATURE_CSV = "ir_temperature.csv"
 SESSION_CONTROL_TRACE_CSV = "control_trace.csv"
+SESSION_RUN_LOG_TXT = "run_log.txt"
 SESSION_SETUP_TX = "setup.txt"
 RUNTIME_LOCKED_SPINBOX_STYLE = (
     "QDoubleSpinBox {"
@@ -5674,6 +5675,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_json_path: Path | None = None
         self._session_raw_scale_path: Path | None = None
         self._session_control_trace_path: Path | None = None
+        self._session_run_log_path: Path | None = None
+        self._session_run_log_write_failed = False
         self._session_ui_telemetry_path: Path | None = None
         self._session_setup_txt_path: Path | None = None
         self._session_setup_csv_path: Path | None = None
@@ -9777,6 +9780,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._flush_pending_run_log_lines()
         else:
             self._schedule_run_log_flush()
+        if self._session_run_log_path is not None and not self._session_run_log_write_failed:
+            try:
+                append_text_with_rotation(self._session_run_log_path, line + "\n")
+            except Exception:
+                self._session_run_log_write_failed = True
+                self._pending_run_log_lines.append(
+                    f"[{timestamp}] Per-run log mirror disabled because writing "
+                    f"{self._session_run_log_path} failed."
+                )
+                self._schedule_run_log_flush()
         if self._run_log_mirror_enabled:
             try:
                 append_text_with_rotation(self._run_log_mirror_path, line + "\n")
@@ -21102,6 +21115,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "control_trace_csv": None
                 if self._session_control_trace_path is None
                 else self._session_control_trace_path.name,
+                "run_log_txt": None
+                if self._session_run_log_path is None
+                else self._session_run_log_path.name,
                 "ui_telemetry_csv": None
                 if self._session_ui_telemetry_path is None
                 else self._session_ui_telemetry_path.name,
@@ -21481,6 +21497,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_path = raw_scale_path
         self._session_ir_temperature_path = ir_temperature_path
         self._session_control_trace_path = control_trace_path
+        self._session_run_log_path = txt_path.parent / SESSION_RUN_LOG_TXT
+        self._session_run_log_write_failed = False
         self._session_ui_telemetry_path = ui_telemetry_path
         self._session_setup_txt_path = setup_txt_path
         self._session_setup_csv_path = setup_csv_path
@@ -21630,6 +21648,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
         self._refresh_live_labels()
+        self._session_run_log_path = None
+        self._session_run_log_write_failed = False
 
     def _start_run_summary_generation(self, run_dir: Path, *, offer_cleanup: bool = False) -> None:
         def _worker() -> None:
@@ -25768,6 +25788,19 @@ class MainWindow(QtWidgets.QMainWindow):
         stop_reason: str | None = None,
         stop_detail: str | None = None,
     ) -> None:
+        if not self._is_ui_thread():
+            self._automation_paused = True
+            self._run_on_ui_thread(
+                lambda: self._stop_auto_ramp(
+                    log_completion=log_completion,
+                    keep_progress=keep_progress,
+                    user_initiated=user_initiated,
+                    offer_recovery=offer_recovery,
+                    stop_reason=stop_reason,
+                    stop_detail=stop_detail,
+                )
+            )
+            return
         if not self._automation_active:
             return
         if stop_reason is not None:

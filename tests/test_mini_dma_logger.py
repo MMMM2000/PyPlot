@@ -24138,6 +24138,83 @@ def test_control_worker_error_finalizes_session_and_summary(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
+def test_worker_thread_stop_auto_ramp_marshals_to_ui_thread(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_worker_thread_stop")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
+    callbacks: list[object] = []
+    original_ui_thread_id = window._ui_thread_id
+    original_run_on_ui_thread = window._run_on_ui_thread
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("sweep_current", note="test")]
+        window._automation_index = 0
+
+        window._ui_thread_id = -1
+        window._run_on_ui_thread = lambda callback: callbacks.append(callback)  # type: ignore[method-assign]
+        window._stop_auto_ramp(
+            log_completion=False,
+            offer_recovery=True,
+            stop_reason="recipe_control_stop",
+            stop_detail="Scale feedback was stale during current hold.",
+        )
+
+        assert window._automation_paused is True
+        assert window._automation_active is True
+        assert len(callbacks) == 1
+
+        window._ui_thread_id = original_ui_thread_id
+        window._run_on_ui_thread = original_run_on_ui_thread  # type: ignore[method-assign]
+        callback = callbacks.pop()
+        assert callable(callback)
+        callback()
+
+        assert window._automation_active is False
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_control_stop"
+        assert payload["stop"]["detail"] == "Scale feedback was stale during current hold."
+        assert window._session_base_path is not None
+        assert requested == [(window._session_base_path.parent, False)]
+    finally:
+        window._ui_thread_id = original_ui_thread_id
+        window._run_on_ui_thread = original_run_on_ui_thread  # type: ignore[method-assign]
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_run_log")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._log("diagnostic line for shared run folder")
+        run_log_path = window._session_run_log_path
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        assert run_log_path is not None
+        assert run_log_path.name == mini_dma_mod.SESSION_RUN_LOG_TXT
+        text = run_log_path.read_text(encoding="utf-8")
+        assert "Session started" in text
+        assert "diagnostic line for shared run folder" in text
+        assert "Session stopped" in text
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+    finally:
+        _close_test_window(window)
+
+
 def test_session_metadata_does_not_replace_fault_stop_with_app_closed(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("metadata_fault_then_app_closed")
