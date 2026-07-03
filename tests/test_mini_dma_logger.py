@@ -12275,6 +12275,9 @@ def test_setup_preload_settle_locks_motor_instead_of_chasing_target(
     seek_calls: list[tuple[object, ...]] = []
 
     monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+    window.combo_scale_baud.setCurrentText("256000")
+    window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
 
     def _fake_seek(*_args: object, **_kwargs: object) -> bool:
         seek_calls.append(_args)
@@ -12319,6 +12322,62 @@ def test_setup_preload_settle_locks_motor_instead_of_chasing_target(
         assert window._active_timed_step_index is None
         assert seek_calls == []
         assert len(window._length_setup_points) == 3
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_prague_setup_preload_settle_keeps_target_stability_requirement(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    seek_results = [False, True, True]
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+    window.combo_scale_baud.setCurrentText("9600")
+    window.edit_scale_request.setText(mini_dma_mod.GNG_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.GNG_SCALE_TERMINATOR)
+
+    def _fake_seek(*_args: object, **_kwargs: object) -> bool:
+        return seek_results.pop(0)
+
+    window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=20.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            duration_s=3.0,
+            note="setup_preload",
+        )
+    ]
+    window._automation_total_steps = 1
+    window._automation_index = 0
+
+    try:
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_active is True
+        assert window._automation_index == 0
+        assert window._active_timed_step_index is None
+
+        now_s[0] = 101.0
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 0
+        assert window._active_timed_step_index == 0
+
+        now_s[0] = 104.1
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 1
+        assert window._active_timed_step_index is None
+        assert seek_results == []
     finally:
         window._automation_active = False
         _close_test_window(window)

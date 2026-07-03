@@ -2,7 +2,7 @@
 
 ## 2026-07-03 06:30 UTC
 
-- Changed TMA length setup so the setup-preload settle phase holds motor position and records the actual settled load/stress instead of continuing closed-loop preload corrections.
+- Changed TMA length setup so the fast Košice KERN/KCP setup-preload settle phase holds motor position and records the actual settled load/stress instead of continuing closed-loop preload corrections, while the Prague G&G profile keeps the previous continuous target-stability setup behavior.
 
 ## 2026-07-03 00:30 UTC
 

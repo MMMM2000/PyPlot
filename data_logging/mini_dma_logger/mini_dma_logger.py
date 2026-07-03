@@ -3574,7 +3574,7 @@ class MiniDmaAutomationController:
         host._timed_step_elapsed_s(step_index)
         plateau_index = int(step.note) if step.note.isdigit() else None
         setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}
-        setup_preload_locked_settle = step.note == "setup_preload"
+        setup_preload_locked_settle = step.note == "setup_preload" and host._setup_preload_uses_locked_settle()
         host._set_automation_context(
             phase="settle",
             basis=step.basis,
@@ -26946,6 +26946,9 @@ class MainWindow(QtWidgets.QMainWindow):
             and str(terminator or "") == KERN_KCP_SCALE_TERMINATOR
             and str(request or "") in {KERN_KCP_SCALE_REQUEST, "S"}
         )
+
+    def _setup_preload_uses_locked_settle(self) -> bool:
+        return self._using_kern_kcp_scale()
 
     def _scale_quantization_band_for_basis(self, basis: str) -> float:
         readability_g = self._scale_readability_g()
