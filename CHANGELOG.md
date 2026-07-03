@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-07-03 00:30 UTC
+
+- Added high-speed KERN KCP scale support for the Kosice TMA bench, including 128000/256000 baud auto-detect, a 256000 baud `SI`/CRLF preset, and Prague G&G defaults kept at 9600 baud `ESC+p` / 250 ms.
+- Made TMA hardware auto-connect faster and safer for the Kosice setup: sample names refresh from split wire tokens, scale probing avoids long serial scans, HMP4030/HMP4040 defaults bring up CH2 motor power before Tic VIN checks, and shared-HMP defaults use CH2 for the Tic motor rail plus CH3 for microwire current sweep.
+- Updated KERN fast-scale control to be scale-profile aware, quantization-aware, response-based, and free of fixed MPa hold thresholds; KERN current-hold recovery now uses bounded drift recovery, earned resume, latest-sample lag clearing, setup-specific preload caps, and simulator calibration from the observed fast-feedback runs while leaving Prague-scale behavior unchanged.
+- Added Kosice KERN full-run simulation and validation coverage using the observed approximately 16 Hz effective raw scale cadence, mounted-wire geometry, 0.01 g readability, controller wait overhead, and multi-seed adaptive-cap checks.
+- Let bench plans and campaign manifests pin serial/HMP/Tic hardware settings, tolerate UTF-8 BOM markers, safe-off the configured HMP current and motor channels, and set Tic full steps/mm, step mode, winding-current limit, max speed, max acceleration, and max deceleration before unattended runs.
+- TMA manual auto-connect, recipe preflight, and bench provisioning now apply and verify Tic step/current/motion settings; stopped recipes restore the configured idle motion limits after dynamic per-move speed caps.
+- The shared HMP broker now enforces confirmed channel voltage/current limits, and TMA supplies planned current-sweep and motor-rail limits when it builds or auto-starts a shared-broker controller.
+- Documented that TMA can set and auto-detect the KERN PC-side serial preset, while internal balance menu settings such as `prMode`, `triG`, `cont`, speed, zero, and stability remain manual unless a safe KERN remote-write path is verified.
+
 ## 2026-06-29 13:25 UTC
 
 - Removed the TMA current-sweep mechanical load-loss stop condition so near-zero load during target acquisition no longer disables current or stops a recipe when electrical continuity/current feedback can still indicate an intact wire.
