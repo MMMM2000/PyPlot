@@ -9170,17 +9170,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 editor.setProperty("_mini_dma_wheel_guard", True)
                 editor.installEventFilter(self)
 
-    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
-        if (
-            event.type() == QtCore.QEvent.Type.Wheel
-            and isinstance(watched, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox, QtWidgets.QLineEdit))
-            and watched.property("_mini_dma_wheel_guard")
-        ):
-            if isinstance(watched, QtWidgets.QComboBox) and watched.view().isVisible():
-                return super().eventFilter(watched, event)
-            self._scroll_control_panel_from_wheel(event)
-            return True
-        return super().eventFilter(watched, event)
+    def _wheel_guard_widget(self, watched: QtCore.QObject | None) -> QtWidgets.QWidget | None:
+        current = watched
+        while current is not None:
+            if (
+                isinstance(current, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox, QtWidgets.QLineEdit))
+                and current.property("_mini_dma_wheel_guard")
+            ):
+                return current
+            current = current.parent()
+        return None
+
+    def _handle_settings_wheel_guard_event(
+        self,
+        watched: QtCore.QObject | None,
+        event: QtCore.QEvent,
+    ) -> bool:
+        if event.type() != QtCore.QEvent.Type.Wheel:
+            return False
+        guarded = self._wheel_guard_widget(watched)
+        if guarded is None:
+            return False
+        if isinstance(guarded, QtWidgets.QComboBox) and guarded.view().isVisible():
+            return False
+        self._scroll_control_panel_from_wheel(event)
+        return True
 
     def _scroll_control_panel_from_wheel(self, event: QtCore.QEvent) -> None:
         if not isinstance(event, QtGui.QWheelEvent):
@@ -11610,6 +11624,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_name_wire.dismiss_available_completions(suppress_ms=250)
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: N802
+        if self._handle_settings_wheel_guard_event(watched, event):
+            return True
         if (
             watched is QtWidgets.QApplication.instance()
             and event.type() == QtCore.QEvent.Type.ApplicationDeactivate
