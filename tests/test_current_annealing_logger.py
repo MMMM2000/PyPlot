@@ -2180,6 +2180,43 @@ def test_shared_broker_measurement_recovers_when_owner_broker_disappears(
     assert window.current_resistance == pytest.approx(150.0)
 
 
+def test_current_annealing_rejects_first_sample_from_previous_setpoint(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    fake.readbacks = [{"voltage_V": 4.8, "current_mA": 29.0}]
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.operation_mode = 2
+    window.process_running = True
+    window.first_sample = True
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.current_increment = 0.001
+    window.current_current_set = 0.001
+    window.max_current_mA = 100
+
+    window.handle_send_new_command()
+
+    assert window.first_sample is True
+    assert window.current_current_set == pytest.approx(0.001)
+    assert window._samples_current == []
+    assert window._samples_resistance == []
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 1.0,
+            "rate_mA_s": 1.0,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
+
+
 def test_shared_broker_measurement_prefers_cached_scheduler_readback(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

@@ -3601,18 +3601,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.progressBar_process.setMaximum(self.total_steps)
             self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
 
-    def _record_acquired_sample(self, *, record_voltage_progress: bool = False) -> None:
+    def _first_sample_current_matches_setpoint(self, current_mA: float) -> bool:
+        if not bool(getattr(self, "first_sample", False)):
+            return True
+        try:
+            target_mA = max(0.0, float(getattr(self, "current_current_set", 0.0) or 0.0) * 1000.0)
+        except Exception:
+            return True
+        if not math.isfinite(target_mA) or target_mA <= 0.0:
+            return True
+        try:
+            resolution_mA = float(self._current_resolution_mA())
+        except Exception:
+            resolution_mA = 0.2
+        try:
+            step_mA = abs(float(getattr(self, "current_step_mA", resolution_mA) or resolution_mA))
+        except Exception:
+            step_mA = resolution_mA
+        tolerance_mA = max(2.0 * resolution_mA, 2.0 * step_mA, 0.25 * target_mA)
+        return abs(float(current_mA) - target_mA) <= tolerance_mA
+
+    def _record_acquired_sample(self, *, record_voltage_progress: bool = False) -> bool:
         """Write, plot, and account for the latest accepted measurement once."""
 
         if self._skip_current_sample:
-            return
+            return False
         try:
             current_mA = float(self.curr_value_x)
             resistance = float(self.curr_value_y)
         except Exception:
-            return
+            return False
         if not self._measurement_sample_is_plottable(current_mA, resistance):
-            return
+            return False
+        if not self._first_sample_current_matches_setpoint(current_mA):
+            return False
         initial_sample = self.first_sample
         self._write_sample_to_file(initial_sample=initial_sample)
         if self.first_sample:
@@ -3622,9 +3644,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._record_sample_progress()
         if record_voltage_progress:
             self._record_voltage_progress()
+        return True
 
-    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> None:
-        self._record_acquired_sample(record_voltage_progress=record_voltage_progress)
+    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> bool:
+        return self._record_acquired_sample(record_voltage_progress=record_voltage_progress)
 
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
         spin = getattr(self.ui, 'spinBox_loops', None)
@@ -5169,7 +5192,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            self._record_acquired_sample()
+            if not self._record_acquired_sample():
+                if self.process_running:
+                    self._send_current_setpoint()
+                return
 
 
             # Iterate the current set point
@@ -5226,7 +5252,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            self._record_acquired_sample(record_voltage_progress=True)
+            if not self._record_acquired_sample(record_voltage_progress=True):
+                if self.process_running:
+                    self._send_current_setpoint()
+                return
 
             # Reverse or stop immediately at the configured maximum current.
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
