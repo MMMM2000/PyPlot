@@ -222,6 +222,7 @@ PLOT_AXIS_VOLTAGE = "voltage"
 PLOT_AXIS_CURRENT_DENSITY = "current_density"
 PLOT_AXIS_POWER_MW = "power_mw"
 PLOT_AXIS_NONE = "none"
+MIN_PLOTTABLE_RESISTANCE_OHM = 1.0
 PLOT_X_AXIS_CHOICES = (
     (PLOT_AXIS_CURRENT_MA, "Current", "mA"),
     (PLOT_AXIS_SAMPLE_N, "N", ""),
@@ -2302,7 +2303,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if current_mA < self._minimum_plottable_current_mA():
             return False
-        return resistance > 0.0
+        return resistance >= MIN_PLOTTABLE_RESISTANCE_OHM
 
     def _append_measurement_sample(self, current_mA: float, resistance: float, voltage: float | None = None) -> None:
         if not self._measurement_sample_is_plottable(current_mA, resistance):
@@ -3327,6 +3328,13 @@ class MainWindow(QtWidgets.QMainWindow):
             start_scheduler(tick_s=0.05)
 
     def _read_shared_broker_sample(self) -> bool:
+        if self._read_shared_broker_sample_once():
+            return True
+        if self.process_running and self._recover_shared_broker_connection():
+            return self._read_shared_broker_sample_once()
+        return False
+
+    def _read_shared_broker_sample_once(self) -> bool:
         channel = self._shared_broker_channel()
         client = self._get_shared_broker_client()
         readback = None
@@ -3366,6 +3374,31 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{float(current_mA):.6g} mA"
         )
         self.sample_ready = True
+        return True
+
+    def _recover_shared_broker_connection(self) -> bool:
+        self._show_status_message(
+            "Shared HMP broker stopped responding; trying to reconnect without stopping the annealing run.",
+            timeout_ms=12000,
+        )
+        self._shared_broker_client = None
+        self._shared_broker_lease_id = None
+        self._shared_broker_role_checked_channel = None
+        self._shared_broker_current_limit_mA = None
+        try:
+            self._connect_shared_broker_mode()
+            self._initialize_shared_broker_output()
+        except Exception as exc:
+            self._show_status_message(
+                "Shared HMP broker recovery failed: "
+                + broker_failure_diagnostic(exc, context="Current Annealing shared HMP broker"),
+                timeout_ms=15000,
+            )
+            return False
+        self._show_status_message(
+            f"Recovered shared HMP broker on CH{self._shared_broker_channel()}; annealing run continues.",
+            timeout_ms=12000,
+        )
         return True
 
     def _set_shared_broker_current(self) -> None:

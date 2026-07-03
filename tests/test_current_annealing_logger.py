@@ -2032,7 +2032,7 @@ def test_record_acquired_sample_writes_each_non_initial_sample_once(tmp_path, qt
     assert window._samples_resistance == [250.0, 200.0]
 
 
-def test_invalid_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:
+def test_invalid_near_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     window.f_name = str(tmp_path / "annealing.tsv")
@@ -2041,10 +2041,10 @@ def test_invalid_zero_resistance_readback_does_not_consume_first_sample(tmp_path
     window._reset_sample_buffers()
 
     window.curr_value_x = 1.0
-    window.curr_value_y = 0.0
+    window.curr_value_y = 0.25
     window.current_current_read = 0.001
-    window.current_voltage = 0.0
-    window.current_resistance = 0.0
+    window.current_voltage = 0.00025
+    window.current_resistance = 0.25
     window._record_acquired_sample()
 
     window.curr_value_x = 1.0
@@ -2121,6 +2121,63 @@ def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot)
     assert window.current_current_read == pytest.approx(0.010)
     assert window.current_resistance == pytest.approx(250.0)
     assert fake.calls == [("measure_channel", {"channel": 1})]
+
+
+def test_shared_broker_measurement_recovers_when_owner_broker_disappears(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    class _DeadBrokerClient(_FakeBrokerClient):
+        def measure_channel(self, *, channel: int) -> dict[str, float]:
+            self.calls.append(("measure_channel", {"channel": channel}))
+            raise RuntimeError("broker missing")
+
+    dead = _DeadBrokerClient()
+    recovered = _FakeBrokerClient()
+    recovered.readbacks = [{"voltage_V": 3.75, "current_mA": 25.0}]
+    window._shared_broker_client = dead
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "dead-lease"
+    window.max_voltage = 30.0
+    window.current_current_set = 0.025
+    window.process_running = True
+
+    def _connect_recovered_broker() -> None:
+        window._shared_broker_client = recovered
+        window.is_connected = True
+
+    monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect_recovered_broker)
+
+    assert window._read_shared_broker_sample() is True
+
+    assert dead.calls == [
+        ("measure_channel", {"channel": 1}),
+        ("measure_channel", {"channel": 1}),
+    ]
+    assert recovered.calls == [
+        ("snapshot", {}),
+        ("lease", {"channel": 1, "owner": "current_annealing_logger", "role": "current_annealing"}),
+        (
+            "configure_channel",
+            {
+                "channel": 1,
+                "lease_id": "lease-1",
+                "voltage_v": 30.0,
+                "current_a": 0.025,
+                "output_on": True,
+            },
+        ),
+        ("measure_channel", {"channel": 1}),
+    ]
+    assert window.process_running is True
+    assert window._shared_broker_lease_id == "lease-1"
+    assert window.current_voltage == pytest.approx(3.75)
+    assert window.current_current_read == pytest.approx(0.025)
+    assert window.current_resistance == pytest.approx(150.0)
 
 
 def test_shared_broker_measurement_prefers_cached_scheduler_readback(qtbot) -> None:
