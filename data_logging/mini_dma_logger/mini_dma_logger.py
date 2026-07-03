@@ -3570,9 +3570,11 @@ class MiniDmaAutomationController:
             host._update_recipe_progress()
             host._refresh_live_labels()
             return
+        first_timed_tick = host._active_timed_step_index != step_index
         host._timed_step_elapsed_s(step_index)
         plateau_index = int(step.note) if step.note.isdigit() else None
         setup_settle_phase = step.note in {"setup_preload", "setup_return_zero"}
+        setup_preload_locked_settle = step.note == "setup_preload"
         host._set_automation_context(
             phase="settle",
             basis=step.basis,
@@ -3580,6 +3582,30 @@ class MiniDmaAutomationController:
             plateau_index=plateau_index,
             note=step.note,
         )
+        if setup_preload_locked_settle:
+            if first_timed_tick:
+                if step.basis and step.target_value is not None:
+                    seek_key = host._seek_error_key(step.basis, step.target_value)
+                    host._clear_seek_state(seek_key)
+                    current_value = host._current_distribution_value(step.basis)
+                    host._write_control_trace(
+                        decision="settle",
+                        basis=step.basis,
+                        target_value=step.target_value,
+                        current_value=current_value,
+                        error_value=None if current_value is None else step.target_value - current_value,
+                        tolerance=host._automation_tolerance_for_step(step),
+                        result="motor_locked",
+                        reason="setup_preload_locked_settle",
+                    )
+                host._log(
+                    "Setup preload reached; holding motor position during preload settle "
+                    "instead of chasing the balance target."
+                )
+            host._record_length_setup_point()
+            if not host._timed_step_finished(step, step_index) and host._automation_active:
+                host._automation_index -= 1
+            return
         settle_target_reached = True
         setup_points_before = len(host._length_setup_points) if setup_settle_phase else None
         if (

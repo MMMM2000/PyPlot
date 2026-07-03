@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-07-03 06:30 UTC
+
+- Changed TMA length setup so the setup-preload settle phase holds motor position and records the actual settled load/stress instead of continuing closed-loop preload corrections.
+
 ## 2026-07-03 00:30 UTC
 
 - Added high-speed KERN KCP scale support for the Kosice TMA bench, including 128000/256000 baud auto-detect, a 256000 baud `SI`/CRLF preset, and Prague G&G defaults kept at 9600 baud `ESC+p` / 250 ms.

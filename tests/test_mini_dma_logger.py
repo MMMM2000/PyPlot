@@ -12265,19 +12265,20 @@ def test_current_sweep_settle_advances_after_timed_recovery_even_if_target_is_no
         _close_test_window(window)
 
 
-def test_setup_preload_settle_requires_continuous_target_stability_in_current_sweep(
+def test_setup_preload_settle_locks_motor_instead_of_chasing_target(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     now_s = [100.0]
-    seek_results = [False, True, True]
+    seek_calls: list[tuple[object, ...]] = []
 
     monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
 
     def _fake_seek(*_args: object, **_kwargs: object) -> bool:
-        return seek_results.pop(0)
+        seek_calls.append(_args)
+        raise AssertionError("setup preload settle must not send correction moves")
 
     window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
     window._automation_active = True
@@ -12299,19 +12300,25 @@ def test_setup_preload_settle_requires_continuous_target_stability_in_current_sw
 
         assert window._automation_active is True
         assert window._automation_index == 0
-        assert window._active_timed_step_index is None
+        assert window._active_timed_step_index == 0
+        assert seek_calls == []
+        assert len(window._length_setup_points) == 1
 
         now_s[0] = 101.0
         window._handle_auto_ramp_tick()
 
         assert window._automation_index == 0
         assert window._active_timed_step_index == 0
+        assert seek_calls == []
+        assert len(window._length_setup_points) == 2
 
         now_s[0] = 104.1
         window._handle_auto_ramp_tick()
 
         assert window._automation_index == 1
         assert window._active_timed_step_index is None
+        assert seek_calls == []
+        assert len(window._length_setup_points) == 3
     finally:
         window._automation_active = False
         _close_test_window(window)
