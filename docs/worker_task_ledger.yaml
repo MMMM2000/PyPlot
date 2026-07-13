@@ -1,12 +1,180 @@
 ledger:
-  updated_utc: "2026-06-19 07:25"
-  integration_branch: "codex/integration-mini-dma-ready-review"
+  updated_utc: "2026-07-13 11:30"
+  integration_branch: "codex/integration-tma-kosice-offline"
   notes: >
     Master coordination ledger for active and recently handed-off PyPlot worker
     branches. Update this before integrating worker branches or creating new
     workers so pending work is not tracked only in chat.
 
 tasks:
+  - id: "tma-kosice-offline-optimization"
+    title: "TMA Kosice offline response optimization"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "019f5aa3-b02a-7010-9ff5-2fb9b52b2d1a"
+      thread_title: "TMA Kosice offline optimization"
+      role: "worker"
+    git:
+      base_branch: "origin/main"
+      branch: "codex/tma-kosice-offline-optimization"
+      upstream: "origin/codex/tma-kosice-offline-optimization"
+      commit: "2103f43a293496f9ce63fc6282533d5995444c01"
+      worktree: "C:/tmp/PyPlot-tma-kosice-offline-optimization"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Adds a simulator-only response-synchronized control candidate, cross-sample
+        Kosice families, oscillation metrics, and leave-one-family-out ranking.
+      touched_files:
+        - "data_logging/mini_dma_logger/full_run_simulator.py"
+        - "tests/test_mini_dma_full_run_simulator.py"
+        - "docs/mini_dma_wire_simulator.md"
+      conflict_areas:
+        - "TMA full-run simulator"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Production logger and Prague defaults are unchanged."
+        - "A synchronized candidate permits only one command in flight and requires fresh post-command feedback."
+        - "All twelve synchronized cross-sample cases complete; all four overlapping-window references enter severe limit cycles."
+      tests:
+        - "Worker focused simulator slice: 3 passed."
+        - "Integration combined TMA slice: 6 passed."
+      screenshots_or_artifacts:
+        - "artifacts/tma-kosice-offline-optimization/kosice_offline_optimization_ranked.png"
+      changelog_status: "Fragment added."
+      risks:
+        - "Simulator evidence only; production and staged hardware validation remain required."
+    integration:
+      decision: "merge"
+      merged_commit: "4968204f"
+      combined_checks:
+        - "Cross-sample ranking, fresh-feedback, Prague baseline, diagnostics, and identity slice: 6 passed."
+        - "launcher.py --help and diagnostics CLI --help passed."
+      regression_guarantees_to_recheck:
+        - "Prague controller decisions and timing remain unchanged."
+        - "Kosice commands cannot stack while a response is pending."
+      final_status: "integrated as offline evidence; not production enabled"
+    links:
+      handoff: "worker handoff in master thread"
+      pr: ""
+      artifacts:
+        - "artifacts/tma-kosice-offline-optimization/kosice_offline_optimization_ranked.json"
+
+  - id: "tma-remote-diagnostics"
+    title: "TMA remote diagnostics and frozen sample identity"
+    status: "integrated"
+    priority: "high"
+    owner:
+      thread_id: "019f5aa4-00e7-75c1-b969-1e222614d5c0"
+      thread_title: "TMA remote diagnostics"
+      role: "worker"
+    git:
+      base_branch: "origin/main"
+      branch: "codex/tma-remote-diagnostics"
+      upstream: "origin/codex/tma-remote-diagnostics"
+      commit: "0fad2d09b109044ec501cdfd289a1da48e34f8b7"
+      worktree: "C:/tmp/PyPlot-tma-remote-diagnostics"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Freezes canonical run identity before output creation and adds append-only
+        identity corrections plus portable remote-diagnostic summaries and bundles.
+      touched_files:
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "data_logging/mini_dma_logger/tma_diagnostics.py"
+        - "tests/test_mini_dma_logger.py"
+        - "docs/tma_remote_diagnostics.md"
+      conflict_areas:
+        - "TMA session creation and metadata"
+        - "TMA control trace and UI telemetry"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Contradictory sample identities fail before run files are created."
+        - "Historical raw metadata is never rewritten by identity corrections."
+        - "Controller decisions, timing, motion, and safety policy are unchanged."
+      tests:
+        - "Worker focused diagnostics slice: 6 passed."
+        - "Integration identity and bundle slice: 3 passed."
+      screenshots_or_artifacts: []
+      changelog_status: "Fragment added."
+      risks:
+        - "Full logger suite timed out at 47 percent with no observed failures."
+    integration:
+      decision: "merge"
+      merged_commit: "6679f2ed"
+      combined_checks:
+        - "Integration combined TMA slice: 6 passed."
+        - "launcher.py --help and diagnostics CLI --help passed."
+      regression_guarantees_to_recheck:
+        - "Existing automatic filename synchronization remains compatible with identity preflight."
+      final_status: "integrated and focused checks passed"
+    links:
+      handoff: "worker handoff in master thread"
+      pr: ""
+      artifacts: []
+
+  - id: "tma-kosice-response-sync-production"
+    title: "TMA Kosice response-synchronized production controller"
+    status: "ready"
+    priority: "high"
+    owner:
+      thread_id: "019f5b35-61ea-7002-ad4b-f37d9e12c095"
+      thread_title: "TMA Kosice production response sync"
+      role: "worker"
+    git:
+      base_branch: "codex/integration-tma-kosice-offline"
+      branch: "codex/tma-kosice-response-sync-production"
+      upstream: "origin/codex/tma-kosice-response-sync-production"
+      commit: "38020ab0"
+      worktree: "C:/tmp/PyPlot-tma-kosice-response-sync-production"
+      clean_status_reported: true
+    scope:
+      summary: >
+        Map the simulator-proven synchronized policy into the explicit Kosice KERN
+        production path with fake-driver validation and Prague invariance tests.
+      touched_files:
+        - "data_logging/mini_dma_logger/mini_dma_logger.py"
+        - "tests/test_mini_dma_logger.py"
+      conflict_areas:
+        - "TMA current-hold recovery controller"
+        - "Post-move feedback gating"
+    readiness:
+      handoff_received: true
+      branch_and_commit: true
+      clean_git_status: true
+      behavioral_guarantees:
+        - "Kosice KERN force control permits one pending correction and requires fresh post-motion feedback."
+        - "Response timing and local sensitivity are learned from directional response."
+        - "Target crossings damp later adaptive corrections."
+        - "Prague G&G does not instantiate the KERN response tracker or change feedback timing."
+      tests:
+        - "Worker logger/controller slice: 27 passed."
+        - "Worker simulator-policy slice: 2 passed."
+      screenshots_or_artifacts: []
+      changelog_status: "Fragment added."
+      risks:
+        - "No hardware is available; production enablement requires later staged Kosice validation."
+    integration:
+      decision: "merge"
+      merged_commit: ""
+      combined_checks: []
+      regression_guarantees_to_recheck:
+        - "Prague scale behavior remains byte-for-byte equivalent where practical."
+        - "Stale scale input remains fail-safe."
+        - "Integrated diagnostic fields remain populated."
+      final_status: "ready for master integration checks; live KERN validation still required"
+    links:
+      handoff: "worker handoff in master thread"
+      pr: ""
+      artifacts: []
+
   - id: "mini-dma-run-cleanup-ui"
     title: "TMA wire-break run cleanup review"
     status: "integrated"

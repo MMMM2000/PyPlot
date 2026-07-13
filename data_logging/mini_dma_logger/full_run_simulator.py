@@ -2701,13 +2701,28 @@ def _write_kosice_offline_rank_plot(path: Path, ranking: dict[str, Any]) -> bool
         return False
     labels = [item["policy"] for item in overall]
     x = list(range(len(overall)))
+    completed_metrics = [item["completed"] == item["case_count"] for item in overall]
     fig, axes = plt.subplots(3, 1, figsize=(10, 9), constrained_layout=True)
     axes[0].bar(x, [item["mean_offline_score"] for item in overall], color="#2563eb")
     axes[0].set_ylabel("mean offline score")
     axes[0].set_title("Košice response-synchronized policy validation")
-    axes[1].bar(x, [item["mean_p95_error_fraction"] for item in overall], color="#dc2626")
+    axes[1].bar(
+        x,
+        [
+            item["mean_p95_error_fraction"] if complete else math.nan
+            for item, complete in zip(overall, completed_metrics)
+        ],
+        color="#dc2626",
+    )
     axes[1].set_ylabel("mean p95 error / target")
-    axes[2].bar(x, [item["mean_hold_fraction"] for item in overall], color="#f59e0b")
+    axes[2].bar(
+        x,
+        [
+            item["mean_hold_fraction"] if complete else math.nan
+            for item, complete in zip(overall, completed_metrics)
+        ],
+        color="#f59e0b",
+    )
     axes[2].set_ylabel("mean hold fraction")
     axes[2].set_xticks(x)
     axes[2].set_xticklabels(labels, rotation=25, ha="right")
@@ -2716,6 +2731,12 @@ def _write_kosice_offline_rank_plot(path: Path, ranking: dict[str, Any]) -> bool
         if axis is not axes[2]:
             axis.set_xticks(x)
             axis.set_xticklabels([])
+    for index, (item, complete) in enumerate(zip(overall, completed_metrics)):
+        if complete:
+            continue
+        label = f"{item['completed']}/{item['case_count']} completed"
+        axes[1].text(index, 0.02, label, rotation=90, ha="center", va="bottom", color="#991b1b")
+        axes[2].text(index, 0.02, label, rotation=90, ha="center", va="bottom", color="#991b1b")
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return True
