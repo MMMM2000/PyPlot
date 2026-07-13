@@ -37179,7 +37179,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _capture_project_load_state(self) -> Dict[str, Any]:
         attr_names = (
-            "_phase_points", "_transition_reviews", "_hidden_paths",
+            "_phase_points", "_transition_points", "_transition_reviews",
+            "_hidden_paths",
             "_overrides", "_validated", "_prepopulated_keys",
             "_expected_keys_current", "_expected_key_source_labels", "_show_other_ends",
             "_strain_offsets", "_strain_mode", "_clamp_span_mm", "_wire_choices",
@@ -37242,6 +37243,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         return {
             "sections": section_states,
             "assembly": assembly_state,
+            "show_imported_action_checked": (
+                self._show_imported_action.isChecked()
+                if isinstance(self._show_imported_action, QtGui.QAction)
+                else None
+            ),
             "project_path": self._project_path,
             "dirty": self._dirty,
             "paused_timers": paused_timers,
@@ -37344,6 +37350,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             name,
                             copy.deepcopy(assembly_state[name]),
                         )
+            action_checked = snapshot.get("show_imported_action_checked")
+            if (
+                isinstance(self._show_imported_action, QtGui.QAction)
+                and isinstance(action_checked, bool)
+            ):
+                blocker = QtCore.QSignalBlocker(self._show_imported_action)
+                try:
+                    self._show_imported_action.setChecked(action_checked)
+                finally:
+                    del blocker
         self._project_path = snapshot.get("project_path")
         self._dirty = bool(snapshot.get("dirty", False))
         self._update_project_title()

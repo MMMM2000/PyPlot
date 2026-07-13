@@ -11260,10 +11260,12 @@ def test_project_import_failure_restores_previous_state_without_disk_writes(
     old_vsm_reviews = {
         "old-vsm": {"status": "No transition", "transition_points": {}}
     }
+    old_vsm_points = {"old-vsm": {"Ms": 12.0, "As": 34.0}}
     old_tma_reviews = {
         "old-tma": {"status": "accepted", "transition_points": {"As": 33.0}}
     }
     window.transition_temps_section._transition_reviews = copy.deepcopy(old_vsm_reviews)
+    window.transition_temps_section._transition_points = copy.deepcopy(old_vsm_points)
     window.mini_dma_section._transition_reviews = copy.deepcopy(old_tma_reviews)
     assembly = window.assembly_section
     assembly._raw_preview_frame = pd.DataFrame(
@@ -11355,6 +11357,7 @@ def test_project_import_failure_restores_previous_state_without_disk_writes(
         assert window.annealing_section._phase_points == old_phases
         assert window.annealing_section._hidden_paths == old_hidden
         assert window.transition_temps_section._transition_reviews == old_vsm_reviews
+        assert window.transition_temps_section._transition_points == old_vsm_points
         assert window.mini_dma_section._transition_reviews == old_tma_reviews
         assert window.assembly_section._selected_columns == old_assembly_state["selected_columns"]
         assert window.assembly_section._column_order == old_assembly_state["column_order"]
@@ -11432,6 +11435,57 @@ def test_successful_partial_project_does_not_retain_omitted_transition_state(
         assert window.annealing_section._hidden_paths == set()
         assert window.transition_temps_section._transition_reviews == {}
         assert window.mini_dma_section._transition_reviews == {}
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_late_project_load_failure_restores_show_imported_action_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    window.assembly_section._show_imported = False
+    assert window._show_imported_action is not None
+    window._show_imported_action.setChecked(False)
+    refresh_action_states: list[bool] = []
+
+    def _fail_after_action_update() -> None:
+        assert window._show_imported_action is not None
+        refresh_action_states.append(window._show_imported_action.isChecked())
+        raise RuntimeError("synthetic late finish failure")
+
+    monkeypatch.setattr(
+        window, "_refresh_sections_after_project_load", _fail_after_action_update
+    )
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "late-failure.pydpj",
+        payload={
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": 1,
+            "sections": {"assemble": {"show_imported": True}},
+        },
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._dirty = False
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+
+        assert refresh_action_states == [True]
+        assert window.assembly_section._show_imported is False
+        assert window._show_imported_action.isChecked() is False
+        assert builder_ui.MiniDatabaseStore._memory_transactions == []
     finally:
         window._dirty = False
         window.close()
