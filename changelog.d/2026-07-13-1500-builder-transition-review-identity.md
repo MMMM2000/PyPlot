@@ -2,3 +2,4 @@
 
 - Preserved reviewed VSM transitions and phase points while scans are filtered or hidden, and safely reconnected VSM and TMA review states after equivalent source files or run folders are moved or renamed.
 - Migrated legacy path-based VSM and TMA review records when a unique source match exists while retaining ambiguous reviews without applying them to the wrong measurement.
+- Kept old VSM and TMA reviews unmatched when a source is replaced with different data at the same path, and restored VSM preview records cleanly when a project load fails.

@@ -7869,6 +7869,43 @@ def _transition_review_source_name(record: object) -> str:
     return path.name if isinstance(path, Path) else ""
 
 
+def _transition_review_orphan_id(
+    namespace: str,
+    stored_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return a stable key that cannot be consumed as a current path-based ID."""
+
+    digest = hashlib.sha256()
+    for value in (
+        namespace,
+        stored_id,
+        str(payload.get("content_identity") or ""),
+        str(payload.get("target_label") or ""),
+    ):
+        digest.update(value.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return f"unmatched:{namespace}:{digest.hexdigest()}"
+
+
+def _move_transition_review_to_orphan(
+    reviews: MutableMapping[str, Dict[str, Any]],
+    stored_id: str,
+    namespace: str,
+) -> bool:
+    payload = reviews.get(stored_id)
+    if not isinstance(payload, dict):
+        return False
+    orphan_id = _transition_review_orphan_id(namespace, stored_id, payload)
+    if orphan_id in reviews:
+        suffix = 2
+        while f"{orphan_id}:{suffix}" in reviews:
+            suffix += 1
+        orphan_id = f"{orphan_id}:{suffix}"
+    reviews[orphan_id] = reviews.pop(stored_id)
+    return True
+
+
 def _mini_dma_review_record_id(record: MiniDmaRecord, target_label: str) -> str:
     path = getattr(record, "path", None)
     if isinstance(path, Path):
@@ -21210,8 +21247,21 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 current_by_id.setdefault(record_id, []).append(record)
                 group_by_id[record_id] = group_key
         proposals: Dict[str, List[str]] = {}
+        direct_mismatches: List[str] = []
         for stored_id, payload in self._transition_reviews.items():
             if stored_id in current_by_id:
+                content_identity = str(payload.get("content_identity") or "").strip()
+                current_records = current_by_id[stored_id]
+                if content_identity and (
+                    len(current_records) != 1
+                    or _transition_review_content_identity(
+                        current_records[0],
+                        "vsm-ts",
+                        self._review_content_identity_cache,
+                    )
+                    != content_identity
+                ):
+                    direct_mismatches.append(stored_id)
                 continue
             candidates = self._vsm_review_candidates(payload, records, groups)
             if len(candidates) == 1:
@@ -21219,6 +21269,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 if len(current_by_id.get(current_id, [])) == 1:
                     proposals.setdefault(current_id, []).append(stored_id)
         changed = False
+        for stored_id in direct_mismatches:
+            changed = (
+                _move_transition_review_to_orphan(
+                    self._transition_reviews, stored_id, "vsm-ts"
+                )
+                or changed
+            )
         for current_id, stored_ids in proposals.items():
             if len(stored_ids) != 1 or current_id in self._transition_reviews:
                 continue
@@ -25129,6 +25186,7 @@ class MiniDmaSection(MiniDatabaseSection):
     def _reconcile_transition_reviews(self, records: Sequence[MiniDmaRecord]) -> bool:
         proposals: Dict[str, List[Tuple[str, MiniDmaRecord]]] = {}
         direct: List[Tuple[str, MiniDmaRecord]] = []
+        direct_mismatches: List[str] = []
         for stored_id, payload in self._transition_reviews.items():
             target_label = str(payload.get("target_label") or "").strip()
             if not target_label and "::" in stored_id:
@@ -25140,6 +25198,16 @@ class MiniDmaSection(MiniDatabaseSection):
                 for record in records
                 if _mini_dma_review_record_id(record, target_label) == stored_id
             ]
+            content_identity = str(payload.get("content_identity") or "").strip()
+            if direct_matches and content_identity and (
+                len(direct_matches) != 1
+                or _transition_review_content_identity(
+                    direct_matches[0], "tma", self._review_content_identity_cache
+                )
+                != content_identity
+            ):
+                direct_mismatches.append(stored_id)
+                continue
             if len(direct_matches) == 1:
                 direct.append((stored_id, direct_matches[0]))
                 continue
@@ -25150,6 +25218,13 @@ class MiniDmaSection(MiniDatabaseSection):
             current_id = _mini_dma_review_record_id(record, target_label)
             proposals.setdefault(current_id, []).append((stored_id, record))
         changed = False
+        for stored_id in direct_mismatches:
+            changed = (
+                _move_transition_review_to_orphan(
+                    self._transition_reviews, stored_id, "tma"
+                )
+                or changed
+            )
         for stored_id, record in direct:
             enriched = dict(self._transition_reviews[stored_id])
             enriched.update(self._mini_dma_review_metadata(record))
@@ -37532,6 +37607,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         if isinstance(value, pd.DataFrame)
                         else copy.deepcopy(value)
                     )
+            if isinstance(section, TransitionTempsSection):
+                # Record frames can be large. Project import replaces these derived
+                # containers rather than mutating records, so shallow snapshots keep
+                # rollback cheap and preserve the old preview objects by identity.
+                state["transition_record_state"] = {
+                    "all_records": list(section._all_transition_records),
+                    "record_groups": {
+                        group_key: list(records)
+                        for group_key, records in section._record_groups.items()
+                    },
+                }
             status_label = getattr(section, "status_label", None)
             if isinstance(status_label, QtWidgets.QLabel):
                 state["status_text"] = status_label.text()
@@ -37614,7 +37700,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     section.data = self._clone_load_data(data)
                 if isinstance(state, Mapping):
                     for name, value in state.items():
-                        if name not in {"data", "status_text"}:
+                        if name not in {"data", "status_text", "transition_record_state"}:
                             setattr(section, name, copy.deepcopy(value))
 
                 if isinstance(section, AnnealingSection):
@@ -37627,6 +37713,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     section._update_missing_summary()
                     section._update_review_buttons()
                 elif isinstance(section, TransitionTempsSection):
+                    record_state = (
+                        state.get("transition_record_state")
+                        if isinstance(state, Mapping)
+                        else None
+                    )
+                    if isinstance(record_state, Mapping):
+                        section._all_transition_records = list(
+                            record_state.get("all_records", [])
+                        )
+                        section._record_groups = dict(
+                            record_state.get("record_groups", {})
+                        )
+                        section._review_content_identity_cache = {}
                     frame = state.get("_current_frame") if isinstance(state, Mapping) else None
                     if isinstance(frame, pd.DataFrame):
                         section._current_frame = frame
