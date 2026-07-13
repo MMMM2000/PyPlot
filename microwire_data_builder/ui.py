@@ -21262,6 +21262,22 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     != content_identity
                 ):
                     direct_mismatches.append(stored_id)
+                    candidates = self._vsm_review_candidates(
+                        payload,
+                        [
+                            record
+                            for record in records
+                            if all(
+                                record is not conflicting
+                                for conflicting in current_records
+                            )
+                        ],
+                        groups,
+                    )
+                    if len(candidates) == 1:
+                        current_id = _vsm_transition_review_record_id(candidates[0])
+                        if len(current_by_id.get(current_id, [])) == 1:
+                            proposals.setdefault(current_id, []).append(stored_id)
                 continue
             candidates = self._vsm_review_candidates(payload, records, groups)
             if len(candidates) == 1:
@@ -21269,13 +21285,6 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 if len(current_by_id.get(current_id, [])) == 1:
                     proposals.setdefault(current_id, []).append(stored_id)
         changed = False
-        for stored_id in direct_mismatches:
-            changed = (
-                _move_transition_review_to_orphan(
-                    self._transition_reviews, stored_id, "vsm-ts"
-                )
-                or changed
-            )
         for current_id, stored_ids in proposals.items():
             if len(stored_ids) != 1 or current_id in self._transition_reviews:
                 continue
@@ -21287,6 +21296,14 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 current_id, payload
             )
             changed = True
+        for stored_id in direct_mismatches:
+            if stored_id in self._transition_reviews:
+                changed = (
+                    _move_transition_review_to_orphan(
+                        self._transition_reviews, stored_id, "vsm-ts"
+                    )
+                    or changed
+                )
         for current_id, current_records in current_by_id.items():
             if len(current_records) != 1 or current_id not in self._transition_reviews:
                 continue
@@ -25207,6 +25224,22 @@ class MiniDmaSection(MiniDatabaseSection):
                 != content_identity
             ):
                 direct_mismatches.append(stored_id)
+                candidates = self._mini_dma_review_candidates(
+                    stored_id,
+                    payload,
+                    [
+                        record
+                        for record in records
+                        if all(
+                            record is not conflicting
+                            for conflicting in direct_matches
+                        )
+                    ],
+                )
+                if len(candidates) == 1:
+                    record = candidates[0]
+                    current_id = _mini_dma_review_record_id(record, target_label)
+                    proposals.setdefault(current_id, []).append((stored_id, record))
                 continue
             if len(direct_matches) == 1:
                 direct.append((stored_id, direct_matches[0]))
@@ -25218,13 +25251,6 @@ class MiniDmaSection(MiniDatabaseSection):
             current_id = _mini_dma_review_record_id(record, target_label)
             proposals.setdefault(current_id, []).append((stored_id, record))
         changed = False
-        for stored_id in direct_mismatches:
-            changed = (
-                _move_transition_review_to_orphan(
-                    self._transition_reviews, stored_id, "tma"
-                )
-                or changed
-            )
         for stored_id, record in direct:
             enriched = dict(self._transition_reviews[stored_id])
             enriched.update(self._mini_dma_review_metadata(record))
@@ -25242,6 +25268,14 @@ class MiniDmaSection(MiniDatabaseSection):
                 current_id, payload
             )
             changed = True
+        for stored_id in direct_mismatches:
+            if stored_id in self._transition_reviews:
+                changed = (
+                    _move_transition_review_to_orphan(
+                        self._transition_reviews, stored_id, "tma"
+                    )
+                    or changed
+                )
         return changed
 
     def _schedule_transition_review_store(self) -> None:
