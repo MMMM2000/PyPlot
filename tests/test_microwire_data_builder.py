@@ -89,7 +89,7 @@ def test_microscope_key_draw_piece_starts_after_composition_boundary() -> None:
         "Ni46Fe27Ga23Cu2Co2",
         2,
         1,
-        "No1",
+        None,
     )
 
 
@@ -2252,6 +2252,17 @@ def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
         )
         assert dialog._entries_by_run  # noqa: SLF001
         assert dialog._visible_refs  # noqa: SLF001
+        first_visible_ref = dialog._visible_refs[0]  # noqa: SLF001
+        dialog.tree.setCurrentItem(dialog._tree_items[first_visible_ref])  # noqa: SLF001
+        dialog.show_fit_lines_check.setChecked(False)
+        dialog.show_markers_check.setChecked(False)
+        dialog.show_resistance_check.setChecked(True)
+        dialog._redraw_current()  # noqa: SLF001
+        assert dialog.canvas is not None
+        assert [axis.get_ylabel() for axis in dialog.figure.axes] == [
+            "Strain [%]",
+            "Resistance [Ω]",
+        ]
         dialog.rejected_only_check.setChecked(True)
         assert dialog.rejected_only_check.isChecked()
         assert not dialog.accepted_only_check.isChecked()
@@ -2259,10 +2270,6 @@ def test_mini_dma_transition_review_dialog_loads_selected_run_lazily() -> None:
             dialog._entries_by_run[key][index].status == "rejected"  # noqa: SLF001
             for key, index in dialog._visible_refs  # noqa: SLF001
         )
-        dialog.show_fit_lines_check.setChecked(False)
-        dialog.show_markers_check.setChecked(False)
-        dialog._redraw_current()  # noqa: SLF001
-        assert dialog.canvas is not None
     finally:
         dialog.close()
         dialog.deleteLater()
