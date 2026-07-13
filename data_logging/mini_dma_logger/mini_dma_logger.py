@@ -59,6 +59,7 @@ from data_logging.mini_dma_logger.tma_diagnostics import (
     SampleIdentitySnapshot,
     build_sample_identity_snapshot,
 )
+from data_logging.mini_dma_logger.response_sync import ResponseSample, ResponseSyncTracker
 
 try:
     import serial
@@ -102,8 +103,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-03.4"
-CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
+CONTROL_LOGIC_VERSION = "2026-07-13.1"
+CONTROL_LOGIC_PROFILE = "processed-center-kern-response-synchronized"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -146,6 +147,9 @@ CONTROL_LOGIC_FEATURES = [
     "kern_kcp_held_recovery_preserves_base_resume_confirmation",
     "kern_kcp_earned_resume_ignores_noise_inflated_pause_band",
     "kern_kcp_iso_current_settle_uses_processed_timed_recovery",
+    "kern_kcp_force_control_uses_one_response_synchronized_command",
+    "kern_kcp_response_learning_uses_fresh_post_completion_samples",
+    "kern_kcp_target_crossing_damps_adaptive_corrections",
     "separate_setup_preload_and_zero_settle",
     "stable_setup_phase_progress",
     "dashboard_plot_gap_breaks",
@@ -5703,6 +5707,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_scale_timestamp_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_last_scale_timestamp_by_clock: dict[tuple[str, int], float] = {}
         self._seek_post_move_sample_count_by_key: dict[tuple[str, int, float], int] = {}
+        self._kern_response_sync_by_key: dict[tuple[str, int, float], ResponseSyncTracker] = {}
         self._seek_last_effective_position_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_live_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._seek_no_response_count_by_key: dict[tuple[str, int, float], int] = {}
@@ -17147,6 +17152,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_out_of_band_sign_by_key.pop(seek_key, None)
         self._seek_last_scale_timestamp_by_key.pop(seek_key, None)
         self._seek_post_move_sample_count_by_key.pop(seek_key, None)
+        self._kern_response_sync_by_key.pop(seek_key, None)
         self._seek_last_effective_position_by_key.pop(seek_key, None)
         self._seek_no_response_count_by_key.pop(seek_key, None)
         self._seek_travel_by_key.pop(seek_key, None)
@@ -17640,6 +17646,135 @@ class MainWindow(QtWidgets.QMainWindow):
         clock_key = seek_key[0], seek_key[1]
         last_s = self._seek_last_scale_timestamp_by_clock.get(clock_key)
         return last_s is None or latest_s > float(last_s) + 1e-9
+
+    def _kern_response_sync_active(self, basis: str) -> bool:
+        if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return False
+        if not self._using_kern_kcp_scale() or not self._automation_active:
+            return False
+        if self._automation_step_note in {"setup_preload", "setup_return_zero"}:
+            return False
+        return self._is_current_sweep_mode(self._automation_name) or self._is_iso_current_mode(
+            self._automation_name
+        )
+
+    def _kern_response_samples(self, basis: str) -> list[ResponseSample]:
+        samples = self._scale_signal_buffer.recent_samples(window_s=self._scale_signal_buffer.window_s)
+        if basis == HSW_BASIS_LOAD_G:
+            return [
+                ResponseSample(timestamp_s=sample.timestamp_s, value=sample.applied_load_g)
+                for sample in samples
+            ]
+        config = self._control_config()
+        diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+        converted: list[ResponseSample] = []
+        for sample in samples:
+            stress = stress_mpa_from_load_g(sample.applied_load_g, diameter_mm)
+            if stress is not None and math.isfinite(float(stress)):
+                converted.append(ResponseSample(timestamp_s=sample.timestamp_s, value=float(stress)))
+        return converted
+
+    def _kern_response_sync_gate(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        target_value: float,
+        tolerance: float,
+    ) -> tuple[bool, ScaleControlSignal | None]:
+        if not self._kern_response_sync_active(basis):
+            return False, None
+        tracker = self._kern_response_sync_by_key.get(seek_key)
+        if tracker is None or tracker.pending is None:
+            return False, None
+        required_fresh_samples = tracker.pending.min_fresh_samples
+        samples = self._kern_response_samples(basis)
+        latest_s = samples[-1].timestamp_s if samples else time.time()
+        result = tracker.evaluate(
+            samples,
+            target_value=target_value,
+            tolerance=tolerance,
+            quantization_band=self._scale_quantization_band_for_basis(basis),
+            now_s=latest_s,
+        )
+        if not result.released:
+            self._log_waiting_for_feedback(
+                "Košice KERN response synchronization is waiting for fresh post-move "
+                f"feedback ({result.reason}, {result.fresh_sample_count} accepted samples)."
+            )
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                required_fresh_samples=required_fresh_samples,
+                post_move_sample_count=result.fresh_sample_count,
+                result="waiting",
+                reason=f"kern_response_sync_{result.reason}",
+            )
+            return True, None
+        if tracker.learned_sensitivity_per_mm is not None:
+            self._seek_live_stiffness_by_key[seek_key] = tracker.learned_sensitivity_per_mm
+        signal = None
+        if result.center is not None:
+            signal = ScaleControlSignal(
+                value=result.center,
+                latest_value=result.center,
+                noise=result.noise,
+                slope_per_s=result.slope_per_s,
+                sample_count=result.fresh_sample_count,
+                timestamp_s=latest_s,
+            )
+        self._write_control_trace(
+            decision="wait",
+            basis=basis,
+            target_value=target_value,
+            current_value=result.center,
+            error_value=None if result.center is None else target_value - result.center,
+            tolerance=tolerance,
+            sensitivity_per_mm=tracker.learned_sensitivity_per_mm,
+            required_fresh_samples=required_fresh_samples,
+            post_move_sample_count=result.fresh_sample_count,
+            result="released",
+            reason=f"kern_response_sync_{result.reason}",
+        )
+        return False, signal
+
+    def _arm_kern_response_sync(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        *,
+        current_value: float,
+        error_value: float,
+        correction_tensile_mm: float,
+    ) -> None:
+        if not self._kern_response_sync_active(basis) or abs(float(correction_tensile_mm)) <= 0.0:
+            return
+        feedback_ready_after_s = self._motion_feedback_ready_after_s()
+        if feedback_ready_after_s is None:
+            return
+        tracker = self._kern_response_sync_by_key.setdefault(seek_key, ResponseSyncTracker())
+        tracker.arm(
+            feedback_ready_after_s=feedback_ready_after_s,
+            pre_value=current_value,
+            pre_error=error_value,
+            correction_tensile_mm=correction_tensile_mm,
+            sample_rate_hz=self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
+            filter_window_s=self._current_sweep_hold_filter_window_s(),
+        )
+
+    def _kern_response_sync_correction_cap_mm(
+        self,
+        seek_key: tuple[str, int, float],
+        basis: str,
+        error_value: float,
+    ) -> float | None:
+        if not self._kern_response_sync_active(basis):
+            return None
+        tracker = self._kern_response_sync_by_key.get(seek_key)
+        if tracker is None or tracker.pending is not None:
+            return None
+        return tracker.correction_cap_mm(error=error_value, motor_step_mm=self._motor_step_mm())
 
     def _seek_supports_cruise_feedback(self, basis: str) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
@@ -18155,6 +18290,17 @@ class MainWindow(QtWidgets.QMainWindow):
         filtered_signal = self._seek_filtered_control_signal(basis)
         if filtered_signal is not None:
             current_value = filtered_signal.value
+        response_waiting, response_signal = self._kern_response_sync_gate(
+            seek_key,
+            basis,
+            target_value,
+            tolerance,
+        )
+        if response_waiting:
+            return False
+        if response_signal is not None:
+            filtered_signal = response_signal
+            current_value = response_signal.value
         setup_preload_relaxation = self._setup_preload_relaxation_active(
             basis,
             current_value,
@@ -18806,6 +18952,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(
                     "Current-hold response is unstable; damping load/stress correction to one motor step."
                 )
+        response_cap_mm = self._kern_response_sync_correction_cap_mm(
+            seek_key,
+            basis,
+            delta_value,
+        )
+        if response_cap_mm is not None:
+            nudge_mm = max(self._motor_step_mm(), min(nudge_mm, response_cap_mm))
+            response_tracker = self._kern_response_sync_by_key.get(seek_key)
+            if response_tracker is not None and response_tracker.response_damping < 1.0:
+                current_hold_correction_reason = (
+                    "kern_response_synchronized"
+                    if current_hold_correction_reason is None
+                    else f"{current_hold_correction_reason};kern_response_synchronized"
+                )
         seek_direction = delta_value
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA, HSW_BASIS_STRAIN_PCT}:
             seek_direction *= self._tension_motion_sign()
@@ -18903,6 +19063,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
             self._seek_travel_by_key[seek_key] = (
                 self._seek_travel_by_key.get(seek_key, 0.0) + abs(backlash_takeup_mm)
+            )
+            self._arm_kern_response_sync(
+                seek_key,
+                basis,
+                current_value=current_value,
+                error_value=delta_value,
+                correction_tensile_mm=math.copysign(backlash_takeup_mm, delta_value),
             )
             self._write_control_trace(
                 decision="backlash_takeup",
@@ -19012,6 +19179,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_last_effective_position_by_key[seek_key] = current_effective_tensile_position_mm
         self._seek_travel_by_key[seek_key] = (
             self._seek_travel_by_key.get(seek_key, 0.0) + abs(nudge_mm + backlash_takeup_mm)
+        )
+        self._arm_kern_response_sync(
+            seek_key,
+            basis,
+            current_value=current_value,
+            error_value=delta_value,
+            correction_tensile_mm=math.copysign(nudge_mm, delta_value),
         )
         return False
 
@@ -25372,6 +25546,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_out_of_band_sign_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
         self._seek_last_scale_timestamp_by_clock.clear()
+        self._seek_post_move_sample_count_by_key.clear()
+        self._kern_response_sync_by_key.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
         self._seek_live_stiffness_g_per_mm = None
@@ -26272,6 +26448,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._seek_out_of_band_sign_by_key.clear()
         self._seek_last_scale_timestamp_by_key.clear()
         self._seek_last_scale_timestamp_by_clock.clear()
+        self._seek_post_move_sample_count_by_key.clear()
+        self._kern_response_sync_by_key.clear()
         self._seek_last_effective_position_by_key.clear()
         self._seek_live_stiffness_by_key.clear()
         self._seek_last_stiffness_value_by_basis.clear()
