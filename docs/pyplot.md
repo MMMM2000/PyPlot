@@ -148,6 +148,7 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
 
 - TMA recipe/control execution uses a worker scheduler with settings frozen at start, while Qt widgets, dialogs, labels, progress bars, run-log display, and Matplotlib redraws are applied through queued UI updates.
 - TMA run folders include `ui_telemetry.csv` alongside `measurement.csv`, `scale_raw.csv`, `control_trace.csv`, and setup logs. Use it to separate real control/logging cadence from Qt event-loop or graph redraw stalls.
+- TMA freezes a canonical sample-identity snapshot before creating a run folder, rejects contradictory structured/sample/output names at preflight, and keeps runtime length provenance separate from the preflight identity. Historical fixes use an auditable `identity_correction.json` sidecar, while `python -m data_logging.mini_dma_logger.tma_diagnostics summarize|bundle` creates machine-readable remote-diagnostic artifacts; see `docs/tma_remote_diagnostics.md`.
 - TMA current-sweep task text is derived from the active worker context so it does not flicker to the next queued recipe step, scheduled CSV logging continues during already-in-tolerance iso-strain current sweeps, setup-preload ramps start from the live load/stress value when the sample is already partly loaded, and recipe-completion cleanup is marshalled back to the Qt thread.
 
 ## Annotation And Composition

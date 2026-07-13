@@ -55,6 +55,10 @@ from data_logging.mini_dma_logger.run_cleanup import (
     format_duration_s,
     sanitize_archive_name,
 )
+from data_logging.mini_dma_logger.tma_diagnostics import (
+    SampleIdentitySnapshot,
+    build_sample_identity_snapshot,
+)
 
 try:
     import serial
@@ -176,13 +180,20 @@ CONTROL_TRACE_FIELDNAMES = [
     "automation_basis",
     "automation_target_value",
     "plateau_index",
+    "scale_profile",
+    "scale_accepted_sample_count",
+    "scale_rejected_sample_count",
     "decision",
+    "controller_state",
+    "gate_reason",
     "current_value",
     "error_value",
     "tolerance",
     "filtered_slope_per_s",
     "filtered_noise",
     "filtered_sample_count",
+    "estimator_window_s",
+    "estimator_freshness",
     "latest_scale_age_s",
     "scale_recent_rate_hz",
     "raw_scale_sample_count",
@@ -195,6 +206,10 @@ CONTROL_TRACE_FIELDNAMES = [
     "correction_mm",
     "backlash_mm",
     "command_speed_mm_s",
+    "motor_command_id",
+    "motor_command_issued_utc",
+    "motor_command_target_steps",
+    "motor_response_sample_count",
     "required_fresh_samples",
     "post_move_sample_count",
     "target_mm",
@@ -219,6 +234,8 @@ UI_TELEMETRY_FIELDNAMES = [
     "ui_heartbeat_interval_ms",
     "ui_heartbeat_fps",
     "handler_duration_ms",
+    "ui_stall_count",
+    "dropped_row_count",
     "graph_refresh_interval_ms",
     "task_text",
     "automation_active",
@@ -2656,6 +2673,7 @@ class CollapsibleSection(QtWidgets.QFrame):
 
 class ScaleWorker(QtCore.QObject):
     measurement_received = QtCore.pyqtSignal(float, str, float)
+    sample_diagnostic = QtCore.pyqtSignal(bool, float)
     status_changed = QtCore.pyqtSignal(str)
     error_occurred = QtCore.pyqtSignal(str)
     finished = QtCore.pyqtSignal()
@@ -2719,13 +2737,16 @@ class ScaleWorker(QtCore.QObject):
 
                 raw_bytes = port.readline()
                 if raw_bytes:
+                    observed_s = time.time()
                     raw_text = raw_bytes.decode("utf-8", errors="ignore").strip()
                     if raw_text:
                         value = _parse_first_float(raw_text)
                         if value is None:
+                            self.sample_diagnostic.emit(False, observed_s)
                             self.status_changed.emit(f"Scale raw: {raw_text}")
                         else:
-                            self.measurement_received.emit(value, raw_text, time.time())
+                            self.sample_diagnostic.emit(True, observed_s)
+                            self.measurement_received.emit(value, raw_text, observed_s)
                 if request_payload:
                     delay_s = self._request_poll_delay_s(
                         started_s=request_started_s,
@@ -5705,6 +5726,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sleep_guard: Any = None
         self._session_start_monotonic = 0.0
         self._session_created_utc: str | None = None
+        self._session_identity_snapshot: SampleIdentitySnapshot | None = None
         self._session_txt_handle: Any = None
         self._session_csv_handle: Any = None
         self._session_csv_writer: csv.DictWriter[str] | None = None
@@ -5740,8 +5762,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s: float | None = None
         self._session_raw_scale_max_gap_s = 0.0
+        self._session_raw_scale_intervals_ms: list[float] = []
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
+        self._session_scale_rejected_count = 0
+        self._session_ui_stall_count = 0
+        self._session_dropped_row_count = 0
         self._ui_refresh_last_monotonic_s: float | None = None
         self._last_ui_refresh_interval_ms: float | None = None
         self._last_ui_handler_duration_ms: float | None = None
@@ -5750,6 +5776,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_session_metadata_write_s = 0.0
         self._session_metadata_dirty = False
         self._session_logging_enabled = True
+        self._motor_command_sequence = 0
+        self._last_motor_command_id: str | None = None
+        self._last_motor_command_issued_utc: str | None = None
         self._load_offset_g = 0.0
         self._position_reference_mm = 0.0
         self._preload_reference_armed = False
@@ -12627,6 +12656,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._handle_scale_measurement,
             QtCore.Qt.ConnectionType.DirectConnection,
         )
+        worker.sample_diagnostic.connect(
+            self._handle_scale_sample_diagnostic,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
         worker.status_changed.connect(self._handle_scale_status)
         worker.error_occurred.connect(self._handle_scale_error)
         worker.finished.connect(thread.quit)
@@ -12680,6 +12713,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_on_ui_thread(self._handle_scale_measurement_ui_update)
             return
         self._handle_scale_measurement_ui_update()
+
+    def _handle_scale_sample_diagnostic(self, accepted: bool, _timestamp_s: float) -> None:
+        if self._session_active and not accepted:
+            with self._scale_state_lock:
+                self._session_scale_rejected_count += 1
 
     def _handle_scale_measurement_ui_update(self) -> None:
         if self._scale_hint_timer.isActive():
@@ -13448,10 +13486,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_recipe_sample_label(self) -> None:
         if not hasattr(self, "label_recipe_sample"):
             return
-        sample_name = self.edit_sample_name.text().strip()
+        identity = self._session_identity_snapshot if self._session_active else None
+        sample_name = self.edit_sample_name.text().strip() if identity is None else identity.sample_name
         if not sample_name:
             sample_name = "(unnamed sample)"
-        diameter_mm = float(self.spin_diameter.value()) if hasattr(self, "spin_diameter") else 0.0
+        diameter_mm = (
+            float(self.spin_diameter.value()) if identity is None else identity.diameter_mm
+        ) if hasattr(self, "spin_diameter") else 0.0
         diameter_text = (
             f" | diameter {_format_compact_unit(diameter_mm * 1000.0, 'um', decimals=3)}"
             if diameter_mm > 0.0
@@ -20416,6 +20457,15 @@ class MainWindow(QtWidgets.QMainWindow):
             f"target {_format_compact_unit(target_mm, 'mm')} ({target_steps} {target_unit_label})."
         )
 
+    def _record_motor_command_observation(self, *, target_steps: int, issued_s: float) -> None:
+        self._motor_command_sequence += 1
+        self._last_motor_command_id = f"motor-{self._motor_command_sequence:06d}"
+        self._last_motor_command_issued_utc = datetime.fromtimestamp(
+            issued_s,
+            tz=timezone.utc,
+        ).isoformat()
+        self._last_commanded_position_steps = int(target_steps)
+
     def _move_relative_raw_tic_steps(self, delta_steps: int, *, speed_steps_per_s: float) -> bool:
         if self._tic_motor_power_ok is False:
             vin_text = self._tic_vin_text()
@@ -20477,12 +20527,12 @@ class MainWindow(QtWidgets.QMainWindow):
             f"({delta_steps:+d} steps) at {selected_speed_steps_per_s:.3f} steps/s."
         )
         command_time_s = time.time()
+        self._record_motor_command_observation(target_steps=target_steps, issued_s=command_time_s)
         self._last_motion_command_time_s = command_time_s
         self._last_motion_expected_complete_time_s = (
             command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
         )
         self._last_commanded_speed_mm_s = selected_speed_mm_s
-        self._last_commanded_position_steps = target_steps
         self._last_effective_move_target_mm = target_mm
         self._last_move_target_mm = target_mm
         self._manual_jog_uses_last_target = True
@@ -20584,12 +20634,12 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         command_time_s = time.time()
+        self._record_motor_command_observation(target_steps=target_steps, issued_s=command_time_s)
         self._last_motion_command_time_s = command_time_s
         self._last_motion_expected_complete_time_s = (
             command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
         )
         self._last_commanded_speed_mm_s = selected_speed_mm_s
-        self._last_commanded_position_steps = target_steps
         self._start_tic_keepalive()
         self._last_effective_move_target_mm = (
             float(position_mm) if effective_position_mm is None else float(effective_position_mm)
@@ -20604,17 +20654,74 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         return True
 
-    def _session_base_paths(self) -> tuple[Path, Path, Path, Path]:
+    def _diameter_provenance_snapshot(self) -> dict[str, Any]:
+        current_key = self._current_diameter_import_sample_key()
+        match = self._builder_project_match
+        if (
+            self._diameter_imported
+            and self._diameter_import_sample_key == current_key
+            and match is not None
+            and match.diameter_mm is not None
+            and math.isclose(float(match.diameter_mm), float(self.spin_diameter.value()), rel_tol=0.0, abs_tol=1e-9)
+        ):
+            return {
+                "source": "builder_project",
+                "path": str(match.path),
+                "section": match.section,
+            }
+        if self._diameter_imported and self._diameter_import_sample_key == current_key:
+            record = self._matching_fabrication_record()
+            if record is not None and record.diameter_mm is not None:
+                return {
+                    "source": "fabrication_record",
+                    "fabrication_root": None
+                    if self._fabrication_folder_path is None
+                    else str(self._fabrication_folder_path),
+                    "record_label": record.label,
+                }
+        return {"source": "manual_or_saved_setting"}
+
+    def _freeze_session_identity_snapshot(self, *, frozen_utc: str) -> SampleIdentitySnapshot:
+        return build_sample_identity_snapshot(
+            frozen_utc=frozen_utc,
+            composition=self.edit_name_composition.text(),
+            microwire=MicrowireLineEdit.to_display_text(self.edit_name_wire.text())
+            or self.edit_name_wire.text(),
+            specimen=self.edit_name_specimen.text(),
+            condition=self.edit_name_condition.text(),
+            sample_name=self.edit_sample_name.text(),
+            diameter_mm=float(self.spin_diameter.value()),
+            diameter_provenance=self._diameter_provenance_snapshot(),
+            initial_length_mm=float(self.spin_initial_length.value()),
+            length_provenance={
+                "source": "configured_preflight",
+                "mandatory_setup": True,
+                "note": "Runtime l0 may be derived later by the mandatory mounted-length setup.",
+            },
+            base_filename=_clean_session_basename(self.edit_log_name.text()),
+        )
+
+    def _session_base_paths(
+        self,
+        identity: SampleIdentitySnapshot | None = None,
+    ) -> tuple[Path, Path, Path, Path]:
         directory = Path(self.edit_log_dir.text().strip() or _default_download_dir())
         directory.mkdir(parents=True, exist_ok=True)
-        basename = _clean_session_basename(self.edit_log_name.text())
+        basename = _clean_session_basename(
+            self.edit_log_name.text() if identity is None else identity.base_filename
+        )
         if basename != self.edit_log_name.text().strip():
             self.edit_log_name.setText(basename)
         return _session_paths_for_basename(directory, basename)
 
     def _current_session_identity_text(self, paths: Sequence[Path] | None = None) -> str:
-        sample_name = self.edit_sample_name.text().strip() or "(unnamed sample)"
-        log_name = _clean_session_basename(self.edit_log_name.text())
+        snapshot = self._session_identity_snapshot
+        sample_name = (
+            snapshot.sample_name if snapshot is not None else self.edit_sample_name.text().strip()
+        ) or "(unnamed sample)"
+        log_name = _clean_session_basename(
+            snapshot.base_filename if snapshot is not None else self.edit_log_name.text()
+        )
         output_folder = paths[0].parent if paths else Path(self.edit_log_dir.text().strip() or _default_download_dir()) / log_name
         return (
             f"Sample: {sample_name}\n"
@@ -20649,8 +20756,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return OUTPUT_COLLISION_CANCEL
         return OUTPUT_COLLISION_CANCEL
 
-    def _resolve_session_base_paths(self) -> tuple[Path, Path, Path, Path]:
-        paths = self._session_base_paths()
+    def _resolve_session_base_paths(
+        self,
+        identity: SampleIdentitySnapshot | None = None,
+    ) -> tuple[Path, Path, Path, Path]:
+        paths = self._session_base_paths(identity)
         if not _session_paths_exist(paths):
             return paths
         action = self._ask_existing_output_action(paths)
@@ -20660,7 +20770,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return paths
         if action == OUTPUT_COLLISION_NEXT:
             directory = paths[0].parent.parent
-            basename = _clean_session_basename(self.edit_log_name.text())
+            basename = _clean_session_basename(
+                self.edit_log_name.text() if identity is None else identity.base_filename
+            )
             next_basename, next_paths = _next_run_session_paths(directory, basename)
             self.edit_log_name.setText(next_basename)
             self._log(f"Existing output preserved; using next run filename {next_basename}.")
@@ -20696,7 +20808,12 @@ class MainWindow(QtWidgets.QMainWindow):
         Path,
         Path,
     ]:
-        txt_path, csv_path, json_path, raw_scale_path = self._resolve_session_base_paths()
+        identity = self._freeze_session_identity_snapshot(frozen_utc=created_utc)
+        self._session_identity_snapshot = identity
+        txt_path, csv_path, json_path, raw_scale_path = self._resolve_session_base_paths(identity)
+        if txt_path.parent.name != identity.base_filename:
+            identity = identity.with_base_filename(txt_path.parent.name)
+            self._session_identity_snapshot = identity
         txt_path.parent.mkdir(parents=True, exist_ok=True)
         setup_txt_path, setup_csv_path = _session_setup_paths_for_measurement(txt_path)
         ir_temperature_path = txt_path.parent / SESSION_IR_TEMPERATURE_CSV
@@ -20714,10 +20831,12 @@ class MainWindow(QtWidgets.QMainWindow):
         txt_handle.write("\t".join(LONG_NAMES) + "\n")
         txt_handle.write("\t".join(UNITS) + "\n")
         txt_handle.write(f"# Created UTC\t{created_utc}\n")
-        txt_handle.write(f"# Sample\t{self.edit_sample_name.text().strip()}\n")
+        txt_handle.write(f"# Sample\t{identity.sample_name}\n")
+        txt_handle.write(f"# Sample ID\t{identity.sample_id}\n")
+        txt_handle.write(f"# Identity frozen UTC\t{identity.frozen_utc}\n")
         txt_handle.write(f"# Notes\t{self.edit_run_notes.toPlainText().strip()}\n")
-        txt_handle.write(f"# Initial length mm\t{self.spin_initial_length.value():.6f}\n")
-        txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
+        txt_handle.write(f"# Initial length mm\t{identity.initial_length_mm:.6f}\n")
+        txt_handle.write(f"# Wire diameter mm\t{identity.diameter_mm:.6f}\n")
         txt_handle.write(f"# Zero-load scale reading g\t{self._zero_load_scale_reference_g():.6f}\n")
         txt_handle.write(f"# Diagnostic software load offset g\t{self._load_offset_g:.6f}\n")
         txt_handle.write("# Mandatory length setup\tTrue\n")
@@ -20728,10 +20847,12 @@ class MainWindow(QtWidgets.QMainWindow):
         setup_txt_handle.write("\t".join(LONG_NAMES) + "\n")
         setup_txt_handle.write("\t".join(UNITS) + "\n")
         setup_txt_handle.write(f"# Created UTC\t{created_utc}\n")
-        setup_txt_handle.write(f"# Sample\t{self.edit_sample_name.text().strip()}\n")
+        setup_txt_handle.write(f"# Sample\t{identity.sample_name}\n")
+        setup_txt_handle.write(f"# Sample ID\t{identity.sample_id}\n")
+        setup_txt_handle.write(f"# Identity frozen UTC\t{identity.frozen_utc}\n")
         setup_txt_handle.write(f"# Notes\t{self.edit_run_notes.toPlainText().strip()}\n")
-        setup_txt_handle.write(f"# Initial length setting before setup mm\t{self.spin_initial_length.value():.6f}\n")
-        setup_txt_handle.write(f"# Wire diameter mm\t{self.spin_diameter.value():.6f}\n")
+        setup_txt_handle.write(f"# Initial length setting before setup mm\t{identity.initial_length_mm:.6f}\n")
+        setup_txt_handle.write(f"# Wire diameter mm\t{identity.diameter_mm:.6f}\n")
         setup_txt_handle.write(f"# Zero-load scale reading g\t{self._zero_load_scale_reference_g():.6f}\n")
         setup_txt_handle.write(f"# Setup preload stress MPa\t{self.spin_setup_preload_stress_mpa.value():.6f}\n")
         setup_txt_handle.write(f"# Setup preload duration s\t{self.spin_setup_preload_duration_s.value():.6f}\n")
@@ -20899,6 +21020,21 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._session_raw_scale_count / elapsed_s
 
+    def _session_raw_scale_interval_percentiles_ms(self) -> dict[str, float | None]:
+        values = sorted(self._session_raw_scale_intervals_ms)
+        if not values:
+            return {"p50": None, "p95": None, "p99": None}
+
+        def _percentile(fraction: float) -> float:
+            index = (len(values) - 1) * fraction
+            lower = math.floor(index)
+            upper = math.ceil(index)
+            if lower == upper:
+                return values[lower]
+            return values[lower] + (values[upper] - values[lower]) * (index - lower)
+
+        return {"p50": _percentile(0.50), "p95": _percentile(0.95), "p99": _percentile(0.99)}
+
     def _session_ir_temperature_rate_hz(self) -> float | None:
         started_s = self._session_start_wall_s
         if started_s <= 0.0:
@@ -20975,6 +21111,20 @@ class MainWindow(QtWidgets.QMainWindow):
             "frame_width": sample.frame_width,
             "frame_height": sample.frame_height,
         }
+
+    def _scale_profile_name(self) -> str:
+        settings = {
+            "baudrate": int(self.combo_scale_baud.currentText()),
+            "request_command": self.edit_scale_request.text(),
+            "terminator": self.edit_scale_terminator.text(),
+        }
+        if _is_kern_kcp_scale_match(settings):
+            return "kosice_kern_kcp_request"
+        if str(settings["request_command"]) == GNG_SCALE_REQUEST:
+            return "prague_gng_request"
+        if str(settings["request_command"]).strip():
+            return "custom_request_response"
+        return "passive_stream"
 
     def _source_control_metadata(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]
@@ -21197,6 +21347,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_recorded_utc = _utc_timestamp()
 
     def _session_metadata(self) -> dict[str, Any]:
+        identity = self._session_identity_snapshot
         calibration_metadata = {
             "baseline_s": float(self.spin_calibration_baseline_s.value()),
             "start_load_g": float(self.spin_calibration_start_load_g.value()),
@@ -21217,16 +21368,31 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         return {
             "created_utc": self._session_created_utc or _utc_timestamp(),
-            "sample_name": self.edit_sample_name.text().strip(),
+            "sample_identity": None if identity is None else identity.to_dict(),
+            "sample_name": self.edit_sample_name.text().strip() if identity is None else identity.sample_name,
             "name_fields": {
-                "composition": self.edit_name_composition.text().strip(),
-                "microwire": self.edit_name_wire.text().strip(),
-                "specimen": self.edit_name_specimen.text().strip(),
-                "condition": self.edit_name_condition.text().strip(),
+                "composition": self.edit_name_composition.text().strip() if identity is None else identity.composition,
+                "microwire": self.edit_name_wire.text().strip() if identity is None else identity.microwire,
+                "specimen": self.edit_name_specimen.text().strip() if identity is None else identity.specimen,
+                "condition": self.edit_name_condition.text().strip() if identity is None else identity.condition,
             },
             "notes": self.edit_run_notes.toPlainText().strip(),
-            "initial_length_mm": float(self.spin_initial_length.value()),
-            "wire_diameter_mm": float(self.spin_diameter.value()),
+            "initial_length_mm": (
+                float(self.spin_initial_length.value()) if identity is None else identity.initial_length_mm
+            ),
+            "runtime_initial_length_mm": float(self.spin_initial_length.value()),
+            "runtime_length_provenance": {
+                "source": (
+                    "mandatory_length_setup"
+                    if self._setup_measured_length_mm is not None or self._setup_starting_length_mm is not None
+                    else "configured_preflight"
+                ),
+                "starting_length_mm": self._setup_starting_length_mm,
+                "measured_preload_length_mm": self._setup_measured_length_mm,
+                "preload_position_mm": self._setup_preload_position_mm,
+                "zero_position_mm": self._setup_zero_position_mm,
+            },
+            "wire_diameter_mm": float(self.spin_diameter.value()) if identity is None else identity.diameter_mm,
             "mandatory_length_setup": True,
             "steps_per_mm": float(self.spin_steps_per_mm.value()),
             "position_reference_mm": float(self._position_reference_mm),
@@ -21253,6 +21419,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "positions_by_leg": dict(self._constant_current_step_base_position_by_note),
             },
             "scale": {
+                "profile": self._scale_profile_name(),
                 "port": str(self.combo_scale_port.currentData() or ""),
                 "baud": int(self.combo_scale_baud.currentText()),
                 "poll_interval_ms": int(self.spin_scale_interval.value()),
@@ -21260,6 +21427,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "line_ending": self.edit_scale_terminator.text(),
                 "readability_g": self._scale_readability_g(),
                 "recent_sample_rate_hz": self._scale_signal_buffer.sample_rate_hz(now_s=time.time()),
+                "accepted_sample_count": int(self._session_raw_scale_count),
+                "rejected_sample_count": int(self._session_scale_rejected_count),
+                "interval_percentiles_ms": self._session_raw_scale_interval_percentiles_ms(),
             },
             "ir_thermometer": {
                 "enabled": self._ir_enabled(),
@@ -21304,6 +21474,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ir_temperature_sample_count": int(self._session_ir_temperature_count),
                 "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
+                "ui_stall_count": int(self._session_ui_stall_count),
+                "dropped_row_count": int(self._session_dropped_row_count),
             },
             "control": {
                 "control_interval_ms": self._control_interval_ms(),
@@ -21314,6 +21486,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tic_keepalive_interval_ms": self._tic_keepalive_interval_ms(),
                 "tic_status_interval_ms": self._tic_status_interval_ms(),
                 "supply_read_interval_ms": self._supply_read_interval_ms(),
+                "controller_state": self._automation_phase,
+                "last_motor_command_id": self._last_motor_command_id,
+                "last_motor_command_issued_utc": self._last_motor_command_issued_utc,
+                "last_motor_command_target_steps": self._last_commanded_position_steps,
             },
             "heating": {
                 "port": str(self.combo_supply_port.currentData() or ""),
@@ -21572,8 +21748,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 setup_csv_path,
             ) = self._prepare_session_files(created_utc=created_utc)
         except Exception as exc:
+            self._session_identity_snapshot = None
             if str(exc):
                 self._log(str(exc))
+                self.label_session_status.setText(str(exc))
             return
 
         self._session_created_utc = created_utc
@@ -21647,8 +21825,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_raw_scale_count = 0
         self._session_last_raw_scale_wall_s = None
         self._session_raw_scale_max_gap_s = 0.0
+        self._session_raw_scale_intervals_ms = []
         self._session_ir_temperature_count = 0
         self._session_ui_telemetry_count = 0
+        self._session_scale_rejected_count = 0
+        self._session_ui_stall_count = 0
+        self._session_dropped_row_count = 0
+        self._motor_command_sequence = 0
+        self._last_motor_command_id = None
+        self._last_motor_command_issued_utc = None
         self._ui_refresh_last_monotonic_s = None
         self._last_ui_refresh_interval_ms = None
         self._last_ui_handler_duration_ms = None
@@ -21909,6 +22094,7 @@ class MainWindow(QtWidgets.QMainWindow):
         effective_target_mm: float | None = None,
         result: str = "",
         reason: str = "",
+        gate_reason: str | None = None,
         task_text: str | None = None,
     ) -> None:
         if (
@@ -21943,6 +22129,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             filtered_signal = self._seek_filtered_control_signal(basis)
         scale_age_s = self._scale_reading_age_s()
+        estimator_freshness = (
+            "unavailable"
+            if scale_age_s is None
+            else ("stale" if scale_age_s > STALE_SCALE_AFTER_S else "fresh")
+        )
         scale_recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
         try:
             voltage_limit_v = float(self.spin_supply_voltage_limit.value())
@@ -21959,7 +22150,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     "automation_basis": "" if basis is None else basis,
                     "automation_target_value": _number(target_value),
                     "plateau_index": "" if self._automation_plateau_index is None else self._automation_plateau_index,
+                    "scale_profile": self._scale_profile_name(),
+                    "scale_accepted_sample_count": int(self._session_raw_scale_count),
+                    "scale_rejected_sample_count": int(self._session_scale_rejected_count),
                     "decision": decision,
+                    "controller_state": self._automation_phase,
+                    "gate_reason": reason if gate_reason is None else gate_reason,
                     "current_value": _number(current_value),
                     "error_value": _number(error_value),
                     "tolerance": _number(tolerance),
@@ -21970,6 +22166,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     "filtered_sample_count": (
                         "" if filtered_signal is None else int(filtered_signal.sample_count)
                     ),
+                    "estimator_window_s": _number(
+                        self._current_sweep_hold_filter_window_s()
+                        if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+                        else None
+                    ),
+                    "estimator_freshness": estimator_freshness,
                     "latest_scale_age_s": _number(scale_age_s),
                     "scale_recent_rate_hz": _number(scale_recent_rate_hz),
                     "raw_scale_sample_count": int(self._session_raw_scale_count),
@@ -21984,6 +22186,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     "correction_mm": _number(correction_mm),
                     "backlash_mm": _number(backlash_mm),
                     "command_speed_mm_s": _number(command_speed_mm_s),
+                    "motor_command_id": self._last_motor_command_id or "",
+                    "motor_command_issued_utc": self._last_motor_command_issued_utc or "",
+                    "motor_command_target_steps": (
+                        "" if self._last_commanded_position_steps is None else self._last_commanded_position_steps
+                    ),
+                    "motor_response_sample_count": (
+                        "" if post_move_sample_count is None else int(post_move_sample_count)
+                    ),
                     "required_fresh_samples": "" if required_fresh_samples is None else int(required_fresh_samples),
                     "post_move_sample_count": "" if post_move_sample_count is None else int(post_move_sample_count),
                     "target_mm": _number(target_mm),
@@ -22028,6 +22238,7 @@ class MainWindow(QtWidgets.QMainWindow):
             sample_gap_s = max(0.0, float(sample.timestamp_s) - float(previous_sample_s))
             sample_interval_ms = sample_gap_s * 1000.0
             self._session_raw_scale_max_gap_s = max(self._session_raw_scale_max_gap_s, sample_gap_s)
+            self._session_raw_scale_intervals_ms.append(sample_interval_ms)
         self._session_last_raw_scale_wall_s = float(sample.timestamp_s)
         sample_index = self._session_raw_scale_count + 1
         self._session_raw_scale_writer.writerow(
@@ -22464,11 +22675,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"({self._scale_feedback_diagnostic_text()})."
             )
             return True
-        return self._record_current_point(
+        recorded = self._record_current_point(
             quiet=quiet,
             advance_heating=advance_heating,
             require_fresh_after_move=require_fresh_after_move,
         )
+        if not recorded:
+            self._session_dropped_row_count += 1
+        return recorded
 
     def _record_recovery_point(self) -> bool:
         try:
@@ -28733,6 +28947,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ui_fps = None if not actual_interval_ms or actual_interval_ms <= 0.0 else 1000.0 / actual_interval_ms
         scale_age_s = self._scale_reading_age_s()
         handler_duration_ms = max(0.0, (finished_s - started_s) * 1000.0)
+        target_interval_ms = int(self._ui_refresh_interval_ms())
+        if actual_interval_ms is not None and actual_interval_ms > max(1000.0, 3.0 * target_interval_ms):
+            self._session_ui_stall_count += 1
         self._last_ui_refresh_interval_ms = actual_interval_ms
         self._last_ui_handler_duration_ms = handler_duration_ms
         scale_recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
@@ -28747,12 +28964,14 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "elapsed_s": f"{max(0.0, started_s - self._session_start_monotonic):.6f}",
                 "timestamp_utc": _utc_timestamp(),
-                "target_interval_ms": int(self._ui_refresh_interval_ms()),
+                "target_interval_ms": target_interval_ms,
                 "actual_interval_ms": _number(actual_interval_ms, decimals=3),
                 "ui_fps": _number(ui_fps, decimals=3),
                 "ui_heartbeat_interval_ms": _number(self._ui_heartbeat_interval_ms, decimals=3),
                 "ui_heartbeat_fps": _number(self._ui_heartbeat_fps, decimals=3),
                 "handler_duration_ms": _number(handler_duration_ms, decimals=3),
+                "ui_stall_count": int(self._session_ui_stall_count),
+                "dropped_row_count": int(self._session_dropped_row_count),
                 "graph_refresh_interval_ms": int(self._graph_refresh_interval_ms()),
                 "task_text": self._current_task_summary(),
                 "automation_active": int(bool(self._automation_active)),
