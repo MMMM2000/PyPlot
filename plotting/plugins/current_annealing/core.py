@@ -761,8 +761,8 @@ def _current_axis_label(currents: np.ndarray, diameter_um: object) -> str:
     return (
         f"{base_label} "
         f"({_format_compact_number(max_current_mA, max_decimals=0)} mA = "
-        f"{_format_compact_number(density, max_decimals=0)} A/mm^2, "
-        f"d = {_format_compact_number(normalised_diameter)} um)"
+        f"{_format_compact_number(density, max_decimals=0)} A/mm², "
+        f"d = {_format_compact_number(normalised_diameter)} µm)"
     )
 
 
@@ -788,7 +788,7 @@ def _add_current_density_top_axis(ax: Any, diameter_um: object) -> Any | None:
             for tick in ticks
         ]
     )
-    top_ax.set_xlabel("Current density [A/mm^2]", fontsize=AXIS_LABEL_SIZE)
+    top_ax.set_xlabel("Current density [A/mm²]", fontsize=AXIS_LABEL_SIZE)
     top_ax.tick_params(axis="x", labelsize=TICK_SIZE)
     return top_ax
 

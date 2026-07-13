@@ -592,7 +592,12 @@ _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
 
 def _normalise_microwire_identity_suffix(suffix: object) -> Optional[str]:
-    """Return only suffixes that should create separate sample identities."""
+    """Return only suffixes that should create separate sample identities.
+
+    Filename notes such as ``No1`` and ``noload`` describe a measurement, not
+    a separate microwire.  ``oe`` (other end) remains distinct so it can be
+    reviewed or hidden independently.
+    """
 
     if suffix is None or _is_nan(suffix):
         return None

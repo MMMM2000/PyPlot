@@ -89,7 +89,19 @@ def test_microscope_key_draw_piece_starts_after_composition_boundary() -> None:
         "Ni46Fe27Ga23Cu2Co2",
         2,
         1,
-        "No1",
+        None,
+    )
+    assert core._microscope_key(Path("Ni46Fe27Ga23Cu2Co2_2-1_noload glass.jpg")) == (
+        "Ni46Fe27Ga23Cu2Co2",
+        2,
+        1,
+        None,
+    )
+    assert core._microscope_key(Path("Ni46Fe27Ga23Cu2Co2 2_1oe glass.jpg")) == (
+        "Ni46Fe27Ga23Cu2Co2",
+        2,
+        1,
+        "oe",
     )
 
 
@@ -758,6 +770,7 @@ def test_render_measurement_pixmap_passes_wire_diameter_to_axis_label(
         assert captured_figures[0].axes[0].get_xlabel() == (
             "Current [mA] (100 mA = 318 A/mm², d = 20 µm)"
         )
+        assert captured_figures[0].axes[0].get_ylabel() == "Resistance [Ω]"
         assert captured_figures[0].axes[1].get_xlabel() == "Current density [A/mm²]"
     finally:
         for figure in captured_figures:
