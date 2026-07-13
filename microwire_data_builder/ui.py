@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import difflib
 import faulthandler
 import hashlib
@@ -14015,7 +14016,16 @@ class AnnealingSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._phase_points = {}
+        stored_phase_points = self.data.extra.get("phase_points")
+        if isinstance(stored_phase_points, Mapping):
+            for key, stored in stored_phase_points.items():
+                if isinstance(key, str) and isinstance(stored, dict):
+                    cleaned = self._clean_phase_points_payload(stored)
+                    if cleaned:
+                        self._phase_points[key] = cleaned
         self._load_transition_reviews()
+        self._load_hidden_paths()
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
@@ -19906,8 +19916,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
         if not isinstance(payload, Mapping) or not payload:
-            self._transition_points = self._load_transition_points()
-            self._transition_reviews = self._load_transition_reviews()
+            self.data = MiniDatabaseData()
+            self._transition_points = {}
+            self._transition_reviews = {}
+            self._current_frame = pd.DataFrame(
+                columns=TRANSITION_TEMP_COLUMNS + VSM_TRANSITION_REVIEW_COLUMNS + ["_group_key"]
+            )
+            self.model.set_frame(self._current_frame)
             self.refresh_data()
             return
         columns = [str(column) for column in payload.get("columns", [])] if isinstance(payload.get("columns"), list) else []
@@ -36492,6 +36507,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._auto_open_in_progress = False
         self._project_load_thread: QtCore.QThread | None = None
         self._project_load_worker: _ProjectLoadWorker | None = None
+        self._project_restore_state: Dict[str, Any] | None = None
+        self._project_restore_timer = QtCore.QTimer(self)
+        self._project_restore_timer.setSingleShot(True)
+        self._project_restore_timer.timeout.connect(self._run_project_restore_callback)
+        self._project_load_cancelled = False
+        self._close_after_project_load = False
         self._project_load_started_s: float = 0.0
         self._project_load_auto_open = False
 
@@ -37147,7 +37168,204 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    @staticmethod
+    def _clone_load_data(data: MiniDatabaseData) -> MiniDatabaseData:
+        return MiniDatabaseData(
+            sources=list(data.sources),
+            processed=dict(data.processed),
+            table=data.table.copy(deep=True),
+            extra=copy.deepcopy(data.extra),
+        )
+
+    def _capture_project_load_state(self) -> Dict[str, Any]:
+        attr_names = (
+            "_phase_points", "_transition_reviews", "_hidden_paths",
+            "_overrides", "_validated", "_prepopulated_keys",
+            "_expected_keys_current", "_expected_key_source_labels", "_show_other_ends",
+            "_strain_offsets", "_strain_mode", "_clamp_span_mm", "_wire_choices",
+            "_row_keys", "_compare_columns", "_compare_view_mode",
+            "_compare_fields", "_compare_field_order", "_current_frame",
+            "_auto_values_cache", "_last_sources", "_pending_preview_record_id",
+        )
+        section_states: Dict[str, Dict[str, Any]] = {}
+        for key, section in self.sections.items():
+            state: Dict[str, Any] = {}
+            data = getattr(section, "data", None)
+            if isinstance(data, MiniDatabaseData):
+                state["data"] = self._clone_load_data(data)
+            for name in attr_names:
+                if hasattr(section, name):
+                    value = getattr(section, name)
+                    state[name] = (
+                        value.copy(deep=True)
+                        if isinstance(value, pd.DataFrame)
+                        else copy.deepcopy(value)
+                    )
+            status_label = getattr(section, "status_label", None)
+            if isinstance(status_label, QtWidgets.QLabel):
+                state["status_text"] = status_label.text()
+            section_states[key] = state
+        assembly = self.assembly_section
+        assembly_state = {
+            name: (
+                value.copy(deep=True)
+                if isinstance(value, pd.DataFrame)
+                else copy.deepcopy(value)
+            )
+            for name in (
+                "_raw_preview_frame", "_measured_preview_frame", "_selected_columns",
+                "_column_order", "_sort_spec", "_preview_search_text",
+                "_preview_source_filter_text", "_imported_rows", "_imported_sources",
+                "_show_imported", "_show_oe_samples", "_known_columns",
+            )
+            if hasattr(assembly, name)
+            for value in (getattr(assembly, name),)
+        }
+        assembly_state["export_settings"] = copy.deepcopy(assembly._export_settings_payload())
+        assembly_state["graph_preview"] = bool(assembly.graph_panel_checkbox.isChecked())
+        paused_timers: List[Tuple[QtCore.QTimer, bool, int]] = []
+        timer_names = (
+            "_transition_state_store_timer",
+            "_transition_review_store_timer",
+            "_transition_review_update_timer",
+            "_pending_state_save_timer",
+            "_transition_table_apply_timer",
+        )
+        for section in self.sections.values():
+            for timer_name in timer_names:
+                timer = getattr(section, timer_name, None)
+                if isinstance(timer, QtCore.QTimer):
+                    active = timer.isActive()
+                    remaining = timer.remainingTime() if active else -1
+                    timer.stop()
+                    paused_timers.append((timer, active, remaining))
+        return {
+            "sections": section_states,
+            "assembly": assembly_state,
+            "project_path": self._project_path,
+            "dirty": self._dirty,
+            "paused_timers": paused_timers,
+        }
+
+    @staticmethod
+    def _resume_project_load_timers(snapshot: Mapping[str, Any]) -> None:
+        if snapshot.get("timers_resumed"):
+            return
+        if isinstance(snapshot, dict):
+            snapshot["timers_resumed"] = True
+        for timer, was_active, remaining in snapshot.get("paused_timers", []):
+            if isinstance(timer, QtCore.QTimer) and was_active:
+                timer.start(max(int(remaining), 1))
+
+    @staticmethod
+    def _discard_project_load_timers(snapshot: Mapping[str, Any]) -> None:
+        """Keep old-project deferred work from running against newly loaded state."""
+        if isinstance(snapshot, dict):
+            snapshot["timers_resumed"] = True
+        for timer, _was_active, _remaining in snapshot.get("paused_timers", []):
+            if isinstance(timer, QtCore.QTimer):
+                timer.stop()
+
+    def _restore_project_load_state(self, snapshot: Mapping[str, Any]) -> None:
+        section_states = snapshot.get("sections", {})
+        with MiniDatabaseStore.discard_writes():
+            for key, section in self.sections.items():
+                state = section_states.get(key, {}) if isinstance(section_states, Mapping) else {}
+                data = state.get("data") if isinstance(state, Mapping) else None
+                if isinstance(section, MiniDatabaseSection) and isinstance(data, MiniDatabaseData):
+                    section.apply_data(self._clone_load_data(data))
+                elif isinstance(section, TransitionTempsSection) and isinstance(data, MiniDatabaseData):
+                    section.data = self._clone_load_data(data)
+                if isinstance(state, Mapping):
+                    for name, value in state.items():
+                        if name not in {"data", "status_text"}:
+                            setattr(section, name, copy.deepcopy(value))
+
+                if isinstance(section, AnnealingSection):
+                    section._sanitize_graph_columns()
+                    section._refresh_record_groups()
+                    section._update_export_enabled()
+                elif isinstance(section, MicroscopeSection):
+                    section._apply_overrides_to_table(restore_selection=False, clear_preview_cache=True)
+                    section._refresh_status_column()
+                    section._update_missing_summary()
+                    section._update_review_buttons()
+                elif isinstance(section, TransitionTempsSection):
+                    frame = state.get("_current_frame") if isinstance(state, Mapping) else None
+                    if isinstance(frame, pd.DataFrame):
+                        section._current_frame = frame
+                        section.model.set_frame(frame)
+                    section._hide_internal_columns()
+                    section._sync_preview_status()
+                elif isinstance(section, MiniDmaSection):
+                    section.model.set_frame(_normalise_tma_display_columns(section.model.frame()))
+                    _drop_visible_sample_column(section)
+                    section._refresh_record_groups()
+                elif isinstance(section, StrainSection):
+                    section._reload_strain_settings_from_extra()
+                    section._recompute_table_metrics()
+                    section._refresh_table_view()
+                    section._update_status()
+                elif isinstance(section, CompareSection):
+                    section._set_compare_view_mode(section._compare_view_mode)
+                    section._update_matrix_view()
+                    section._update_preview_graph_buttons()
+                status_label = getattr(section, "status_label", None)
+                if isinstance(status_label, QtWidgets.QLabel) and isinstance(state, Mapping):
+                    status_label.setText(str(state.get("status_text", status_label.text())))
+
+            assembly_state = snapshot.get("assembly", {})
+            if isinstance(assembly_state, Mapping):
+                for name, value in assembly_state.items():
+                    if name not in {"export_settings", "graph_preview"}:
+                        setattr(self.assembly_section, name, copy.deepcopy(value))
+                self.assembly_section._apply_export_settings(
+                    assembly_state.get("export_settings", {})
+                )
+                self.assembly_section.graph_panel_checkbox.setChecked(
+                    bool(assembly_state.get("graph_preview", False))
+                )
+                self.assembly_section._refresh_preview_source_filter_options()
+                self.assembly_section._refresh_preview_frame()
+                # Refresh helpers enforce mandatory display columns and may normalise
+                # filters. Rollback must nevertheless restore the user's exact saved
+                # view choices, not a close approximation of them.
+                for name in (
+                    "_selected_columns",
+                    "_column_order",
+                    "_preview_search_text",
+                    "_preview_source_filter_text",
+                    "_imported_rows",
+                    "_imported_sources",
+                ):
+                    if name in assembly_state:
+                        setattr(
+                            self.assembly_section,
+                            name,
+                            copy.deepcopy(assembly_state[name]),
+                        )
+        self._project_path = snapshot.get("project_path")
+        self._dirty = bool(snapshot.get("dirty", False))
+        self._update_project_title()
+        self._update_project_actions()
+
+    def _run_project_restore_callback(self) -> None:
+        state = self._project_restore_state
+        callback = state.get("next_callback") if isinstance(state, Mapping) else None
+        if callable(callback):
+            callback()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._project_restore_state is not None:
+            self._abort_project_restore(RuntimeError("Project load cancelled"), report=False)
+        thread = self._project_load_thread
+        if isinstance(thread, QtCore.QThread) and thread.isRunning():
+            self._project_load_cancelled = True
+            self._close_after_project_load = True
+            thread.requestInterruption()
+            thread.quit()
+            event.ignore()
+            return
         if self._dirty:
             box = QtWidgets.QMessageBox(self)
             box.setWindowTitle("Unsaved project")
@@ -38126,6 +38344,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.logger.warning("Project load already in progress; ignoring request for %s", target)
             return
         load_started_s = time.perf_counter()
+        self._project_load_cancelled = False
         self._project_load_in_progress = True
         auto_open_load = bool(getattr(self, "_auto_open_in_progress", False))
         self._begin_project_load_prepare_worker(
@@ -38163,8 +38382,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _cleanup_project_load_worker(self) -> None:
         self._project_load_thread = None
         self._project_load_worker = None
+        if self._close_after_project_load:
+            self._close_after_project_load = False
+            QtCore.QTimer.singleShot(0, self.close)
 
     def _handle_project_load_prepared(self, prepared_obj: object) -> None:
+        if self._project_load_cancelled:
+            self._project_load_in_progress = False
+            return
         if not isinstance(prepared_obj, _PreparedProjectLoad):
             self._handle_project_load_worker_failed(
                 Path("<unknown>"),
@@ -38191,6 +38416,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
 
     def _handle_project_load_worker_failed(self, target: Path, exc: object) -> None:
+        if self._project_load_cancelled:
+            self._project_load_in_progress = False
+            return
         load_started_s = self._project_load_started_s or time.perf_counter()
         error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
         self._handle_project_load_failed(target, error, load_started_s)
@@ -38228,6 +38456,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         total_steps = max(len(self.sections) + 1, 1)
         last_pump = 0.0
         show_progress_dialog = not _builder_dialogs_suppressed()
+        self._project_load_auto_open = bool(auto_open_load)
 
         def _pump_events(step: int | None = None, label: str | None = None) -> None:
             """Keep the UI responsive while loading a project."""
@@ -38273,14 +38502,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._suppress_dirty = True
         try:
             if payload.get("kind") != self.PROJECT_KIND:
-                QtWidgets.QMessageBox.critical(
-                    self,
-                    "Open Project",
-                    "The selected file is not a Microwire Data Builder project.",
+                self._handle_project_load_failed(
+                    target,
+                    ValueError("The selected file is not a Microwire Data Builder project."),
+                    load_started_s,
                 )
-                self._project_load_in_progress = False
-                self._project_load_auto_open = False
-                self._suppress_dirty = False
                 if progress_dialog is not None:
                     try:
                         progress_dialog.close()
@@ -38409,6 +38635,42 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         except Exception:
                             pass
 
+    def _abort_project_restore(self, exc: Exception, *, report: bool = True) -> None:
+        state = self._project_restore_state
+        if not isinstance(state, dict):
+            return
+        self._project_restore_timer.stop()
+        self._project_restore_state = None
+        transaction = state.get("transaction")
+        try:
+            if transaction is not None and not transaction.finished:
+                transaction.rollback()
+        except Exception:
+            self.logger.exception("Failed to roll back project store transaction")
+        try:
+            self._restore_project_load_state(state["snapshot"])
+        except Exception:
+            self.logger.exception("Failed to rebuild previous project UI after load failure")
+        try:
+            self._resume_project_load_timers(state["snapshot"])
+        except Exception:
+            self.logger.exception("Failed to resume project timers after load failure")
+        finally:
+            MiniDatabaseSection._project_load_batch_mode = False
+            self._suppress_dirty = False
+            self._project_load_in_progress = False
+            progress_dialog = state.get("progress_dialog")
+            if isinstance(progress_dialog, QtWidgets.QProgressDialog):
+                progress_dialog.close()
+        if report:
+            try:
+                self._project_load_auto_open = bool(state.get("auto_open_load", False))
+                self._handle_project_load_failed(state["target"], exc, state["load_started_s"])
+            except Exception:
+                self.logger.exception("Failed to report project load failure")
+        else:
+            self._project_load_auto_open = False
+
     def _restore_project_sections_staged(
         self,
         *,
@@ -38421,20 +38683,46 @@ class BuilderWindow(QtWidgets.QMainWindow):
         pump_events: Callable[[int | None, str | None], None],
     ) -> None:
         items = list(self.sections.items())
-        state = {
+        try:
+            snapshot = self._capture_project_load_state()
+            transaction = MiniDatabaseStore.begin_memory_transaction()
+        except Exception as exc:
+            self._handle_project_load_failed(target, exc, load_started_s)
+            return
+        state: Dict[str, Any] = {
             "index": 0,
             "assembly_done": False,
-            "disk_context": MiniDatabaseStore.suspend_disk_writes(),
+            "transaction": transaction,
+            "snapshot": snapshot,
+            "target": target,
+            "load_started_s": load_started_s,
+            "auto_open_load": auto_open_load,
+            "progress_dialog": progress_dialog,
+            "next_callback": None,
         }
+        # Hide every old section cache before the first importer runs. Some
+        # importers consult peer stores, and must never observe a later section
+        # from the previous project merely because its own staged turn has not
+        # run yet.
+        for key, section in items:
+            store = getattr(section, "store", None)
+            if isinstance(store, MiniDatabaseStore):
+                section_key = str(getattr(section, "section_key", key))
+                transaction.save_data(section_key, MiniDatabaseData())
+                transaction.clear_section_payloads(section_key)
+        self._project_restore_state = state
         MiniDatabaseSection._project_load_batch_mode = True
-        state["disk_context"].__enter__()
+
+        def _schedule(callback: Callable[[], None]) -> None:
+            if self._project_restore_state is not state:
+                return
+            state["next_callback"] = callback
+            self._project_restore_timer.start(0)
 
         def _finish() -> None:
+            if self._project_restore_state is not state:
+                return
             try:
-                try:
-                    state["disk_context"].__exit__(None, None, None)
-                except Exception:
-                    pass
                 assembly = getattr(self, "assembly_section", None)
                 self._update_imported_data_item()
                 if isinstance(assembly, AssemblySection):
@@ -38450,19 +38738,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     if isinstance(fabrication, FabricationSection):
                         fabrication.set_import_separation(separate)
                 self._project_path = target
-                self._remember_project_directory(target.parent)
-                self._remember_recent_project(target)
-                try:
-                    self.settings.setValue(self._project_settings_key("last_path"), str(target))
-                except Exception:
-                    pass
                 self._update_project_title()
                 refresh_started_s = time.perf_counter()
                 self._refresh_sections_after_project_load()
                 _log_builder_timing(self.logger, "project_load_post_refresh", refresh_started_s)
                 self._update_project_actions()
-                self._dirty = False
-                self.logger.info("Project loaded from %s", target)
                 pump_events(total_steps, "Finishing...")
                 MiniDatabaseSection._project_load_batch_mode = False
                 transitions = getattr(self, "transitions_section", None)
@@ -38471,20 +38751,37 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     and self.tab_widget.currentWidget() is transitions
                 ):
                     transitions.refresh_current_workspace()
+                self._dirty = False
+                self._update_project_actions()
+                transaction.commit_memory_only()
+                self._discard_project_load_timers(snapshot)
+                self._project_restore_state = None
+                try:
+                    self._remember_project_directory(target.parent)
+                    self._remember_recent_project(target)
+                    self.settings.setValue(self._project_settings_key("last_path"), str(target))
+                except Exception:
+                    self.logger.exception("Failed to update project history after load")
+                self.logger.info("Project loaded from %s", target)
                 if not auto_open_load and not _builder_dialogs_suppressed():
-                    QtWidgets.QMessageBox.information(
-                        self,
-                        "Open Project",
-                        f"Loaded project from {target}",
-                    )
+                    try:
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "Open Project",
+                            f"Loaded project from {target}",
+                        )
+                    except Exception:
+                        self.logger.exception("Failed to show project load confirmation")
                 _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
             except Exception as exc:
-                self._handle_project_load_failed(target, exc, load_started_s)
+                self._abort_project_restore(exc)
             finally:
-                self._project_load_in_progress = False
-                self._project_load_auto_open = False
-                self._suppress_dirty = False
-                MiniDatabaseSection._project_load_batch_mode = False
+                if self._project_restore_state is None:
+                    self._project_load_in_progress = False
+                    self._project_load_auto_open = False
+                    self._suppress_dirty = False
+                    MiniDatabaseSection._project_load_batch_mode = False
+                    self._resume_project_load_timers(snapshot)
                 if progress_dialog is not None:
                     try:
                         progress_dialog.close()
@@ -38495,6 +38792,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             pass
 
         def _step() -> None:
+            if self._project_restore_state is not state:
+                return
             try:
                 index = int(state["index"])
                 if index < len(items):
@@ -38503,24 +38802,22 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     pump_events(index, f"Loading {label}...")
                     importer = getattr(section, "import_project_payload", None)
                     if callable(importer):
-                        if isinstance(section, MiniDatabaseSection):
-                            section.reset_to_blank()
                         section_payload = sections_payload.get(key)
+                        section_started_s = time.perf_counter()
                         try:
-                            section_started_s = time.perf_counter()
                             importer(section_payload or {})
-                            _log_builder_timing(
-                                self.logger,
-                                "project_load_section",
-                                section_started_s,
-                                section=key,
-                                staged=True,
-                            )
                         except Exception as exc:
-                            self.logger.error("Failed to load section %s from project: %s", key, exc)
+                            raise RuntimeError(f"Failed to load section {key}: {exc}") from exc
+                        _log_builder_timing(
+                            self.logger,
+                            "project_load_section",
+                            section_started_s,
+                            section=key,
+                            staged=True,
+                        )
                     state["index"] = index + 1
                     pump_events(index + 1, f"Loaded {label}")
-                    QtCore.QTimer.singleShot(0, _step)
+                    _schedule(_step)
                     return
 
                 if not state["assembly_done"]:
@@ -38529,34 +38826,25 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     assembly = getattr(self, "assembly_section", None)
                     importer = getattr(assembly, "import_project_payload", None)
                     if callable(importer):
+                        assembly_started_s = time.perf_counter()
                         try:
-                            assembly_started_s = time.perf_counter()
                             importer(assembly_payload or {})
-                            _log_builder_timing(
-                                self.logger,
-                                "project_load_section",
-                                assembly_started_s,
-                                section="assemble",
-                                staged=True,
-                            )
                         except Exception as exc:
-                            self.logger.error("Failed to load section assemble: %s", exc)
+                            raise RuntimeError(f"Failed to load section assemble: {exc}") from exc
+                        _log_builder_timing(
+                            self.logger,
+                            "project_load_section",
+                            assembly_started_s,
+                            section="assemble",
+                            staged=True,
+                        )
                     pump_events(total_steps, "Finishing...")
-                    QtCore.QTimer.singleShot(0, _finish)
+                    _schedule(_finish)
                     return
             except Exception as exc:
-                try:
-                    state["disk_context"].__exit__(type(exc), exc, exc.__traceback__)
-                except Exception:
-                    pass
-                self._handle_project_load_failed(target, exc, load_started_s)
-                if progress_dialog is not None:
-                    try:
-                        progress_dialog.close()
-                    except Exception:
-                        pass
+                self._abort_project_restore(exc)
 
-        QtCore.QTimer.singleShot(0, _step)
+        _schedule(_step)
 
     def _refresh_sections_after_project_load(self) -> None:
         self._sync_microscope_dependent_sections()
