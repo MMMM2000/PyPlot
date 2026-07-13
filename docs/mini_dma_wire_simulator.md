@@ -133,6 +133,18 @@ Run response-gated adaptive correction-cap comparisons:
 uv run python scripts/mini_dma_full_run_simulator.py --adaptive-policy-matrix --out artifacts/mini-dma-adaptive-policy-matrix
 ```
 
+Run the July 7-8 Košice KERN offline optimization family:
+
+```powershell
+uv run python scripts/mini_dma_full_run_simulator.py --kosice-offline-optimization --out artifacts/tma-kosice-offline-optimization
+```
+
+This software-only suite is calibrated from the source runs without modifying them. It preserves the measured 19-20 Hz KERN SI feedback envelope, 1.8 s processed window, approximately 0.25-0.30 s stack-heavy command cadence, 0.01 g readability, and the observed geometry range. The cases vary target stress, length, diameter, stiffness, noise, and mechanical response time, so the candidate is not tuned to one absolute 50 MPa case.
+
+The `overlapping_window` reference permits the old simulator behavior to issue corrections while delayed response remains in the processed window. The `response_sync_*` candidates allow one command in flight, make subsequent decisions from fresh post-command samples, learn response time and MPa/mm stiffness, and damp correction gain after target crossings. Ranking uses leave-one-family-out validation. Outputs include `kosice_offline_optimization_ranked.json`, `kosice_offline_optimization_ranked.md`, and `kosice_offline_optimization_ranked.png`, in addition to the ordinary sweep artifacts.
+
+This result is an offline design gate, not a production controller change. The production logger is intentionally untouched; integration still requires a review against its state machine, fake-driver tests, and staged hardware safety validation under an approved campaign.
+
 ```powershell
 uv run python scripts/mini_dma_full_run_simulator.py --control-validation --out artifacts/mini-dma-control-validation
 ```
