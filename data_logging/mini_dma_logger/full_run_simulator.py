@@ -49,6 +49,13 @@ FULL_RUN_SCENARIOS = (
     "stress_ladder_50_100_after_unwind",
 )
 
+KOSICE_OFFLINE_POLICIES = (
+    "overlapping_window",
+    "response_sync_d035",
+    "response_sync_d050",
+    "response_sync_d065",
+)
+
 
 @dataclass(frozen=True)
 class ScaleFeedbackConfig:
@@ -100,9 +107,16 @@ class FullRunConfig:
     rising_transformation_steps: tuple[tuple[float, float, float], ...] = ()
     falling_transformation_steps: tuple[tuple[float, float, float], ...] = ()
     transformation_kinetic_tau_s: float = 0.0
+    mechanical_response_tau_s: float = 0.0
     free_strain_fluctuation_pct: float = 0.0
     free_strain_fluctuation_cycles: float = 0.0
     inter_target_free_length_shift_mm: float = 0.0
+    response_synchronized: bool = False
+    response_min_fresh_samples: int = 5
+    response_initial_wait_s: float = 0.30
+    response_timeout_s: float = 3.60
+    response_learning_alpha: float = 0.30
+    limit_cycle_damping: float = 0.50
     seed: int = 0
 
     def validated(self) -> "FullRunConfig":
@@ -141,10 +155,22 @@ class FullRunConfig:
             raise ValueError("transformation_profile must be 'wire' or 'stepped'")
         if self.transformation_kinetic_tau_s < 0.0:
             raise ValueError("transformation_kinetic_tau_s must be non-negative")
+        if self.mechanical_response_tau_s < 0.0:
+            raise ValueError("mechanical_response_tau_s must be non-negative")
         if self.free_strain_fluctuation_pct < 0.0:
             raise ValueError("free_strain_fluctuation_pct must be non-negative")
         if self.free_strain_fluctuation_cycles < 0.0:
             raise ValueError("free_strain_fluctuation_cycles must be non-negative")
+        if self.response_min_fresh_samples < 2:
+            raise ValueError("response_min_fresh_samples must be at least 2")
+        if self.response_initial_wait_s <= 0.0:
+            raise ValueError("response_initial_wait_s must be positive")
+        if self.response_timeout_s < self.response_initial_wait_s:
+            raise ValueError("response_timeout_s must be at least response_initial_wait_s")
+        if not 0.0 < self.response_learning_alpha <= 1.0:
+            raise ValueError("response_learning_alpha must be in (0, 1]")
+        if not 0.0 < self.limit_cycle_damping <= 1.0:
+            raise ValueError("limit_cycle_damping must be in (0, 1]")
         if not self.target_stress_sequence_mpa:
             _finite(self.controller.target_stress_mpa)
         for target in self.target_stress_sequence_mpa:
@@ -158,11 +184,16 @@ class FullRunConfig:
                 _finite(weight)
         _finite(self.free_strain_fluctuation_pct)
         _finite(self.free_strain_fluctuation_cycles)
+        _finite(self.mechanical_response_tau_s)
         _finite(self.inter_target_free_length_shift_mm)
         _finite(self.current_hold_feedback_wait_s)
         _finite(self.current_hold_correction_feedback_wait_s)
         _finite(self.adaptive_correction_cap_max_scale)
         _finite(self.adaptive_correction_cap_growth)
+        _finite(self.response_initial_wait_s)
+        _finite(self.response_timeout_s)
+        _finite(self.response_learning_alpha)
+        _finite(self.limit_cycle_damping)
         if self.target_ramp_max_lead_fraction is not None:
             _finite(self.target_ramp_max_lead_fraction)
         return self
@@ -190,6 +221,10 @@ class FullRunEvent:
     fresh: bool
     feedback_age_s: float
     total_travel_mm: float
+    command_in_flight: bool = False
+    learned_response_time_s: float | None = None
+    learned_stiffness_mpa_per_mm: float | None = None
+    response_damping: float | None = None
     cruise_allowed: bool = False
 
     def to_row(self) -> dict[str, Any]:
@@ -217,6 +252,14 @@ class FullRunEvent:
             "processed_fresh": str(bool(self.fresh)).lower(),
             "feedback_age_s": f"{self.feedback_age_s:.6f}",
             "total_travel_mm": f"{self.total_travel_mm:.9f}",
+            "command_in_flight": str(bool(self.command_in_flight)).lower(),
+            "learned_response_time_s": (
+                "" if self.learned_response_time_s is None else f"{self.learned_response_time_s:.6f}"
+            ),
+            "learned_stiffness_mpa_per_mm": (
+                "" if self.learned_stiffness_mpa_per_mm is None else f"{self.learned_stiffness_mpa_per_mm:.6f}"
+            ),
+            "response_damping": "" if self.response_damping is None else f"{self.response_damping:.6f}",
             "cruise_allowed": str(bool(self.cruise_allowed)).lower(),
         }
 
@@ -316,6 +359,19 @@ class FullRunTrace:
             total_measurement_time_s=total_time_s,
             max_target_mpa=max_target_mpa,
         )
+        correction_events = [event for event in self.events if abs(event.correction_mm) > 0.0]
+        command_intervals_s = [
+            current.elapsed_s - previous.elapsed_s
+            for previous, current in zip(correction_events, correction_events[1:])
+        ]
+        max_same_direction_stack = 0
+        current_stack = 0
+        previous_direction = 0
+        for event in correction_events:
+            direction = 1 if event.correction_mm > 0.0 else -1
+            current_stack = current_stack + 1 if direction == previous_direction else 1
+            previous_direction = direction
+            max_same_direction_stack = max(max_same_direction_stack, current_stack)
         return {
             "scenario": self.config.name,
             "description": self.config.description,
@@ -323,6 +379,7 @@ class FullRunTrace:
             "length_mm": self.config.wire.length_mm,
             "diameter_mm": self.config.wire.diameter_mm,
             "elastic_stiffness_mpa_per_mm": self.config.wire.elastic_stiffness_mpa_per_mm,
+            "mechanical_response_tau_s": self.config.mechanical_response_tau_s,
             "configured_transformation_strain_pct": (
                 self.config.wire.transformation_contraction_mm / self.config.wire.length_mm * 100.0
             ),
@@ -386,6 +443,38 @@ class FullRunTrace:
             "max_observed_correction_cap_mm": max((event.correction_cap_mm for event in self.events), default=0.0),
             "max_total_travel_mm": max((event.total_travel_mm for event in self.events), default=0.0),
             "max_abs_correction_mm": max((abs(event.correction_mm) for event in self.events), default=0.0),
+            "response_synchronized": self.config.response_synchronized,
+            "response_command_count": len(correction_events),
+            "minimum_command_interval_s": min(command_intervals_s, default=0.0),
+            "median_command_interval_s": (
+                statistics.median(command_intervals_s) if command_intervals_s else 0.0
+            ),
+            "max_same_direction_command_stack": max_same_direction_stack,
+            "response_crossing_count": sum(
+                1
+                for previous, current in zip(correction_events, correction_events[1:])
+                if previous.correction_mm * current.correction_mm < 0.0
+            ),
+            "learned_response_time_s": next(
+                (
+                    event.learned_response_time_s
+                    for event in reversed(self.events)
+                    if event.learned_response_time_s is not None
+                ),
+                None,
+            ),
+            "learned_stiffness_mpa_per_mm": next(
+                (
+                    event.learned_stiffness_mpa_per_mm
+                    for event in reversed(self.events)
+                    if event.learned_stiffness_mpa_per_mm is not None
+                ),
+                None,
+            ),
+            "final_response_damping": next(
+                (event.response_damping for event in reversed(self.events) if event.response_damping is not None),
+                None,
+            ),
             "current_hold_count": len(hold_events),
             "current_hold_time_s": current_hold_time_s,
             "current_hold_fraction_of_measurement": (
@@ -417,6 +506,7 @@ class _FullRunState:
         self.sample_index = 0
         self.current_ma = config.sweep.start_ma
         self.motor_mm = config.wire.initial_motor_mm
+        self.physical_motor_mm = config.wire.initial_motor_mm
         self.total_travel_mm = 0.0
         self.samples: list[MeasurementSample] = []
         self.events: list[FullRunEvent] = []
@@ -432,6 +522,12 @@ class _FullRunState:
         self.adaptive_correction_scale = 1.0
         self.max_observed_adaptive_correction_scale = 1.0
         self.previous_adaptive_error_mpa: float | None = None
+        self.pending_response_command: dict[str, float] | None = None
+        self.last_response_command_elapsed_s: float | None = None
+        self.learned_response_time_s = config.response_initial_wait_s
+        self.learned_stiffness_mpa_per_mm: float | None = None
+        self.response_damping = config.limit_cycle_damping
+        self.response_crossing_count = 0
 
     @property
     def dt_s(self) -> float:
@@ -451,6 +547,69 @@ class _FullRunState:
         if not feedback:
             return math.inf
         return max(0.0, self.elapsed_s - feedback[-1].elapsed_s)
+
+    def _post_command_feedback(self) -> list[MeasurementSample]:
+        feedback = self.feedback_samples()
+        if not self.config.response_synchronized or self.last_response_command_elapsed_s is None:
+            return feedback
+        return [
+            sample
+            for sample in feedback
+            if sample.elapsed_s > self.last_response_command_elapsed_s + 1e-12
+        ]
+
+    def _refresh_response_learning(self, controller: RobustControllerConfig) -> None:
+        pending = self.pending_response_command
+        if not self.config.response_synchronized or pending is None:
+            return
+        post = self._post_command_feedback()
+        if len(post) < self.config.response_min_fresh_samples:
+            return
+        age_s = post[-1].elapsed_s - pending["elapsed_s"]
+        if age_s + 1e-12 < self.learned_response_time_s and age_s < self.config.response_timeout_s:
+            return
+        signal = processed_control_signal(post, controller)
+        response_mpa = signal.center_mpa - pending["center_mpa"]
+        threshold_mpa = max(controller.tolerance_mpa * 0.25, signal.noise_mpa * 0.50, 1e-6)
+        directional_response = response_mpa * pending["correction_mm"] > 0.0
+        detected = directional_response and abs(response_mpa) >= threshold_mpa
+        alpha = self.config.response_learning_alpha
+        if detected:
+            observed_stiffness = abs(response_mpa / pending["correction_mm"])
+            if self.learned_stiffness_mpa_per_mm is None:
+                self.learned_stiffness_mpa_per_mm = observed_stiffness
+            else:
+                self.learned_stiffness_mpa_per_mm += alpha * (
+                    observed_stiffness - self.learned_stiffness_mpa_per_mm
+                )
+            self.learned_response_time_s += alpha * (age_s - self.learned_response_time_s)
+            post_error = signal.center_mpa - controller.target_stress_mpa
+            pre_error = pending["error_mpa"]
+            if pre_error * post_error < 0.0:
+                self.response_crossing_count += 1
+                self.response_damping = max(0.12, self.response_damping * 0.50)
+            elif abs(post_error) < abs(pre_error):
+                self.response_damping += alpha * (
+                    self.config.limit_cycle_damping - self.response_damping
+                )
+            else:
+                self.response_damping = max(0.12, self.response_damping * 0.70)
+        else:
+            self.response_damping = max(0.12, self.response_damping * 0.70)
+            self.learned_response_time_s = min(
+                self.config.response_timeout_s,
+                max(self.learned_response_time_s, age_s),
+            )
+        self.pending_response_command = None
+
+    def control_feedback_samples(self, controller: RobustControllerConfig) -> list[MeasurementSample]:
+        self._refresh_response_learning(controller)
+        if not self.config.response_synchronized:
+            return self.feedback_samples()
+        post = self._post_command_feedback()
+        if len(post) >= 2:
+            return post
+        return self.feedback_samples()
 
     def controller_for_decision(self, *, min_recovery_mpa: float | None = None) -> RobustControllerConfig:
         controller = replace(
@@ -527,7 +686,13 @@ class _FullRunState:
             + fraction * wire.transformation_contraction_mm
             + _free_strain_fluctuation_mm(self.config, fraction)
         )
-        mechanical_mm = self.motor_mm + free_shift_mm
+        response_tau_s = self.config.mechanical_response_tau_s
+        if response_tau_s <= 0.0:
+            self.physical_motor_mm = self.motor_mm
+        else:
+            response_alpha = 1.0 - math.exp(-self.dt_s / response_tau_s)
+            self.physical_motor_mm += (self.motor_mm - self.physical_motor_mm) * response_alpha
+        mechanical_mm = self.physical_motor_mm + free_shift_mm
         base_stress = mechanical_mm * wire.elastic_stiffness_mpa_per_mm
         if self.config.zero_compression_stress and base_stress < 0.0:
             base_stress = 0.0
@@ -668,7 +833,7 @@ class _FullRunState:
         *,
         controller: RobustControllerConfig | None = None,
     ) -> FullRunEvent:
-        feedback = self.feedback_samples()
+        feedback = self.control_feedback_samples(controller or self.controller_for_decision())
         if not feedback:
             raise ValueError("cannot record a control event without delayed feedback")
         controller = controller or self.controller_for_decision()
@@ -696,6 +861,12 @@ class _FullRunState:
             fresh=signal.fresh and feedback_age_s <= self.config.controller.stale_feedback_s,
             feedback_age_s=feedback_age_s,
             total_travel_mm=self.total_travel_mm,
+            command_in_flight=self.pending_response_command is not None,
+            learned_response_time_s=(
+                self.learned_response_time_s if self.config.response_synchronized else None
+            ),
+            learned_stiffness_mpa_per_mm=self.learned_stiffness_mpa_per_mm,
+            response_damping=self.response_damping if self.config.response_synchronized else None,
             cruise_allowed=False,
         )
         self.events.append(event)
@@ -706,39 +877,61 @@ class _FullRunState:
         return event
 
     def correct_toward_target(self, *, controller: RobustControllerConfig | None = None) -> float:
-        feedback = self.feedback_samples()
+        controller = controller or self.controller_for_decision()
+        feedback = self.control_feedback_samples(controller)
         if not feedback or self.feedback_age_s(feedback) > self.config.controller.stale_feedback_s:
             return 0.0
-        controller = controller or self.controller_for_decision()
+        if self.config.response_synchronized and self.pending_response_command is not None:
+            return 0.0
         decision = decide_robust_center(feedback, controller)
         correction = decision.motor_step_mm
         if decision.decision in {"no_move", "wait_reversal", "safety_stop"}:
             correction = 0.0
-        correction = _clamp(
-            correction,
-            -controller.max_correction_mm,
-            controller.max_correction_mm,
-        )
+        if (
+            abs(correction) > 0.0
+            and self.config.response_synchronized
+            and self.learned_stiffness_mpa_per_mm is not None
+        ):
+            response_step = -decision.error_mpa / max(1e-9, self.learned_stiffness_mpa_per_mm)
+            response_step *= self.response_damping
+            if abs(response_step) < controller.motor_step_mm:
+                response_step = math.copysign(controller.motor_step_mm, response_step)
+            correction = response_step
+        correction = _clamp(correction, -controller.max_correction_mm, controller.max_correction_mm)
         if abs(correction) <= 0.0:
             return 0.0
         self.motor_mm += correction
         self.total_travel_mm += abs(correction)
+        if self.config.response_synchronized:
+            signal = processed_control_signal(feedback, controller)
+            self.last_response_command_elapsed_s = self.elapsed_s
+            self.pending_response_command = {
+                "elapsed_s": self.elapsed_s,
+                "center_mpa": signal.center_mpa,
+                "error_mpa": signal.center_mpa - controller.target_stress_mpa,
+                "correction_mm": correction,
+            }
         return correction
 
 
 def _recovered(state: _FullRunState) -> bool:
-    feedback = state.feedback_samples()
+    controller = state.controller_for_decision()
+    feedback = state.control_feedback_samples(controller)
+    if state.config.response_synchronized and state.pending_response_command is not None:
+        return False
     if not feedback:
         return False
-    decision = decide_robust_center(feedback, state.controller_for_decision())
+    decision = decide_robust_center(feedback, controller)
     return decision.endpoint_recovered
 
 
 def _current_sweep_ready_to_advance(state: _FullRunState) -> bool:
-    feedback = state.feedback_samples()
+    controller = state.controller_for_decision(min_recovery_mpa=state.config.controller.tolerance_mpa)
+    feedback = state.control_feedback_samples(controller)
+    if state.config.response_synchronized and state.pending_response_command is not None:
+        return False
     if not feedback:
         return False
-    controller = state.controller_for_decision(min_recovery_mpa=state.config.controller.tolerance_mpa)
     decision = decide_robust_center(feedback, controller)
     return decision.endpoint_recovered
 
@@ -746,10 +939,10 @@ def _current_sweep_ready_to_advance(state: _FullRunState) -> bool:
 def _current_sweep_crossed_target_for_resume(state: _FullRunState, *, rising: bool) -> bool:
     if not state.config.current_resume_requires_target_crossing:
         return True
-    feedback = state.feedback_samples()
+    controller = state.controller_for_decision(min_recovery_mpa=state.config.controller.tolerance_mpa)
+    feedback = state.control_feedback_samples(controller)
     if not feedback:
         return False
-    controller = state.controller_for_decision(min_recovery_mpa=state.config.controller.tolerance_mpa)
     signal = processed_control_signal(feedback, controller)
     if signal.raw_min_mpa <= controller.target_stress_mpa <= signal.raw_max_mpa:
         return True
@@ -758,10 +951,13 @@ def _current_sweep_crossed_target_for_resume(state: _FullRunState, *, rising: bo
 
 
 def _target_ramp_centered_for_move(state: _FullRunState) -> bool:
-    feedback = state.feedback_samples()
+    controller = state.controller_for_decision()
+    feedback = state.control_feedback_samples(controller)
+    if state.config.response_synchronized and state.pending_response_command is not None:
+        return True
     if not feedback:
         return False
-    signal = processed_control_signal(feedback, state.controller_for_decision())
+    signal = processed_control_signal(feedback, controller)
     return abs(signal.center_mpa - state.active_target_stress_mpa) <= state.config.controller.tolerance_mpa
 
 
@@ -2047,6 +2243,105 @@ def _control_validation_config(
     )
 
 
+def _kosice_offline_family_configs() -> list[FullRunConfig]:
+    """Build geometry/noise/response families from the July 7-8 KERN envelope."""
+
+    base = full_run_scenario_by_name("kosice_kern_first_overheating")
+    families = (
+        ("thin_long_slow", 62.832, 0.0135, 1050.0, 2.2, 0.45, 35.0),
+        ("thin_mid_noisy", 54.630, 0.0139, 760.0, 3.8, 0.60, 50.0),
+        ("fine_short_stiff", 51.612, 0.0121, 1320.0, 4.8, 0.28, 70.0),
+        ("thicker_compliant", 56.110, 0.0189, 430.0, 1.6, 0.82, 90.0),
+    )
+    configs: list[FullRunConfig] = []
+    for index, (family, length_mm, diameter_mm, stiffness, noise, response_tau_s, target_mpa) in enumerate(
+        families,
+        start=1,
+    ):
+        readability_stress_mpa = stress_mpa_from_load_g(0.01, diameter_mm)
+        tolerance_mpa = max(1.0, readability_stress_mpa * 1.5, noise * 0.55)
+        motor_step_mm = max(0.005, length_mm * 0.00016)
+        configs.append(
+            replace(
+                base,
+                name=f"kosice_family_{family}",
+                description=(
+                    "Cross-sample Košice KERN low-stress family derived from geometry, "
+                    "0.01 g readability, measured noise, and delayed mechanical response."
+                ),
+                wire=replace(
+                    base.wire,
+                    length_mm=length_mm,
+                    diameter_mm=diameter_mm,
+                    elastic_stiffness_mpa_per_mm=stiffness,
+                    transformation_onset_ma=8.0 + index,
+                    transformation_end_ma=22.0 + index,
+                    transformation_contraction_mm=length_mm * (0.018 + index * 0.002),
+                    fluctuation_mpa=target_mpa * (0.035 + index * 0.008),
+                    noise_mpa=noise,
+                ),
+                controller=replace(
+                    base.controller,
+                    target_stress_mpa=target_mpa,
+                    tolerance_mpa=tolerance_mpa,
+                    min_recovery_mpa=max(tolerance_mpa * 1.5, target_mpa * 0.04),
+                    motor_step_mm=motor_step_mm,
+                    max_correction_mm=max(motor_step_mm, length_mm * 0.0020),
+                    safety_max_stress_mpa=target_mpa * 4.0 + 80.0,
+                    stale_feedback_s=0.75,
+                ),
+                sweep=CurrentSweepConfig(start_ma=1.0, end_ma=28.0, rate_ma_s=1.4, sample_hz=20.0),
+                target_ramp_start_mpa=0.0,
+                target_ramp_rate_mpa_s=max(4.0, target_mpa * 0.10),
+                target_ramp_timeout_s=120.0,
+                endpoint_hold_timeout_s=180.0,
+                max_ticks=12000,
+                scale_latency_s=0.10,
+                current_hold_feedback_wait_s=0.20,
+                current_hold_correction_feedback_wait_s=0.05,
+                reverse_current=False,
+                max_correction_strain_pct=0.20,
+                adaptive_correction_cap_max_scale=1.0,
+                transformation_kinetic_tau_s=0.8 + index * 0.25,
+                mechanical_response_tau_s=response_tau_s,
+                free_strain_fluctuation_pct=0.18 + index * 0.04,
+                free_strain_fluctuation_cycles=5.0 + index,
+                response_initial_wait_s=max(0.25, response_tau_s * 0.65),
+                response_timeout_s=max(2.4, response_tau_s * 4.0),
+                seed=87000 + index,
+            )
+        )
+    return configs
+
+
+def run_kosice_offline_optimization(
+    *,
+    policies: tuple[str, ...] = KOSICE_OFFLINE_POLICIES,
+) -> list[FullRunTrace]:
+    """Compare overlapping-window control with response-synchronized candidates."""
+
+    traces: list[FullRunTrace] = []
+    for policy_index, policy in enumerate(policies, start=1):
+        if policy not in KOSICE_OFFLINE_POLICIES:
+            known = ", ".join(KOSICE_OFFLINE_POLICIES)
+            raise ValueError(f"unknown Košice offline policy {policy!r}; known: {known}")
+        for case_index, config in enumerate(_kosice_offline_family_configs(), start=1):
+            synchronized = policy != "overlapping_window"
+            damping = config.limit_cycle_damping
+            if synchronized:
+                damping = float(policy.removeprefix("response_sync_d")) / 100.0
+            policy_config = replace(
+                config,
+                name=f"kosice_cv_{policy}__{config.name.removeprefix('kosice_family_')}",
+                description=f"Košice cross-sample policy {policy}: {config.description}",
+                response_synchronized=synchronized,
+                limit_cycle_damping=damping,
+                seed=config.seed + policy_index * 1000 + case_index,
+            )
+            traces.append(run_full_mini_dma_simulation(policy_config))
+    return traces
+
+
 def run_adaptive_control_policy_matrix() -> list[FullRunTrace]:
     """Compare response-gated adaptive cap ceilings on representative matrix cases."""
 
@@ -2273,6 +2568,195 @@ def write_sweep_outputs(traces: list[FullRunTrace], output_dir: Path | str) -> d
         validation_plot_path = out / "control_validation_top.png"
         if _write_validation_policy_rank_plot(validation_plot_path, validation_rank):
             paths["validation_plot"] = validation_plot_path
+    return paths
+
+
+def _kosice_case_identity(name: str) -> tuple[str, str] | None:
+    if not name.startswith("kosice_cv_") or "__" not in name:
+        return None
+    policy, family = name.removeprefix("kosice_cv_").split("__", 1)
+    return policy, family
+
+
+def _kosice_case_score(item: dict[str, Any]) -> float:
+    target = max(abs(float(value)) for value in item["target_stress_sequence_mpa"])
+    target = max(1.0, target)
+    failure_penalty = 100.0 if item["stop_reason"] != "completed" else 0.0
+    return (
+        failure_penalty
+        + float(item["p95_abs_current_sweep_error_fraction_of_target"]) * 12.0
+        + float(item["max_abs_current_sweep_error_fraction_of_target"]) * 3.0
+        + float(item["max_abs_target_ramp_error_mpa"]) / target * 2.0
+        + float(item["current_hold_fraction_of_measurement"]) * 2.0
+        + float(item["response_crossing_count"]) * 0.04
+    )
+
+
+def _kosice_offline_rankings(traces: list[FullRunTrace]) -> dict[str, Any]:
+    rows = [trace.summary() for trace in traces]
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_policy_family: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in rows:
+        identity = _kosice_case_identity(str(item["scenario"]))
+        if identity is None:
+            continue
+        policy, family = identity
+        enriched = dict(item)
+        enriched["offline_score"] = _kosice_case_score(item)
+        grouped[policy].append(enriched)
+        by_policy_family[(policy, family)] = enriched
+
+    overall = []
+    for policy, group in grouped.items():
+        overall.append(
+            {
+                "policy": policy,
+                "case_count": len(group),
+                "completed": sum(item["stop_reason"] == "completed" for item in group),
+                "mean_offline_score": statistics.fmean(item["offline_score"] for item in group),
+                "mean_p95_error_fraction": statistics.fmean(
+                    float(item["p95_abs_current_sweep_error_fraction_of_target"]) for item in group
+                ),
+                "mean_hold_fraction": statistics.fmean(
+                    float(item["current_hold_fraction_of_measurement"]) for item in group
+                ),
+                "max_stress_error_mpa": max(float(item["max_abs_error_mpa"]) for item in group),
+                "minimum_command_interval_s": min(
+                    float(item["minimum_command_interval_s"])
+                    for item in group
+                    if int(item["response_command_count"]) > 1
+                ),
+                "mean_learned_stiffness_mpa_per_mm": (
+                    statistics.fmean(
+                        float(item["learned_stiffness_mpa_per_mm"])
+                        for item in group
+                        if item["learned_stiffness_mpa_per_mm"] is not None
+                    )
+                    if any(item["learned_stiffness_mpa_per_mm"] is not None for item in group)
+                    else None
+                ),
+            }
+        )
+    overall.sort(key=lambda item: (-item["completed"], item["mean_offline_score"]))
+
+    families = sorted({family for _, family in by_policy_family})
+    folds = []
+    for held_out in families:
+        training = []
+        for policy, group in grouped.items():
+            train_rows = [item for item in group if not item["scenario"].endswith(f"__{held_out}")]
+            training.append(
+                {
+                    "policy": policy,
+                    "completed": sum(item["stop_reason"] == "completed" for item in train_rows),
+                    "mean_offline_score": statistics.fmean(item["offline_score"] for item in train_rows),
+                }
+            )
+        training.sort(key=lambda item: (-item["completed"], item["mean_offline_score"]))
+        selected = training[0]["policy"]
+        held = by_policy_family[(selected, held_out)]
+        folds.append(
+            {
+                "held_out_family": held_out,
+                "selected_policy": selected,
+                "training_ranking": training,
+                "held_out_stop_reason": held["stop_reason"],
+                "held_out_offline_score": held["offline_score"],
+                "held_out_p95_error_fraction": held["p95_abs_current_sweep_error_fraction_of_target"],
+                "held_out_max_error_mpa": held["max_abs_error_mpa"],
+            }
+        )
+    return {
+        "calibration_evidence": {
+            "source": "July 7-8 2026 Košice TMA_Logger runs (read-only)",
+            "run_count": 6,
+            "scale_feedback_hz_range": [18.98, 20.02],
+            "processed_window_s": 1.8,
+            "stack_heavy_median_command_interval_s_range": [0.251, 0.300],
+            "source_length_mm_range": [51.612, 64.266],
+            "source_diameter_mm_range": [0.0121, 0.0189],
+            "observed_50_mpa_processed_center_range_mpa": [0.0, 417.9],
+        },
+        "ranking_method": "Leave one geometry/noise/response family out; lower score is better after completion count.",
+        "overall": overall,
+        "leave_one_family_out": folds,
+        "production_integration_ready": False,
+        "production_note": (
+            "Offline evidence supports the response-synchronized family, but production integration requires "
+            "review against production controller state and staged fake-driver/live safety validation."
+        ),
+    }
+
+
+def _write_kosice_offline_rank_plot(path: Path, ranking: dict[str, Any]) -> bool:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    overall = ranking["overall"]
+    if not overall:
+        return False
+    labels = [item["policy"] for item in overall]
+    x = list(range(len(overall)))
+    fig, axes = plt.subplots(3, 1, figsize=(10, 9), constrained_layout=True)
+    axes[0].bar(x, [item["mean_offline_score"] for item in overall], color="#2563eb")
+    axes[0].set_ylabel("mean offline score")
+    axes[0].set_title("Košice response-synchronized policy validation")
+    axes[1].bar(x, [item["mean_p95_error_fraction"] for item in overall], color="#dc2626")
+    axes[1].set_ylabel("mean p95 error / target")
+    axes[2].bar(x, [item["mean_hold_fraction"] for item in overall], color="#f59e0b")
+    axes[2].set_ylabel("mean hold fraction")
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(labels, rotation=25, ha="right")
+    for axis in axes:
+        axis.grid(True, axis="y", alpha=0.25)
+        if axis is not axes[2]:
+            axis.set_xticks(x)
+            axis.set_xticklabels([])
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    return True
+
+
+def write_kosice_offline_optimization_outputs(
+    traces: list[FullRunTrace],
+    output_dir: Path | str,
+) -> dict[str, Path]:
+    paths = write_sweep_outputs(traces, output_dir)
+    out = Path(output_dir)
+    ranking = _kosice_offline_rankings(traces)
+    ranking_path = out / "kosice_offline_optimization_ranked.json"
+    report_path = out / "kosice_offline_optimization_ranked.md"
+    plot_path = out / "kosice_offline_optimization_ranked.png"
+    ranking_path.write_text(json.dumps(ranking, indent=2), encoding="utf-8")
+    lines = [
+        "# Košice TMA offline optimization ranking",
+        "",
+        "The July 7-8 source runs were read only. Lower offline score is better after completed-case count.",
+        "",
+        "| Rank | Policy | Completed | Mean score | Mean p95 error / target | Mean hold fraction | Min command interval s |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for rank, item in enumerate(ranking["overall"], start=1):
+        lines.append(
+            f"| {rank} | {item['policy']} | {item['completed']}/{item['case_count']} | "
+            f"{item['mean_offline_score']:.4f} | {item['mean_p95_error_fraction']:.4f} | "
+            f"{item['mean_hold_fraction']:.4f} | {item['minimum_command_interval_s']:.3f} |"
+        )
+    lines.extend(["", "## Leave-one-family-out", ""])
+    for fold in ranking["leave_one_family_out"]:
+        lines.append(
+            f"- `{fold['held_out_family']}`: selected `{fold['selected_policy']}`, "
+            f"held-out score {fold['held_out_offline_score']:.4f}, stop `{fold['held_out_stop_reason']}`."
+        )
+    lines.extend(["", "## Production status", "", ranking["production_note"], ""])
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    paths.update({"kosice_ranking": ranking_path, "kosice_report": report_path})
+    if _write_kosice_offline_rank_plot(plot_path, ranking):
+        paths["kosice_plot"] = plot_path
     return paths
 
 
@@ -2666,11 +3150,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stress-ladder-policy-grid", action="store_true", help="Run the combined stress-ladder lead/cap/adaptive policy grid.")
     parser.add_argument("--control-validation", action="store_true", help="Rank candidate control policies on run32 and 0 -> 50 -> 100 MPa ladder cases.")
     parser.add_argument("--adaptive-policy-matrix", action="store_true", help="Run response-gated adaptive cap comparisons.")
+    parser.add_argument(
+        "--kosice-offline-optimization",
+        action="store_true",
+        help="Run cross-sample Košice response-synchronized policy validation.",
+    )
     parser.add_argument("--out", type=Path, default=Path("artifacts/mini-dma-full-run-sim"))
     args = parser.parse_args(argv)
 
     traces: list[FullRunTrace]
-    if args.adaptive_policy_matrix:
+    if args.kosice_offline_optimization:
+        traces = run_kosice_offline_optimization()
+        write_kosice_offline_optimization_outputs(traces, args.out)
+    elif args.adaptive_policy_matrix:
         traces = run_adaptive_control_policy_matrix()
         write_sweep_outputs(traces, args.out)
     elif args.control_validation:
