@@ -1,0 +1,42 @@
+report_sources:
+  official_outline:
+    filename: Osnova-zaverecnej-spravy-SK.docx
+    sha256: 1d1e38093cbe0906dd9e4468c4ca3a0968b4ff2f7dfdf547ab846ea74260336f
+    role: structural authority
+  half_year_report:
+    filename: Martin Elias_Polrocna sprava.docx
+    sha256: 2f681edac19176c898dacae6ba89bf81dce9ffe46a7e9f91fd7971dcefbe254e
+    role: filled content and visual baseline
+
+data_sources:
+  tma:
+    root: 'G:\My Drive\1 Projects\Praha\mini DMA'
+    status: quality-controlled candidate set available
+    key_evidence:
+      - 'C:\Users\Martin\PyPlot\artifacts\tma_low_transition_review\docx_origin_export_all_candidates\tma_low_as_af_all_candidate_values.csv'
+      - 'C:\Users\Martin\PyPlot\artifacts\tma_low_transition_review\docx_origin_export_all_candidates\tma_low_as_af_all_candidate_origin_graphs.docx'
+  thermal_camera:
+    root: 'G:\My Drive\1 Projects\Praha\mini DMA'
+    pattern: ir_temperature.csv
+    status: synchronized apparent-temperature runs available
+  current_annealing:
+    root: 'G:\My Drive\1 Projects\Praha\current annealing data'
+    status: paired vacuum and no-vacuum comparison available
+  vsm_hysteresis:
+    root: 'G:\My Drive\1 Projects\Praha\VSM hysteresis loops'
+    status: expanded angular series available
+  vsm_temperature:
+    root: 'G:\My Drive\1 Projects\Praha\VSM temp scan'
+    status: expanded M(T) series available; automatic transitions require review
+  ac_susceptibility:
+    root: 'G:\My Drive\1 Projects\Praha\ac_susceptibility'
+    status: Ni50Fe27Ga23 12/2 completed; follow-up sample incomplete
+    analysis_handoff: docs/ac_susceptibility_analysis_origin_handoff.md
+
+draft_policy:
+  commit_personal_docx: false
+  modify_raw_data: false
+  modify_original_reports: false
+  require_manual_vsm_transition_review: true
+  apparent_temperature_label: true
+  apparent_susceptibility_label: true
