@@ -18011,6 +18011,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
             pass
 
     def _update_preview(self) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         panel = self._preview_panel
         if panel is None:
             return
@@ -20512,6 +20514,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
             pass
 
     def _update_preview(self) -> None:
+        if MiniDatabaseSection._project_load_batch_mode:
+            return
         panel = self._preview_panel
         if panel is None:
             return
@@ -25202,7 +25206,6 @@ class _EmbeddedTransitionReviewWorkspace(QtWidgets.QWidget):
         self._host_layout = QtWidgets.QVBoxLayout(self._host)
         self._host_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._host, 1)
-        self.refresh_workspace()
 
     def refresh_workspace(self) -> None:
         if self._dialog is not None:
@@ -25326,11 +25329,10 @@ class _VsmTransitionWorkspace(QtWidgets.QWidget):
             object.__setattr__(self._section, "_preview_panel", self.preview_panel)
         except Exception:
             pass
-        self.refresh_workspace()
 
     def refresh_workspace(self) -> None:
+        selected_ref = self._current_ref()
         try:
-            self._section._refresh_record_groups()
             self._section.refresh_data()
         except Exception:
             pass
@@ -25366,7 +25368,9 @@ class _VsmTransitionWorkspace(QtWidgets.QWidget):
                 self._items[ref] = item
         self.tree.setColumnWidth(0, 280)
         self.tree.setColumnWidth(1, 120)
-        if self.tree.topLevelItemCount():
+        if selected_ref in self._items:
+            self.tree.setCurrentItem(self._items[selected_ref])
+        elif self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         else:
             self.preview_panel.update_selection("No VSM temperature scans are available yet.", [], {})
@@ -25481,6 +25485,7 @@ class TransitionsSection(QtWidgets.QWidget):
             "mini_dma": 2,
         }
         self._dirty_view_indexes: Set[int] = {0, 1, 2}
+        self._active = False
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.tab_widget = QtWidgets.QTabWidget(self)
@@ -25490,8 +25495,17 @@ class TransitionsSection(QtWidgets.QWidget):
         self.tab_widget.addTab(self.annealing_workspace, "Annealing")
         self.tab_widget.addTab(self.vsm_workspace, "VSM")
         self.tab_widget.addTab(self.dma_workspace, "TMA")
-        self.tab_widget.currentChanged.connect(lambda _index: self.refresh_current_workspace())
+        self.tab_widget.currentChanged.connect(self._handle_view_changed)
         layout.addWidget(self.tab_widget, 1)
+
+    def _handle_view_changed(self, _index: int) -> None:
+        if self._active:
+            self.refresh_current_workspace()
+
+    def set_active(self, active: bool) -> None:
+        self._active = bool(active)
+        if self._active:
+            self.refresh_current_workspace()
 
     def mark_workspaces_dirty(self, view: str | None = None) -> None:
         if view is None:
@@ -36572,6 +36586,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.dma_transitions_section,
             )
             self.tab_widget.insertTab(3, self.transitions_section, "Transitions")
+            self.tab_widget.currentChanged.connect(self._handle_builder_tab_changed)
             self._install_transition_shortcuts()
             _pump_events()
 
@@ -36814,6 +36829,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
             index = self.tab_widget.indexOf(transitions)
             if index >= 0:
                 self.tab_widget.setCurrentIndex(index)
+
+    def _handle_builder_tab_changed(self, _index: int) -> None:
+        transitions = getattr(self, "transitions_section", None)
+        if isinstance(transitions, TransitionsSection):
+            transitions.set_active(self.tab_widget.currentWidget() is transitions)
 
     def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
         if getattr(self, "_startup_auto_open_scheduled", False):
@@ -38086,30 +38106,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         load_started_s = time.perf_counter()
         self._project_load_in_progress = True
         auto_open_load = bool(getattr(self, "_auto_open_in_progress", False))
-        if auto_open_load:
-            self._begin_project_load_prepare_worker(target, load_started_s, auto_open_load=True)
-            return
-        try:
-            prepared = _prepare_project_payload_for_gui(target)
-            _log_builder_timing(
-                self.logger,
-                "project_load_prepare_sync",
-                load_started_s,
-                path=target,
-                bytes=prepared.byte_count,
-                decoded_payloads=prepared.decoded_payload_count,
-                read_ms=f"{prepared.read_ms:.1f}",
-                json_ms=f"{prepared.json_ms:.1f}",
-                decode_ms=f"{prepared.decode_ms:.1f}",
-            )
-            self._apply_prepared_project_load(
-                prepared,
-                load_started_s=load_started_s,
-                auto_open_load=False,
-                staged=False,
-            )
-        except Exception as exc:
-            self._handle_project_load_failed(target, exc, load_started_s)
+        self._begin_project_load_prepare_worker(
+            target,
+            load_started_s,
+            auto_open_load=auto_open_load,
+        )
 
     def _begin_project_load_prepare_worker(
         self,
@@ -38407,57 +38408,68 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         def _finish() -> None:
             try:
-                state["disk_context"].__exit__(None, None, None)
-            except Exception:
-                pass
-            assembly = getattr(self, "assembly_section", None)
-            self._update_imported_data_item()
-            if isinstance(assembly, AssemblySection):
-                show_imported = getattr(assembly, "_show_imported", True)
-                if self._show_imported_action is not None:
-                    self._show_imported_action.setChecked(bool(show_imported))
-            if self._separate_imported_action is not None:
-                separate = bool(
-                    self.settings.value(self._project_settings_key("separate_imported"), False)
-                )
-                self._separate_imported_action.setChecked(separate)
-                fabrication = getattr(self, "fabrication_section", None)
-                if isinstance(fabrication, FabricationSection):
-                    fabrication.set_import_separation(separate)
-            self._project_path = target
-            self._remember_project_directory(target.parent)
-            self._remember_recent_project(target)
-            try:
-                self.settings.setValue(self._project_settings_key("last_path"), str(target))
-            except Exception:
-                pass
-            self._update_project_title()
-            refresh_started_s = time.perf_counter()
-            self._refresh_sections_after_project_load()
-            _log_builder_timing(self.logger, "project_load_post_refresh", refresh_started_s)
-            self._update_project_actions()
-            self._dirty = False
-            self.logger.info("Project loaded from %s", target)
-            pump_events(total_steps, "Finishing...")
-            MiniDatabaseSection._project_load_batch_mode = False
-            if not auto_open_load and not _builder_dialogs_suppressed():
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Open Project",
-                    f"Loaded project from {target}",
-                )
-            _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
-            self._project_load_in_progress = False
-            self._project_load_auto_open = False
-            self._suppress_dirty = False
-            if progress_dialog is not None:
                 try:
-                    progress_dialog.close()
+                    state["disk_context"].__exit__(None, None, None)
                 except Exception:
+                    pass
+                assembly = getattr(self, "assembly_section", None)
+                self._update_imported_data_item()
+                if isinstance(assembly, AssemblySection):
+                    show_imported = getattr(assembly, "_show_imported", True)
+                    if self._show_imported_action is not None:
+                        self._show_imported_action.setChecked(bool(show_imported))
+                if self._separate_imported_action is not None:
+                    separate = bool(
+                        self.settings.value(self._project_settings_key("separate_imported"), False)
+                    )
+                    self._separate_imported_action.setChecked(separate)
+                    fabrication = getattr(self, "fabrication_section", None)
+                    if isinstance(fabrication, FabricationSection):
+                        fabrication.set_import_separation(separate)
+                self._project_path = target
+                self._remember_project_directory(target.parent)
+                self._remember_recent_project(target)
+                try:
+                    self.settings.setValue(self._project_settings_key("last_path"), str(target))
+                except Exception:
+                    pass
+                self._update_project_title()
+                refresh_started_s = time.perf_counter()
+                self._refresh_sections_after_project_load()
+                _log_builder_timing(self.logger, "project_load_post_refresh", refresh_started_s)
+                self._update_project_actions()
+                self._dirty = False
+                self.logger.info("Project loaded from %s", target)
+                pump_events(total_steps, "Finishing...")
+                MiniDatabaseSection._project_load_batch_mode = False
+                transitions = getattr(self, "transitions_section", None)
+                if (
+                    isinstance(transitions, TransitionsSection)
+                    and self.tab_widget.currentWidget() is transitions
+                ):
+                    transitions.refresh_current_workspace()
+                if not auto_open_load and not _builder_dialogs_suppressed():
+                    QtWidgets.QMessageBox.information(
+                        self,
+                        "Open Project",
+                        f"Loaded project from {target}",
+                    )
+                _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
+            except Exception as exc:
+                self._handle_project_load_failed(target, exc, load_started_s)
+            finally:
+                self._project_load_in_progress = False
+                self._project_load_auto_open = False
+                self._suppress_dirty = False
+                MiniDatabaseSection._project_load_batch_mode = False
+                if progress_dialog is not None:
                     try:
-                        progress_dialog.cancel()
+                        progress_dialog.close()
                     except Exception:
-                        pass
+                        try:
+                            progress_dialog.cancel()
+                        except Exception:
+                            pass
 
         def _step() -> None:
             try:
@@ -38552,7 +38564,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         transitions = getattr(self, "transitions_section", None)
         if isinstance(transitions, TransitionsSection):
             transitions.mark_workspaces_dirty()
-            transitions.refresh_current_workspace()
+            if (
+                not MiniDatabaseSection._project_load_batch_mode
+                and self.tab_widget.currentWidget() is transitions
+            ):
+                transitions.refresh_current_workspace()
 
     def _remember_project_directory(self, directory: Path) -> None:
         try:

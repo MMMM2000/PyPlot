@@ -6562,7 +6562,7 @@ def test_builder_load_project_preserves_saved_fabrication_and_video_rows(
         project_path.write_text(json.dumps(payload), encoding="utf-8")
 
         window._load_project_from_path(project_path)
-        QtWidgets.QApplication.processEvents()
+        _wait_for_qt(lambda: window._project_path == project_path)
 
         fabrication_frame = window.fabrication_section.model.frame()
         assert fabrication_frame.loc[0, "Length (m)"] == pytest.approx(7.0)
@@ -6632,6 +6632,7 @@ def test_builder_project_load_runs_single_fabrication_video_sync(
         )
 
         window._load_project_from_path(project_path)
+        _wait_for_qt(lambda: window._project_path == project_path)
 
         assert sync_calls == ["sync"]
     finally:
@@ -8399,17 +8400,24 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         assert transitions.tab_widget.widget(0) is not window.current_density_section
         assert transitions.tab_widget.widget(1) is not window.transition_temps_section
         assert transitions.tab_widget.widget(2) is not window.dma_transitions_section
-        assert transitions.annealing_workspace._dialog is not None  # noqa: SLF001
-        assert transitions.annealing_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
+        assert transitions.annealing_workspace._dialog is None  # noqa: SLF001
         assert transitions.vsm_workspace.tree.headerItem().text(0) == "VSM scan"
-        assert transitions.dma_workspace._dialog is not None  # noqa: SLF001
-        assert transitions.dma_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
+        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
         assert window.current_density_section.section_key == "current_density"
         assert window.transition_temps_section.section_key == "transition_temps"
 
         window.show_transitions_view("vsm")
         assert window.tab_widget.currentWidget() is transitions
         assert transitions.tab_widget.currentIndex() == 1
+
+        window.show_transitions_view("annealing")
+        assert transitions.annealing_workspace._dialog is not None  # noqa: SLF001
+        assert transitions.annealing_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
+        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
+
+        window.show_transitions_view("dma")
+        assert transitions.dma_workspace._dialog is not None  # noqa: SLF001
+        assert transitions.dma_workspace._dialog.findChild(QtWidgets.QTreeWidget) is not None  # noqa: SLF001
 
         assert window.annealing_section.review_transitions_button.text() == "Transitions..."
         assert window.mini_dma_section.review_transitions_button.text() == "Transitions..."
@@ -8457,6 +8465,7 @@ def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
             }
         }
 
+        window.tab_widget.setCurrentWidget(window.transitions_section)
         window.transitions_section.tab_widget.setCurrentIndex(0)
         window._refresh_sections_after_project_load()  # noqa: SLF001
 
@@ -9279,6 +9288,7 @@ def test_annealing_transition_review_pick_updates_markers_in_place() -> None:
     )
     try:
         dialog._tree.setCurrentItem(dialog._tree.topLevelItem(0))  # noqa: SLF001
+        _wait_for_qt(lambda: dialog._display._canvas is not None)  # noqa: SLF001
         original_canvas = dialog._display._canvas  # noqa: SLF001
         dialog._phase_controls.set_target("Af1")  # noqa: SLF001
         dialog._handle_plot_pick(24.5)  # noqa: SLF001
@@ -10390,7 +10400,7 @@ def test_builder_section_visibility_menu_persists_hidden_tabs(
     try:
         action = window._section_visibility_actions["current_density"]
         transitions = window.transitions_section
-        index = transitions.tab_widget.indexOf(window.current_density_section)
+        index = transitions._view_aliases["current_density"]  # noqa: SLF001
         assert index >= 0
         assert transitions.tab_widget.isTabVisible(index)
 
@@ -10411,7 +10421,7 @@ def test_builder_section_visibility_menu_persists_hidden_tabs(
 
     restored = BuilderWindow()
     try:
-        restored_index = restored.transitions_section.tab_widget.indexOf(restored.current_density_section)
+        restored_index = restored.transitions_section._view_aliases["current_density"]  # noqa: SLF001
         assert restored_index >= 0
         assert not restored.transitions_section.tab_widget.isTabVisible(restored_index)
         assert not restored._section_visibility_actions["current_density"].isChecked()
@@ -10694,6 +10704,250 @@ def test_builder_auto_open_prepares_project_off_gui_thread(
         QtWidgets.QApplication.processEvents()
 
 
+def test_vsm_transition_workspace_refresh_preserves_selected_scan(tmp_path: Path) -> None:
+    _ensure_qapp()
+    data = pd.DataFrame(
+        {
+            "temperature": [0.0, 20.0, 40.0],
+            "field": [10000.0, 10000.0, 10000.0],
+            "signal": [0.0, 1.0, 0.5],
+            "section_index": [0, 0, 0],
+        }
+    )
+    scans = [
+        builder_ui.VsmTemperatureScanRecord(
+            path=tmp_path / f"Ni50Fe27Ga23 12_2 scan-{suffix}.txt",
+            sample="Ni50Fe27Ga23 12_2",
+            data=data.copy(),
+            key=("Ni50Fe27Ga23", 12, 2),
+            label=f"scan-{suffix}",
+        )
+        for suffix in ("a", "b")
+    ]
+    fake_vsm_section = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: None),
+        _all_records=scans,
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        fake_vsm_section,
+        logging.getLogger("test"),
+        lambda *_args: None,
+    )
+    workspace = builder_ui._VsmTransitionWorkspace(section)  # noqa: SLF001
+    try:
+        section.refresh_data()
+        workspace.refresh_workspace()
+        second_item = workspace.tree.topLevelItem(1)
+        assert second_item is not None
+        workspace.tree.setCurrentItem(second_item)
+        selected_ref = workspace._current_ref()  # noqa: SLF001
+
+        workspace.refresh_workspace()
+
+        assert workspace._current_ref() == selected_ref  # noqa: SLF001
+    finally:
+        workspace.close()
+        workspace.deleteLater()
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_project_load_defers_hidden_transition_workspace_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    try:
+        transitions = window.transitions_section
+        window.tab_widget.setCurrentWidget(window.annealing_section)
+        refresh_calls: list[str] = []
+        monkeypatch.setattr(
+            transitions,
+            "refresh_current_workspace",
+            lambda *args, **kwargs: refresh_calls.append("refresh"),
+        )
+
+        window._refresh_sections_after_project_load()  # noqa: SLF001
+
+        assert refresh_calls == []
+        assert transitions._dirty_view_indexes == {0, 1, 2}  # noqa: SLF001
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_project_load_batch_suppresses_hidden_vsm_preview_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    preview_updates: list[str] = []
+    try:
+        monkeypatch.setattr(
+            window.transitions_section.vsm_workspace.preview_panel,
+            "update_selection",
+            lambda *args, **kwargs: preview_updates.append("preview"),
+        )
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = True
+
+        window.transition_temps_section.refresh_data()
+
+        assert preview_updates == []
+    finally:
+        builder_ui.MiniDatabaseSection._project_load_batch_mode = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_hidden_initial_transition_view_does_not_initialize_peer_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    settings = QtCore.QSettings(str(settings_path), QtCore.QSettings.Format.IniFormat)
+    settings.setValue("project/hidden_sections", json.dumps(["current_density"]))
+    settings.sync()
+
+    window = BuilderWindow()
+    try:
+        transitions = window.transitions_section
+        assert transitions.tab_widget.currentIndex() == transitions._view_aliases["vsm"]  # noqa: SLF001
+        assert transitions._dirty_view_indexes == {0, 1, 2}  # noqa: SLF001
+        assert transitions.annealing_workspace._dialog is None  # noqa: SLF001
+        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
+
+        window.tab_widget.setCurrentWidget(transitions)
+
+        assert transitions._view_aliases["vsm"] not in transitions._dirty_view_indexes  # noqa: SLF001
+        assert transitions.annealing_workspace._dialog is None  # noqa: SLF001
+        assert transitions.dma_workspace._dialog is None  # noqa: SLF001
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_manual_open_prepares_project_off_gui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    project_path = tmp_path / "large_manual_open.pydpj"
+    project_path.write_text("{}", encoding="utf-8")
+    main_thread = app.thread()
+    prepare_threads: list[QtCore.QThread] = []
+
+    def _fake_prepare(path: Path) -> builder_ui._PreparedProjectLoad:
+        prepare_threads.append(QtCore.QThread.currentThread())
+        QtCore.QThread.msleep(50)
+        return builder_ui._PreparedProjectLoad(
+            target=path,
+            payload={
+                "kind": BuilderWindow.PROJECT_KIND,
+                "version": BuilderWindow.PROJECT_VERSION,
+                "sections": {},
+            },
+            byte_count=10_000_000,
+            decoded_payload_count=0,
+            read_ms=45.0,
+            json_ms=55.0,
+            decode_ms=0.0,
+        )
+
+    monkeypatch.setattr(builder_ui, "_prepare_project_payload_for_gui", _fake_prepare)
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+    )
+
+    window = BuilderWindow()
+    try:
+        window._load_project_from_path(project_path)
+
+        assert window._project_path is None
+        assert window._project_load_in_progress is True
+        assert prepare_threads == [] or all(thread is not main_thread for thread in prepare_threads)
+
+        _wait_for_qt(lambda: window._project_path == project_path)
+
+        assert prepare_threads
+        assert all(thread is not main_thread for thread in prepare_threads)
+        assert window._project_load_in_progress is False
+    finally:
+        window._auto_open_latest_database = False
+        window._auto_open_last = False
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builder_manual_open_recovers_when_staged_finish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    settings_path = tmp_path / "builder.ini"
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(settings_path))
+    project_path = tmp_path / "finish_failure.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": BuilderWindow.PROJECT_KIND,
+                "version": BuilderWindow.PROJECT_VERSION,
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    critical_calls: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, title, *_args, **_kwargs: critical_calls.append(str(title)),
+    )
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+    )
+
+    window = BuilderWindow()
+    try:
+        monkeypatch.setattr(
+            window,
+            "_refresh_sections_after_project_load",
+            lambda: (_ for _ in ()).throw(RuntimeError("finish failed")),
+        )
+
+        window._load_project_from_path(project_path)
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+
+        assert critical_calls == ["Open Project"]
+        assert window._project_load_auto_open is False
+        assert window._suppress_dirty is False
+        assert builder_ui.MiniDatabaseSection._project_load_batch_mode is False
+    finally:
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_project_payload_prepare_predecodes_section_payloads(tmp_path: Path) -> None:
     project_path = tmp_path / "payload_project.pydpj"
     stored_payload = {"records": [1, 2, 3]}
@@ -10879,7 +11133,7 @@ def test_load_project_handles_missing_sections(
         project_path.write_text(json.dumps(payload), encoding="utf-8")
 
         window._load_project_from_path(project_path)
-        QtWidgets.QApplication.processEvents()
+        _wait_for_qt(lambda: window._project_path == project_path)
 
         assert window._project_path == project_path
         assert window._recent_projects and str(project_path) == window._recent_projects[0]
@@ -10942,6 +11196,8 @@ def test_load_project_suppressed_dialogs_skip_progress_dialog(
         project_path.write_text(json.dumps(payload), encoding="utf-8")
 
         window._load_project_from_path(project_path)
+
+        _wait_for_qt(lambda: window._project_path == project_path)
 
         assert progress_dialog_attempts == []
         assert window._project_path == project_path
