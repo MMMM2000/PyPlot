@@ -40,6 +40,9 @@ mini_dma_mod = importlib.import_module(
 stiff_guard_mod = importlib.import_module(
     "data_logging.mini_dma_logger.stiff_sample_guard"
 )
+tma_diagnostics_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.tma_diagnostics"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -24718,6 +24721,119 @@ def test_existing_output_message_names_sample_and_output_folder(tmp_path: Path, 
         assert str(tmp_path / "Ni50Fe27Ga23 10_4 calibration") in message
     finally:
         _close_test_window(window)
+
+
+def test_session_identity_preflight_rejects_contradictory_structured_fields(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("12/2")
+    window.edit_sample_name.setText("Ni50Fe27Ga23 10/4")
+    window.edit_log_name.setText("Ni50Fe27Ga23 10_4 iso-stress")
+
+    try:
+        with pytest.raises(ValueError, match="Sample identity preflight failed") as exc_info:
+            window._prepare_session_files(created_utc="2026-07-13T10:00:00Z")
+
+        assert "microwire" in str(exc_info.value)
+        assert not (tmp_path / "Ni50Fe27Ga23 10_4 iso-stress").exists()
+    finally:
+        _close_test_window(window)
+
+
+def test_session_identity_snapshot_stays_frozen_after_ui_fields_change(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("12/2")
+    window.edit_name_specimen.setText("A")
+    window.edit_sample_name.setText("Ni50Fe27Ga23 12/2 A")
+    window.edit_log_name.setText("Ni50Fe27Ga23 12_2 A")
+    window.spin_diameter.setValue(0.0191)
+    window.spin_initial_length.setValue(61.7)
+
+    handles: list[object] = []
+    try:
+        prepared = window._prepare_session_files(created_utc="2026-07-13T10:00:00Z")
+        handles = list(prepared[:2]) + list(prepared[3:4]) + list(prepared[5:6]) + list(prepared[7:8])
+        handles += list(prepared[9:10]) + list(prepared[11:13])
+        window.edit_name_composition.setText("Ni46Fe27Ga23Co2Cu2")
+        window.edit_name_wire.setText("2/8")
+        window.edit_sample_name.setText("Ni46Fe27Ga23Co2Cu2 2/8")
+        window.spin_diameter.setValue(0.0137)
+        window.spin_initial_length.setValue(42.0)
+        window._session_active = True
+        window._refresh_recipe_sample_label()
+
+        metadata = window._session_metadata()
+
+        assert metadata["sample_name"] == "Ni50Fe27Ga23 12/2 A"
+        assert metadata["name_fields"]["microwire"] == "12/2"
+        assert metadata["wire_diameter_mm"] == pytest.approx(0.0191)
+        assert metadata["initial_length_mm"] == pytest.approx(61.7)
+        assert metadata["runtime_initial_length_mm"] == pytest.approx(42.0)
+        assert metadata["sample_identity"]["base_filename"] == "Ni50Fe27Ga23 12_2 A"
+        assert "Ni50Fe27Ga23 12/2 A" in window.label_recipe_sample.text()
+        assert "19.1 um" in window.label_recipe_sample.text()
+    finally:
+        window._session_active = False
+        for handle in handles:
+            handle.close()
+        _close_test_window(window)
+
+
+def test_identity_correction_and_diagnostic_bundle_are_non_mutating(tmp_path: Path) -> None:
+    run_dir = tmp_path / "synthetic_run"
+    run_dir.mkdir()
+    metadata = {
+        "sample_identity": {"sample_name": "Ni50Fe27Ga23 12/2", "microwire": "12/2"},
+        "scale": {"profile": "kosice_kern_kcp_request", "rejected_sample_count": 2},
+        "logging": {"dropped_row_count": 1},
+        "stop": {"reason": "manual_recipe_stop", "detail": "synthetic"},
+    }
+    metadata_path = run_dir / "metadata.json"
+    original_metadata = json.dumps(metadata, indent=2)
+    metadata_path.write_text(original_metadata, encoding="utf-8")
+    (run_dir / "scale_raw.csv").write_text(
+        "sample_index,host_interval_ms\n1,\n2,250\n3,300\n",
+        encoding="utf-8",
+    )
+    (run_dir / "ui_telemetry.csv").write_text(
+        "target_interval_ms,actual_interval_ms,handler_duration_ms\n250,250,10\n250,1250,20\n",
+        encoding="utf-8",
+    )
+    (run_dir / "measurement.csv").write_text("elapsed_s\n0\n1\n", encoding="utf-8")
+    (run_dir / "control_trace.csv").write_text(
+        "decision,result,gate_reason,motor_command_id,controller_state\n"
+        "wait,rejected,stale_scale,motor-000001,current_hold\n"
+        "move,accepted,,motor-000002,current_hold\n",
+        encoding="utf-8",
+    )
+
+    correction_path = tma_diagnostics_mod.write_identity_correction(
+        run_dir,
+        corrected={"microwire": "10/4"},
+        reason="Operator corrected notebook transcription",
+        operator="Martin",
+        timestamp_utc="2026-07-13T10:30:00Z",
+    )
+    bundle_path = tma_diagnostics_mod.write_diagnostic_bundle(run_dir)
+    summary = json.loads((run_dir / "diagnostic_summary.json").read_text(encoding="utf-8"))
+
+    assert metadata_path.read_text(encoding="utf-8") == original_metadata
+    correction = json.loads(correction_path.read_text(encoding="utf-8"))
+    assert correction["original_identity"]["microwire"] == "12/2"
+    assert correction["effective_identity"]["microwire"] == "10/4"
+    assert correction["corrections"][0]["reason"] == "Operator corrected notebook transcription"
+    assert summary["scale"]["accepted_sample_count"] == 3
+    assert summary["scale"]["interval_ms"]["p95"] == pytest.approx(297.5)
+    assert summary["control"]["motor_command_count"] == 2
+    assert summary["ui_logging"]["stall_count"] == 1
+    assert bundle_path.exists()
 
 
 def test_stale_output_base_filename_syncs_to_current_sample(tmp_path: Path, qtbot) -> None:
