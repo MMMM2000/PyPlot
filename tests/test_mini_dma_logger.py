@@ -69,6 +69,12 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def _select_kern_response_profile(window: object) -> None:
+    window.combo_scale_baud.setCurrentText("256000")
+    window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+
+
 def _snapshot_settings() -> dict[str, object]:
     settings = _test_settings()
     return {key: settings.value(key) for key in settings.allKeys()}
@@ -183,6 +189,165 @@ def test_main_window_automation_tick_delegates_to_controller(tmp_path: Path, qtb
         window._handle_auto_ramp_tick()
 
         assert calls == ["tick"]
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_response_sync_blocks_stacked_corrections_until_fresh_response(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    _select_kern_response_profile(window)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    ready_s = time.time() + 0.10
+    window._last_motion_command_time_s = ready_s - 0.20
+    window._last_motion_expected_complete_time_s = ready_s
+    window._arm_kern_response_sync(
+        seek_key,
+        mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_value=20.0,
+        error_value=30.0,
+        correction_tensile_mm=0.02,
+    )
+
+    try:
+        for index, stress in enumerate([20.0, 20.2, 20.1, 20.3]):
+            load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+            assert load_g is not None
+            timestamp_s = ready_s + (index + 1) * 0.05
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=timestamp_s,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=f"{load_g:.5f} g",
+            )
+        waiting, signal = window._kern_response_sync_gate(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+            1.0,
+        )
+        assert waiting is True
+        assert signal is None
+        assert window._kern_response_sync_by_key[seek_key].pending is not None
+
+        for index, stress in enumerate([22.0, 24.0, 26.0, 28.0], start=5):
+            load_g = mini_dma_mod.load_g_from_stress_mpa(stress, window.spin_diameter.value())
+            assert load_g is not None
+            timestamp_s = ready_s + index * 0.05
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=timestamp_s,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=f"{load_g:.5f} g",
+            )
+        waiting, signal = window._kern_response_sync_gate(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+            1.0,
+        )
+        assert waiting is False
+        assert signal is not None
+        assert signal.value > 20.0
+        assert window._kern_response_sync_by_key[seek_key].pending is None
+        assert window._seek_live_stiffness_by_key[seek_key] > 0.0
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_force_control_does_not_enable_kern_response_sync(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.combo_scale_baud.setCurrentText("9600")
+    window.edit_scale_request.setText(mini_dma_mod.GNG_SCALE_REQUEST)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._last_motion_command_time_s = time.time()
+    window._last_motion_expected_complete_time_s = time.time() + 0.2
+
+    try:
+        assert window._kern_response_sync_active(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
+        original_dead_time = window._seek_feedback_dead_time_s(mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        window._arm_kern_response_sync(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_value=20.0,
+            error_value=30.0,
+            correction_tensile_mm=0.02,
+        )
+        assert seek_key not in window._kern_response_sync_by_key
+        assert window._seek_feedback_dead_time_s(mini_dma_mod.HSW_BASIS_STRESS_MPA) == pytest.approx(
+            original_dead_time
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_response_sync_does_not_release_on_stale_scale_samples(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    _select_kern_response_profile(window)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    ready_s = time.time()
+    window._last_motion_command_time_s = ready_s - 0.1
+    window._last_motion_expected_complete_time_s = ready_s
+    window._arm_kern_response_sync(
+        seek_key,
+        mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_value=20.0,
+        error_value=30.0,
+        correction_tensile_mm=0.02,
+    )
+    old_load = mini_dma_mod.load_g_from_stress_mpa(20.0, window.spin_diameter.value())
+    assert old_load is not None
+    for index in range(20):
+        timestamp_s = ready_s - 2.0 + index * 0.05
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=old_load,
+            applied_load_g=old_load,
+            raw_text=f"{old_load:.5f} g",
+        )
+
+    try:
+        waiting, signal = window._kern_response_sync_gate(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+            1.0,
+        )
+        assert waiting is True
+        assert signal is None
+        assert window._kern_response_sync_by_key[seek_key].pending is not None
     finally:
         _close_test_window(window)
 
@@ -26221,5 +26386,73 @@ def test_load_target_ramp_waits_for_new_scale_sample_even_as_target_changes(tmp_
         ) is False
         assert len(moves) == 1
         assert "new scale sample" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_seek_state_machine_does_not_stack_flat_feedback_corrections(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        moves.append(target_mm)
+        issued_s = time.time()
+        window._last_motion_command_time_s = issued_s
+        window._last_motion_expected_complete_time_s = issued_s + 0.05
+        window._last_move_target_mm = target_mm
+        window._last_effective_move_target_mm = target_mm
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    _select_kern_response_profile(window)
+    window.check_tension_load_positive.setChecked(True)
+    window.check_positive_motion_is_tension.setChecked(False)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_steps_per_mm.setValue(800.0)
+    window._calibrated_stiffness_g_per_mm = 1.0
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
+    window._set_automation_context(
+        phase="target_ramp",
+        basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+        target_value=1.0,
+        plateau_index=1,
+    )
+    initial_s = time.time()
+    window._latest_scale_value_g = 0.0
+    window._latest_scale_timestamp = initial_s
+
+    try:
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=1.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        ) is False
+        assert len(moves) == 1
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_LOAD_G, 1.0)
+        tracker = window._kern_response_sync_by_key[seek_key]
+        assert tracker.pending is not None
+        ready_s = tracker.pending.feedback_ready_after_s
+
+        for index in range(8):
+            timestamp_s = ready_s + (index + 1) * 0.05
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=timestamp_s,
+                raw_g=0.0,
+                applied_load_g=0.0,
+                raw_text="0.00000 g",
+            )
+            window._latest_scale_value_g = 0.0
+            window._latest_scale_timestamp = timestamp_s
+
+        assert window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            target_value=1.0,
+            tolerance=mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G,
+        ) is False
+        assert len(moves) == 1
+        assert tracker.pending is not None
+        assert "response synchronization" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
