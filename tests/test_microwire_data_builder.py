@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -11126,6 +11127,764 @@ def test_builder_manual_open_recovers_when_staged_finish_fails(
         window._dirty = False
         window.hide()
         window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_store_memory_transaction_nested_rollback_and_memory_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    store_cls = builder_ui.MiniDatabaseStore
+    original = (
+        store_cls._memory_data,
+        store_cls._memory_payloads,
+        store_cls._pending_sections,
+        store_cls._pending_payloads,
+        store_cls._pending_section_values,
+        store_cls._pending_payload_values,
+        store_cls._disk_writes_suspended,
+        list(store_cls._memory_transactions),
+    )
+    writes: list[tuple[str, str, object]] = []
+    monkeypatch.setattr(
+        store_cls,
+        "_write_data_to_disk",
+        lambda self, data: writes.append(
+            (
+                "data",
+                self.section,
+                {"v": data.table["v"].tolist(), "extra": copy.deepcopy(data.extra)},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        store_cls,
+        "_write_payload_to_disk",
+        lambda self, name, payload: writes.append(
+            ("payload", f"{self.section}:{name}", copy.deepcopy(payload))
+        ),
+    )
+    try:
+        store_cls._memory_data = {
+            "annealing": MiniDatabaseData(
+                table=pd.DataFrame({"v": [1]}), extra={"nested": {"old": 1}}
+            )
+        }
+        store_cls._memory_payloads = {("annealing", "records"): {"old": [1]}}
+        store_cls._pending_sections = {"annealing"}
+        store_cls._pending_payloads = {("annealing", "records")}
+        store_cls._pending_section_values = {}
+        store_cls._pending_payload_values = {}
+        store_cls._disk_writes_suspended = 0
+        store_cls._memory_transactions = []
+        store = store_cls("annealing")
+
+        outer = store_cls.begin_memory_transaction()
+        assert writes == []
+        assert store_cls._pending_sections == {"annealing"}
+        assert store_cls._pending_payloads == {("annealing", "records")}
+        store_cls._memory_data["annealing"].extra["nested"]["old"] = 99
+        store_cls._memory_payloads[("annealing", "records")]["old"].append(99)
+        store.save(MiniDatabaseData(table=pd.DataFrame({"v": [2]})))
+        store.save_payload("records", {"outer": [2]})
+
+        inner = store_cls.begin_memory_transaction()
+        store.save(MiniDatabaseData(table=pd.DataFrame({"v": [3]})))
+        store.save_payload("records", {"inner": [3]})
+        inner.rollback()
+        assert store.load().table["v"].tolist() == [2]
+        assert store.load_payload("records") == {"outer": [2]}
+
+        inner_commit = store_cls.begin_memory_transaction()
+        store.save(MiniDatabaseData(table=pd.DataFrame({"v": [4]})))
+        inner_commit.commit_memory_only()
+        outer.commit_memory_only()
+
+        assert store.load().table["v"].tolist() == [4]
+        assert store.load_payload("records") == {"outer": [2]}
+        assert writes == []
+        assert store_cls._pending_sections == {"annealing"}
+        assert store_cls._pending_payloads == {("annealing", "records")}
+        assert store_cls._memory_transactions == []
+        assert store_cls._disk_writes_suspended == 0
+        store_cls._flush_pending_writes()
+        assert writes == [
+            ("data", "annealing", {"v": [1], "extra": {"nested": {"old": 1}}}),
+            ("payload", "annealing:records", {"old": [1]}),
+        ]
+        assert store.load().table["v"].tolist() == [4]
+        assert store.load_payload("records") == {"outer": [2]}
+    finally:
+        (
+            store_cls._memory_data,
+            store_cls._memory_payloads,
+            store_cls._pending_sections,
+            store_cls._pending_payloads,
+            store_cls._pending_section_values,
+            store_cls._pending_payload_values,
+            store_cls._disk_writes_suspended,
+            transactions,
+        ) = original
+        store_cls._memory_transactions = transactions
+
+
+@pytest.mark.parametrize("failure_target", ["fabrication", "mini_dma", "assemble"])
+def test_project_import_failure_restores_previous_state_without_disk_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_target: str,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    old_reviews = {"old-record": {"status": "accepted", "Ms": 12.5}}
+    old_phases = {"old-record": {"austenite": 20.0}}
+    old_hidden = {"C:/old/hidden.csv"}
+    window.annealing_section.apply_data(
+        MiniDatabaseData(
+            table=pd.DataFrame({"marker": ["old"]}),
+            extra={
+                builder_ui.TRANSITION_REVIEW_EXTRA_KEY: copy.deepcopy(old_reviews),
+                "phase_points": copy.deepcopy(old_phases),
+                "hidden_paths": sorted(old_hidden),
+            },
+        )
+    )
+    window.annealing_section._transition_reviews = copy.deepcopy(old_reviews)
+    window.annealing_section._phase_points = copy.deepcopy(old_phases)
+    window.annealing_section._hidden_paths = set(old_hidden)
+    old_cached_payload = {"old": [1, 2, 3]}
+    window.annealing_section.store.save_payload("rollback_marker", old_cached_payload)
+    old_vsm_reviews = {
+        "old-vsm": {"status": "No transition", "transition_points": {}}
+    }
+    old_vsm_points = {"old-vsm": {"Ms": 12.0, "As": 34.0}}
+    old_tma_reviews = {
+        "old-tma": {"status": "accepted", "transition_points": {"As": 33.0}}
+    }
+    window.transition_temps_section._transition_reviews = copy.deepcopy(old_vsm_reviews)
+    window.transition_temps_section._transition_points = copy.deepcopy(old_vsm_points)
+    window.mini_dma_section._transition_reviews = copy.deepcopy(old_tma_reviews)
+    assembly = window.assembly_section
+    assembly._raw_preview_frame = pd.DataFrame(
+        {"Sample": ["old"], builder_ui.SOURCE_LABEL_COLUMN: ["Measured"]}
+    )
+    assembly._measured_preview_frame = assembly._raw_preview_frame.copy(deep=True)
+    assembly._selected_columns = {"Sample", "CA Austenite (°C)"}
+    assembly._column_order = ["CA Austenite (°C)", "Sample"]
+    assembly._preview_source_filter_text = "Measured"
+    assembly._preview_search_text = "old-filter"
+    assembly._imported_rows = {"old/import.xlsx": [{"Sample": "old-import"}]}
+    assembly._imported_sources = ["old/import.xlsx"]
+    old_assembly_state = {
+        "selected_columns": copy.deepcopy(assembly._selected_columns),
+        "column_order": copy.deepcopy(assembly._column_order),
+        "source_filter": assembly._preview_source_filter_text,
+        "search": assembly._preview_search_text,
+        "imported_rows": copy.deepcopy(assembly._imported_rows),
+        "imported_sources": copy.deepcopy(assembly._imported_sources),
+    }
+    window._dirty = False
+    window._update_project_actions()
+    before_save_enabled = window._save_project_action.isEnabled()
+    for section in window.sections.values():
+        for timer_name in (
+            "_transition_state_store_timer",
+            "_transition_review_store_timer",
+            "_transition_review_update_timer",
+            "_pending_state_save_timer",
+            "_transition_table_apply_timer",
+        ):
+            timer = getattr(section, timer_name, None)
+            if isinstance(timer, QtCore.QTimer):
+                timer.stop()
+    old_project_timer = window.transition_temps_section._transition_state_store_timer
+    old_project_timer.start(60_000)
+    before_pending = (
+        set(builder_ui.MiniDatabaseStore._pending_sections),
+        set(builder_ui.MiniDatabaseStore._pending_payloads),
+    )
+    before_memory_data = dict(builder_ui.MiniDatabaseStore._memory_data)
+    before_memory_payloads = dict(builder_ui.MiniDatabaseStore._memory_payloads)
+    storage_root = tmp_path / "storage"
+    before_disk = {
+        path.relative_to(storage_root): path.read_bytes()
+        for path in storage_root.rglob("*")
+        if path.is_file()
+    }
+    target_obj = (
+        window.assembly_section
+        if failure_target == "assemble"
+        else window.sections[failure_target]
+    )
+    original_import = target_obj.import_project_payload
+
+    def _failing_import(payload: object) -> None:
+        if isinstance(payload, dict) and payload.get("force_failure"):
+            raise RuntimeError(f"synthetic {failure_target} failure")
+        original_import(payload)
+
+    monkeypatch.setattr(target_obj, "import_project_payload", _failing_import)
+    sections = {
+        "annealing": {"columns": ["marker"], "rows": [{"marker": "new"}]},
+        failure_target: {"force_failure": True},
+    }
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "broken.pydpj",
+        payload={"kind": BuilderWindow.PROJECT_KIND, "version": 1, "sections": sections},
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared,
+            load_started_s=time.perf_counter(),
+            auto_open_load=False,
+            staged=True,
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+
+        assert window._project_path is None
+        assert window._dirty is False
+        assert window.annealing_section.data.table["marker"].tolist() == ["old"]
+        assert window.annealing_section._transition_reviews == old_reviews
+        assert window.annealing_section._phase_points == old_phases
+        assert window.annealing_section._hidden_paths == old_hidden
+        assert window.transition_temps_section._transition_reviews == old_vsm_reviews
+        assert window.transition_temps_section._transition_points == old_vsm_points
+        assert window.mini_dma_section._transition_reviews == old_tma_reviews
+        assert window.assembly_section._selected_columns == old_assembly_state["selected_columns"]
+        assert window.assembly_section._column_order == old_assembly_state["column_order"]
+        assert (
+            window.assembly_section._preview_source_filter_text
+            == old_assembly_state["source_filter"]
+        )
+        assert window.assembly_section._preview_search_text == old_assembly_state["search"]
+        assert window.assembly_section._imported_rows == old_assembly_state["imported_rows"]
+        assert window.assembly_section._imported_sources == old_assembly_state["imported_sources"]
+        assert window._save_project_action.isEnabled() is before_save_enabled
+        assert old_project_timer.isActive()
+        assert builder_ui.MiniDatabaseStore._memory_transactions == []
+        assert set(builder_ui.MiniDatabaseStore._memory_data) == set(before_memory_data)
+        assert all(
+            builder_ui.MiniDatabaseStore._memory_data[key] is value
+            for key, value in before_memory_data.items()
+        )
+        assert set(builder_ui.MiniDatabaseStore._memory_payloads) == set(before_memory_payloads)
+        assert all(
+            builder_ui.MiniDatabaseStore._memory_payloads[key] is value
+            for key, value in before_memory_payloads.items()
+        )
+        assert (
+            set(builder_ui.MiniDatabaseStore._pending_sections),
+            set(builder_ui.MiniDatabaseStore._pending_payloads),
+        ) == before_pending
+        after_disk = {
+            path.relative_to(storage_root): path.read_bytes()
+            for path in storage_root.rglob("*")
+            if path.is_file()
+        }
+        assert after_disk == before_disk
+    finally:
+        old_project_timer.stop()
+        window._dirty = False
+        window.close()
+
+
+def test_successful_partial_project_does_not_retain_omitted_transition_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    window.annealing_section._transition_reviews = {"old-ca": {"status": "accepted"}}
+    window.annealing_section._phase_points = {"old-ca": {"austenite": 1.0}}
+    window.annealing_section._hidden_paths = {"old-ca"}
+    window.transition_temps_section._transition_reviews = {"old-vsm": {"status": "accepted"}}
+    window.mini_dma_section._transition_reviews = {"old-tma": {"status": "accepted"}}
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "partial.pydpj",
+        payload={
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": 1,
+            "sections": {"fabrication": {"columns": [], "rows": []}},
+        },
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+        assert window._project_path == prepared.target
+        assert window.annealing_section._transition_reviews == {}
+        assert window.annealing_section._phase_points == {}
+        assert window.annealing_section._hidden_paths == set()
+        assert window.transition_temps_section._transition_reviews == {}
+        assert window.mini_dma_section._transition_reviews == {}
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_late_project_load_failure_restores_show_imported_action_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    window.assembly_section._show_imported = False
+    assert window._show_imported_action is not None
+    window._show_imported_action.setChecked(False)
+    refresh_action_states: list[bool] = []
+
+    def _fail_after_action_update() -> None:
+        assert window._show_imported_action is not None
+        refresh_action_states.append(window._show_imported_action.isChecked())
+        raise RuntimeError("synthetic late finish failure")
+
+    monkeypatch.setattr(
+        window, "_refresh_sections_after_project_load", _fail_after_action_update
+    )
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "late-failure.pydpj",
+        payload={
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": 1,
+            "sections": {"assemble": {"show_imported": True}},
+        },
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._dirty = False
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+
+        assert refresh_action_states == [True]
+        assert window.assembly_section._show_imported is False
+        assert window._show_imported_action.isChecked() is False
+        assert builder_ui.MiniDatabaseStore._memory_transactions == []
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_auto_open_section_failure_is_nonmodal_and_restores_blank_save_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.delenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", raising=False)
+    critical_calls: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, title, _message: critical_calls.append(str(title)),
+    )
+    store_cls = builder_ui.MiniDatabaseStore
+    store_snapshot = (
+        store_cls._memory_data,
+        store_cls._memory_payloads,
+        store_cls._pending_sections,
+        store_cls._pending_payloads,
+        list(store_cls._memory_transactions),
+    )
+    store_cls._memory_data = {}
+    store_cls._memory_payloads = {}
+    store_cls._pending_sections = set()
+    store_cls._pending_payloads = set()
+    store_cls._memory_transactions = []
+    window = BuilderWindow()
+
+    def _fail(_payload: object) -> None:
+        raise RuntimeError("synthetic auto-open failure")
+
+    monkeypatch.setattr(window.fabrication_section, "import_project_payload", _fail)
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "auto-broken.pydpj",
+        payload={
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": 1,
+            "sections": {"fabrication": {"columns": [], "rows": []}},
+        },
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._dirty = False
+        window._update_project_actions()
+        before_save_enabled = window._save_project_action.isEnabled()
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+
+        assert critical_calls == []
+        assert window._project_path is None
+        assert window._dirty is False
+        assert window._save_project_action.isEnabled() is before_save_enabled
+        assert builder_ui.MiniDatabaseStore._memory_transactions == []
+    finally:
+        window._dirty = False
+        window.close()
+        (
+            store_cls._memory_data,
+            store_cls._memory_payloads,
+            store_cls._pending_sections,
+            store_cls._pending_payloads,
+            transactions,
+        ) = store_snapshot
+        store_cls._memory_transactions = transactions
+
+
+def test_close_between_staged_project_steps_cancels_transaction_and_timer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    window.annealing_section.apply_data(
+        MiniDatabaseData(table=pd.DataFrame({"marker": ["old"]}))
+    )
+    window._dirty = False
+    calls: list[str] = []
+    original_import = window.annealing_section.import_project_payload
+
+    def _record_import(payload: object) -> None:
+        calls.append("annealing")
+        original_import(payload)
+
+    monkeypatch.setattr(window.annealing_section, "import_project_payload", _record_import)
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "cancelled.pydpj",
+        payload={
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": 1,
+            "sections": {"annealing": {"columns": ["marker"], "rows": [{"marker": "new"}]}},
+        },
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+
+    window._project_load_in_progress = True
+    window._apply_prepared_project_load(
+        prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+    )
+    assert window._project_restore_state is not None
+    assert window._project_restore_timer.isActive()
+    window.close()
+
+    assert window._project_restore_state is None
+    assert not window._project_restore_timer.isActive()
+    assert builder_ui.MiniDatabaseStore._memory_transactions == []
+    assert window.annealing_section.data.table["marker"].tolist() == ["old"]
+    assert calls == []
+    assert window._project_load_in_progress is False
+    assert window._suppress_dirty is False
+    assert builder_ui.MiniDatabaseSection._project_load_batch_mode is False
+    window.deleteLater()
+    QtCore.QCoreApplication.sendPostedEvents(
+        None, QtCore.QEvent.Type.DeferredDelete
+    )
+    QtWidgets.QApplication.processEvents()
+    assert calls == []
+
+
+def test_staged_project_restore_yields_to_gui_heartbeat_between_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    heartbeat = {"count": 0}
+    timer = QtCore.QTimer(window)
+    timer.setInterval(0)
+    timer.timeout.connect(lambda: heartbeat.__setitem__("count", heartbeat["count"] + 1))
+    observed: list[int] = []
+    importer_count = 0
+    for section in window.sections.values():
+        original_import = getattr(section, "import_project_payload", None)
+        if not callable(original_import):
+            continue
+        importer_count += 1
+
+        def _record(payload: object, importer=original_import) -> None:
+            observed.append(heartbeat["count"])
+            importer(payload)
+
+        monkeypatch.setattr(section, "import_project_payload", _record)
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "yielding.pydpj",
+        payload={"kind": BuilderWindow.PROJECT_KIND, "version": 1, "sections": {}},
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        timer.start()
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+        timer.stop()
+
+        assert len(observed) == importer_count
+        assert heartbeat["count"] > 1
+        assert len(set(observed)) > 1
+    finally:
+        timer.stop()
+        window._dirty = False
+        window.close()
+
+
+def test_successful_project_load_discards_old_deferred_persistence_timer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    old_project_timer = window.transition_temps_section._transition_state_store_timer
+    old_project_timer.start(60_000)
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "success.pydpj",
+        payload={"kind": BuilderWindow.PROJECT_KIND, "version": 1, "sections": {}},
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+
+        assert window._project_path == prepared.target
+        assert not old_project_timer.isActive()
+        assert builder_ui.MiniDatabaseStore._memory_transactions == []
+    finally:
+        old_project_timer.stop()
+        window._dirty = False
+        window.close()
+
+
+@pytest.mark.parametrize("auto_open, expected_critical_calls", [(True, 0), (False, 1)])
+def test_invalid_project_kind_respects_auto_open_modal_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    auto_open: bool,
+    expected_critical_calls: int,
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.delenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", raising=False)
+    critical_calls: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, title, _message: critical_calls.append(str(title)),
+    )
+    window = BuilderWindow()
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "wrong-kind.pydpj",
+        payload={"kind": "not-a-builder-project", "version": 1, "sections": {}},
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared,
+            load_started_s=time.perf_counter(),
+            auto_open_load=auto_open,
+            staged=True,
+        )
+
+        assert len(critical_calls) == expected_critical_calls
+        assert window._project_path is None
+        assert window._project_load_in_progress is False
+        assert window._project_load_auto_open is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_close_while_project_prepare_thread_runs_skips_prepared_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    target = tmp_path / "slow-prepare.pydpj"
+    target.write_text("{}", encoding="utf-8")
+    apply_calls: list[Path] = []
+
+    def _slow_prepare(path: Path) -> builder_ui._PreparedProjectLoad:
+        QtCore.QThread.msleep(75)
+        return builder_ui._PreparedProjectLoad(
+            target=path,
+            payload={"kind": BuilderWindow.PROJECT_KIND, "version": 1, "sections": {}},
+            byte_count=2,
+            decoded_payload_count=0,
+            read_ms=75.0,
+            json_ms=0.0,
+            decode_ms=0.0,
+        )
+
+    monkeypatch.setattr(builder_ui, "_prepare_project_payload_for_gui", _slow_prepare)
+    window = BuilderWindow()
+    monkeypatch.setattr(
+        window,
+        "_apply_prepared_project_load",
+        lambda prepared, **_kwargs: apply_calls.append(prepared.target),
+    )
+
+    window._load_project_from_path(target)
+    assert window._project_load_thread is not None
+    window.close()
+    assert window._project_load_cancelled is True
+    _wait_for_qt(lambda: window._project_load_thread is None)
+    QtWidgets.QApplication.processEvents()
+
+    assert apply_calls == []
+    assert window._project_load_in_progress is False
+    assert window._project_restore_state is None
+    assert builder_ui.MiniDatabaseStore._memory_transactions == []
+    window._dirty = False
+    window.deleteLater()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
+
+
+def test_abort_cleanup_survives_ui_rebuild_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    monkeypatch.setattr(
+        window,
+        "_restore_project_load_state",
+        lambda _snapshot: (_ for _ in ()).throw(RuntimeError("rollback rebuild failed")),
+    )
+    monkeypatch.setattr(
+        window.fabrication_section,
+        "import_project_payload",
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("import failed")),
+    )
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "double-failure.pydpj",
+        payload={
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": 1,
+            "sections": {"fabrication": {}},
+        },
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(
+            prepared, load_started_s=time.perf_counter(), auto_open_load=True, staged=True
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+
+        assert window._project_restore_state is None
+        assert not window._project_restore_timer.isActive()
+        assert builder_ui.MiniDatabaseStore._memory_transactions == []
+        assert window._suppress_dirty is False
+        assert builder_ui.MiniDatabaseSection._project_load_batch_mode is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_annealing_project_import_restores_phase_points_and_hidden_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    section = builder_ui.AnnealingSection(logging.getLogger("test"), lambda *_args: None)
+    monkeypatch.setattr(section, "_prune_transition_reviews", lambda: None)
+    monkeypatch.setattr(section, "_prune_phase_points", lambda: None)
+    try:
+        section.import_project_payload(
+            {
+                "columns": ["Sample"],
+                "rows": [{"Sample": "1/1"}],
+                "extra": {
+                    "phase_points": {"record-1": {"As1": 42.5, "Ms1": 17.0}},
+                    builder_ui.TRANSITION_REVIEW_EXTRA_KEY: {
+                        "record-1": {
+                            "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+                        }
+                    },
+                    "hidden_paths": ["C:/copied/hidden.csv"],
+                },
+            }
+        )
+
+        assert section._phase_points["record-1"]["As1"] == pytest.approx(42.5)
+        assert section._phase_points["record-1"]["Ms1"] == pytest.approx(17.0)
+        assert (
+            section._transition_reviews["record-1"]["status"]
+            == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        )
+        assert section._transition_reviews["record-1"]["included"] is False
+        assert section._hidden_paths == {"C:/copied/hidden.csv"}
+    finally:
+        section.close()
+        section.deleteLater()
         QtWidgets.QApplication.processEvents()
 
 
