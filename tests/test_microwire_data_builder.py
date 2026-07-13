@@ -3243,6 +3243,7 @@ def test_transition_temps_preview_click_persists_manual_temperature(
         lambda *_args: None,
     )
     try:
+        section._transition_reviews = {}  # noqa: SLF001
         section._auto_values_for_records = lambda _records: {"As": 12.0, "Af": 32.0}  # type: ignore[method-assign]  # noqa: SLF001
         section.refresh_data()
         source_index = section.model.index(0, 0)
@@ -3311,6 +3312,7 @@ def test_transition_temps_project_payload_preserves_review_records(
         lambda *_args: None,
     )
     try:
+        section._transition_reviews = {}  # noqa: SLF001
         section._auto_values_for_record = lambda _record: {"As": 12.0, "Af": 32.0}  # type: ignore[method-assign]  # noqa: SLF001
         section.refresh_data()
         source_index = section.model.index(0, 0)
@@ -3372,6 +3374,7 @@ def test_transition_temps_preview_drag_marker_and_clear_label(
         lambda *_args: None,
     )
     try:
+        section._transition_reviews = {}  # noqa: SLF001
         section._auto_values_for_record = lambda _record: {"As": 12.0, "Af": 32.0, "Ms": 8.0, "Mf": 4.0}  # type: ignore[method-assign]  # noqa: SLF001
         section.refresh_data()
         source_index = section.model.index(0, 0)
@@ -3439,6 +3442,9 @@ def test_transition_temps_queue_marks_no_transition_and_shows_scan_counts(
         lambda *_args: None,
     )
     try:
+        # This action test starts from a deliberately empty review queue. Unmatched
+        # persisted reviews are retained by production refreshes for later recovery.
+        section._transition_reviews = {}  # noqa: SLF001
         section._auto_values_for_record = lambda _record: {"As": 12.0, "Af": 32.0}  # type: ignore[method-assign]  # noqa: SLF001
         section.refresh_data()
         source_index = section.model.index(0, 0)
@@ -11397,6 +11403,115 @@ def test_project_import_failure_restores_previous_state_without_disk_writes(
         window.close()
 
 
+def test_failed_project_load_restores_vsm_preview_records_without_copying_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+    window = BuilderWindow()
+    group_key = "Ni50Fe27Ga23|12|2"
+    old_record = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "old" / "scan.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame({"temperature": [0.0, 20.0], "signal": [1.0, 2.0]}),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="old scan",
+    )
+    new_record = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "new" / "scan.txt",
+        sample=old_record.sample,
+        data=pd.DataFrame({"temperature": [0.0, 20.0], "signal": [9.0, 8.0]}),
+        key=old_record.key,
+        label="new scan",
+    )
+    transition_section = window.transition_temps_section
+    old_id = builder_ui._vsm_transition_review_record_id(old_record)  # noqa: SLF001
+    new_id = builder_ui._vsm_transition_review_record_id(new_record)  # noqa: SLF001
+    old_frame = pd.DataFrame(
+        {
+            "Composition": ["Ni50Fe27Ga23"],
+            "Microwire": ["12/2"],
+            "Graph": ["old scan"],
+            "_group_key": [group_key],
+            "_record_id": [old_id],
+        }
+    )
+    transition_section._all_transition_records = [old_record]  # noqa: SLF001
+    transition_section._record_groups = {group_key: [old_record]}  # noqa: SLF001
+    transition_section._current_frame = old_frame  # noqa: SLF001
+    transition_section.model.set_frame(old_frame)
+    transition_section._pending_preview_record_id = old_id  # noqa: SLF001
+
+    snapshot = window._capture_project_load_state()  # noqa: SLF001
+    captured_record = snapshot["sections"]["transition_temps"][  # noqa: SLF001
+        "transition_record_state"
+    ]["all_records"][0]
+    assert captured_record is old_record
+    assert captured_record.data is old_record.data
+    window._resume_project_load_timers(snapshot)  # noqa: SLF001
+
+    original_transition_import = transition_section.import_project_payload
+
+    def _replace_preview_records(payload: object) -> None:
+        original_transition_import(payload)
+        transition_section._all_transition_records = [new_record]  # noqa: SLF001
+        transition_section._record_groups = {group_key: [new_record]}  # noqa: SLF001
+        transition_section._review_content_identity_cache = {  # noqa: SLF001
+            id(new_record): (
+                new_record,
+                builder_ui._transition_review_content_identity(new_record, "vsm-ts"),  # noqa: SLF001
+            )
+        }
+        transition_section._pending_preview_record_id = new_id  # noqa: SLF001
+
+    monkeypatch.setattr(
+        transition_section, "import_project_payload", _replace_preview_records
+    )
+    monkeypatch.setattr(
+        window.mini_dma_section,
+        "import_project_payload",
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("synthetic TMA failure")),
+    )
+    prepared = builder_ui._PreparedProjectLoad(
+        target=tmp_path / "broken-preview.pydpj",
+        payload={
+            "kind": BuilderWindow.PROJECT_KIND,
+            "version": 1,
+            "sections": {
+                "transition_temps": {"columns": [], "rows": []},
+                "mini_dma": {"force_failure": True},
+            },
+        },
+        byte_count=1,
+        decoded_payload_count=0,
+        read_ms=0.0,
+        json_ms=0.0,
+        decode_ms=0.0,
+    )
+    try:
+        window._dirty = False
+        window._project_load_in_progress = True
+        window._apply_prepared_project_load(  # noqa: SLF001
+            prepared,
+            load_started_s=time.perf_counter(),
+            auto_open_load=True,
+            staged=True,
+        )
+        _wait_for_qt(lambda: not window._project_load_in_progress)  # noqa: SLF001
+
+        assert transition_section._all_transition_records == [old_record]  # noqa: SLF001
+        assert transition_section._all_transition_records[0] is old_record  # noqa: SLF001
+        assert transition_section._record_groups[group_key][0] is old_record  # noqa: SLF001
+        assert transition_section._pending_preview_record_id == old_id  # noqa: SLF001
+        assert transition_section.model.frame()["_record_id"].tolist() == [old_id]
+        assert transition_section._review_content_identity_cache == {}  # noqa: SLF001
+    finally:
+        window._dirty = False
+        window.close()
+
+
 def test_successful_partial_project_does_not_retain_omitted_transition_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -11883,6 +11998,670 @@ def test_annealing_project_import_restores_phase_points_and_hidden_paths(
         assert section._transition_reviews["record-1"]["included"] is False
         assert section._hidden_paths == {"C:/copied/hidden.csv"}
     finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_transition_reviews_survive_filter_hide_show_and_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    scan = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "source" / "scan-a.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame({"temperature": [0.0, 20.0], "signal": [1.0, 2.0]}),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="scan-a",
+    )
+    holder = {"records": [scan]}
+    source = SimpleNamespace(
+        store=SimpleNamespace(
+            load_payload=lambda name: holder["records"]
+            if name == "vsm_temperature_scan_records"
+            else None
+        ),
+        _all_records=[scan],
+        _record_groups_by_key={},
+        data=MiniDatabaseData(extra={"hidden_paths": []}),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    try:
+        section.refresh_data()
+        group_key = "Ni50Fe27Ga23|12|2"
+        record_id = builder_ui._vsm_transition_review_record_id(scan)  # noqa: SLF001
+        payload = {
+            "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+            "included": False,
+            **section._record_review_metadata(group_key, scan),  # noqa: SLF001
+        }
+        section._transition_reviews[record_id] = section._clean_transition_review_payload(  # noqa: SLF001
+            record_id, payload
+        )
+        section._transition_points[group_key] = {"As": 21.5}  # noqa: SLF001
+
+        section.search_edit.setText("not-visible")
+        QtWidgets.QApplication.processEvents()
+        section.refresh_data()
+        assert record_id in section.transition_reviews_snapshot()
+        assert section._transition_points[group_key] == {"As": 21.5}  # noqa: SLF001
+
+        source.data.extra["hidden_paths"] = [str(scan.path)]
+        section.search_edit.clear()
+        section.refresh_data()
+        assert section.model.frame().empty
+        assert record_id in section.transition_reviews_snapshot()
+        assert section._transition_points[group_key] == {"As": 21.5}  # noqa: SLF001
+
+        source.data.extra["hidden_paths"] = []
+        section.refresh_data()
+        assert len(section.model.frame().index) == 1
+        assert section.model.frame().iloc[0]["Review status"] == "No transition"
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_transition_review_reconciles_content_after_path_and_metadata_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    frame = pd.DataFrame({"temperature": [0.0, 20.0], "signal": [1.0, 2.0]})
+    old = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "old-root" / "old-name.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=frame.copy(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="old-label",
+    )
+    moved = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "new-root" / "renamed.txt",
+        sample="Renamed sample metadata",
+        data=frame.copy(),
+        key=("Renamed", 99, 1),
+        label="renamed-label",
+    )
+    holder = {"records": [old]}
+    source = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: holder["records"]),
+        _all_records=[old],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    try:
+        section.refresh_data()
+        old_id = builder_ui._vsm_transition_review_record_id(old)  # noqa: SLF001
+        section._transition_reviews[old_id] = section._clean_transition_review_payload(  # noqa: SLF001
+            old_id,
+            {
+                "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                "included": True,
+                "manual_values_C": {"As": 33.0},
+                "final_values_C": {"As": 33.0},
+                **section._record_review_metadata("Ni50Fe27Ga23|12|2", old),  # noqa: SLF001
+            },
+        )
+
+        holder["records"] = [moved]
+        source._all_records = [moved]
+        section.refresh_data()
+
+        moved_id = builder_ui._vsm_transition_review_record_id(moved)  # noqa: SLF001
+        reviews = section.transition_reviews_snapshot()
+        assert old_id not in reviews
+        assert reviews[moved_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED
+        assert reviews[moved_id]["manual_values_C"] == {"As": 33.0}
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_transition_review_same_path_changed_content_becomes_unmatched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    path = tmp_path / "source" / "scan.txt"
+    old = builder_ui.VsmTemperatureScanRecord(
+        path=path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame({"temperature": [0.0, 20.0], "signal": [1.0, 2.0]}),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="scan",
+    )
+    replaced = builder_ui.VsmTemperatureScanRecord(
+        path=path,
+        sample=old.sample,
+        data=pd.DataFrame({"temperature": [0.0, 20.0], "signal": [9.0, 8.0]}),
+        key=old.key,
+        label=old.label,
+    )
+    holder = {"records": [old]}
+    source = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: holder["records"]),
+        _all_records=[old],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    try:
+        section.refresh_data()
+        record_id = builder_ui._vsm_transition_review_record_id(old)  # noqa: SLF001
+        section._transition_reviews = {  # noqa: SLF001
+            record_id: section._clean_transition_review_payload(  # noqa: SLF001
+                record_id,
+                {
+                    "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    "included": False,
+                    **section._record_review_metadata("Ni50Fe27Ga23|12|2", old),  # noqa: SLF001
+                },
+            )
+        }
+        old_identity = section._transition_reviews[record_id]["content_identity"]  # noqa: SLF001
+
+        holder["records"] = [replaced]
+        source._all_records = [replaced]
+        section.refresh_data()
+
+        reviews = section.transition_reviews_snapshot()
+        assert record_id not in reviews
+        assert len(reviews) == 1
+        orphan_id, review = next(iter(reviews.items()))
+        assert orphan_id.startswith("unmatched:vsm-ts:")
+        assert review["content_identity"] == old_identity
+        assert review["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert section.model.frame().iloc[0]["Review status"] != "No transition"
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_transition_review_same_path_replacement_moves_to_content_in_one_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    original_path = tmp_path / "source-a" / "scan.txt"
+    frame = pd.DataFrame({"temperature": [0.0, 20.0], "signal": [1.0, 2.0]})
+    old = builder_ui.VsmTemperatureScanRecord(
+        path=original_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=frame.copy(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="scan-a",
+    )
+    replacement = builder_ui.VsmTemperatureScanRecord(
+        path=original_path,
+        sample=old.sample,
+        data=pd.DataFrame({"temperature": [0.0, 20.0], "signal": [9.0, 8.0]}),
+        key=old.key,
+        label=old.label,
+    )
+    moved = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "source-b" / "renamed.txt",
+        sample="changed metadata",
+        data=frame.copy(),
+        key=("Changed", 99, 1),
+        label="renamed",
+    )
+    holder = {"records": [old]}
+    source = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: holder["records"]),
+        _all_records=[old],
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    try:
+        section.refresh_data()
+        old_id = builder_ui._vsm_transition_review_record_id(old)  # noqa: SLF001
+        section._transition_reviews = {  # noqa: SLF001
+            old_id: section._clean_transition_review_payload(  # noqa: SLF001
+                old_id,
+                {
+                    "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                    "included": True,
+                    "manual_values_C": {"As": 33.0},
+                    "final_values_C": {"As": 33.0},
+                    **section._record_review_metadata("Ni50Fe27Ga23|12|2", old),  # noqa: SLF001
+                },
+            )
+        }
+
+        holder["records"] = [replacement, moved]
+        source._all_records = [replacement, moved]
+        section.refresh_data()
+
+        moved_id = builder_ui._vsm_transition_review_record_id(moved)  # noqa: SLF001
+        reviews = section.transition_reviews_snapshot()
+        assert set(reviews) == {moved_id}
+        assert reviews[moved_id]["manual_values_C"] == {"As": 33.0}
+        assert not any(record_id.startswith("unmatched:") for record_id in reviews)
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_transition_review_keeps_ambiguous_content_match_unassigned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    frame = pd.DataFrame({"temperature": [0.0, 20.0], "signal": [1.0, 2.0]})
+    old = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "old" / "scan.txt",
+        sample="sample",
+        data=frame.copy(),
+        label="scan",
+    )
+    candidates = [
+        builder_ui.VsmTemperatureScanRecord(
+            path=tmp_path / f"new-{index}" / f"scan-{index}.txt",
+            sample=f"changed-{index}",
+            data=frame.copy(),
+            label=f"changed-{index}",
+        )
+        for index in (1, 2)
+    ]
+    source = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: candidates),
+        _all_records=candidates,
+        _record_groups_by_key={},
+        _hidden_paths=set(),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    try:
+        old_id = builder_ui._vsm_transition_review_record_id(old)  # noqa: SLF001
+        section._transition_reviews = {  # noqa: SLF001
+            old_id: section._clean_transition_review_payload(  # noqa: SLF001
+                old_id,
+                {
+                    "status": builder_ui.TRANSITION_REVIEW_STATUS_EXCLUDED,
+                    "included": False,
+                    **section._record_review_metadata("sample", old),  # noqa: SLF001
+                },
+            )
+        }
+        section.refresh_data()
+
+        reviews = section.transition_reviews_snapshot()
+        assert set(reviews) == {old_id}
+        assert reviews[old_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_EXCLUDED
+        assert all(
+            builder_ui._vsm_transition_review_record_id(record) not in reviews  # noqa: SLF001
+            for record in candidates
+        )
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_vsm_legacy_transition_review_migrates_by_unique_source_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    frame = pd.DataFrame({"temperature": [0.0, 20.0], "signal": [1.0, 2.0]})
+    old = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "old-root" / "scan.txt",
+        sample="Ni50Fe27Ga23 12_2",
+        data=frame.copy(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="scan",
+    )
+    moved = builder_ui.VsmTemperatureScanRecord(
+        path=tmp_path / "new-root" / "scan.txt",
+        sample=old.sample,
+        data=frame.copy(),
+        key=old.key,
+        label=old.label,
+    )
+    source = SimpleNamespace(
+        store=SimpleNamespace(load_payload=lambda _name: [moved]),
+        _all_records=[moved],
+        _record_groups_by_key={},
+        data=MiniDatabaseData(extra={"hidden_paths": []}),
+    )
+    section = builder_ui.TransitionTempsSection(
+        source, logging.getLogger("test"), lambda *_args: None
+    )
+    try:
+        old_id = builder_ui._vsm_transition_review_record_id(old)  # noqa: SLF001
+        section._transition_reviews = {  # noqa: SLF001
+            old_id: section._clean_transition_review_payload(  # noqa: SLF001
+                old_id,
+                {
+                    "status": builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION,
+                    "included": False,
+                    "sample": old.sample,
+                    "group_key": "Ni50Fe27Ga23|12|2",
+                    "record_label": old.label,
+                    "record_path": str(old.path),
+                },
+            )
+        }
+
+        section.refresh_data()
+
+        moved_id = builder_ui._vsm_transition_review_record_id(moved)  # noqa: SLF001
+        reviews = section.transition_reviews_snapshot()
+        assert old_id not in reviews
+        assert reviews[moved_id]["status"] == builder_ui.TRANSITION_REVIEW_STATUS_NO_TRANSITION
+        assert reviews[moved_id]["content_identity"].startswith("vsm-ts:")
+        stored = section.data.extra[builder_ui.VSM_TRANSITION_REVIEW_EXTRA_KEY]
+        assert stored["schema_version"] == builder_ui.VSM_TRANSITION_REVIEW_SCHEMA_VERSION
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+@pytest.mark.parametrize(
+    "status, extras",
+    [
+        (
+            builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+            {
+                "auto_values_mA": {"As": 30.0, "Af": 70.0},
+                "manual_values_mA": {"Af": 64.0},
+                "cleared_labels": ["Ms"],
+                "values": {"As": 30.0, "Af": 64.0},
+            },
+        ),
+        (builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION, {}),
+        (builder_ui.MINI_DMA_REVIEW_STATUS_EXCLUDED, {}),
+    ],
+)
+def test_tma_transition_review_reconciles_path_and_metadata_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    extras: dict[str, object],
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    frame = pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, 1.0]})
+    old = MiniDmaRecord(
+        path=tmp_path / "old-root" / "run-old",
+        sample="Ni50Fe27Ga23 12_2",
+        data=frame.copy(),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="run-old",
+    )
+    moved = MiniDmaRecord(
+        path=tmp_path / "new-root" / "renamed-run",
+        sample="Changed sample metadata",
+        data=frame.copy(),
+        key=("Changed", 99, 1),
+        label="renamed-run",
+    )
+    target = "100 MPa / 1.5 g"
+    try:
+        section._all_mini_dma_records = [old]  # noqa: SLF001
+        old_id = builder_ui._mini_dma_review_record_id(old, target)  # noqa: SLF001
+        section.set_transition_review_for_target(
+            old_id,
+            {
+                "status": status,
+                "sample": old.sample,
+                "run_label": old.label or "",
+                "target_label": target,
+                **extras,
+            },
+        )
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+
+        assert section._reconcile_transition_reviews([moved])  # noqa: SLF001
+        moved_id = builder_ui._mini_dma_review_record_id(moved, target)  # noqa: SLF001
+        reviews = section.transition_reviews_snapshot()
+        assert old_id not in reviews
+        assert reviews[moved_id]["status"] == status
+        if status == builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED:
+            assert reviews[moved_id]["manual_values_mA"] == {"Af": 64.0}
+            assert reviews[moved_id]["cleared_labels"] == ["Ms"]
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_tma_transition_review_same_path_changed_content_becomes_unmatched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    path = tmp_path / "run"
+    old = MiniDmaRecord(
+        path=path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, 1.0]}),
+        label="run",
+    )
+    replaced = MiniDmaRecord(
+        path=path,
+        sample=old.sample,
+        data=pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, 9.0]}),
+        label=old.label,
+    )
+    target = "100 MPa / 1.5 g"
+    try:
+        section._all_mini_dma_records = [old]  # noqa: SLF001
+        record_id = builder_ui._mini_dma_review_record_id(old, target)  # noqa: SLF001
+        section.set_transition_review_for_target(
+            record_id,
+            {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                "sample": old.sample,
+                "run_label": old.label,
+                "target_label": target,
+            },
+        )
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+        old_identity = section._transition_reviews[record_id]["content_identity"]  # noqa: SLF001
+
+        assert section._reconcile_transition_reviews([replaced])  # noqa: SLF001
+
+        reviews = section.transition_reviews_snapshot()
+        assert record_id not in reviews
+        assert len(reviews) == 1
+        orphan_id, review = next(iter(reviews.items()))
+        assert orphan_id.startswith("unmatched:tma:")
+        assert review["content_identity"] == old_identity
+        assert review["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_tma_transition_review_same_path_replacement_moves_to_content_in_one_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    original_path = tmp_path / "run-a"
+    frame = pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, 1.0]})
+    old = MiniDmaRecord(
+        path=original_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=frame.copy(),
+        label="run-a",
+    )
+    replacement = MiniDmaRecord(
+        path=original_path,
+        sample=old.sample,
+        data=pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, 9.0]}),
+        label=old.label,
+    )
+    moved = MiniDmaRecord(
+        path=tmp_path / "run-b",
+        sample="changed metadata",
+        data=frame.copy(),
+        label="renamed",
+    )
+    target = "100 MPa / 1.5 g"
+    try:
+        section._all_mini_dma_records = [old]  # noqa: SLF001
+        old_id = builder_ui._mini_dma_review_record_id(old, target)  # noqa: SLF001
+        section.set_transition_review_for_target(
+            old_id,
+            {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_ACCEPTED,
+                "sample": old.sample,
+                "run_label": old.label,
+                "target_label": target,
+                "manual_values_mA": {"Af": 64.0},
+                "values": {"Af": 64.0},
+            },
+        )
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+
+        assert section._reconcile_transition_reviews(  # noqa: SLF001
+            [replacement, moved]
+        )
+
+        moved_id = builder_ui._mini_dma_review_record_id(moved, target)  # noqa: SLF001
+        reviews = section.transition_reviews_snapshot()
+        assert set(reviews) == {moved_id}
+        assert reviews[moved_id]["manual_values_mA"] == {"Af": 64.0}
+        assert not any(record_id.startswith("unmatched:") for record_id in reviews)
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_tma_transition_review_keeps_ambiguous_content_match_unassigned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    frame = pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, 1.0]})
+    old = MiniDmaRecord(
+        path=tmp_path / "old" / "run",
+        sample="sample",
+        data=frame.copy(),
+        label="run",
+    )
+    candidates = [
+        MiniDmaRecord(
+            path=tmp_path / f"new-{index}" / f"run-{index}",
+            sample=f"changed-{index}",
+            data=frame.copy(),
+            label=f"changed-{index}",
+        )
+        for index in (1, 2)
+    ]
+    target = "50 MPa / 1.46 g"
+    try:
+        section._all_mini_dma_records = [old]  # noqa: SLF001
+        old_id = builder_ui._mini_dma_review_record_id(old, target)  # noqa: SLF001
+        section.set_transition_review_for_target(
+            old_id,
+            {
+                "status": builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                "sample": old.sample,
+                "run_label": old.label or "",
+                "target_label": target,
+            },
+        )
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+
+        assert not section._reconcile_transition_reviews(candidates)  # noqa: SLF001
+        reviews = section.transition_reviews_snapshot()
+        assert set(reviews) == {old_id}
+        assert all(
+            builder_ui._mini_dma_review_record_id(record, target) not in reviews  # noqa: SLF001
+            for record in candidates
+        )
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_tma_legacy_transition_review_migrates_by_unique_source_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "store"))
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    frame = pd.DataFrame({"current_mA": [0.0, 10.0], "strain": [0.0, 1.0]})
+    old = MiniDmaRecord(
+        path=tmp_path / "old-root" / "run-a",
+        sample="Ni50Fe27Ga23 12_2",
+        data=frame.copy(),
+        label="run-a",
+    )
+    moved = MiniDmaRecord(
+        path=tmp_path / "new-root" / "run-a",
+        sample=old.sample,
+        data=frame.copy(),
+        label=old.label,
+    )
+    target = "100 MPa / 1.5 g"
+    try:
+        old_id = builder_ui._mini_dma_review_record_id(old, target)  # noqa: SLF001
+        section._transition_reviews = {  # noqa: SLF001
+            old_id: section._clean_transition_review_payload(  # noqa: SLF001
+                old_id,
+                {
+                    "status": builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION,
+                    "sample": old.sample,
+                    "run_label": old.label,
+                    "target_label": target,
+                    "record_path": str(old.path),
+                },
+            )
+        }
+        section.store.load_payload = lambda _name: [moved]
+
+        section._refresh_record_groups()  # noqa: SLF001
+
+        moved_id = builder_ui._mini_dma_review_record_id(moved, target)  # noqa: SLF001
+        reviews = section.transition_reviews_snapshot()
+        assert old_id not in reviews
+        assert reviews[moved_id]["status"] == builder_ui.MINI_DMA_REVIEW_STATUS_NO_TRANSITION
+        assert reviews[moved_id]["content_identity"].startswith("tma:")
+        stored = section.data.extra[builder_ui.MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY]
+        assert stored["schema_version"] == builder_ui.MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION
+    finally:
+        section._transition_review_store_timer.stop()  # noqa: SLF001
+        section._transition_table_apply_timer.stop()  # noqa: SLF001
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()

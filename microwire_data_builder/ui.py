@@ -26,7 +26,22 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
-from typing import Any, Callable, ClassVar, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Collection,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    cast,
+)
 
 try:
     from .ocr import ORIGINAL_HOME as OCR_ORIGINAL_HOME
@@ -6196,14 +6211,14 @@ TRANSITION_REVIEW_INCLUDED_STATUSES = {
     TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
 }
 
-MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION = 1
+MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION = 2
 MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY = "mini_dma_transition_reviews"
 MINI_DMA_REVIEW_STATUS_ACCEPTED = "accepted"
 MINI_DMA_REVIEW_STATUS_NO_TRANSITION = "no_transition"
 MINI_DMA_REVIEW_STATUS_EXCLUDED = "excluded"
 MINI_DMA_TRANSITION_LABELS = ("As", "Af", "Ms", "Mf")
 
-VSM_TRANSITION_REVIEW_SCHEMA_VERSION = 1
+VSM_TRANSITION_REVIEW_SCHEMA_VERSION = 2
 VSM_TRANSITION_REVIEW_EXTRA_KEY = "transition_reviews"
 VSM_TRANSITION_VALUES_KEY = "transition_temps"
 VSM_TRANSITION_STATUS_KEY = "__review_status__"
@@ -7811,6 +7826,84 @@ class _MiniDmaTransitionReviewEntry:
     run: Any
     group: pd.DataFrame
     target_summary: Any
+
+
+def _transition_review_content_identity(
+    record: object,
+    namespace: str,
+    cache: Optional[MutableMapping[int, Tuple[object, str]]] = None,
+) -> str:
+    """Hash already-loaded record content once; never re-read the source path."""
+
+    cache_key = id(record)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] is record:
+            return cached[1]
+    digest = hashlib.sha256()
+    digest.update(str(namespace).encode("utf-8", errors="replace"))
+    frame = getattr(record, "data", None)
+    if isinstance(frame, pd.DataFrame):
+        digest.update(repr(tuple(str(column) for column in frame.columns)).encode("utf-8"))
+        digest.update(repr(tuple(str(dtype) for dtype in frame.dtypes)).encode("utf-8"))
+        digest.update(repr(tuple(int(value) for value in frame.shape)).encode("ascii"))
+        try:
+            hashed = pd.util.hash_pandas_object(frame, index=True, categorize=True)
+            digest.update(hashed.to_numpy(copy=False).tobytes())
+        except Exception:
+            try:
+                fallback = frame.to_json(orient="split", date_format="iso")
+            except Exception:
+                fallback = repr(frame)
+            digest.update(fallback.encode("utf-8", errors="replace"))
+    else:
+        digest.update(repr(frame).encode("utf-8", errors="replace"))
+    identity = f"{namespace}:{digest.hexdigest()}"
+    if cache is not None:
+        cache[cache_key] = (record, identity)
+    return identity
+
+
+def _transition_review_source_name(record: object) -> str:
+    path = getattr(record, "path", None)
+    return path.name if isinstance(path, Path) else ""
+
+
+def _transition_review_orphan_id(
+    namespace: str,
+    stored_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return a stable key that cannot be consumed as a current path-based ID."""
+
+    digest = hashlib.sha256()
+    for value in (
+        namespace,
+        stored_id,
+        str(payload.get("content_identity") or ""),
+        str(payload.get("target_label") or ""),
+    ):
+        digest.update(value.encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return f"unmatched:{namespace}:{digest.hexdigest()}"
+
+
+def _move_transition_review_to_orphan(
+    reviews: MutableMapping[str, Dict[str, Any]],
+    stored_id: str,
+    namespace: str,
+) -> bool:
+    payload = reviews.get(stored_id)
+    if not isinstance(payload, dict):
+        return False
+    orphan_id = _transition_review_orphan_id(namespace, stored_id, payload)
+    if orphan_id in reviews:
+        suffix = 2
+        while f"{orphan_id}:{suffix}" in reviews:
+            suffix += 1
+        orphan_id = f"{orphan_id}:{suffix}"
+    reviews[orphan_id] = reviews.pop(stored_id)
+    return True
 
 
 def _mini_dma_review_record_id(record: MiniDmaRecord, target_label: str) -> str:
@@ -19598,6 +19691,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self._transition_state_store_timer.timeout.connect(self._persist_transition_state)
         self._auto_values_cache: Dict[str, Dict[str, float]] = {}
         self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        self._all_transition_records: List[VsmTemperatureScanRecord] = []
+        self._review_content_identity_cache: Dict[int, Tuple[object, str]] = {}
         self._last_sources: List[str] = []
         self._pending_preview_record_id: Optional[str] = None
         self._current_frame = pd.DataFrame(
@@ -19786,7 +19881,14 @@ class TransitionTempsSection(QtWidgets.QWidget):
             "manual_values_C": manual_values,
             "final_values_C": final_values,
         }
-        for key in ("sample", "group_key", "record_label", "record_path"):
+        for key in (
+            "sample",
+            "group_key",
+            "record_label",
+            "record_path",
+            "content_identity",
+            "source_name",
+        ):
             value = payload.get(key)
             if value not in (None, ""):
                 cleaned[key] = str(value)
@@ -19954,11 +20056,12 @@ class TransitionTempsSection(QtWidgets.QWidget):
         previous_order = self._current_column_order()
         selected_key = self._current_selection_key()
         self._refresh_record_groups()
-        valid_keys = set(self._record_groups.keys())
-        pruned_points = self._prune_transition_points(valid_keys)
-        pruned_reviews = self._prune_transition_reviews()
-        if pruned_points or pruned_reviews:
-            self._store_transition_points()
+        all_groups = _group_graph_records_by_key(self._all_transition_records)
+        reconciled_points = self._reconcile_transition_points(all_groups.keys())
+        reconciled_reviews = self._reconcile_transition_reviews(self._all_transition_records)
+        if reconciled_points or reconciled_reviews:
+            self._sync_transition_points_payload()
+            self._store_transition_reviews(update_table=False)
         frame = self._build_frame()
         self._current_frame = frame
         self.model.set_frame(frame)
@@ -20024,7 +20127,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self._auto_values_cache.clear()
         grouped: Dict[str, List[VsmTemperatureScanRecord]] = {}
         payload = None
-        visible_records: List[VsmTemperatureScanRecord] = []
+        all_records: List[VsmTemperatureScanRecord] = []
         try:
             payload = self._vsm_temperature_section.store.load_payload(
                 "vsm_temperature_scan_records"
@@ -20032,21 +20135,29 @@ class TransitionTempsSection(QtWidgets.QWidget):
         except Exception:
             payload = None
         if isinstance(payload, list):
-            hidden = _hidden_paths_from_section(self._vsm_temperature_section)
-            visible_records.extend(
-                record
-                for record in payload
-                if _record_path_key(record) not in hidden
+            all_records.extend(
+                record for record in payload if isinstance(record, VsmTemperatureScanRecord)
             )
-        fallback_records = self._fallback_vsm_temperature_records()
+        fallback_records = self._fallback_vsm_temperature_records(include_hidden=True)
         if fallback_records:
-            seen = {_record_path_key(record) or repr(record) for record in visible_records}
+            seen = {_record_path_key(record) or repr(record) for record in all_records}
             for record in fallback_records:
                 marker = _record_path_key(record) or repr(record)
                 if marker in seen:
                     continue
-                visible_records.append(record)
+                all_records.append(record)
                 seen.add(marker)
+        self._all_transition_records = all_records
+        current_records_by_id = {id(record): record for record in all_records}
+        self._review_content_identity_cache = {
+            key: value
+            for key, value in self._review_content_identity_cache.items()
+            if current_records_by_id.get(key) is value[0]
+        }
+        hidden = _hidden_paths_from_section(self._vsm_temperature_section)
+        visible_records = [
+            record for record in all_records if _record_path_key(record) not in hidden
+        ]
         if visible_records:
             grouped = _group_graph_records_by_key(visible_records)
             for records in grouped.values():
@@ -20060,7 +20171,9 @@ class TransitionTempsSection(QtWidgets.QWidget):
                     sources.append(str(path))
         self._last_sources = list(dict.fromkeys(sources))
 
-    def _fallback_vsm_temperature_records(self) -> List[VsmTemperatureScanRecord]:
+    def _fallback_vsm_temperature_records(
+        self, *, include_hidden: bool = False
+    ) -> List[VsmTemperatureScanRecord]:
         section = self._vsm_temperature_section
         hidden = _hidden_paths_from_section(section)
         records: List[VsmTemperatureScanRecord] = []
@@ -20084,7 +20197,7 @@ class TransitionTempsSection(QtWidgets.QWidget):
         unique: Dict[str, VsmTemperatureScanRecord] = {}
         for record in records:
             key = _record_path_key(record) or repr(record)
-            if key in hidden:
+            if not include_hidden and key in hidden:
                 continue
             unique.setdefault(key, record)
         return list(unique.values())
@@ -20756,8 +20869,8 @@ class TransitionTempsSection(QtWidgets.QWidget):
                 return group_key, record
         return None
 
-    @staticmethod
     def _record_review_metadata(
+        self,
         group_key: str,
         record: VsmTemperatureScanRecord,
     ) -> Dict[str, str]:
@@ -20769,6 +20882,12 @@ class TransitionTempsSection(QtWidgets.QWidget):
         path = getattr(record, "path", None)
         if isinstance(path, Path):
             metadata["record_path"] = str(path)
+        metadata["content_identity"] = _transition_review_content_identity(
+            record, "vsm-ts", self._review_content_identity_cache
+        )
+        source_name = _transition_review_source_name(record)
+        if source_name:
+            metadata["source_name"] = source_name
         return metadata
 
     def _store_review_for_record(
@@ -21034,27 +21153,174 @@ class TransitionTempsSection(QtWidgets.QWidget):
             return None
         return _microwire_key_from_string(text)
 
-    def _prune_transition_points(self, valid_keys: Iterable[str]) -> bool:
-        valid_set = {str(value) for value in valid_keys if value}
-        removed = False
-        for key in list(self._transition_points.keys()):
-            if key not in valid_set:
-                self._transition_points.pop(key, None)
-                removed = True
-        return removed
+    def _reconcile_transition_points(self, current_keys: Iterable[str]) -> bool:
+        current = {str(value) for value in current_keys if value}
+        proposals: Dict[str, List[str]] = {}
+        for stored_key in self._transition_points:
+            if stored_key in current:
+                continue
+            parsed = self._parse_group_key(stored_key)
+            if parsed is None:
+                continue
+            matches = [key for key in current if self._parse_group_key(key) == parsed]
+            if len(matches) == 1 and matches[0] not in self._transition_points:
+                proposals.setdefault(matches[0], []).append(stored_key)
+        changed = False
+        for current_key, stored_keys in proposals.items():
+            if len(stored_keys) != 1:
+                continue
+            stored_key = stored_keys[0]
+            self._transition_points[current_key] = self._transition_points.pop(stored_key)
+            changed = True
+        return changed
+
+    def _vsm_review_candidates(
+        self,
+        payload: Mapping[str, Any],
+        records: Sequence[VsmTemperatureScanRecord],
+        groups: Mapping[str, Sequence[VsmTemperatureScanRecord]],
+    ) -> List[VsmTemperatureScanRecord]:
+        candidates = list(records)
+        content_identity = str(payload.get("content_identity") or "").strip()
+        if content_identity:
+            candidates = [
+                record
+                for record in candidates
+                if _transition_review_content_identity(
+                    record, "vsm-ts", self._review_content_identity_cache
+                )
+                == content_identity
+            ]
+            if len(candidates) <= 1:
+                return candidates
+        group_key = str(payload.get("group_key") or "").strip()
+        if group_key and group_key in groups:
+            grouped_records = groups[group_key]
+            narrowed = [
+                record
+                for record in candidates
+                if any(record is grouped_record for grouped_record in grouped_records)
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        sample = str(payload.get("sample") or "").strip().casefold()
+        if sample:
+            narrowed = [
+                record
+                for record in candidates
+                if str(getattr(record, "sample", "") or "").strip().casefold() == sample
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        record_label = str(payload.get("record_label") or "").strip().casefold()
+        if record_label:
+            narrowed = [
+                record
+                for record in candidates
+                if _record_label_for_display(record).strip().casefold() == record_label
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        source_name = str(payload.get("source_name") or "").strip().casefold()
+        if not source_name:
+            record_path = str(payload.get("record_path") or "").strip()
+            source_name = Path(record_path).name.casefold() if record_path else ""
+        if source_name:
+            narrowed = [
+                record
+                for record in candidates
+                if _transition_review_source_name(record).casefold() == source_name
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        return candidates
+
+    def _reconcile_transition_reviews(
+        self, records: Sequence[VsmTemperatureScanRecord]
+    ) -> bool:
+        groups = _group_graph_records_by_key(records)
+        current_by_id: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        group_by_id: Dict[str, str] = {}
+        for group_key, grouped_records in groups.items():
+            for record in grouped_records:
+                record_id = _vsm_transition_review_record_id(record)
+                current_by_id.setdefault(record_id, []).append(record)
+                group_by_id[record_id] = group_key
+        proposals: Dict[str, List[str]] = {}
+        direct_mismatches: List[str] = []
+        for stored_id, payload in self._transition_reviews.items():
+            if stored_id in current_by_id:
+                content_identity = str(payload.get("content_identity") or "").strip()
+                current_records = current_by_id[stored_id]
+                if content_identity and (
+                    len(current_records) != 1
+                    or _transition_review_content_identity(
+                        current_records[0],
+                        "vsm-ts",
+                        self._review_content_identity_cache,
+                    )
+                    != content_identity
+                ):
+                    direct_mismatches.append(stored_id)
+                    candidates = self._vsm_review_candidates(
+                        payload,
+                        [
+                            record
+                            for record in records
+                            if all(
+                                record is not conflicting
+                                for conflicting in current_records
+                            )
+                        ],
+                        groups,
+                    )
+                    if len(candidates) == 1:
+                        current_id = _vsm_transition_review_record_id(candidates[0])
+                        if len(current_by_id.get(current_id, [])) == 1:
+                            proposals.setdefault(current_id, []).append(stored_id)
+                continue
+            candidates = self._vsm_review_candidates(payload, records, groups)
+            if len(candidates) == 1:
+                current_id = _vsm_transition_review_record_id(candidates[0])
+                if len(current_by_id.get(current_id, [])) == 1:
+                    proposals.setdefault(current_id, []).append(stored_id)
+        changed = False
+        for current_id, stored_ids in proposals.items():
+            if len(stored_ids) != 1 or current_id in self._transition_reviews:
+                continue
+            stored_id = stored_ids[0]
+            record = current_by_id[current_id][0]
+            payload = dict(self._transition_reviews.pop(stored_id))
+            payload.update(self._record_review_metadata(group_by_id[current_id], record))
+            self._transition_reviews[current_id] = self._clean_transition_review_payload(
+                current_id, payload
+            )
+            changed = True
+        for stored_id in direct_mismatches:
+            if stored_id in self._transition_reviews:
+                changed = (
+                    _move_transition_review_to_orphan(
+                        self._transition_reviews, stored_id, "vsm-ts"
+                    )
+                    or changed
+                )
+        for current_id, current_records in current_by_id.items():
+            if len(current_records) != 1 or current_id not in self._transition_reviews:
+                continue
+            record = current_records[0]
+            enriched = dict(self._transition_reviews[current_id])
+            enriched.update(self._record_review_metadata(group_by_id[current_id], record))
+            cleaned = self._clean_transition_review_payload(current_id, enriched)
+            if cleaned != self._transition_reviews[current_id]:
+                self._transition_reviews[current_id] = cleaned
+                changed = True
+        return changed
+
+    def _prune_transition_points(self, _valid_keys: Iterable[str]) -> bool:
+        return False
 
     def _prune_transition_reviews(self) -> bool:
-        valid_ids = {
-            _vsm_transition_review_record_id(record)
-            for records in self._record_groups.values()
-            for record in records
-        }
-        removed = False
-        for record_id in list(self._transition_reviews.keys()):
-            if record_id not in valid_ids:
-                self._transition_reviews.pop(record_id, None)
-                removed = True
-        return removed
+        return False
 
     def _current_column_order(self) -> List[str]:
         header = self.table_view.horizontalHeader()
@@ -24397,6 +24663,7 @@ class MiniDmaSection(MiniDatabaseSection):
         self._record_groups_by_key: Dict[str, List[MiniDmaRecord]] = {}
         self._all_mini_dma_records: List[MiniDmaRecord] = []
         self._transition_reviews: Dict[str, Dict[str, Any]] = {}
+        self._review_content_identity_cache: Dict[int, Tuple[object, str]] = {}
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._preview_group_count = 1
         self._preview_spacing = 6
@@ -24650,6 +24917,17 @@ class MiniDmaSection(MiniDatabaseSection):
             payload = None
         records = list(payload) if isinstance(payload, list) else []
         self._all_mini_dma_records = records
+        current_records_by_id = {id(record): record for record in records}
+        self._review_content_identity_cache = {
+            key: value
+            for key, value in self._review_content_identity_cache.items()
+            if current_records_by_id.get(key) is value[0]
+        }
+        if self._reconcile_transition_reviews(records):
+            self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
+                "schema_version": MINI_DMA_TRANSITION_REVIEW_SCHEMA_VERSION,
+                "records": self.transition_reviews_snapshot(),
+            }
         for record in records:
             sample = getattr(record, "sample", None)
             if isinstance(sample, str) and sample.strip():
@@ -24819,7 +25097,15 @@ class MiniDmaSection(MiniDatabaseSection):
         }:
             return {}
         entry: Dict[str, Any] = {"status": status}
-        for field in ("sample", "run_label", "target_label", "auto_status"):
+        for field in (
+            "sample",
+            "run_label",
+            "target_label",
+            "auto_status",
+            "content_identity",
+            "source_name",
+            "record_path",
+        ):
             value = payload.get(field)
             if isinstance(value, str) and value.strip():
                 entry[field] = value.strip()
@@ -24847,6 +25133,150 @@ class MiniDmaSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist TMA transition reviews")
+
+    def _mini_dma_review_candidates(
+        self,
+        stored_id: str,
+        payload: Mapping[str, Any],
+        records: Sequence[MiniDmaRecord],
+    ) -> List[MiniDmaRecord]:
+        content_identity = str(payload.get("content_identity") or "").strip()
+        if content_identity:
+            candidates = [
+                record
+                for record in records
+                if _transition_review_content_identity(
+                    record, "tma", self._review_content_identity_cache
+                )
+                == content_identity
+            ]
+            if len(candidates) <= 1:
+                return candidates
+        else:
+            candidates = list(records)
+        sample = str(payload.get("sample") or "").strip().casefold()
+        if sample:
+            narrowed = [
+                record
+                for record in candidates
+                if str(getattr(record, "sample", "") or "").strip().casefold() == sample
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        run_label = str(payload.get("run_label") or "").strip().casefold()
+        if run_label:
+            narrowed = [
+                record
+                for record in candidates
+                if str(getattr(record, "label", "") or "").strip().casefold() == run_label
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        source_name = str(payload.get("source_name") or "").strip().casefold()
+        if not source_name:
+            record_path = str(payload.get("record_path") or "").strip()
+            if not record_path and "::" in stored_id:
+                record_path = stored_id.rsplit("::", 1)[0]
+            source_name = Path(record_path).name.casefold() if record_path else ""
+        if source_name:
+            narrowed = [
+                record
+                for record in candidates
+                if _transition_review_source_name(record).casefold() == source_name
+            ]
+            if narrowed or not content_identity:
+                candidates = narrowed
+        return candidates
+
+    def _mini_dma_review_metadata(self, record: MiniDmaRecord) -> Dict[str, str]:
+        metadata = {
+            "content_identity": _transition_review_content_identity(
+                record, "tma", self._review_content_identity_cache
+            )
+        }
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            metadata["record_path"] = str(path)
+            metadata["source_name"] = path.name
+        return metadata
+
+    def _reconcile_transition_reviews(self, records: Sequence[MiniDmaRecord]) -> bool:
+        proposals: Dict[str, List[Tuple[str, MiniDmaRecord]]] = {}
+        direct: List[Tuple[str, MiniDmaRecord]] = []
+        direct_mismatches: List[str] = []
+        for stored_id, payload in self._transition_reviews.items():
+            target_label = str(payload.get("target_label") or "").strip()
+            if not target_label and "::" in stored_id:
+                target_label = stored_id.rsplit("::", 1)[-1].strip()
+            if not target_label:
+                continue
+            direct_matches = [
+                record
+                for record in records
+                if _mini_dma_review_record_id(record, target_label) == stored_id
+            ]
+            content_identity = str(payload.get("content_identity") or "").strip()
+            if direct_matches and content_identity and (
+                len(direct_matches) != 1
+                or _transition_review_content_identity(
+                    direct_matches[0], "tma", self._review_content_identity_cache
+                )
+                != content_identity
+            ):
+                direct_mismatches.append(stored_id)
+                candidates = self._mini_dma_review_candidates(
+                    stored_id,
+                    payload,
+                    [
+                        record
+                        for record in records
+                        if all(
+                            record is not conflicting
+                            for conflicting in direct_matches
+                        )
+                    ],
+                )
+                if len(candidates) == 1:
+                    record = candidates[0]
+                    current_id = _mini_dma_review_record_id(record, target_label)
+                    proposals.setdefault(current_id, []).append((stored_id, record))
+                continue
+            if len(direct_matches) == 1:
+                direct.append((stored_id, direct_matches[0]))
+                continue
+            candidates = self._mini_dma_review_candidates(stored_id, payload, records)
+            if len(candidates) != 1:
+                continue
+            record = candidates[0]
+            current_id = _mini_dma_review_record_id(record, target_label)
+            proposals.setdefault(current_id, []).append((stored_id, record))
+        changed = False
+        for stored_id, record in direct:
+            enriched = dict(self._transition_reviews[stored_id])
+            enriched.update(self._mini_dma_review_metadata(record))
+            cleaned = self._clean_transition_review_payload(stored_id, enriched)
+            if cleaned != self._transition_reviews[stored_id]:
+                self._transition_reviews[stored_id] = cleaned
+                changed = True
+        for current_id, matches in proposals.items():
+            if len(matches) != 1 or current_id in self._transition_reviews:
+                continue
+            stored_id, record = matches[0]
+            payload = dict(self._transition_reviews.pop(stored_id))
+            payload.update(self._mini_dma_review_metadata(record))
+            self._transition_reviews[current_id] = self._clean_transition_review_payload(
+                current_id, payload
+            )
+            changed = True
+        for stored_id in direct_mismatches:
+            if stored_id in self._transition_reviews:
+                changed = (
+                    _move_transition_review_to_orphan(
+                        self._transition_reviews, stored_id, "tma"
+                    )
+                    or changed
+                )
+        return changed
 
     def _schedule_transition_review_store(self) -> None:
         self.data.extra[MINI_DMA_TRANSITION_REVIEW_EXTRA_KEY] = {
@@ -24950,6 +25380,15 @@ class MiniDmaSection(MiniDatabaseSection):
         return result
 
     def set_transition_review_for_target(self, record_id: str, payload: Dict[str, Any]) -> None:
+        target_label = str(payload.get("target_label") or "").strip()
+        if target_label:
+            matches = [
+                record
+                for record in self._all_mini_dma_records
+                if _mini_dma_review_record_id(record, target_label) == str(record_id)
+            ]
+            if len(matches) == 1:
+                payload = {**payload, **self._mini_dma_review_metadata(matches[0])}
         entry = self._clean_transition_review_payload(record_id, payload)
         if entry:
             self._transition_reviews[str(record_id)] = entry
@@ -37202,6 +37641,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         if isinstance(value, pd.DataFrame)
                         else copy.deepcopy(value)
                     )
+            if isinstance(section, TransitionTempsSection):
+                # Record frames can be large. Project import replaces these derived
+                # containers rather than mutating records, so shallow snapshots keep
+                # rollback cheap and preserve the old preview objects by identity.
+                state["transition_record_state"] = {
+                    "all_records": list(section._all_transition_records),
+                    "record_groups": {
+                        group_key: list(records)
+                        for group_key, records in section._record_groups.items()
+                    },
+                }
             status_label = getattr(section, "status_label", None)
             if isinstance(status_label, QtWidgets.QLabel):
                 state["status_text"] = status_label.text()
@@ -37284,7 +37734,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     section.data = self._clone_load_data(data)
                 if isinstance(state, Mapping):
                     for name, value in state.items():
-                        if name not in {"data", "status_text"}:
+                        if name not in {"data", "status_text", "transition_record_state"}:
                             setattr(section, name, copy.deepcopy(value))
 
                 if isinstance(section, AnnealingSection):
@@ -37297,6 +37747,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     section._update_missing_summary()
                     section._update_review_buttons()
                 elif isinstance(section, TransitionTempsSection):
+                    record_state = (
+                        state.get("transition_record_state")
+                        if isinstance(state, Mapping)
+                        else None
+                    )
+                    if isinstance(record_state, Mapping):
+                        section._all_transition_records = list(
+                            record_state.get("all_records", [])
+                        )
+                        section._record_groups = dict(
+                            record_state.get("record_groups", {})
+                        )
+                        section._review_content_identity_cache = {}
                     frame = state.get("_current_frame") if isinstance(state, Mapping) else None
                     if isinstance(frame, pd.DataFrame):
                         section._current_frame = frame
