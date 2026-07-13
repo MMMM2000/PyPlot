@@ -175,7 +175,7 @@ tasks:
       final_status: "integrated and software checks passed; live KERN validation still required before main"
     links:
       handoff: "worker handoff in master thread"
-      pr: ""
+      pr: "https://github.com/MMMM2000/PyPlot/pull/285"
       artifacts: []
 
   - id: "mini-dma-run-cleanup-ui"
