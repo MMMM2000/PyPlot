@@ -8949,7 +8949,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
                 self._values_for_entry(entry, self._review_for_entry(entry)),
                 labels=False,
             )
-        ax.set_ylabel("Resistance [ohm]")
+        ax.set_ylabel("Resistance [Ω]")
         ax.set_xlabel("Current [mA]")
         ax.grid(True, alpha=0.25)
 
