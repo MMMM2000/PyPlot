@@ -3,12 +3,8 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/cmake/gcc-arm-none-eabi.cmake")
 project(stm32cube_mlx90614_probe C ASM)
 
-set(STM32_CORE "C:/Users/Martin Eliáš/AppData/Local/Arduino15/packages/STMicroelectronics/hardware/stm32/2.12.0")
-set(STM32_SYSTEM "${STM32_CORE}/system")
-set(STM32_HAL "${STM32_SYSTEM}/Drivers/STM32H7xx_HAL_Driver")
-set(STM32_CMSIS "${STM32_SYSTEM}/Drivers/CMSIS")
-set(STM32_DEVICE "${STM32_CMSIS}/Device/ST/STM32H7xx")
-set(STM32_VARIANT "${STM32_CORE}/variants/STM32H7xx/H742Z(G-I)T_H743Z(G-I)T_H747A(G-I)I_H747I(G-I)T_H750ZBT_H753ZIT_H757AII_H757IIT")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/stm32-arduino-core.cmake")
+
 set(MLX_I2C_TIMING "0x307075B1" CACHE STRING "STM32H7 I2C timing register value for MLX90614 SMBus, default about 100 kHz")
 set(MLX_UART_BAUD "2000000" CACHE STRING "USART3 baud rate for the ST-LINK virtual COM port")
 set(MLX_SAMPLE_INTERVAL_MS "100" CACHE STRING "Default MLX90614 serial sample interval in milliseconds")
@@ -40,7 +36,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     src
     "${STM32_SYSTEM}/STM32H7xx"
     "${STM32_HAL}/Inc"
-    "C:/Users/Martin Eliáš/AppData/Local/Arduino15/packages/STMicroelectronics/tools/CMSIS/6.2.0/CMSIS/Core/Include"
+    "${STM32_CMSIS_CORE_INCLUDE}"
     "${STM32_CMSIS}/Include"
     "${STM32_DEVICE}/Include"
 )

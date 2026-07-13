@@ -45,6 +45,10 @@
 #define MLX_I2C_DIGITAL_FILTER 0U
 #endif
 
+#ifndef MLX_I2C_PINSET
+#define MLX_I2C_PINSET 99U
+#endif
+
 #ifndef MLX_UART_BAUD
 #define MLX_UART_BAUD 2000000U
 #endif
@@ -72,9 +76,29 @@
 #define RAW_FLAG_COMPACT 0x40U
 #define RAW_FLAG_OVERRUN 0x80U
 
+#define MLX_I2C_PINSET_AUTO 99U
+
+typedef struct {
+    I2C_TypeDef *instance;
+    GPIO_TypeDef *gpio_port;
+    uint16_t scl_pin;
+    uint16_t sda_pin;
+    uint16_t pin_mask;
+    const char *label;
+} MlxI2cPinset;
+
+static const MlxI2cPinset MLX_I2C_PINSETS[] = {
+    {I2C1, GPIOB, GPIO_PIN_8, GPIO_PIN_9, GPIO_PIN_8 | GPIO_PIN_9, "PB9/PB8"},
+    {I2C1, GPIOB, GPIO_PIN_6, GPIO_PIN_7, GPIO_PIN_6 | GPIO_PIN_7, "PB7/PB6"},
+    {I2C2, GPIOF, GPIO_PIN_1, GPIO_PIN_0, GPIO_PIN_0 | GPIO_PIN_1, "PF0/PF1"},
+};
+
+#define MLX_I2C_PINSET_COUNT ((uint8_t)(sizeof(MLX_I2C_PINSETS) / sizeof(MLX_I2C_PINSETS[0])))
+
 I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart3;
 
+static const MlxI2cPinset *active_i2c_pinset = &MLX_I2C_PINSETS[0];
 static uint8_t frame_payload[RAW_PAYLOAD_BYTES];
 static uint8_t packet[RAW_PACKET_BYTES];
 static uint32_t sequence_number;
@@ -92,7 +116,16 @@ static bool mlx_set_refresh_rate(uint8_t refresh_rate);
 static HAL_StatusTypeDef mlx_read_interleaved_subpage(uint8_t subpage);
 static bool mlx_read_eeprom(void);
 static bool mlx_read_frame(uint16_t *status, uint16_t *control, uint32_t *read_us);
+static bool mlx_select_pinset(uint8_t pinset);
+static bool mlx_try_configured_pinsets(void);
+static bool mlx_pinset_is_enabled(uint8_t pinset);
+static void mlx_i2c_gpio_clk_enable(void);
+static void mlx_i2c_clk_enable(void);
+static void mlx_i2c_fastmode_enable(void);
 static void mlx_i2c_bus_recover(void);
+static bool i2c_drive_self_test_report(void);
+static void i2c_scan_report(void);
+static void i2c_line_report(void);
 static void handle_uart_commands(void);
 static void send_raw_packet(uint16_t status, uint16_t control, uint32_t read_us);
 static void send_eeprom_packet(uint32_t read_us);
@@ -100,6 +133,7 @@ static void uart_wait_ready(void);
 static void uart_write(const void *data, uint16_t size);
 static void uart_write_raw_packet(const void *data, uint16_t size);
 static void uart_write_text(const char *text);
+static void uart_write_hex8(const char *prefix, uint8_t value);
 static void put_u8(uint16_t *offset, uint8_t value);
 static void put_u16(uint16_t *offset, uint16_t value);
 static void put_u32(uint16_t *offset, uint32_t value);
@@ -112,15 +146,12 @@ int main(void)
     SystemClock_Config();
     dwt_init();
     MX_GPIO_Init();
-    mlx_i2c_bus_recover();
-    MX_I2C1_Init();
     MX_USART3_UART_Init();
 
     uart_write_text("\r\nMLX90640_CUBE_RAW_BOOT\r\n");
-
-    if (!mlx_configure()) {
-        uart_write_text("MLX90640_CUBE_ERROR_NOT_FOUND_OR_CONFIG_FAILED\r\n");
-        Error_Handler();
+    while (!mlx_try_configured_pinsets()) {
+        uart_write_text("MLX90640_CUBE_WAITING_FOR_CAMERA\r\n");
+        HAL_Delay(1000U);
     }
     if (!mlx_read_eeprom()) {
         uart_write_text("MLX90640_CUBE_ERROR_EEPROM_READ_FAILED\r\n");
@@ -208,7 +239,7 @@ static void MX_GPIO_Init(void)
 
 static void MX_I2C1_Init(void)
 {
-    hi2c1.Instance = I2C1;
+    hi2c1.Instance = active_i2c_pinset->instance;
     hi2c1.Init.Timing = MLX_I2C_TIMING;
     hi2c1.Init.OwnAddress1 = 0;
     hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
@@ -259,26 +290,33 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef *i2cHandle)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    if (i2cHandle->Instance != I2C1) {
+    if (i2cHandle->Instance != active_i2c_pinset->instance) {
         return;
     }
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_I2C1_CLK_ENABLE();
+    mlx_i2c_gpio_clk_enable();
+    mlx_i2c_clk_enable();
 
-    HAL_I2CEx_EnableFastModePlus(I2C_FASTMODEPLUS_I2C1);
+    mlx_i2c_fastmode_enable();
 
-    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    GPIO_InitStruct.Pin = active_i2c_pinset->pin_mask;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    HAL_GPIO_Init(active_i2c_pinset->gpio_port, &GPIO_InitStruct);
 
-    HAL_NVIC_SetPriority(I2C1_EV_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(I2C1_EV_IRQn);
-    HAL_NVIC_SetPriority(I2C1_ER_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(I2C1_ER_IRQn);
+    if (active_i2c_pinset->instance == I2C1) {
+        HAL_NVIC_SetPriority(I2C1_EV_IRQn, 0, 0);
+        HAL_NVIC_EnableIRQ(I2C1_EV_IRQn);
+        HAL_NVIC_SetPriority(I2C1_ER_IRQn, 0, 0);
+        HAL_NVIC_EnableIRQ(I2C1_ER_IRQn);
+    } else if (active_i2c_pinset->instance == I2C2) {
+        HAL_NVIC_SetPriority(I2C2_EV_IRQn, 0, 0);
+        HAL_NVIC_EnableIRQ(I2C2_EV_IRQn);
+        HAL_NVIC_SetPriority(I2C2_ER_IRQn, 0, 0);
+        HAL_NVIC_EnableIRQ(I2C2_ER_IRQn);
+    }
 }
 
 void HAL_UART_MspInit(UART_HandleTypeDef *uartHandle)
@@ -438,37 +476,196 @@ static bool mlx_read_eeprom(void)
     return true;
 }
 
+static bool mlx_select_pinset(uint8_t pinset)
+{
+    if (pinset >= MLX_I2C_PINSET_COUNT) {
+        return false;
+    }
+    active_i2c_pinset = &MLX_I2C_PINSETS[pinset];
+    return true;
+}
+
+static bool mlx_pinset_is_enabled(uint8_t pinset)
+{
+#if MLX_I2C_PINSET == MLX_I2C_PINSET_AUTO
+    (void)pinset;
+    return true;
+#else
+    return pinset == (uint8_t)MLX_I2C_PINSET;
+#endif
+}
+
+static bool mlx_try_configured_pinsets(void)
+{
+    for (uint8_t pinset = 0; pinset < MLX_I2C_PINSET_COUNT; ++pinset) {
+        if (!mlx_pinset_is_enabled(pinset) || !mlx_select_pinset(pinset)) {
+            continue;
+        }
+
+        (void)HAL_I2C_DeInit(&hi2c1);
+        mlx_i2c_bus_recover();
+        (void)i2c_drive_self_test_report();
+        MX_I2C1_Init();
+        uart_write_text("MLX90640_CUBE_I2C_PINS_");
+        uart_write_text(active_i2c_pinset->label);
+        uart_write_text("\r\n");
+        i2c_line_report();
+        i2c_scan_report();
+        if (mlx_configure()) {
+            uart_write_text("MLX90640_CUBE_I2C_ACTIVE_");
+            uart_write_text(active_i2c_pinset->label);
+            uart_write_text("\r\n");
+            return true;
+        }
+        (void)HAL_I2C_DeInit(&hi2c1);
+    }
+    return false;
+}
+
+static void mlx_i2c_gpio_clk_enable(void)
+{
+    if (active_i2c_pinset->gpio_port == GPIOB) {
+        __HAL_RCC_GPIOB_CLK_ENABLE();
+    } else if (active_i2c_pinset->gpio_port == GPIOF) {
+        __HAL_RCC_GPIOF_CLK_ENABLE();
+    }
+}
+
+static void mlx_i2c_clk_enable(void)
+{
+    if (active_i2c_pinset->instance == I2C1) {
+        __HAL_RCC_I2C1_CLK_ENABLE();
+    } else if (active_i2c_pinset->instance == I2C2) {
+        __HAL_RCC_I2C2_CLK_ENABLE();
+    }
+}
+
+static void mlx_i2c_fastmode_enable(void)
+{
+    if (active_i2c_pinset->instance == I2C1) {
+        HAL_I2CEx_EnableFastModePlus(I2C_FASTMODEPLUS_I2C1);
+    } else if (active_i2c_pinset->instance == I2C2) {
+        HAL_I2CEx_EnableFastModePlus(I2C_FASTMODEPLUS_I2C2);
+    }
+}
+
 static void mlx_i2c_bus_recover(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+    mlx_i2c_gpio_clk_enable();
 
-    GPIO_InitStruct.Pin = GPIO_PIN_8 | GPIO_PIN_9;
+    GPIO_InitStruct.Pin = active_i2c_pinset->pin_mask;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    HAL_GPIO_Init(active_i2c_pinset->gpio_port, &GPIO_InitStruct);
 
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8 | GPIO_PIN_9, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->pin_mask, GPIO_PIN_SET);
     HAL_Delay(2U);
     for (uint8_t i = 0; i < 9U; ++i) {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin, GPIO_PIN_RESET);
         for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
         }
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin, GPIO_PIN_SET);
         for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
         }
     }
 
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin, GPIO_PIN_RESET);
     for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
     }
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin, GPIO_PIN_SET);
     for (volatile uint32_t delay = 0; delay < 1200U; ++delay) {
     }
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin, GPIO_PIN_SET);
     HAL_Delay(2U);
+}
+
+static bool i2c_drive_self_test_report(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    bool high_ok = false;
+    bool scl_low_ok = false;
+    bool sda_low_ok = false;
+
+    mlx_i2c_gpio_clk_enable();
+
+    GPIO_InitStruct.Pin = active_i2c_pinset->pin_mask;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(active_i2c_pinset->gpio_port, &GPIO_InitStruct);
+
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->pin_mask, GPIO_PIN_SET);
+    HAL_Delay(2U);
+    uart_write_text("MLX90640_CUBE_I2C_DRIVE_HIGH_SCL_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("_SDA_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("\r\n");
+    high_ok =
+        HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin) == GPIO_PIN_SET &&
+        HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin) == GPIO_PIN_SET;
+
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin, GPIO_PIN_SET);
+    HAL_Delay(2U);
+    uart_write_text("MLX90640_CUBE_I2C_DRIVE_SCL_LOW_SCL_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("_SDA_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("\r\n");
+    scl_low_ok =
+        HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin) == GPIO_PIN_RESET &&
+        HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin) == GPIO_PIN_SET;
+
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin, GPIO_PIN_RESET);
+    HAL_Delay(2U);
+    uart_write_text("MLX90640_CUBE_I2C_DRIVE_SDA_LOW_SCL_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("_SDA_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("\r\n");
+    sda_low_ok =
+        HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin) == GPIO_PIN_SET &&
+        HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin) == GPIO_PIN_RESET;
+
+    HAL_GPIO_WritePin(active_i2c_pinset->gpio_port, active_i2c_pinset->pin_mask, GPIO_PIN_SET);
+    HAL_Delay(2U);
+
+    uart_write_text(
+        high_ok && scl_low_ok && sda_low_ok
+            ? "MLX90640_CUBE_I2C_DRIVE_RESULT_PASS\r\n"
+            : "MLX90640_CUBE_I2C_DRIVE_RESULT_FAIL\r\n");
+    return high_ok && scl_low_ok && sda_low_ok;
+}
+
+static void i2c_line_report(void)
+{
+    uart_write_text("MLX90640_CUBE_I2C_LINES_SCL_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->scl_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("_SDA_");
+    uart_write_text(HAL_GPIO_ReadPin(active_i2c_pinset->gpio_port, active_i2c_pinset->sda_pin) == GPIO_PIN_SET ? "1" : "0");
+    uart_write_text("\r\n");
+}
+
+static void i2c_scan_report(void)
+{
+    bool found = false;
+
+    uart_write_text("MLX90640_CUBE_I2C_SCAN_BEGIN\r\n");
+    for (uint8_t address = 0x08U; address <= 0x77U; ++address) {
+        if (HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(address << 1), 1, 20U) == HAL_OK) {
+            uart_write_hex8("MLX90640_CUBE_I2C_FOUND_", address);
+            found = true;
+        }
+    }
+    if (!found) {
+        uart_write_text("MLX90640_CUBE_I2C_SCAN_NONE\r\n");
+    }
+    uart_write_text("MLX90640_CUBE_I2C_SCAN_END\r\n");
 }
 
 static HAL_StatusTypeDef mlx_read_interleaved_subpage(uint8_t subpage)
@@ -632,6 +829,26 @@ static void uart_write_text(const char *text)
         ++cursor;
     }
     uart_write(text, (uint16_t)(cursor - text));
+}
+
+static void uart_write_hex8(const char *prefix, uint8_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char text[64];
+    uint16_t offset = 0;
+
+    while (prefix[offset] != '\0' && offset < (sizeof(text) - 7U)) {
+        text[offset] = prefix[offset];
+        ++offset;
+    }
+    text[offset++] = '0';
+    text[offset++] = 'x';
+    text[offset++] = hex[(value >> 4) & 0x0FU];
+    text[offset++] = hex[value & 0x0FU];
+    text[offset++] = '\r';
+    text[offset++] = '\n';
+    text[offset] = '\0';
+    uart_write_text(text);
 }
 
 static void put_u8(uint16_t *offset, uint8_t value)

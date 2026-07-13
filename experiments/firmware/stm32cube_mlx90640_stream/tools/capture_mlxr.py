@@ -16,6 +16,18 @@ LEGACY_COMPACT_PAYLOAD_BYTES = 448 * 2
 MAX_PACKET_SIZE = HEADER_SIZE + PAYLOAD_BYTES + 2
 REQUIRED_AUX_WORDS = 43
 SUBPAGE_ROWS = 12
+TEXT_STATUS_PREFIX = "MLX90640_CUBE_"
+
+
+def extract_status_lines(chunk: bytes) -> list[str]:
+    text = chunk.decode("ascii", errors="ignore")
+    lines = []
+    for line in text.replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        prefix_index = stripped.find(TEXT_STATUS_PREFIX)
+        if prefix_index >= 0:
+            lines.append(stripped[prefix_index:])
+    return lines
 
 
 def payload_len_is_valid(words: int, payload_len: int) -> bool:
@@ -100,6 +112,8 @@ def main() -> int:
     deadline = time.monotonic() + args.seconds
     buffer = bytearray()
     packets: list[dict[str, int]] = []
+    status_lines: list[str] = []
+    seen_status_lines: set[str] = set()
 
     with serial.Serial(args.port, args.baud, timeout=0.05) as port:
         port.reset_input_buffer()
@@ -111,11 +125,17 @@ def main() -> int:
         while time.monotonic() < deadline:
             chunk = port.read(8192)
             if chunk:
+                for line in extract_status_lines(chunk):
+                    if line not in seen_status_lines:
+                        status_lines.append(line)
+                        seen_status_lines.add(line)
                 buffer.extend(chunk)
                 packets.extend(pop_packets(buffer))
 
     if not packets:
         print("packets=0")
+        for line in status_lines:
+            print(f"status={line}")
         return 1
 
     elapsed = [packet["elapsed_ms"] for packet in packets]

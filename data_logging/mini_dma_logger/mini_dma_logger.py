@@ -3109,6 +3109,49 @@ class Mlx90614Worker(QtCore.QObject):
                     "Cube raw MLX90640 firmware for TMA live camera logging."
                 )
                 text_status_tokens_reported.add(b"FRAME_BEGIN")
+            if (
+                b"MLX90640_CUBE_I2C_DRIVE_RESULT_PASS" in chunk
+                and b"MLX90640_CUBE_I2C_DRIVE_RESULT_PASS" not in text_status_tokens_reported
+            ):
+                self.status_changed.emit(
+                    "MLX90640 Cube I2C pin self-test passed; the NUCLEO can release and pull down "
+                    "the selected SCL/SDA pair."
+                )
+                text_status_tokens_reported.add(b"MLX90640_CUBE_I2C_DRIVE_RESULT_PASS")
+            if (
+                b"MLX90640_CUBE_I2C_DRIVE_RESULT_FAIL" in chunk
+                and b"MLX90640_CUBE_I2C_DRIVE_RESULT_FAIL" not in text_status_tokens_reported
+            ):
+                text = chunk.decode("ascii", errors="ignore").strip()
+                self.status_changed.emit(
+                    "MLX90640 Cube I2C pin self-test failed. This points to a stuck/shorted line, "
+                    f"wrong header pin, or possible NUCLEO pin damage. Diagnostic: {text}"
+                )
+                text_status_tokens_reported.add(b"MLX90640_CUBE_I2C_DRIVE_RESULT_FAIL")
+            if (
+                b"MLX90640_CUBE_I2C_SCAN_NONE" in chunk
+                and b"MLX90640_CUBE_I2C_SCAN_NONE" not in text_status_tokens_reported
+            ):
+                text = chunk.decode("ascii", errors="ignore").strip()
+                self.status_changed.emit(
+                    "MLX90640 Cube firmware is running, but no I2C device is detected. "
+                    "Check camera power, ground, SDA/SCL orientation, and the selected pin pair. "
+                    f"Diagnostic: {text}"
+                )
+                text_status_tokens_reported.add(b"MLX90640_CUBE_I2C_SCAN_NONE")
+            if (
+                b"MLX90640_CUBE_I2C_FOUND_" in chunk
+                and b"MLX90640_CUBE_I2C_FOUND_" not in text_status_tokens_reported
+            ):
+                text = chunk.decode("ascii", errors="ignore").strip()
+                self.status_changed.emit(f"MLX90640 Cube I2C diagnostic found a device. {text}")
+                text_status_tokens_reported.add(b"MLX90640_CUBE_I2C_FOUND_")
+            if (
+                b"MLX90640_CUBE_WAITING_FOR_CAMERA" in chunk
+                and b"MLX90640_CUBE_WAITING_FOR_CAMERA" not in text_status_tokens_reported
+            ):
+                self.status_changed.emit("MLX90640 Cube firmware is waiting for the camera to appear on I2C.")
+                text_status_tokens_reported.add(b"MLX90640_CUBE_WAITING_FOR_CAMERA")
             if b"MLX90640_CUBE_ERROR" in chunk and b"MLX90640_CUBE_ERROR" not in text_status_tokens_reported:
                 text = chunk.decode("ascii", errors="ignore").strip()
                 self.status_changed.emit(text or "MLX90640 Cube firmware reported an error.")
@@ -12894,12 +12937,61 @@ class MainWindow(QtWidgets.QMainWindow):
                 continue
         return None
 
+    @staticmethod
+    def _stm32_cubeclt_search_bases() -> list[Path]:
+        bases = [Path(r"C:\ST")]
+        for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+            env_value = os.environ.get(env_name, "").strip()
+            if env_value:
+                bases.append(Path(env_value) / "STMicroelectronics")
+                bases.append(Path(env_value) / "STMicroelectronics" / "STM32Cube")
+        return bases
+
+    @staticmethod
+    def _stm32_cubeclt_version_key(path: Path) -> tuple[int, ...]:
+        return tuple(int(part) for part in re.findall(r"\d+", path.name))
+
+    @classmethod
+    def _stm32_cubeclt_roots(cls) -> list[Path]:
+        roots: list[Path] = []
+        seen: set[str] = set()
+
+        def add_root(path: Path) -> None:
+            try:
+                resolved = str(path.resolve())
+            except OSError:
+                resolved = str(path)
+            if resolved.lower() in seen:
+                return
+            seen.add(resolved.lower())
+            try:
+                if path.exists() and path.is_dir():
+                    roots.append(path)
+            except OSError:
+                return
+
+        for env_name in ("STM32CUBECLT_ROOT", "STM32_CUBECLT_ROOT"):
+            env_path = os.environ.get(env_name, "").strip()
+            if env_path:
+                add_root(Path(env_path))
+
+        for base in cls._stm32_cubeclt_search_bases():
+            try:
+                for root in base.glob("STM32CubeCLT_*"):
+                    add_root(root)
+            except OSError:
+                continue
+
+        roots.sort(key=cls._stm32_cubeclt_version_key, reverse=True)
+        return roots
+
     def _stm32_programmer_cli_path(self) -> Path | None:
         env_path = os.environ.get("STM32_PROGRAMMER_CLI", "").strip()
         candidates = []
         if env_path:
             candidates.append(Path(env_path))
-        candidates.append(Path(r"C:\ST\STM32CubeCLT_1.21.0\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe"))
+        for root in self._stm32_cubeclt_roots():
+            candidates.append(root / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI.exe")
         path_text = shutil.which("STM32_Programmer_CLI")
         if path_text:
             candidates.append(Path(path_text))
@@ -12910,8 +13002,21 @@ class MainWindow(QtWidgets.QMainWindow):
         candidates = []
         if env_path:
             candidates.append(Path(env_path))
-        candidates.append(Path(r"C:\ST\STM32CubeCLT_1.21.0\CMake\bin\cmake.exe"))
+        for root in self._stm32_cubeclt_roots():
+            candidates.append(root / "CMake" / "bin" / "cmake.exe")
         path_text = shutil.which("cmake")
+        if path_text:
+            candidates.append(Path(path_text))
+        return self._existing_file_from_candidates(candidates)
+
+    def _stm32_ninja_path(self) -> Path | None:
+        env_path = os.environ.get("STM32_NINJA", "").strip()
+        candidates = []
+        if env_path:
+            candidates.append(Path(env_path))
+        for root in self._stm32_cubeclt_roots():
+            candidates.append(root / "Ninja" / "bin" / "ninja.exe")
+        path_text = shutil.which("ninja")
         if path_text:
             candidates.append(Path(path_text))
         return self._existing_file_from_candidates(candidates)
@@ -12930,8 +13035,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if cmake is None:
             return False, "STM32CubeCLT CMake was not found. Install STM32CubeCLT or set STM32_CMAKE."
         build_dir = firmware_dir / "build"
+        ninja = self._stm32_ninja_path()
+        configure_command = [str(cmake), "-S", ".", "-B", "build", "-G", "Ninja"]
+        if ninja is not None:
+            configure_command.append(f"-DCMAKE_MAKE_PROGRAM={ninja}")
         commands = (
-            [str(cmake), "-S", ".", "-B", "build", "-G", "Ninja"],
+            configure_command,
             [str(cmake), "--build", "build"],
         )
         outputs: list[str] = []

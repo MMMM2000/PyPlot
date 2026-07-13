@@ -3,17 +3,14 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_LIST_DIR}/cmake/gcc-arm-none-eabi.cmake")
 project(stm32cube_mlx90640_stream C ASM)
 
-set(STM32_CORE "C:/Users/Martin Eliáš/AppData/Local/Arduino15/packages/STMicroelectronics/hardware/stm32/2.12.0")
-set(STM32_SYSTEM "${STM32_CORE}/system")
-set(STM32_HAL "${STM32_SYSTEM}/Drivers/STM32H7xx_HAL_Driver")
-set(STM32_CMSIS "${STM32_SYSTEM}/Drivers/CMSIS")
-set(STM32_DEVICE "${STM32_CMSIS}/Device/ST/STM32H7xx")
-set(STM32_VARIANT "${STM32_CORE}/variants/STM32H7xx/H742Z(G-I)T_H743Z(G-I)T_H747A(G-I)I_H747I(G-I)T_H750ZBT_H753ZIT_H757AII_H757IIT")
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/stm32-arduino-core.cmake")
+
 set(MLX_REFRESH_RATE "5" CACHE STRING "MLX90640 refresh-rate code: 5=16 Hz, 6=32 Hz, 7=64 Hz")
 set(MLX_ADC_RESOLUTION "1" CACHE STRING "MLX90640 ADC resolution code: 0=16 bit, 1=17 bit, 2=18 bit, 3=19 bit")
 set(MLX_I2C_TIMING "0x20D01132" CACHE STRING "STM32H7 I2C timing register value, e.g. 0x20D01132=400 kHz, 0x1080091A=1 MHz")
 set(MLX_I2C_ANALOG_FILTER "1" CACHE STRING "Enable STM32 I2C analog filter: 1=enabled, 0=disabled")
 set(MLX_I2C_DIGITAL_FILTER "0" CACHE STRING "STM32 I2C digital filter setting, 0-15")
+set(MLX_I2C_PINSET "99" CACHE STRING "I2C pin set: 99=auto scan, 0=I2C1 PB9/PB8 Arduino D14/D15, 1=I2C1 PB7/PB6 alternate, 2=I2C2 PF0/PF1")
 set(MLX_UART_BAUD "2000000" CACHE STRING "USART3 baud rate for the ST-LINK virtual COM port")
 
 add_executable(${PROJECT_NAME}
@@ -43,7 +40,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     src
     "${STM32_SYSTEM}/STM32H7xx"
     "${STM32_HAL}/Inc"
-    "C:/Users/Martin Eliáš/AppData/Local/Arduino15/packages/STMicroelectronics/tools/CMSIS/6.2.0/CMSIS/Core/Include"
+    "${STM32_CMSIS_CORE_INCLUDE}"
     "${STM32_CMSIS}/Include"
     "${STM32_DEVICE}/Include"
 )
@@ -57,6 +54,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     MLX_I2C_TIMING=${MLX_I2C_TIMING}
     MLX_I2C_ANALOG_FILTER=${MLX_I2C_ANALOG_FILTER}
     MLX_I2C_DIGITAL_FILTER=${MLX_I2C_DIGITAL_FILTER}
+    MLX_I2C_PINSET=${MLX_I2C_PINSET}
     MLX_UART_BAUD=${MLX_UART_BAUD}
 )
 

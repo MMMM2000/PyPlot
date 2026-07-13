@@ -8830,6 +8830,45 @@ def test_mini_dma_flash_firmware_runs_programmer_for_selected_sensor(
         _close_test_window(window)
 
 
+def test_mini_dma_stm32_cubeclt_detection_uses_newest_installed_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = tmp_path / "ST"
+    older = base / "STM32CubeCLT_1.21.0"
+    newer = base / "STM32CubeCLT_1.22.0"
+    for root in (older, newer):
+        cmake = root / "CMake" / "bin" / "cmake.exe"
+        ninja = root / "Ninja" / "bin" / "ninja.exe"
+        programmer = root / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI.exe"
+        cmake.parent.mkdir(parents=True)
+        ninja.parent.mkdir(parents=True)
+        programmer.parent.mkdir(parents=True)
+        cmake.write_text("", encoding="utf-8")
+        ninja.write_text("", encoding="utf-8")
+        programmer.write_text("", encoding="utf-8")
+
+    monkeypatch.delenv("STM32_CMAKE", raising=False)
+    monkeypatch.delenv("STM32_NINJA", raising=False)
+    monkeypatch.delenv("STM32_PROGRAMMER_CLI", raising=False)
+    monkeypatch.delenv("STM32CUBECLT_ROOT", raising=False)
+    monkeypatch.delenv("STM32_CUBECLT_ROOT", raising=False)
+    monkeypatch.setattr(
+        mini_dma_mod.MainWindow,
+        "_stm32_cubeclt_search_bases",
+        staticmethod(lambda: [base]),
+    )
+    monkeypatch.setattr(mini_dma_mod.shutil, "which", lambda _name: None)
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+
+    assert window._stm32_cmake_path() == newer / "CMake" / "bin" / "cmake.exe"
+    assert window._stm32_ninja_path() == newer / "Ninja" / "bin" / "ninja.exe"
+    assert (
+        window._stm32_programmer_cli_path()
+        == newer / "STM32CubeProgrammer" / "bin" / "STM32_Programmer_CLI.exe"
+    )
+
+
 def test_ir_worker_records_selected_sensor_mode() -> None:
     worker = mini_dma_mod.Mlx90614Worker(
         port_name="COM10",
@@ -8983,6 +9022,84 @@ def test_mlx90640_worker_reports_mlx90614_firmware_bytes(monkeypatch) -> None:
     worker._run_mlx90640_cube_raw(WrongFirmwarePort())  # noqa: SLF001
 
     assert any("MLX90614 thermometer firmware" in message for message in statuses)
+
+
+def test_mlx90640_worker_reports_i2c_scan_failure(monkeypatch) -> None:
+    class MissingCameraPort:
+        def __init__(self) -> None:
+            self._chunks = [
+                b"MLX90640_CUBE_RAW_BOOT\r\n"
+                b"MLX90640_CUBE_I2C_DRIVE_RESULT_PASS\r\n"
+                b"MLX90640_CUBE_I2C_PINS_PB9/PB8\r\n"
+                b"MLX90640_CUBE_I2C_LINES_SCL_1_SDA_1\r\n"
+                b"MLX90640_CUBE_I2C_SCAN_BEGIN\r\n"
+                b"MLX90640_CUBE_I2C_SCAN_NONE\r\n"
+                b"MLX90640_CUBE_I2C_SCAN_END\r\n"
+                b"MLX90640_CUBE_WAITING_FOR_CAMERA\r\n",
+            ]
+
+        def reset_input_buffer(self) -> None:
+            pass
+
+        def write(self, _payload: bytes) -> None:
+            pass
+
+        def flush(self) -> None:
+            pass
+
+        def read(self, _size: int) -> bytes:
+            if self._chunks:
+                return self._chunks.pop(0)
+            time.sleep(0.005)
+            return b""
+
+    monkeypatch.setattr(mini_dma_mod, "MLX90640_SILENT_STATUS_TIMEOUT_S", 10.0)
+    statuses: list[str] = []
+    worker = mini_dma_mod.Mlx90614Worker(
+        port_name="COM10",
+        baudrate=2000000,
+        interval_code=7,
+        sensor_mode=mini_dma_mod.IR_SENSOR_MLX90640,
+    )
+
+    def collect_status(message: str) -> None:
+        statuses.append(message)
+        if "no I2C device is detected" in message:
+            worker.stop()
+
+    worker.status_changed.connect(collect_status)
+    worker._run_mlx90640_cube_raw(MissingCameraPort())  # noqa: SLF001
+
+    assert any("pin self-test passed" in message for message in statuses)
+    assert any("no I2C device is detected" in message for message in statuses)
+    assert any("MLX90640_CUBE_I2C_SCAN_NONE" in message for message in statuses)
+
+
+def test_mlx90640_capture_tool_extracts_i2c_status_lines() -> None:
+    script_path = (
+        Path(__file__).resolve().parents[1]
+        / "experiments"
+        / "firmware"
+        / "stm32cube_mlx90640_stream"
+        / "tools"
+        / "capture_mlxr.py"
+    )
+    spec = importlib.util.spec_from_file_location("capture_mlxr_for_test", script_path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    lines = module.extract_status_lines(
+        b"\x00MLX90640_CUBE_RAW_BOOT\r\n"
+        b"MLX90640_CUBE_I2C_SCAN_NONE\r\n"
+        b"noise\r\n"
+    )
+
+    assert lines == [
+        "MLX90640_CUBE_RAW_BOOT",
+        "MLX90640_CUBE_I2C_SCAN_NONE",
+    ]
 
 
 def test_ir_sample_from_thermal_frame_records_camera_summary() -> None:
