@@ -10580,6 +10580,165 @@ def test_builder_auto_open_startup_skips_initial_section_store_load(
         QtWidgets.QApplication.processEvents()
 
 
+def test_builder_blank_startup_skips_initial_section_store_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    load_calls: list[str] = []
+
+    def _unexpected_load(self: builder_ui.MiniDatabaseStore) -> MiniDatabaseData:
+        load_calls.append(self.section)
+        return MiniDatabaseData()
+
+    monkeypatch.setattr(builder_ui.MiniDatabaseStore, "load", _unexpected_load)
+    window = BuilderWindow()
+    try:
+        assert window._startup_auto_open_candidate is None
+        assert load_calls == []
+        assert all(
+            section.data.table.empty
+            for section in window.sections.values()
+            if isinstance(section, builder_ui.MiniDatabaseSection)
+        )
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_auto_open_project_failure_does_not_show_modal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    modal_calls: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda *_args, **_kwargs: modal_calls.append("critical"),
+    )
+    window = BuilderWindow()
+    try:
+        window._project_load_in_progress = True
+        window._project_load_auto_open = True
+        window._handle_project_load_failed(
+            tmp_path / "bad.pydpj",
+            RuntimeError("synthetic failure"),
+            time.perf_counter(),
+        )
+        assert modal_calls == []
+        assert window._project_load_in_progress is False
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_tma_transition_dialog_reports_active_load_threads() -> None:
+    _ensure_qapp()
+    dialog = builder_ui._MiniDmaTransitionReviewDialog([], logging.getLogger("test"))
+    thread = QtCore.QThread()
+    worker = QtCore.QObject()
+    worker.moveToThread(thread)
+    dialog._workers["synthetic"] = (thread, worker)
+    thread.start()
+    try:
+        assert thread.isRunning()
+        assert dialog.has_active_loaders()
+        thread.quit()
+        assert thread.wait(5000)
+        assert not dialog.has_active_loaders()
+        assert dialog.close() is True
+    finally:
+        if thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        worker.deleteLater()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_embedded_tma_busy_refresh_returns_promptly_and_retains_dialog() -> None:
+    _ensure_qapp()
+    created: list[QtWidgets.QDialog] = []
+
+    def _factory(parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
+        dialog: QtWidgets.QDialog
+        if not created:
+            dialog = builder_ui._MiniDmaTransitionReviewDialog(
+                [], logging.getLogger("test"), parent
+            )
+        else:
+            dialog = QtWidgets.QDialog(parent)
+        created.append(dialog)
+        return dialog
+
+    workspace = builder_ui._EmbeddedTransitionReviewWorkspace("Test", _factory)
+    thread = QtCore.QThread()
+    worker = QtCore.QObject()
+    worker.moveToThread(thread)
+    try:
+        workspace.refresh_workspace()
+        original = workspace._dialog
+        assert isinstance(original, builder_ui._MiniDmaTransitionReviewDialog)
+        original._workers["synthetic"] = (thread, worker)
+        thread.start()
+        assert thread.isRunning()
+
+        started = time.perf_counter()
+        workspace.refresh_workspace()
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.1
+        assert workspace._dialog is original
+        assert workspace.refresh_button.isEnabled()
+        assert "finish loading" in workspace.refresh_button.toolTip()
+        thread.quit()
+        assert thread.wait(5000)
+
+        workspace.refresh_workspace()
+        assert workspace._dialog is not original
+        assert len(created) == 2
+    finally:
+        if thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        worker.deleteLater()
+        if workspace._dialog is not None:
+            workspace._dialog.setParent(None)
+            workspace._dialog.deleteLater()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_embedded_transition_refresh_retains_dialog_when_close_rejected() -> None:
+    _ensure_qapp()
+    created: list[QtWidgets.QDialog] = []
+
+    class RejectingDialog(QtWidgets.QDialog):
+        def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+            event.ignore()
+
+    def _factory(parent: QtWidgets.QWidget) -> QtWidgets.QDialog:
+        dialog = RejectingDialog(parent)
+        created.append(dialog)
+        return dialog
+
+    workspace = builder_ui._EmbeddedTransitionReviewWorkspace("Test", _factory)
+    try:
+        workspace.refresh_workspace()
+        original = workspace._dialog
+        workspace.refresh_workspace()
+
+        assert workspace._dialog is original
+        assert created == [original]
+    finally:
+        if workspace._dialog is not None:
+            workspace._dialog.setParent(None)
+            workspace._dialog.deleteLater()
+        workspace.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_builder_auto_open_skips_reentrant_project_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

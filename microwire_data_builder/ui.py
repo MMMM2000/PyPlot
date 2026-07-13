@@ -8127,9 +8127,20 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         for thread, _worker in list(self._workers.values()):
             try:
                 thread.quit()
+                if not thread.wait(5000):
+                    self._logger.warning("Timed out stopping TMA transition loader")
+                    self._closing = False
+                    event.ignore()
+                    return
             except Exception:
-                pass
+                self._logger.exception("Failed to stop TMA transition loader")
+                self._closing = False
+                event.ignore()
+                return
         super().closeEvent(event)
+
+    def has_active_loaders(self) -> bool:
+        return any(thread.isRunning() for thread, _worker in self._workers.values())
 
     @staticmethod
     def _run_key(record: MiniDmaRecord) -> str:
@@ -25209,6 +25220,17 @@ class _EmbeddedTransitionReviewWorkspace(QtWidgets.QWidget):
 
     def refresh_workspace(self) -> None:
         if self._dialog is not None:
+            active_loaders = getattr(self._dialog, "has_active_loaders", None)
+            if callable(active_loaders) and active_loaders():
+                self.refresh_button.setToolTip(
+                    "Wait for the current transition graph to finish loading, then refresh again."
+                )
+                return
+            # Dialog close handlers own worker shutdown.  If close is rejected
+            # because a loader is still alive, retain the current workspace.
+            if not self._dialog.close():
+                return
+            self.refresh_button.setToolTip("")
             self._host_layout.removeWidget(self._dialog)
             self._dialog.setParent(None)
             self._dialog.deleteLater()
@@ -36427,9 +36449,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if stored_database_dir:
             self._database_project_dir = Path(stored_database_dir)
         self._startup_auto_open_candidate = self._startup_auto_open_project_candidate()
-        self._skip_startup_persisted_section_load = (
-            self._startup_auto_open_candidate is not None
-        )
+        # Builder intentionally starts as a blank project, so do not load every
+        # persisted section store only to reset it at the end of construction.
+        self._skip_startup_persisted_section_load = True
         _log_builder_timing(
             self.logger,
             "builder_window_settings",
@@ -38180,11 +38202,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         load_started_s: float,
     ) -> None:
         self.logger.exception("Failed to load project %s", target, exc_info=exc)
-        QtWidgets.QMessageBox.critical(
-            self,
-            "Open Project",
-            f"Failed to load project file:\n{exc}",
-        )
+        if not self._project_load_auto_open and not _builder_dialogs_suppressed():
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Project",
+                f"Failed to load project file:\n{exc}",
+            )
         _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
         self._project_load_in_progress = False
         self._project_load_auto_open = False
