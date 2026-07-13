@@ -122,7 +122,7 @@ tasks:
 
   - id: "tma-kosice-response-sync-production"
     title: "TMA Kosice response-synchronized production controller"
-    status: "ready"
+    status: "integrated"
     priority: "high"
     owner:
       thread_id: "019f5b35-61ea-7002-ad4b-f37d9e12c095"
@@ -163,13 +163,16 @@ tasks:
         - "No hardware is available; production enablement requires later staged Kosice validation."
     integration:
       decision: "merge"
-      merged_commit: ""
-      combined_checks: []
+      merged_commit: "a0322cd1"
+      combined_checks:
+        - "Response tracker, logger gate, stale safety, Prague exclusion, and simulator slice: 10 passed."
+        - "Broader KERN, Prague, and G&G profile regression slice: 22 passed, 634 deselected."
+        - "Worker syntax compilation and launcher.py --help passed."
       regression_guarantees_to_recheck:
         - "Prague scale behavior remains byte-for-byte equivalent where practical."
         - "Stale scale input remains fail-safe."
         - "Integrated diagnostic fields remain populated."
-      final_status: "ready for master integration checks; live KERN validation still required"
+      final_status: "integrated and software checks passed; live KERN validation still required before main"
     links:
       handoff: "worker handoff in master thread"
       pr: ""
