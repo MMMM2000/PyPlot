@@ -10685,10 +10685,22 @@ def test_recipe_preflight_requires_native_usb_for_tic_recipes(
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     warnings: list[str] = []
+    supply_checked: list[bool] = []
+    motor_supply_enabled: list[bool] = []
     tic_checked: list[bool] = []
 
     window.check_tic_native_usb.setChecked(False)
-    window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+
+    def _mark_supply_checked() -> bool:
+        supply_checked.append(True)
+        return True
+
+    def _mark_motor_supply_enabled() -> bool:
+        motor_supply_enabled.append(True)
+        return True
+
+    window._ensure_supply_ready_for_recipe = _mark_supply_checked  # type: ignore[method-assign]
+    window._enable_motor_supply_output = _mark_motor_supply_enabled  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: tic_checked.append(True) or True  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -10704,6 +10716,8 @@ def test_recipe_preflight_requires_native_usb_for_tic_recipes(
         assert len(warnings) == 1
         assert "native USB Tic control" in warnings[0]
         assert "ticcmd remains available for diagnostics only" in warnings[0]
+        assert supply_checked == []
+        assert motor_supply_enabled == []
         assert tic_checked == []
     finally:
         _close_test_window(window)

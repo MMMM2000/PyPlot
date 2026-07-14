@@ -22698,7 +22698,18 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _preflight_recipe_hardware(self, steps: Sequence[AutomationStep], *, show_progress: bool = False) -> bool:
-        if self._recipe_requires_tic(steps):
+        requires_tic = self._recipe_requires_tic(steps)
+        if requires_tic and not self.check_tic_native_usb.isChecked():
+            message = (
+                "Recipe preflight failed:\n\n"
+                "- TMA recipes require native USB Tic control. "
+                "Enable 'Prefer native USB commands when available' and run Check motor again. "
+                "ticcmd remains available for diagnostics only."
+            )
+            self._log(message.replace("\n", " "))
+            QtWidgets.QMessageBox.warning(self, APP_NAME, message)
+            return False
+        if requires_tic:
             self._apply_shared_broker_bench_defaults_for_tic_preflight()
             self._apply_direct_hmp_bench_defaults_for_tic_preflight()
         started_progress = False
@@ -22719,13 +22730,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not issues and self._motor_supply_enabled() and not self._enable_motor_supply_output():
                 issues.append("Motor supply channel could not be enabled. Check the HMP channel wiring/settings.")
             self._set_manual_auto_connect_progress("Checking motor controller...", 2, preflight_steps)
-            if self._recipe_requires_tic(steps) and not self.check_tic_native_usb.isChecked():
-                issues.append(
-                    "TMA recipes require native USB Tic control. "
-                    "Enable 'Prefer native USB commands when available' and run Check motor again. "
-                    "ticcmd remains available for diagnostics only."
-                )
-            if not issues and self._recipe_requires_tic(steps) and not self._ensure_tic_ready_for_recipe():
+            if not issues and requires_tic and not self._ensure_tic_ready_for_recipe():
                 vin_text = "-" if self._last_tic_vin_v is None else f"{self._last_tic_vin_v:.2f} V"
                 if self._last_tic_status_error:
                     issues.append(
@@ -22740,17 +22745,17 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"(VIN {vin_text}; expected at least {TIC_MOTOR_POWER_MIN_V:.1f} V). "
                         "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
                     )
-            if not issues and self._recipe_requires_tic(steps):
+            if not issues and requires_tic:
                 tic_step_ok, tic_step_message = self._apply_tic_configured_step_mode()
                 self._log(f"Recipe preflight: {tic_step_message}")
                 if not tic_step_ok:
                     issues.append(tic_step_message.replace("FAIL: ", "", 1))
-            if not issues and self._recipe_requires_tic(steps):
+            if not issues and requires_tic:
                 tic_limit_ok, tic_limit_message = self._apply_tic_current_limit()
                 self._log(f"Recipe preflight: {tic_limit_message}")
                 if not tic_limit_ok:
                     issues.append(tic_limit_message.replace("FAIL: ", "", 1))
-            if not issues and self._recipe_requires_tic(steps):
+            if not issues and requires_tic:
                 tic_motion_ok, tic_motion_message = self._apply_tic_motion_limits()
                 self._log(f"Recipe preflight: {tic_motion_message}")
                 if not tic_motion_ok:
