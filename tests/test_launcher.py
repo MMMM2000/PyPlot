@@ -7,14 +7,24 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 from PyQt6 import QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 import launcher as launcher_module
+from microwire_data_builder import ui as builder_ui
+from microwire_data_builder import safe_codec
+from microwire_data_builder.core import (
+    MeasurementMetadata,
+    MeasurementRecord,
+    MiniDmaRecord,
+    ShapeMemoryStressStrainRecord,
+)
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import TabDescriptor
 from plotting.shared.toolkit import theme_manager
@@ -44,7 +54,1078 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
-def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> None:
+def _write_synthetic_assemble_project(path: Path) -> Path:
+    payload = {
+        "version": 2,
+        "kind": "MicrowireDataBuilder",
+        "saved_at": "2026-06-17 09:30",
+        "sections": {
+            "mini_dma": {
+                "section": "mini_dma",
+                "columns": ["Composition", "Microwire", "Mini DMA transition currents by stress/load"],
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Mini DMA transition currents by stress/load": [
+                            "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
+                        ],
+                    }
+                ],
+                "extra": {
+                    "mini_dma_transition_reviews": {
+                        "schema_version": 1,
+                        "records": {
+                            "G:/runs/run01::50 MPa / 1.46 g": {
+                                "status": "accepted",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "50 MPa / 1.46 g",
+                                "values": {"As": 31.0, "Af": 71.0, "Ms": 66.0, "Mf": 26.0},
+                            },
+                            "G:/runs/run01::75 MPa / 2.19 g": {
+                                "status": "no_transition",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "75 MPa / 2.19 g",
+                            },
+                            "G:/runs/run01::100 MPa / 2.92 g": {
+                                "status": "accepted",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "100 MPa / 2.92 g",
+                                "values": {"As": 35.0, "Af": 74.0},
+                                "cleared_labels": ["Ms", "Mf"],
+                            },
+                            "G:/runs/run01::125 MPa / 3.65 g": {
+                                "status": "excluded",
+                                "sample": "Ni50Fe27Ga23 12_2",
+                                "run_label": "run01",
+                                "target_label": "125 MPa / 3.65 g",
+                            },
+                        },
+                    },
+                },
+            },
+            "transition_temps": {
+                "section": "transition_temps",
+                "columns": ["Composition", "Microwire", "As (C)", "Af (C)"],
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "As (C)": -23.5,
+                        "Af (C)": 18.25,
+                    }
+                ],
+            },
+            "assemble": {
+                "section": "assemble",
+                "title": "Assemble",
+                "columns": [
+                    "Composition",
+                    "Microwire",
+                    "Mini DMA graphs",
+                    "Mini DMA strain by stress/load",
+                        "Mini DMA transition currents by stress/load",
+                        "Current annealing transition status",
+                        "VSM transition temp status",
+                        "Mini DMA transition status",
+                        "d (\u00b5m)",
+                        "As (C)",
+                        "Af (C)",
+                        "As (mA)",
+                    "Ms (mA)",
+                    "As1 (mA)",
+                    "Af1 (mA)",
+                    "As current density (A/mm^2)",
+                    "J_As1 (A/mm^2)",
+                    "Data source",
+                    "Source label",
+                    "_sources",
+                    "internal review note",
+                    "provenance file",
+                    "object summary",
+                ],
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Mini DMA graphs": ["run01", "run02"],
+                        "Mini DMA transition currents by stress/load": [
+                            "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA",
+                            "150 MPa / 4.38 g: As 40 mA, Af 80 mA, Ms 72 mA, Mf 33 mA",
+                        ],
+                        "Mini DMA strain by stress/load": [
+                            "50 MPa / 1.46 g: 5.16% @ 15 mA",
+                            "75 MPa / 2.19 g: 0.2% @ 20 mA",
+                            "100 MPa / 2.92 g: 3.5% @ 22 mA",
+                            "125 MPa / 3.65 g: 9.9% @ 25 mA",
+                            "150 MPa / 4.38 g: 6.5% @ 28 mA",
+                        ],
+                        "Current annealing transition status": "No transition",
+                        "VSM transition temp status": "No transition",
+                        "Mini DMA transition status": "No transition",
+                        "d (\u00b5m)": 20.0,
+                        "As (C)": -23.5,
+                        "Af (C)": 18.25,
+                        "As (mA)": 30,
+                        "Ms (mA)": 25,
+                        "As1 (mA)": 30,
+                        "Af1 (mA)": 70,
+                        "As current density (A/mm^2)": 95.5,
+                        "J_As1 (A/mm^2)": 95.5,
+                        "Data source": "Measured",
+                        "Source label": "Ko\u0161ice",
+                        "_sources": ["G:/internal/run01"],
+                        "internal review note": "needs source check",
+                        "provenance file": "G:/internal/provenance.json",
+                        "object summary": {"fit": "accepted", "points": 120},
+                    }
+                ],
+            },
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    project_path = _write_synthetic_assemble_project(tmp_path / "synthetic.pydpj")
+    workbook_path = tmp_path / "public.xlsx"
+
+    exit_code = launcher_module._run_microwire_assemble_export_cli(  # noqa: SLF001
+        argparse.Namespace(
+            microwire_assemble_export=str(project_path),
+            microwire_assemble_output=str(workbook_path),
+            microwire_assemble_manifest=None,
+            microwire_assemble_preset="public",
+            microwire_assemble_rebuild=False,
+            microwire_assemble_rebuild_section=None,
+            microwire_assemble_working_copy_dir=str(tmp_path / "working"),
+            microwire_assemble_copy_project=True,
+            out=None,
+        )
+    )
+
+    assert exit_code == 0
+    manifest_path = workbook_path.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_project"] == str(project_path.resolve())
+    assert manifest["source_saved_at"] == "2026-06-17 09:30"
+    assert manifest["source_row_count"] == 1
+    assert manifest["row_count"] == 6
+    assert manifest["sections_represented"] == ["assemble", "mini_dma", "transition_temps"]
+    assert "Data source" in manifest["dropped_columns"]
+    assert "Source label" in manifest["dropped_columns"]
+    assert "_sources" in manifest["dropped_columns"]
+    assert "internal review note" in manifest["dropped_columns"]
+    assert "provenance file" in manifest["dropped_columns"]
+    assert "TMA transition currents by stress/load" in manifest["dropped_columns"]
+    assert "TMA strain by stress/load" in manifest["dropped_columns"]
+    assert manifest["hidden_sheets"] == []
+    assert manifest["extra_sheets"] == {}
+    assert manifest["analysis_sheet"]["row_count"] == 6
+    assert manifest["git_commit"]
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames == ["Analysis"]
+    analysis_headers = [cell.value for cell in workbook["Analysis"][1]]
+    assert "Analysis row type" not in analysis_headers
+    assert "CA As1 (mA)" in analysis_headers
+    assert "CA J_As1 (A/mm^2)" in analysis_headers
+    assert "VSM As (\u00b0C)" in analysis_headers
+    assert "TMA target type" in analysis_headers
+    assert "TMA As (mA)" in analysis_headers
+    assert "TMA strain (%)" in analysis_headers
+    assert "TMA J_As (A/mm^2)" in analysis_headers
+    assert "Video end length (m)" not in analysis_headers
+    assert "Video wire range (m)" not in analysis_headers
+    assert "Notes" not in analysis_headers
+    assert "CA current (mA)" not in analysis_headers
+    assert "Data source" not in analysis_headers
+    assert "As1 (mA)" not in analysis_headers
+    assert "Af1 (mA)" not in analysis_headers
+    assert "TMA strain by stress/load" not in analysis_headers
+    analysis_rows = [
+        dict(zip(analysis_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Analysis"].iter_rows(min_row=2)
+    ]
+    assert analysis_rows[0]["CA As1 (mA)"] == "No transition"
+    assert analysis_rows[0]["CA J_As1 (A/mm^2)"] == 95.5
+    assert analysis_rows[1]["VSM As (\u00b0C)"] == "No transition"
+    assert analysis_rows[2]["TMA target type"] == "Stress/load target"
+    assert analysis_rows[2]["TMA strain (%)"] == 5.16
+    headers = analysis_headers
+    assert "Data source" not in headers
+    assert "Source label" not in headers
+    assert "_sources" not in headers
+    assert "internal review note" not in headers
+    assert "provenance file" not in headers
+    assert "As (mA)" not in headers
+    assert "Ms (mA)" not in headers
+    assert "As current density (A/mm^2)" not in headers
+    assert "As1 (mA)" not in headers
+    assert "Af1 (mA)" not in headers
+    assert "J_As1 (A/mm^2)" not in headers
+    assert "Current annealing transition status" not in headers
+    assert "VSM transition temp status" not in headers
+    assert "TMA transition status" not in headers
+    assert "TMA transition currents by stress/load" not in headers
+    assert "TMA strain by stress/load" not in headers
+    tma_headers = analysis_headers
+    tma_rows = [
+        dict(zip(tma_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Analysis"].iter_rows(min_row=4)
+    ]
+    assert [entry["TMA target"] for entry in tma_rows] == [
+        "50 MPa / 1.46 g",
+        "75 MPa / 2.19 g",
+        "100 MPa / 2.92 g",
+        "150 MPa / 4.38 g",
+    ]
+    first = tma_rows[0]
+    assert first["Composition"] == "Ni50Fe27Ga23"
+    assert first["Microwire"] == "12/2"
+    assert first["TMA run"] == "run01"
+    assert first["TMA stress (MPa)"] == 50
+    assert first["TMA load (g)"] == 1.46
+    assert first["TMA strain (%)"] == 5.16
+    assert first["TMA strain peak current (mA)"] == 15
+    assert first["TMA As (mA)"] == 31
+    assert first["TMA Af (mA)"] == 71
+    assert first["TMA Ms (mA)"] == 66
+    assert first["TMA Mf (mA)"] == 26
+    assert first["TMA J_As (A/mm^2)"] == pytest.approx(98.676, rel=1e-3)
+    assert first["TMA J_Af (A/mm^2)"] == pytest.approx(226.0, rel=1e-3)
+    assert first["TMA J_Ms (A/mm^2)"] == pytest.approx(210.085, rel=1e-3)
+    assert first["TMA J_Mf (A/mm^2)"] == pytest.approx(82.761, rel=1e-3)
+    assert {tma_rows[1][label] for label in ("TMA As (mA)", "TMA Af (mA)", "TMA Ms (mA)", "TMA Mf (mA)")} == {
+        "No transition"
+    }
+    assert {tma_rows[1][label] for label in ("TMA J_As (A/mm^2)", "TMA J_Af (A/mm^2)", "TMA J_Ms (A/mm^2)", "TMA J_Mf (A/mm^2)")} == {
+        "No transition"
+    }
+    assert tma_rows[2]["TMA As (mA)"] == 35
+    assert tma_rows[2]["TMA Af (mA)"] == 74
+    assert tma_rows[2]["TMA Ms (mA)"] == "Not observed"
+    assert tma_rows[2]["TMA Mf (mA)"] == "Not observed"
+    assert tma_rows[2]["TMA J_Ms (A/mm^2)"] == "Not observed"
+    assert tma_rows[2]["TMA J_Mf (A/mm^2)"] == "Not observed"
+    assert tma_rows[3]["TMA As (mA)"] == 40
+    assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
+
+
+def test_saved_public_projection_exports_only_selected_tma_family_structure(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    project_path = _write_synthetic_assemble_project(tmp_path / "selected.pydpj")
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["sections"]["assemble"]["selected_columns"] = [
+        "d (µm)",
+        "Mini DMA transition status",
+    ]
+    payload["sections"]["assemble"]["column_order"] = ["d (µm)"]
+    project_path.write_text(json.dumps(payload), encoding="utf-8")
+    workbook_path = tmp_path / "selected.xlsx"
+
+    manifest = launcher_module._export_builder_assemble_workbook(  # noqa: SLF001
+        source_project=project_path,
+        output_path=workbook_path,
+        copy_project=True,
+        working_copy_dir=tmp_path / "working",
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    assert headers[:3] == ["Composition", "Microwire", "d (µm)"]
+    assert "TMA transition status" in headers
+    assert "TMA target" in headers
+    assert "TMA strain (%)" in headers
+    assert "TMA J_As (A/mm^2)" in headers
+    assert "CA graph" not in headers
+    assert "CA As1 (mA)" not in headers
+    assert "VSM scan" not in headers
+    assert "VSM As (°C)" not in headers
+    assert manifest["row_count"] == 4
+    rows = [
+        dict(zip(headers, [cell.value for cell in cells], strict=False))
+        for cells in worksheet.iter_rows(min_row=2)
+    ]
+    assert [row["TMA target"] for row in rows] == [
+        "50 MPa / 1.46 g",
+        "75 MPa / 2.19 g",
+        "100 MPa / 2.92 g",
+        "150 MPa / 4.38 g",
+    ]
+    assert rows[1]["TMA As (mA)"] == "No transition"
+    assert rows[2]["TMA Ms (mA)"] == "Not observed"
+    assert "125 MPa / 3.65 g" not in {row["TMA target"] for row in rows}
+
+
+def test_public_projection_without_measurement_family_keeps_one_compact_row(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "identity_and_length.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Length (m)": 1.2,
+                "Notes": "hidden",
+            }
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA target": "50 MPa / 1 g",
+            }
+        ]
+    )
+
+    info = launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        tma_frame=tma_frame,
+        selected_columns=["Length (m)"],
+        column_order=["Length (m)"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    headers = [cell.value for cell in workbook["Analysis"][1]]
+    assert headers == ["Composition", "Microwire", "Length (m)"]
+    assert info["row_count"] == 1
+    assert info["analysis_sheet"]["row_count"] == 1
+
+
+def test_public_family_projection_without_detail_rows_keeps_explicit_status(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "tma_status_only.xlsx"
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "TMA transition status": "No transition",
+                    "Notes": "hidden",
+                }
+            ]
+        ),
+        preset="public",
+        tma_frame=pd.DataFrame(),
+        selected_columns=["TMA transition status"],
+        column_order=["TMA transition status"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    assert headers[:3] == ["Composition", "Microwire", "TMA transition status"]
+    assert "TMA target" in headers
+    assert "CA graph" not in headers
+    assert "VSM scan" not in headers
+    assert worksheet.cell(2, 3).value == "No transition"
+
+
+def test_public_projection_keeps_compact_fallback_for_sample_without_detail_row(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "mixed_detail.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA transition status": "Reviewed",
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "TMA transition status": "No transition",
+            },
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA target": "50 MPa / 1 g",
+                "TMA strain (%)": 2.5,
+            }
+        ]
+    )
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        tma_frame=tma_frame,
+        selected_columns=["TMA transition status"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    rows = [
+        dict(zip(headers, [cell.value for cell in cells], strict=False))
+        for cells in worksheet.iter_rows(min_row=2)
+    ]
+    assert {(row["Composition"], row["Microwire"]) for row in rows} == {
+        ("Ni50Fe27Ga23", "12/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+    }
+    fallback = next(row for row in rows if row["Microwire"] == "1/2")
+    assert fallback["TMA transition status"] == "No transition"
+    assert fallback["TMA target"] is None
+
+
+def test_full_workbook_ignores_public_projection_and_keeps_legacy_analysis_schema(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "full.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "d (µm)": 20.0,
+                "Length (m)": 1.2,
+            }
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA target": "50 MPa / 1 g",
+            }
+        ]
+    )
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="full",
+        tma_frame=tma_frame,
+        selected_columns=["Length (m)"],
+        column_order=["Length (m)"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    headers = [cell.value for cell in workbook["Analysis"][1]]
+    assert "d (µm)" in headers
+    assert "TMA target" in headers
+    assert "CA As1 (mA)" in headers
+    assert "VSM scan" in headers
+    assert workbook.sheetnames[:3] == ["Analysis", "Assemble", "TMA targets"]
+
+
+def test_public_analysis_export_groups_expanded_rows_by_sample(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "grouped_analysis.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "d (\u00b5m)": 12.5,
+                "D (\u00b5m)": 60.3,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "d (\u00b5m)": 13.9,
+                "D (\u00b5m)": 51.8,
+            },
+        ]
+    )
+    annealing_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Annealing run": "Ni50Fe27Ga23 12_2 100mA.txt",
+                "Annealing current (mA)": 100,
+                "Annealing As1": 29,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "Annealing run": "Ni44Fe27Ga23Cu3Co3 1_2 60mA.txt",
+                "Annealing current (mA)": 60,
+                "Annealing As1": 38,
+            },
+        ]
+    )
+    vsm_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "VSM scan": "scan-a",
+                "VSM As": "No transition",
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "VSM scan": "scan-b",
+                "VSM As": 55,
+            },
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA run": "run-b",
+                "TMA target": "50 MPa / 1 g",
+                "TMA target type": "Stress/load target",
+                "TMA stress (MPa)": 50,
+                "TMA strain (%)": 1.2,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "TMA run": "run-a",
+                "TMA target": "1st: 20MPa / 0.31g",
+                "TMA target type": "First overheating",
+                "TMA stress (MPa)": 20,
+                "TMA strain (%)": 0.3,
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "TMA run": "run-a",
+                "TMA target": "20 MPa / 0.31 g",
+                "TMA target type": "Stress/load target",
+                "TMA stress (MPa)": 20,
+                "TMA strain (%)": 0.6,
+            },
+        ]
+    )
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        extra_frames={
+            launcher_module.ANNEALING_TRANSITION_EXPORT_SHEET: annealing_frame,
+            launcher_module.VSM_TRANSITION_EXPORT_SHEET: vsm_frame,
+            launcher_module.TMA_TARGET_EXPORT_SHEET: tma_frame,
+        },
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames == ["Analysis"]
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    rows = [
+        dict(zip(headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in worksheet.iter_rows(min_row=2)
+    ]
+    identities = [(row["Composition"], row["Microwire"]) for row in rows]
+    assert identities == [
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+        ("Ni50Fe27Ga23", "12/2"),
+        ("Ni50Fe27Ga23", "12/2"),
+        ("Ni50Fe27Ga23", "12/2"),
+    ]
+    sample_rows = rows[:4]
+    assert [row["CA graph"] for row in sample_rows] == [
+        "Ni44Fe27Ga23Cu3Co3 1_2 60mA.txt",
+        None,
+        None,
+        None,
+    ]
+    assert sample_rows[1]["VSM scan"] == "scan-a"
+    assert [row["TMA target type"] for row in sample_rows[2:]] == [
+        "First overheating",
+        "Stress/load target",
+    ]
+    assert "Analysis row type" not in headers
+
+
+def test_public_assemble_workbook_excludes_oe_and_collapses_non_identity_suffixes(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "public_suffixes.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4",
+                "d (\u00b5m)": None,
+                "D (\u00b5m)": None,
+                "Source label": "Praha",
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4noload",
+                "d (\u00b5m)": 12.0,
+                "D (\u00b5m)": 42.0,
+                "Source label": "Praha",
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4oe",
+                "d (\u00b5m)": 13.0,
+                "D (\u00b5m)": 43.0,
+                "Source label": "Praha",
+            },
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4No1",
+                "TMA run": "run-a",
+                "TMA target": "50 MPa / 1 g",
+                "TMA strain (%)": 2.5,
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4No1",
+                "TMA run": "run-b",
+                "TMA target": "100 MPa / 2 g",
+                "TMA strain (%)": 3.5,
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "5/4oe",
+                "TMA run": "run-oe",
+                "TMA target": "50 MPa / 1 g",
+                "TMA strain (%)": 4.5,
+            },
+        ]
+    )
+
+    info = launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        tma_frame=tma_frame,
+    )
+
+    assert info["row_count"] == 2
+    assert info["public_filters"]["assemble"] == {
+        "excluded_oe_rows": 1,
+        "normalised_suffix_rows": 1,
+        "collapsed_suffix_rows": 1,
+    }
+    assert info["public_filters"]["TMA targets"] == {
+        "excluded_oe_rows": 1,
+        "normalised_suffix_rows": 2,
+    }
+    assert info["analysis_sheet"]["row_count"] == 2
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames == ["Analysis"]
+    analysis_headers = [cell.value for cell in workbook["Analysis"][1]]
+    analysis_rows = [
+        dict(zip(analysis_headers, [cell.value for cell in row_cells], strict=False))
+        for row_cells in workbook["Analysis"].iter_rows(min_row=2)
+    ]
+    assert [row["Microwire"] for row in analysis_rows] == ["5/4", "5/4"]
+    assert [row["TMA target"] for row in analysis_rows] == ["50 MPa / 1 g", "100 MPa / 2 g"]
+    assert [row["TMA run"] for row in analysis_rows] == ["run-a", "run-b"]
+
+
+def test_saved_video_table_values_overlay_rebuilt_assemble_rows() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Length (m)": None,
+                "Video wire range (m)": None,
+            }
+        ]
+    )
+    sections = {
+        "videos": {
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Production datetime": "2025-07-18 09:35:00",
+                    "Length (m)": 12.56,
+                    "Mass (g)": 2.42,
+                    "Video end length (m)": 120.0,
+                    "Video wire range (m)": "110-120",
+                }
+            ]
+        }
+    }
+
+    result = launcher_module._overlay_saved_video_table_values(frame, sections)  # noqa: SLF001
+
+    assert result.loc[0, "Production datetime"] == "2025-07-18 09:35:00"
+    assert result.loc[0, "Length (m)"] == 12.56
+    assert result.loc[0, "Mass (g)"] == 2.42
+    assert result.loc[0, "Video end length (m)"] == 120.0
+    assert result.loc[0, "Video wire range (m)"] == "110-120"
+
+
+def test_expanded_transition_export_frames_use_review_records() -> None:
+    sections = {
+        "annealing": {
+            "extra": {
+                "transition_reviews": {
+                    "records": {
+                        "anneal-accepted": {
+                            "status": "manual_adjusted",
+                            "composition": "Ni50Fe27Ga23",
+                            "microwire": "12/2",
+                            "graph_label": "Ni50Fe27Ga23 12_2 100mA",
+                            "setpoint_mA": 100,
+                            "final_values_mA": {"As1": 30.0, "Af1": 70.0},
+                        },
+                        "anneal-none": {
+                            "status": "no_transition",
+                            "composition": "Ni50Fe27Ga23",
+                            "microwire": "12/3",
+                            "graph_label": "Ni50Fe27Ga23 12_3 80mA",
+                            "setpoint_mA": 80,
+                        },
+                        "anneal-excluded": {
+                            "status": "excluded",
+                            "composition": "Ni50Fe27Ga23",
+                            "microwire": "12/4",
+                            "graph_label": "excluded",
+                        },
+                    }
+                }
+            }
+        },
+        "vsm_temperature_scan": {
+            "extra": {
+                "transition_reviews": {
+                    "records": {
+                        "vsm-accepted": {
+                            "status": "accepted_auto",
+                            "sample": "Ni50Fe27Ga23 12_2",
+                            "record_label": "VSM 12_2 scan",
+                            "final_values_C": {"As": -20.0, "Af": 15.0, "Ms": 5.0, "Mf": -30.0},
+                        },
+                        "vsm-none": {
+                            "status": "no_transition",
+                            "sample": "Ni50Fe27Ga23 12_3",
+                            "record_label": "VSM 12_3 scan",
+                        },
+                        "vsm-excluded": {
+                            "status": "excluded",
+                            "sample": "Ni50Fe27Ga23 12_4",
+                            "record_label": "excluded",
+                        },
+                    }
+                }
+            }
+        },
+    }
+
+    annealing = launcher_module._expanded_annealing_transition_frame_from_sections(sections)  # noqa: SLF001
+    vsm = launcher_module._expanded_vsm_transition_frame_from_sections(sections)  # noqa: SLF001
+
+    annealing_rows = annealing.to_dict(orient="records")
+    assert annealing_rows[0]["Composition"] == "Ni50Fe27Ga23"
+    assert annealing_rows[0]["Microwire"] == "12/2"
+    assert annealing_rows[0]["Annealing run"] == "Ni50Fe27Ga23 12_2 100mA"
+    assert annealing_rows[0]["Annealing current (mA)"] == 100
+    assert annealing_rows[0]["Annealing As1"] == 30.0
+    assert annealing_rows[0]["Annealing Af1"] == 70.0
+    assert all(
+        pd.isna(annealing_rows[0][column])
+        for column in (
+            "Annealing Ms1",
+            "Annealing Mf1",
+            "Annealing As2",
+            "Annealing Af2",
+            "Annealing Ms2",
+            "Annealing Mf2",
+        )
+    )
+    assert annealing_rows[1:] == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "Annealing run": "Ni50Fe27Ga23 12_3 80mA",
+            "Annealing current (mA)": 80,
+            "Annealing As1": "No transition",
+            "Annealing Af1": "No transition",
+            "Annealing Ms1": "No transition",
+            "Annealing Mf1": "No transition",
+            "Annealing As2": "No transition",
+            "Annealing Af2": "No transition",
+            "Annealing Ms2": "No transition",
+            "Annealing Mf2": "No transition",
+        },
+    ]
+    assert vsm.to_dict(orient="records") == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/2",
+            "VSM scan": "VSM 12_2 scan",
+            "VSM As": -20.0,
+            "VSM Af": 15.0,
+            "VSM Ms": 5.0,
+            "VSM Mf": -30.0,
+        },
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "VSM scan": "VSM 12_3 scan",
+            "VSM As": "No transition",
+            "VSM Af": "No transition",
+            "VSM Ms": "No transition",
+            "VSM Mf": "No transition",
+        },
+    ]
+
+
+def test_vsm_transition_export_reads_transition_temps_section_reviews() -> None:
+    sections = {
+        "transition_temps": {
+            "extra": {
+                "transition_reviews": {
+                    "records": {
+                        "vsm-ts:accepted": {
+                            "status": "manual_adjusted",
+                            "group_key": "Ni50Fe27Ga23|12|2",
+                            "sample": "Ni50Fe27Ga23 12_2",
+                            "record_label": "20260630-TSCN-a000",
+                            "final_values_C": {"As": 30.0, "Af": 65.0},
+                        },
+                        "vsm-ts:none": {
+                            "status": "no_transition",
+                            "group_key": "Ni50Fe27Ga23|12|3",
+                            "sample": "Ni50Fe27Ga23 12_3",
+                            "record_label": "20260630-TSCN-a090",
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    compact = launcher_module._transition_reviews_to_compact_map(  # noqa: SLF001
+        sections["transition_temps"]["extra"]["transition_reviews"]["records"]
+    )
+    assert compact["Ni50Fe27Ga23|12|2"]["As"] == 30.0
+    assert compact["Ni50Fe27Ga23|12|2"]["Af"] == 65.0
+    assert compact["Ni50Fe27Ga23|12|2"]["__review_status__"] == "Manual adjusted"
+    assert compact["Ni50Fe27Ga23|12|3"]["__review_status__"] == "No transition"
+    assert compact["Ni50Fe27Ga23|12|3"]["__included__"] is False
+
+    vsm = launcher_module._expanded_vsm_transition_frame_from_sections(sections)  # noqa: SLF001
+    rows = vsm.to_dict(orient="records")
+    assert rows[0]["Composition"] == "Ni50Fe27Ga23"
+    assert rows[0]["Microwire"] == "12/2"
+    assert rows[0]["VSM scan"] == "20260630-TSCN-a000"
+    assert rows[0]["VSM As"] == 30.0
+    assert rows[0]["VSM Af"] == 65.0
+    assert pd.isna(rows[0]["VSM Ms"])
+    assert pd.isna(rows[0]["VSM Mf"])
+    assert rows[1:] == [
+        {
+            "Composition": "Ni50Fe27Ga23",
+            "Microwire": "12/3",
+            "VSM scan": "20260630-TSCN-a090",
+            "VSM As": "No transition",
+            "VSM Af": "No transition",
+            "VSM Ms": "No transition",
+            "VSM Mf": "No transition",
+        },
+    ]
+
+
+def test_tma_target_export_includes_strain_only_record_payloads() -> None:
+    records = [
+        MiniDmaRecord(
+            path=Path("G:/runs/Ni50Fe27Ga23 6_6 run01"),
+            sample="Ni50Fe27Ga23 6-6",
+            data=pd.DataFrame(),
+            label="iso-stress - Ni50Fe27Ga23 6_6 run01",
+            strain_summary=(
+                "20 MPa / 0.37 g: 0.86% @ 59 mA",
+                "50 MPa / 0.93 g: 0.63% @ 40 mA",
+            ),
+        ),
+        MiniDmaRecord(
+            path=Path("G:/runs/Ni50Fe27Ga23 6_6 run02"),
+            sample="Ni50Fe27Ga23 6-6",
+            data=pd.DataFrame(),
+            label="iso-stress - Ni50Fe27Ga23 6_6 run02",
+            strain_summary=("50 MPa / 0.93 g: 0.72% @ 42 mA",),
+        ),
+    ]
+    encoded = safe_codec.encode_envelope(records)
+    frame = launcher_module._expanded_tma_export_frame_from_sections(  # noqa: SLF001
+        {
+            "mini_dma": {
+                "payloads": {
+                    "mini_dma_records": encoded
+                }
+            }
+        }
+    )
+
+    assert len(frame.index) == 3
+    rows = frame.to_dict(orient="records")
+    assert [row["TMA run"] for row in rows] == [
+        "iso-stress - Ni50Fe27Ga23 6_6 run01",
+        "iso-stress - Ni50Fe27Ga23 6_6 run01",
+        "iso-stress - Ni50Fe27Ga23 6_6 run02",
+    ]
+    assert [row["TMA target"] for row in rows] == [
+        "20 MPa / 0.37 g",
+        "50 MPa / 0.93 g",
+        "50 MPa / 0.93 g",
+    ]
+    assert [row["TMA strain (%)"] for row in rows] == [0.86, 0.63, 0.72]
+    assert [row["TMA strain peak current (mA)"] for row in rows] == [59.0, 40.0, 42.0]
+    assert all(row["TMA As"] is None or row["TMA As"] != row["TMA As"] for row in rows)
+
+
+def test_tma_target_export_recalculates_stale_strain_summary_from_raw_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_run = tmp_path / "Ni50Fe27Ga23 12_2 raw_run"
+    raw_run.mkdir()
+    records = [
+        MiniDmaRecord(
+            path=raw_run,
+            sample="Ni50Fe27Ga23 12-2",
+            data=pd.DataFrame(),
+            label="raw run",
+            strain_summary=("50 MPa / 1.46 g: 0.08% @ 80 mA",),
+        ),
+    ]
+    encoded = safe_codec.encode_envelope(records)
+
+    def fake_import_module(name: str) -> object:
+        if name != "plotting.plugins.mini_dma.core":
+            return importlib.import_module(name)
+        return SimpleNamespace(
+            load_run=lambda path: SimpleNamespace(path=path),
+            summarize_current_sweep=lambda run: SimpleNamespace(run=run),
+            format_current_sweep_strain_summary=lambda summary: (
+                "50 MPa / 1.46 g: 10.81% @ 4 mA",
+            ),
+        )
+
+    import importlib
+
+    monkeypatch.setattr(launcher_module, "import_module", fake_import_module)
+    frame = launcher_module._expanded_tma_export_frame_from_sections(  # noqa: SLF001
+        {
+            "mini_dma": {
+                "payloads": {
+                    "mini_dma_records": encoded
+                }
+            }
+        }
+    )
+
+    rows = frame.to_dict(orient="records")
+    assert len(rows) == 1
+    assert rows[0]["TMA strain (%)"] == 10.81
+    assert rows[0]["TMA strain peak current (mA)"] == 4.0
+
+
+def test_builder_automation_recipe_exports_assemble_public_workbook(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    project_path = _write_synthetic_assemble_project(tmp_path / "synthetic.pydpj")
+    output_project = tmp_path / "working" / "updated.pydpj"
+    workbook_path = tmp_path / "exports" / "assemble_public.xlsx"
+    manifest_path = tmp_path / "exports" / "assemble_public.manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "export_assemble",
+                        "preset": "public",
+                        "output": str(workbook_path),
+                        "manifest_path": str(manifest_path),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["workbook"] == str(workbook_path.resolve())
+    assert manifest["row_count"] == 6
+    assert "Data source" in manifest["dropped_columns"]
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    assert workbook.sheetnames == ["Analysis"]
+    assert [cell.value for cell in workbook["Analysis"][1]][:2] == ["Composition", "Microwire"]
+
+
+def test_builder_update_filters_existing_records_under_refresh_root(tmp_path: Path) -> None:
+    refresh_root = tmp_path / "mini DMA"
+    stale_path = refresh_root / "Ni46Fe27Ga23Co2Cu2 2_8 iso-stress" / "measurement.csv"
+    fresh_path = refresh_root / "Ni46Fe27Ga23Cu2Co2 2_8 iso-stress" / "measurement.csv"
+    unrelated_path = tmp_path / "other" / "measurement.csv"
+
+    records = [
+        SimpleNamespace(path=str(stale_path), label="stale"),
+        SimpleNamespace(path=str(fresh_path), label="fresh"),
+        SimpleNamespace(path=str(unrelated_path), label="unrelated"),
+    ]
+
+    filtered = launcher_module._filter_builder_records_outside_refresh_roots(
+        records,
+        [refresh_root],
+    )
+
+    assert [record.label for record in filtered] == ["unrelated"]
+
+
+def test_microwire_word_graph_sections_record_reference_and_origin_status() -> None:
+    from microwire_data_builder.core import OriginArtifact
+
     source_only = {
         "Manual stress/strain graphs": [
             "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
@@ -56,29 +1137,64 @@ def test_microwire_word_graph_sections_require_origin_graph_descriptors() -> Non
         "Manual stress/strain graphs (Origin)": "shape_memory.oggu",
     }
 
-    assert launcher_module._microwire_word_graph_sections_for_row(source_only) == {}
-    assert launcher_module._microwire_word_graph_sections_for_row(with_origin) == {
-        "Manual stress/strain": {
-            "sources": [],
-            "graphs": ["shape_memory.oggu"],
-            "references": ["30mA", "shape_memory.oggu"],
-        }
-    }
+    source_section = launcher_module._microwire_word_graph_sections_for_row(source_only)[
+        "Manual stress/strain"
+    ]
+    assert source_section["included"] is True
+    assert source_section["reason"] == "reference_content"
+    assert source_section["graphs"] == []
+    assert source_section["references"] == [
+        "20mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+        "30mA fracture -- Ni52Fe15Ga27Co6 2/1oe",
+    ]
+
+    missing_section = launcher_module._microwire_word_graph_sections_for_row(with_origin)[
+        "Manual stress/strain"
+    ]
+    assert missing_section["included"] is True
+    assert missing_section["reason"] == "reference_content"
+    assert missing_section["graphs"] == []
+    assert missing_section["references"] == ["30mA"]
+    assert missing_section["missing_origin_descriptors"] == ["shape_memory.oggu"]
+
+    artifact_section = launcher_module._microwire_word_graph_sections_for_row(
+        with_origin,
+        {
+            "shape_memory.oggu": OriginArtifact(
+                descriptor="shape_memory.oggu",
+                object_path=Path("shape_memory.oggu"),
+                display_text="shape memory",
+            )
+        },
+    )["Manual stress/strain"]
+    assert artifact_section["included"] is True
+    assert artifact_section["reason"] == "accepted_origin_object"
+    assert artifact_section["graphs"] == ["shape_memory.oggu"]
+    assert artifact_section["references"] == ["30mA"]
 
 
 def test_microwire_word_graph_sections_accept_legacy_shape_memory_columns() -> None:
+    from microwire_data_builder.core import OriginArtifact
+
     row = {
         "Shape memory stress/strain graphs": ["30mA"],
         "Shape memory stress/strain graphs (Origin)": "legacy_shape_memory.oggu",
     }
 
-    assert launcher_module._microwire_word_graph_sections_for_row(row) == {
-        "Manual stress/strain": {
-            "sources": [],
-            "graphs": ["legacy_shape_memory.oggu"],
-            "references": ["30mA", "legacy_shape_memory.oggu"],
-        }
-    }
+    section = launcher_module._microwire_word_graph_sections_for_row(
+        row,
+        {
+            "legacy_shape_memory.oggu": OriginArtifact(
+                descriptor="legacy_shape_memory.oggu",
+                object_path=Path("legacy_shape_memory.oggu"),
+                display_text="legacy shape memory",
+            )
+        },
+    )["Manual stress/strain"]
+    assert section["included"] is True
+    assert section["reason"] == "accepted_origin_object"
+    assert section["graphs"] == ["legacy_shape_memory.oggu"]
+    assert section["references"] == ["30mA"]
 
 
 def _wait_for_registry(window: launcher_module.MasterLauncher, app: QtWidgets.QApplication) -> None:
@@ -365,6 +1481,105 @@ def test_launcher_detects_microwire_word_report_cli_flags() -> None:
     assert args.out == "artifacts/word-report"
 
 
+def test_launcher_detects_microwire_word_job_flag() -> None:
+    args, _qt_args = launcher_module._parse_launcher_args(
+        [
+            "--microwire-word-job",
+            "jobs/word-export.json",
+        ]
+    )
+
+    assert launcher_module._is_microwire_word_job_requested(args) is True  # noqa: SLF001
+    assert args.microwire_word_job == "jobs/word-export.json"
+
+
+def test_run_microwire_word_job_dry_run_writes_status_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "database.pydpj"
+    source.write_text('{"sections": {}}', encoding="utf-8")
+    job_path = tmp_path / "word-job.json"
+    job_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "job_type": "microwire_word_export",
+                "job_id": "dry_word",
+                "source": str(source),
+                "output_dir": str(tmp_path / "reports"),
+                "sample": "Ni50Fe27Ga23 12/2",
+                "include_origin": True,
+                "force_project_rebuild": True,
+                "graphs_only": True,
+                "dry_run": True,
+                "paths": {
+                    "status": str(tmp_path / "status.json"),
+                    "progress": str(tmp_path / "progress.json"),
+                    "manifest": str(tmp_path / "manifest.json"),
+                    "log": str(tmp_path / "job.log"),
+                    "cancel": str(tmp_path / "cancel.requested"),
+                },
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+    args = argparse.Namespace(microwire_word_job=str(job_path))
+
+    exit_code = launcher_module._run_microwire_word_job_cli(args)  # noqa: SLF001
+
+    assert exit_code == 0
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    progress = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert status["state"] == "succeeded"
+    assert status["dry_run"] is True
+    assert progress["events"][-1]["event"] == "validated"
+    assert manifest["job_type"] == "microwire_word_export"
+    assert manifest["dry_run"] is True
+    assert "--microwire-word-report" in manifest["equivalent_command"]
+    assert "--microwire-word-graphs-only" in manifest["equivalent_command"]
+    output = capsys.readouterr().out
+    assert "dry_run=true" in output
+    assert "manifest=" in output
+
+
+def test_run_microwire_word_job_honors_pre_start_cancel(tmp_path: Path) -> None:
+    source = tmp_path / "database.pydpj"
+    source.write_text('{"sections": {}}', encoding="utf-8")
+    cancel = tmp_path / "cancel.requested"
+    cancel.write_text("stop", encoding="utf-8")
+    job_path = tmp_path / "word-job.json"
+    job_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "job_type": "microwire_word_export",
+                "job_id": "cancelled_word",
+                "source": str(source),
+                "dry_run": True,
+                "paths": {
+                    "status": str(tmp_path / "status.json"),
+                    "progress": str(tmp_path / "progress.json"),
+                    "manifest": str(tmp_path / "manifest.json"),
+                    "log": str(tmp_path / "job.log"),
+                    "cancel": str(cancel),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(microwire_word_job=str(job_path))
+
+    exit_code = launcher_module._run_microwire_word_job_cli(args)  # noqa: SLF001
+
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert exit_code == 130
+    assert status["state"] == "cancelled"
+    assert manifest["state"] == "cancelled"
+
+
 def test_run_microwire_word_report_cli_accepts_rvst_csv(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -515,6 +1730,232 @@ def test_microwire_word_report_project_merges_section_rows_and_rvst(
     assert row["R vs T points"] == 2
     assert row["R vs T temperature range (deg C)"] == "-40.5 to -39"
     assert row["TMA graphs"] == mini_dma_path.parent.name
+
+
+def test_microwire_word_report_project_replaces_stale_mini_dma_sources_with_active_runs(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    active_a = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 heat shield iso-stress_run03"
+    active_b = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 baseline-50mpa-01"
+    archived = data_root / "mini DMA" / "archive" / "Ni50Fe27Ga23 12_2 old_run01"
+    for path in (active_a, active_b, archived):
+        path.mkdir(parents=True)
+        (path / "measurement.csv").write_text(
+            "\n".join(
+                [
+                    "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,resistance_ohm,current_measured_mA",
+                    "0.1,current,50,1,0.0,100.0,1.0",
+                    "0.2,current,50,1,0.1,101.0,2.0",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "mini_dma": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Mini DMA graphs": ["stale archived run"],
+                                "_sources": [str(archived)],
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, _origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert set(row["_word_mini_dma_sources"]) == {str(active_a), str(active_b)}
+    mini_dma_graphs = row["TMA graphs"]
+    assert set(mini_dma_graphs) == {active_a.name, active_b.name}
+    assert archived.name not in mini_dma_graphs
+    assert "stale archived run" not in mini_dma_graphs
+
+
+def test_microwire_word_report_project_blocks_stale_mini_dma_when_newest_active_run_unfinished(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    old_finished = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 old_run01"
+    newest_running = data_root / "mini DMA" / "Ni50Fe27Ga23 12_2 active_run02"
+    for path, metadata in (
+        (
+            old_finished,
+            {
+                "sample_name": "Ni50Fe27Ga23 12/2",
+                "created_utc": "2026-06-01 09:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 09:20:00",
+            },
+        ),
+        (
+            newest_running,
+            {
+                "sample_name": "Ni50Fe27Ga23 12/2",
+                "created_utc": "2026-06-01 10:00:00",
+                "session_state": "running",
+            },
+        ),
+    ):
+        path.mkdir(parents=True)
+        (path / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        (path / "measurement.csv").write_text(
+            "\n".join(
+                [
+                    "elapsed_s,automation_phase,automation_target_value,plateau_index,strain_pct,resistance_ohm,current_measured_mA",
+                    "0.1,current,50,1,0.0,100.0,1.0",
+                    "0.2,current,50,1,0.1,101.0,2.0",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 1,
+                "sections": {
+                    "mini_dma": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Mini DMA graphs": ["stale old run"],
+                                "_sources": [str(old_finished)],
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    frame, _origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        argparse.Namespace(microwire_word_sample="Ni50Fe27Ga23 12/2", microwire_word_origin=False),
+        tmp_path / "reports",
+    )
+
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert not launcher_module._word_project_value_items(row.get("_word_mini_dma_sources"))  # noqa: SLF001
+    assert not launcher_module._word_project_value_items(row.get("TMA graphs"))  # noqa: SLF001
+
+
+def test_microwire_word_report_project_uses_shape_memory_payload_sources(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "Praha"
+    project_path = data_root / "microwire_project_copy.pydpj"
+    project_path.parent.mkdir(parents=True)
+    manual_root = data_root / "manual stress-strain"
+    first_path = manual_root / "Ni50Fe27Ga23 12_2 0mA.txt"
+    second_path = manual_root / "Ni50Fe27Ga23 12_2 50mA fracture.txt"
+    manual_root.mkdir(parents=True)
+    for path in (first_path, second_path):
+        path.write_text("0.1 0.01\n0.2 0.02\n", encoding="utf-8")
+    records = [
+        ShapeMemoryStressStrainRecord(
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            sample="Ni50Fe27Ga23 12-2",
+            label="0mA - Ni50Fe27Ga23 12_2 0mA",
+            path=first_path,
+            data=pd.DataFrame(),
+        ),
+        ShapeMemoryStressStrainRecord(
+            key=("Ni50Fe27Ga23", 12, 2, None),
+            sample="Ni50Fe27Ga23 12-2",
+            label="50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+            path=second_path,
+            data=pd.DataFrame(),
+        ),
+    ]
+    encoded_records = safe_codec.encode_envelope(records)
+    project_path.write_text(
+        json.dumps(
+            {
+                "kind": "microwire_data_builder",
+                "version": 2,
+                "sections": {
+                    "shape_memory_stress_strain": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Manual stress/strain graphs": "0mA - Ni50Fe27Ga23 12_2 0mA",
+                                "_sources": [str(first_path)],
+                            }
+                        ],
+                        "payloads": {
+                            "shape_memory_stress_strain_records": encoded_records,
+                        },
+                    },
+                    "assemble": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/2",
+                                "Manual stress/strain graphs": [
+                                    "0mA - Ni50Fe27Ga23 12_2 0mA",
+                                    "50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+                                ],
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        microwire_word_sample="Ni50Fe27Ga23 12/2",
+        microwire_word_origin=False,
+    )
+
+    frame, origin_artifacts = launcher_module._load_microwire_word_report_frame(  # noqa: SLF001
+        project_path,
+        args,
+        tmp_path / "reports",
+    )
+
+    assert origin_artifacts == {}
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["Manual stress/strain graphs"] == [
+        "0mA - Ni50Fe27Ga23 12_2 0mA",
+        "50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
+    ]
+    assert row["_word_shape_memory_stress_strain_sources"] == [
+        str(first_path),
+        str(second_path),
+    ]
 
 
 def test_microwire_word_report_project_exports_rvst_through_pyplot(
@@ -784,6 +2225,31 @@ def test_automation_recipe_validation_errors(
     assert message_fragment in capsys.readouterr().out
 
 
+def test_write_json_keeps_existing_valid_json_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "project.pydpj"
+    target.write_text(json.dumps({"kind": "old", "version": 1}), encoding="utf-8")
+    real_replace = launcher_module.os.replace
+
+    def fail_target_replace(source: object, destination: object) -> None:
+        if Path(destination) == target:
+            raise OSError("simulated replace failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(launcher_module.os, "replace", fail_target_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        launcher_module._write_json(  # noqa: SLF001 - exercise atomic writer
+            target,
+            {"kind": "new", "version": 1},
+        )
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"kind": "old", "version": 1}
+    assert not list(tmp_path.glob(".project.pydpj.*.tmp"))
+
+
 def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -858,7 +2324,7 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["vsm_temperature_scan"]
     assert section_payload["rows"]
-    assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == safe_codec.CODEC_ENCODING
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "ok"
     assert manifest["copied_project"] == str(output_project.resolve())
@@ -879,7 +2345,7 @@ def test_builder_automation_recipe_updates_annealing_copy(
     project_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "kind": "MicrowireDataBuilder",
                 "saved_at": "2026-05-25 10:00",
                 "sections": {},
@@ -927,7 +2393,7 @@ def test_builder_automation_recipe_updates_annealing_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["annealing"]
-    assert section_payload["payloads"]["annealing_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["annealing_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["Composition"] == "Ni50Fe27Ga23"
@@ -940,6 +2406,232 @@ def test_builder_automation_recipe_updates_annealing_copy(
     assert update_command["updated_count"] == 1
     assert update_command["skipped_count"] == 1
     assert update_command["skipped_sources"] == [str(bad_path)]
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "12/2"
+
+
+def test_builder_rebuild_assemble_overlays_saved_transition_reviews(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    metadata = MeasurementMetadata(
+        composition_token="Ni50Fe27Ga23",
+        draw_x=10,
+        piece_y=4,
+        setpoint_mA=80,
+        alt_variant=False,
+        measurement_id="reviewed-transition",
+        file_name="Ni50Fe27Ga23 10_4 80mA.txt",
+        relpath="Ni50Fe27Ga23 10_4 80mA.txt",
+        timestamp_mtime_utc="2026-06-19T09:00:00+00:00",
+    )
+    record = MeasurementRecord(
+        path=tmp_path / metadata.file_name,
+        metadata=metadata,
+        dataframe=launcher_module.pd.DataFrame(
+            {"I_mA": [1.0, 20.0, 40.0, 80.0], "R_Ohm": [100.0, 98.0, 110.0, 120.0]}
+        ),
+        sanity_ok=True,
+        sanity_error=0.0,
+    )
+    record_id = builder_ui._transition_record_id_for_annealing_record(record)  # noqa: SLF001
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-06-19 09:30",
+                "sections": {
+                    "annealing": {
+                        "section": "annealing",
+                        "columns": ["Composition", "Microwire"],
+                        "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "10/4"}],
+                        "extra": {
+                            builder_ui.TRANSITION_REVIEW_EXTRA_KEY: {
+                                "schema_version": builder_ui.TRANSITION_REVIEW_SCHEMA_VERSION,
+                                "records": {
+                                    record_id: {
+                                        "status": builder_ui.TRANSITION_REVIEW_STATUS_MANUAL_ADJUSTED,
+                                        "included": True,
+                                        "auto_values_mA": {"As1": 12.0, "Af1": 22.0},
+                                        "manual_values_mA": {"As1": 14.0},
+                                        "final_values_mA": {"As1": 14.0, "Af1": 22.0},
+                                    }
+                                },
+                            }
+                        },
+                        "payloads": {
+                            "annealing_records": builder_ui._encode_project_payload([record]),  # noqa: SLF001
+                        },
+                    },
+                    "microscope": {
+                        "section": "microscope",
+                        "columns": [
+                            "Composition",
+                            "Microwire",
+                            builder_ui.MICROSCOPE_D_COLUMN,
+                            "_key",
+                        ],
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "10/4",
+                                builder_ui.MICROSCOPE_D_COLUMN: 20.0,
+                                "_key": "Ni50Fe27Ga23|10|4",
+                            }
+                        ],
+                    },
+                    "current_density": {
+                        "section": "current_density",
+                        "columns": [
+                            "Composition",
+                            "Microwire",
+                            builder_ui.MICROSCOPE_D_COLUMN,
+                            "As1 (mA)",
+                            "Af1 (mA)",
+                            "J_As1 (A/mm^2)",
+                            "J_Af1 (A/mm^2)",
+                            "Notes",
+                            "_group_key",
+                        ],
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "10/4",
+                                builder_ui.MICROSCOPE_D_COLUMN: None,
+                                "As1 (mA)": 14.0,
+                                "Af1 (mA)": 22.0,
+                                "J_As1 (A/mm^2)": None,
+                                "J_Af1 (A/mm^2)": None,
+                                "Notes": "Missing diameter",
+                                "_group_key": "Ni50Fe27Ga23|10|4",
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_project = tmp_path / "out" / "updated.pydpj"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "commands": [
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["annealing", "microscope", "current_density"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    assemble_rows = output_payload["sections"]["assemble"]["rows"]
+    assert assemble_rows
+    assemble_row = assemble_rows[0]
+    assert assemble_row["Composition"] == "Ni50Fe27Ga23"
+    assert assemble_row["Microwire"] == "10/4"
+    assert assemble_row["As1 (mA)"] == pytest.approx(14.0)
+    assert assemble_row["Af1 (mA)"] == pytest.approx(22.0)
+    assert assemble_row["J_As1 (A/mm^2)"] == pytest.approx(
+        (14.0 / 1000.0) / (np.pi * 0.01 * 0.01)
+    )
+    assert assemble_row["J_Af1 (A/mm^2)"] == pytest.approx(
+        (22.0 / 1000.0) / (np.pi * 0.01 * 0.01)
+    )
+
+
+def test_builder_automation_recipe_updates_microscope_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "MicrowireDataBuilder",
+                "saved_at": "2026-05-25 10:00",
+                "sections": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    core_image = tmp_path / "Ni50Fe27Ga23 12_2 core.jpg"
+    glass_image = tmp_path / "Ni50Fe27Ga23 12_2 glass.jpg"
+    core_image.write_bytes(b"core image")
+    glass_image.write_bytes(b"glass image")
+    output_project = tmp_path / "out" / "updated.pydpj"
+    manifest_path = tmp_path / "out" / "manifest.json"
+    recipe_path = tmp_path / "builder_recipe.json"
+    recipe_path.write_text(
+        json.dumps(
+            {
+                "kind": "builder",
+                "version": 1,
+                "project": str(project_path),
+                "working_copy_dir": str(tmp_path / "working"),
+                "output_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [
+                    {
+                        "action": "update_section",
+                        "section": "microscope",
+                        "paths": [str(core_image), str(glass_image)],
+                    },
+                    {
+                        "action": "rebuild_assemble",
+                        "sections": ["microscope"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
+        argparse.Namespace(automation_recipe=str(recipe_path)),
+        [],
+    )
+
+    assert exit_code == 0
+    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    section_payload = output_payload["sections"]["microscope"]
+    assert section_payload["payloads"]["microscope_index"]["encoding"] == safe_codec.CODEC_ENCODING
+    assert section_payload["rows"]
+    row = section_payload["rows"][0]
+    assert row["Composition"] == "Ni50Fe27Ga23"
+    assert row["Microwire"] == "12/2"
+    assert row["_core_image"] == str(core_image)
+    assert row["_glass_image"] == str(glass_image)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    update_command = manifest["commands"][0]
+    assert update_command["section"] == "microscope"
+    assert update_command["record_count"] == 1
+    assert update_command["updated_count"] == 2
     assemble_rows = output_payload["sections"]["assemble"]["rows"]
     assert assemble_rows
     assemble_row = assemble_rows[0]
@@ -1023,7 +2715,7 @@ def test_builder_automation_recipe_updates_vsm_hysteresis_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["vsm_hysteresis"]
-    assert section_payload["payloads"]["vsm_hysteresis_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["vsm_hysteresis_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -1103,7 +2795,7 @@ def test_builder_automation_recipe_updates_dma_iso_stress_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["dma_iso_stress"]
-    assert section_payload["payloads"]["dma_iso_stress_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["dma_iso_stress_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -1195,7 +2887,7 @@ def test_builder_automation_recipe_updates_fmr_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["fmr"]
-    assert section_payload["payloads"]["fmr_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["fmr_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -1286,7 +2978,7 @@ def test_builder_automation_recipe_updates_shape_memory_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["shape_memory_stress_strain"]
-    assert section_payload["payloads"]["shape_memory_stress_strain_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["shape_memory_stress_strain_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -1310,7 +3002,15 @@ def test_builder_automation_recipe_updates_shape_memory_copy(
 def _write_mini_dma_run(path: Path, *, sample_name: str = "Ni50Fe27Ga23 12_2") -> Path:
     path.mkdir(parents=True, exist_ok=True)
     (path / "metadata.json").write_text(
-        json.dumps({"sample_name": sample_name, "initial_length_mm": 10.0}),
+        json.dumps(
+            {
+                "sample_name": sample_name,
+                "initial_length_mm": 10.0,
+                "created_utc": "2026-06-01 09:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 09:10:00",
+            }
+        ),
         encoding="utf-8",
     )
     rows = [
@@ -1338,6 +3038,9 @@ def _write_transition_mini_dma_run(
                 "sample_name": sample_name,
                 "initial_length_mm": 10.0,
                 "wire_diameter_mm": 0.0191,
+                "created_utc": "2026-06-01 09:00:00",
+                "session_state": "finished",
+                "finished_utc": "2026-06-01 09:10:00",
             }
         ),
         encoding="utf-8",
@@ -1346,11 +3049,11 @@ def _write_transition_mini_dma_run(
     cooling_current = np.linspace(100.0, 1.0, 120)
 
     def piecewise(current: np.ndarray, start: float, finish: float) -> np.ndarray:
-        before = 0.1 + current * 0.002
-        start_value = 0.1 + start * 0.002
-        transition = start_value + (current - start) * 0.04
-        finish_value = start_value + (finish - start) * 0.04
-        after = finish_value + (current - finish) * 0.003
+        before = 4.0 - current * 0.002
+        start_value = 4.0 - start * 0.002
+        transition = start_value - (current - start) * 0.04
+        finish_value = start_value - (finish - start) * 0.04
+        after = finish_value - (current - finish) * 0.003
         return np.where(current < start, before, np.where(current <= finish, transition, after))
 
     current = np.concatenate([heating_current, cooling_current])
@@ -1449,14 +3152,15 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
         "100 MPa: 0.2% @ 20 mA",
     ]
     assert row["TMA break point"] == ""
-    assert section_payload["payloads"]["mini_dma_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["mini_dma_records"]["encoding"] == safe_codec.CODEC_ENCODING
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     command = manifest["commands"][0]
     assert command["section"] == "mini_dma"
+    assert command["candidate_count"] == 1
     assert command["record_count"] == 1
     assert command["updated_count"] == 1
-    assert command["skipped_count"] == 1
-    assert str(bad_run / "measurement.csv") in command["skipped_sources"]
+    assert command["skipped_count"] == 0
+    assert command["skipped_sources"] == []
     rebuild_command = manifest["commands"][1]
     assert rebuild_command["action"] == "rebuild_assemble"
     assert rebuild_command["status"] == "ok"
@@ -1612,6 +3316,70 @@ def test_builder_automation_recipe_promotes_database_latest_and_archives_previou
     assert latest_manifest_payload["database"]["archived_project"] == str(archived_project.resolve())
 
 
+def test_builder_database_promotion_keeps_latest_when_project_copy_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_dir = tmp_path / "microwire_database"
+    latest_project = database_dir / "microwire_database_latest.pydpj"
+    latest_manifest = database_dir / "update_manifest_latest.json"
+    output_project = tmp_path / "working" / "microwire_database_2026-05-26_1512.pydpj"
+    manifest_path = tmp_path / "working" / "update_manifest_2026-05-26_1512.json"
+    database_paths = {
+        "database_dir": database_dir,
+        "database_name": "microwire_database",
+        "timestamp": "2026-05-26_1512",
+        "latest_project": latest_project,
+        "latest_manifest": latest_manifest,
+        "archive_dir": database_dir / "archive",
+        "archive_project": database_dir / "archive" / "microwire_database_2026-05-26_1512.pydpj",
+        "archive_manifest": database_dir / "archive" / "update_manifest_2026-05-26_1512.json",
+    }
+    old_payload = {
+        "version": 1,
+        "kind": "MicrowireDataBuilder",
+        "saved_at": "2026-05-25 10:00",
+        "sections": {},
+    }
+    new_payload = {
+        "version": 1,
+        "kind": "MicrowireDataBuilder",
+        "saved_at": "2026-05-26 15:12",
+        "sections": {"vsm_temperature_scan": {"rows": [{"Sample": "Ni50Fe27Ga23 5-4"}]}},
+    }
+    launcher_module._write_json(latest_project, old_payload)  # noqa: SLF001
+    launcher_module._write_json(latest_manifest, {"kind": "builder", "status": "old"})  # noqa: SLF001
+    launcher_module._write_json(output_project, new_payload)  # noqa: SLF001
+    real_copy_file_atomic = launcher_module._copy_file_atomic  # noqa: SLF001
+
+    def fail_latest_project_copy(source: Path, target: Path) -> None:
+        if target == latest_project:
+            raise OSError("simulated latest project copy failure")
+        real_copy_file_atomic(source, target)
+
+    monkeypatch.setattr(launcher_module, "_copy_file_atomic", fail_latest_project_copy)
+
+    with pytest.raises(OSError, match="simulated latest project copy failure"):
+        launcher_module._promote_builder_database_latest(  # noqa: SLF001
+            database_paths=database_paths,
+            output_project=output_project,
+            manifest_path=manifest_path,
+            manifest={
+                "kind": "builder",
+                "version": 1,
+                "status": "ok",
+                "source_project": str(latest_project),
+                "copied_project": str(output_project),
+                "manifest_path": str(manifest_path),
+                "commands": [],
+            },
+        )
+
+    assert json.loads(latest_project.read_text(encoding="utf-8")) == old_payload
+    assert latest_manifest.exists()
+    assert not (database_dir / "archive" / "microwire_database_2026-05-26_1512.pydpj").exists()
+
+
 def test_builder_automation_recipe_can_exclude_named_subdirectories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1633,6 +3401,11 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
     data_root = tmp_path / "mini_dma"
     good_run = _write_mini_dma_run(data_root / "good_run")
     archived_run = _write_mini_dma_run(data_root / "archive" / "old_run", sample_name="Ni50Fe27Ga23 12_3")
+    tests_run = _write_mini_dma_run(data_root / "tests" / "fixture_run", sample_name="Ni50Fe27Ga23 12_4")
+    cache_run = _write_mini_dma_run(data_root / "cache" / "scratch_run", sample_name="Ni50Fe27Ga23 12_5")
+    invalid_run = data_root / "Ni50Fe27Ga23 12_6 notes"
+    invalid_run.mkdir(parents=True)
+    (invalid_run / "measurement.csv").write_text("not,a,mini,dma\n1,2,3,4\n", encoding="utf-8")
     output_project = tmp_path / "out" / "updated.pydpj"
     recipe_path = tmp_path / "builder_recipe.json"
     recipe_path.write_text(
@@ -1666,6 +3439,9 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
     assert len(rows) == 1
     assert str(good_run) in rows[0]["_sources"]
     assert str(archived_run) not in rows[0]["_sources"]
+    assert str(tests_run) not in rows[0]["_sources"]
+    assert str(cache_run) not in rows[0]["_sources"]
+    assert str(invalid_run) not in rows[0]["_sources"]
 
 
 def test_automation_recipe_rejects_origin_when_unavailable(

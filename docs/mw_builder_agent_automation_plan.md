@@ -1,4 +1,4 @@
-# Microwire Builder Agent Automation Plan
+﻿# Microwire Builder Agent Automation Plan
 
 This note tracks the implementation direction for making Microwire Data Builder safe to operate from Codex without opening the UI by hand.
 
@@ -16,9 +16,9 @@ The source project must remain untouched unless the user explicitly asks to over
 ## Implemented
 
 - `launcher.py --automation-recipe <recipe.json>` now accepts `kind: "builder"` recipes.
-- `action: "update_section"` supports graph-backed sections including `annealing`, `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, and `fmr`.
+- `action: "update_section"` supports `microscope` plus graph-backed sections including `annealing`, `vsm_temperature_scan`, `vsm_hysteresis`, `dma_iso_stress`, `mini_dma`, `shape_memory_stress_strain`, and `fmr`.
 - `action: "rebuild_assemble"` refreshes saved Assemble rows from the copied project's embedded section payloads without opening the full Builder UI.
-- Builder section project payloads now embed parsed graph payloads as `pickle-base64`, so copied `.pydpj` files can restore graph records without the global AppData store.
+- Builder section project payloads now embed parsed graph payloads in the bounded `microwire-json` version 2 envelope, so copied `.pydpj` files can restore graph records without the global AppData store or ordinary pickle decoding.
 - Automation runs patch the Builder storage root to a working-copy-local `_builder_store` folder while processing, so tests and CLI recipes do not depend on the user's real Builder cache.
 - `database_dir` recipes maintain a rolling `microwire_database_latest.pydpj` plus `update_manifest_latest.json`, archiving the previous latest files before promoting a successful update.
 - Builder startup can be configured to open the latest project from that database folder instead of the older last-opened project.
@@ -42,8 +42,12 @@ Preferred shape:
       "rows": [],
       "payloads": {
         "vsm_temperature_scan_records": {
-          "encoding": "pickle-base64",
-          "value": "..."
+          "encoding": "microwire-json",
+          "version": 2,
+          "value": {
+            "$type": "list",
+            "items": []
+          }
         }
       }
     }

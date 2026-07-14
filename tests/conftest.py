@@ -46,6 +46,10 @@ def pytest_configure() -> None:
             "MICROWIRE_BUILDER_STORAGE_ROOT",
             str(tmp_root / "microwire-data-builder"),
         )
+        os.environ.setdefault(
+            "MICROWIRE_BUILDER_SETTINGS_FILE",
+            str(tmp_root / "microwire-data-builder-settings.ini"),
+        )
         tempfile.tempdir = str(tmp_root)
     except Exception:
         pass

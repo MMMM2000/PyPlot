@@ -80,3 +80,29 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
   `plotting/plugins/base.py`. The workbench and launcher discover plugin classes from the shared
   registry automatically, while standalone plotters can still be surfaced by handing their launch
   functions to `plotting.pyplot.app.main()`.
+
+### Windows Verification
+
+Use the Windows runner when invoking pytest from Codex or a local PowerShell
+session. It forces headless Qt/Matplotlib defaults, stores pytest temp files and
+Microwire Data Builder state under `artifacts/test-runs/`, and keeps tool caches
+inside the workspace:
+
+```powershell
+.\scripts\run_tests.ps1 -Mode focused tests\test_launcher.py::test_launcher_detects_pyplot_automation_flags
+.\scripts\run_tests.ps1 -Mode full
+.\scripts\run_tests.ps1 -Mode focused -DryRun tests\test_launcher.py
+```
+
+If local execution policy blocks `.ps1` scripts, invoke the same runner with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_tests.ps1 -Mode focused -DryRun
+```
+
+The underlying Python entrypoint is also available for CI-like callers:
+
+```powershell
+uv run python scripts\ci_verify.py --mode focused --dry-run tests\test_launcher.py
+uv run python scripts\ci_verify.py --mode full
+```
