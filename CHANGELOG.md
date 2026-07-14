@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-07-14 06:50 UTC
+
+- TMA hardware auto-connect now adopts an already-running localhost shared HMP broker before attempting direct serial supply detection, preventing saved direct-HMP settings from competing for the broker-owned COM port.
+- Kept the automatic localhost broker discovery probe to 0.5 seconds so direct, non-shared benches continue to reach serial detection promptly.
+
 ## 2026-07-03 06:30 UTC
 
 - Restored the TMA settings wheel guard so mouse-wheel scrolling the settings panel scrolls the panel instead of changing focused spin-box or combo-box values.
