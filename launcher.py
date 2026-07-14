@@ -12,7 +12,6 @@ import math
 import re
 import shutil
 import base64
-import pickle
 import secrets
 import socket
 import socketserver
@@ -30,6 +29,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Tuple,
 import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
+
+from microwire_data_builder.safe_codec import SafeCodecError, decode_envelope, read_json_file
 
 from plotting.shared.experiment_processes import (
     ExperimentProcessSpec,
@@ -397,19 +398,38 @@ def _resolve_recipe_path_value(
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    if not path.exists():
+        raise _AutomationRecipeError(f"{label} file not found: {path}")
     try:
-        raw = path.read_text(encoding="utf-8")
+        payload = read_json_file(path)
     except FileNotFoundError as exc:
         raise _AutomationRecipeError(f"{label} file not found: {path}") from exc
+    except SafeCodecError as exc:
+        if "Invalid JSON file" in str(exc):
+            raise _AutomationRecipeError(
+                f"{label} file is not valid JSON: {path}"
+            ) from exc
+        raise _AutomationRecipeError(f"Failed to read {label} file {path}: {exc}") from exc
     except Exception as exc:
         raise _AutomationRecipeError(f"Failed to read {label} file {path}: {exc}") from exc
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise _AutomationRecipeError(f"{label} file is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise _AutomationRecipeError(f"{label} file must contain a JSON object.")
     return payload
+
+
+_BUILDER_LEGACY_PICKLE_WARNING_EMITTED = False
+
+
+def _warn_builder_legacy_pickle_blocked() -> None:
+    global _BUILDER_LEGACY_PICKLE_WARNING_EMITTED
+    if _BUILDER_LEGACY_PICKLE_WARNING_EMITTED:
+        return
+    _BUILDER_LEGACY_PICKLE_WARNING_EMITTED = True
+    LOGGER.warning(
+        "Legacy Builder pickle payload was blocked; ordinary CLI reads never execute "
+        "pickle. Use --microwire-builder-trusted-migrate with "
+        "--microwire-builder-migration-output pointing to a distinct disposable copy."
+    )
 
 
 @dataclass(frozen=True)
@@ -525,7 +545,7 @@ def _validate_builder_project_payload(payload: dict[str, Any], *, path: Path) ->
         raise _AutomationRecipeError(
             f"Project '{path}' is not a Microwire Data Builder project."
         )
-    if payload.get("version") != 1:
+    if payload.get("version") not in {1, 2}:
         raise _AutomationRecipeError(
             f"Project '{path}' uses unsupported Microwire Data Builder project version {payload.get('version')!r}."
         )
@@ -912,6 +932,8 @@ def _decode_builder_section_payload(
     if not isinstance(payloads, Mapping):
         return None
     encoded = payloads.get(payload_name)
+    if isinstance(encoded, Mapping) and encoded.get("encoding") == "pickle-base64":
+        _warn_builder_legacy_pickle_blocked()
     decoder = getattr(builder_ui, "_decode_project_payload", None)
     if not callable(decoder):
         return None
@@ -1826,14 +1848,13 @@ def _mini_dma_records_from_sections(sections: Mapping[str, object]) -> list[obje
         return []
     raw_records = payloads.get("mini_dma_records")
     if isinstance(raw_records, Mapping):
-        encoding = str(raw_records.get("encoding") or "").strip().casefold()
-        raw_value = raw_records.get("value", raw_records.get("data"))
-        if encoding == "pickle-base64" and isinstance(raw_value, str):
-            try:
-                decoded = pickle.loads(base64.b64decode(raw_value))
-            except Exception:
-                return []
-            return list(decoded) if isinstance(decoded, Iterable) else []
+        if raw_records.get("encoding") == "pickle-base64":
+            _warn_builder_legacy_pickle_blocked()
+        try:
+            decoded = decode_envelope(raw_records)
+        except SafeCodecError:
+            return []
+        return list(decoded) if isinstance(decoded, Iterable) else []
     if isinstance(raw_records, Iterable) and not isinstance(raw_records, (str, bytes, Mapping)):
         return list(raw_records)
     return []
@@ -3686,6 +3707,22 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         help="Export saved Assemble rows from a Builder .pydpj to an Excel workbook without opening the Builder UI.",
     )
     parser.add_argument(
+        "--microwire-builder-trusted-migrate",
+        default=None,
+        help=(
+            "Explicitly trust and migrate a legacy Builder .pydpj or storage root. "
+            "This is the only path that may deserialize legacy pickle data."
+        ),
+    )
+    parser.add_argument(
+        "--microwire-builder-migration-output",
+        default=None,
+        help=(
+            "Required new output .pydpj or storage root for trusted migration; "
+            "must differ from the source and must not already exist."
+        ),
+    )
+    parser.add_argument(
         "--microwire-assemble-output",
         default=None,
         help="Output .xlsx path for --microwire-assemble-export. Defaults to <project>_assemble_public.xlsx.",
@@ -3873,12 +3910,40 @@ def _is_microwire_assemble_export_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_assemble_export", None))
 
 
+def _is_builder_trusted_migration_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "microwire_builder_trusted_migrate", None))
+
+
 def _is_microwire_word_report_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_word_report", None))
 
 
 def _is_microwire_word_job_requested(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "microwire_word_job", None))
+
+
+def _run_builder_trusted_migration_cli(args: argparse.Namespace) -> int:
+    from microwire_data_builder.legacy_migration import (
+        migrate_legacy_project_trusted,
+        migrate_legacy_store_trusted,
+    )
+
+    source = Path(
+        str(getattr(args, "microwire_builder_trusted_migrate", "") or "")
+    ).expanduser()
+    raw_output = getattr(args, "microwire_builder_migration_output", None)
+    if not raw_output:
+        raise _AutomationRecipeError(
+            "--microwire-builder-migration-output is required for trusted migration"
+        )
+    output = Path(str(raw_output)).expanduser()
+    result = (
+        migrate_legacy_store_trusted(source, output)
+        if source.is_dir()
+        else migrate_legacy_project_trusted(source, output)
+    )
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
 
 
 def _run_microwire_assemble_export_cli(args: argparse.Namespace) -> int:
@@ -4308,17 +4373,11 @@ def _project_section_rows(section: object) -> list[dict[str, Any]]:
 
 
 def _decode_word_project_payload(payload: object) -> object:
-    if not isinstance(payload, Mapping):
-        return None
-    if payload.get("encoding") != "pickle-base64":
-        return None
-    value = payload.get("value")
-    if not isinstance(value, str):
-        return None
+    if isinstance(payload, Mapping) and payload.get("encoding") == "pickle-base64":
+        _warn_builder_legacy_pickle_blocked()
     try:
-        raw = base64.b64decode(value.encode("ascii"), validate=True)
-        return pickle.loads(raw)
-    except Exception:
+        return decode_envelope(payload)
+    except SafeCodecError:
         return None
 
 
@@ -7530,6 +7589,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_run_experiment_process(args))
     if _is_microwire_word_job_requested(args):
         raise SystemExit(_run_microwire_word_job_cli(args))
+    if _is_builder_trusted_migration_requested(args):
+        raise SystemExit(_run_builder_trusted_migration_cli(args))
     if _is_microwire_assemble_export_requested(args):
         raise SystemExit(_run_microwire_assemble_export_cli(args))
     if _is_microwire_word_report_requested(args):

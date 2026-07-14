@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
-import pickle
 import subprocess
 import sys
 import time
@@ -20,7 +18,13 @@ from matplotlib.figure import Figure
 
 import launcher as launcher_module
 from microwire_data_builder import ui as builder_ui
-from microwire_data_builder.core import MeasurementMetadata, MeasurementRecord
+from microwire_data_builder import safe_codec
+from microwire_data_builder.core import (
+    MeasurementMetadata,
+    MeasurementRecord,
+    MiniDmaRecord,
+    ShapeMemoryStressStrainRecord,
+)
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import TabDescriptor
 from plotting.shared.toolkit import theme_manager
@@ -52,7 +56,7 @@ def _ensure_app() -> QtWidgets.QApplication:
 
 def _write_synthetic_assemble_project(path: Path) -> Path:
     payload = {
-        "version": 1,
+        "version": 2,
         "kind": "MicrowireDataBuilder",
         "saved_at": "2026-06-17 09:30",
         "sections": {
@@ -961,31 +965,30 @@ def test_vsm_transition_export_reads_transition_temps_section_reviews() -> None:
 
 def test_tma_target_export_includes_strain_only_record_payloads() -> None:
     records = [
-        SimpleNamespace(
+        MiniDmaRecord(
             path=Path("G:/runs/Ni50Fe27Ga23 6_6 run01"),
             sample="Ni50Fe27Ga23 6-6",
+            data=pd.DataFrame(),
             label="iso-stress - Ni50Fe27Ga23 6_6 run01",
             strain_summary=(
                 "20 MPa / 0.37 g: 0.86% @ 59 mA",
                 "50 MPa / 0.93 g: 0.63% @ 40 mA",
             ),
         ),
-        SimpleNamespace(
+        MiniDmaRecord(
             path=Path("G:/runs/Ni50Fe27Ga23 6_6 run02"),
             sample="Ni50Fe27Ga23 6-6",
+            data=pd.DataFrame(),
             label="iso-stress - Ni50Fe27Ga23 6_6 run02",
             strain_summary=("50 MPa / 0.93 g: 0.72% @ 42 mA",),
         ),
     ]
-    encoded = base64.b64encode(pickle.dumps(records)).decode("ascii")
+    encoded = safe_codec.encode_envelope(records)
     frame = launcher_module._expanded_tma_export_frame_from_sections(  # noqa: SLF001
         {
             "mini_dma": {
                 "payloads": {
-                    "mini_dma_records": {
-                        "encoding": "pickle-base64",
-                        "value": encoded,
-                    }
+                    "mini_dma_records": encoded
                 }
             }
         }
@@ -1015,14 +1018,15 @@ def test_tma_target_export_recalculates_stale_strain_summary_from_raw_run(
     raw_run = tmp_path / "Ni50Fe27Ga23 12_2 raw_run"
     raw_run.mkdir()
     records = [
-        SimpleNamespace(
+        MiniDmaRecord(
             path=raw_run,
             sample="Ni50Fe27Ga23 12-2",
+            data=pd.DataFrame(),
             label="raw run",
             strain_summary=("50 MPa / 1.46 g: 0.08% @ 80 mA",),
         ),
     ]
-    encoded = base64.b64encode(pickle.dumps(records)).decode("ascii")
+    encoded = safe_codec.encode_envelope(records)
 
     def fake_import_module(name: str) -> object:
         if name != "plotting.plugins.mini_dma.core":
@@ -1042,10 +1046,7 @@ def test_tma_target_export_recalculates_stale_strain_summary_from_raw_run(
         {
             "mini_dma": {
                 "payloads": {
-                    "mini_dma_records": {
-                        "encoding": "pickle-base64",
-                        "value": encoded,
-                    }
+                    "mini_dma_records": encoded
                 }
             }
         }
@@ -1880,28 +1881,27 @@ def test_microwire_word_report_project_uses_shape_memory_payload_sources(
     for path in (first_path, second_path):
         path.write_text("0.1 0.01\n0.2 0.02\n", encoding="utf-8")
     records = [
-        SimpleNamespace(
+        ShapeMemoryStressStrainRecord(
             key=("Ni50Fe27Ga23", 12, 2, None),
             sample="Ni50Fe27Ga23 12-2",
             label="0mA - Ni50Fe27Ga23 12_2 0mA",
             path=first_path,
+            data=pd.DataFrame(),
         ),
-        SimpleNamespace(
+        ShapeMemoryStressStrainRecord(
             key=("Ni50Fe27Ga23", 12, 2, None),
             sample="Ni50Fe27Ga23 12-2",
             label="50mA fracture - Ni50Fe27Ga23 12_2 50mA fracture",
             path=second_path,
+            data=pd.DataFrame(),
         ),
     ]
-    encoded_records = {
-        "encoding": "pickle-base64",
-        "value": base64.b64encode(pickle.dumps(records)).decode("ascii"),
-    }
+    encoded_records = safe_codec.encode_envelope(records)
     project_path.write_text(
         json.dumps(
             {
                 "kind": "microwire_data_builder",
-                "version": 1,
+                "version": 2,
                 "sections": {
                     "shape_memory_stress_strain": {
                         "rows": [
@@ -2324,7 +2324,7 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["vsm_temperature_scan"]
     assert section_payload["rows"]
-    assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == safe_codec.CODEC_ENCODING
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "ok"
     assert manifest["copied_project"] == str(output_project.resolve())
@@ -2345,7 +2345,7 @@ def test_builder_automation_recipe_updates_annealing_copy(
     project_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "kind": "MicrowireDataBuilder",
                 "saved_at": "2026-05-25 10:00",
                 "sections": {},
@@ -2393,7 +2393,7 @@ def test_builder_automation_recipe_updates_annealing_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["annealing"]
-    assert section_payload["payloads"]["annealing_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["annealing_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["Composition"] == "Ni50Fe27Ga23"
@@ -2620,7 +2620,7 @@ def test_builder_automation_recipe_updates_microscope_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["microscope"]
-    assert section_payload["payloads"]["microscope_index"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["microscope_index"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["Composition"] == "Ni50Fe27Ga23"
@@ -2715,7 +2715,7 @@ def test_builder_automation_recipe_updates_vsm_hysteresis_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["vsm_hysteresis"]
-    assert section_payload["payloads"]["vsm_hysteresis_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["vsm_hysteresis_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -2795,7 +2795,7 @@ def test_builder_automation_recipe_updates_dma_iso_stress_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["dma_iso_stress"]
-    assert section_payload["payloads"]["dma_iso_stress_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["dma_iso_stress_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -2887,7 +2887,7 @@ def test_builder_automation_recipe_updates_fmr_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["fmr"]
-    assert section_payload["payloads"]["fmr_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["fmr_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -2978,7 +2978,7 @@ def test_builder_automation_recipe_updates_shape_memory_copy(
     assert exit_code == 0
     output_payload = json.loads(output_project.read_text(encoding="utf-8"))
     section_payload = output_payload["sections"]["shape_memory_stress_strain"]
-    assert section_payload["payloads"]["shape_memory_stress_strain_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["shape_memory_stress_strain_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
     row = section_payload["rows"][0]
     assert row["_sample"] == "Ni50Fe27Ga23 12-2"
@@ -3152,7 +3152,7 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
         "100 MPa: 0.2% @ 20 mA",
     ]
     assert row["TMA break point"] == ""
-    assert section_payload["payloads"]["mini_dma_records"]["encoding"] == "pickle-base64"
+    assert section_payload["payloads"]["mini_dma_records"]["encoding"] == safe_codec.CODEC_ENCODING
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     command = manifest["commands"][0]
     assert command["section"] == "mini_dma"
