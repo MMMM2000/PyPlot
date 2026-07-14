@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import copy
-import json
+import logging
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,17 @@ from typing import Any, Dict, List
 
 import pandas as pd
 from PyQt6 import QtCore
+
+from .safe_codec import (
+    SafeCodecError,
+    atomic_write_json,
+    decode_envelope,
+    encode_envelope,
+    read_json_file,
+)
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _storage_root() -> Path:
@@ -80,6 +92,8 @@ class MiniDatabaseStore:
     _pending_payload_values: Dict[tuple[str, str], Any] = {}
     _memory_transactions: List["_MiniDatabaseMemoryTransaction"] = []
     _discard_writes_depth: int = 0
+    _blocked_sections: set[str] = set()
+    _blocked_payloads: set[tuple[str, str]] = set()
 
     def __init__(self, section: str) -> None:
         self.section = section
@@ -90,7 +104,8 @@ class MiniDatabaseStore:
             pass
         self._base_dir = base
         self._meta_path = base / f"{section}.json"
-        self._table_path = base / f"{section}.pkl"
+        self._data_path = base / f"{section}.store.json"
+        self._legacy_table_path = base / f"{section}.pkl"
         self._payload_dir = base / "payloads"
         try:
             self._payload_dir.mkdir(parents=True, exist_ok=True)
@@ -103,7 +118,20 @@ class MiniDatabaseStore:
 
     @property
     def table_path(self) -> Path:
-        return self._table_path
+        return self._data_path
+
+    @property
+    def legacy_table_path(self) -> Path:
+        return self._legacy_table_path
+
+    def _legacy_diagnostic(self, path: Path, label: str) -> str:
+        message = (
+            f"Legacy Builder {label} was not loaded from {path}; ordinary startup never "
+            "executes pickle. Use the explicit trusted-copy migration command with a "
+            "separate output location."
+        )
+        LOGGER.warning(message)
+        return message
 
     @classmethod
     @contextmanager
@@ -186,31 +214,80 @@ class MiniDatabaseStore:
                 extra=dict(cached.extra),
             )
         data = MiniDatabaseData()
-        if self._meta_path.exists():
+        if self._data_path.exists():
             try:
-                payload = json.loads(self._meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                payload = {}
-            sources = payload.get("sources", [])
-            if isinstance(sources, (list, tuple)):
-                data.sources = [str(entry) for entry in sources if isinstance(entry, str)]
-            processed = payload.get("processed", {})
-            if isinstance(processed, dict):
-                for path, timestamp in processed.items():
-                    try:
-                        data.processed[str(path)] = float(timestamp)
-                    except (TypeError, ValueError):
-                        continue
-            extra = payload.get("extra", {})
-            if isinstance(extra, dict):
-                data.extra = dict(extra)
-        if self._table_path.exists():
-            try:
-                table = pd.read_pickle(self._table_path)
-            except Exception:
-                table = pd.DataFrame()
-            if isinstance(table, pd.DataFrame):
+                decoded = decode_envelope(read_json_file(self._data_path))
+                if not isinstance(decoded, dict):
+                    raise SafeCodecError("Builder store root must decode to a mapping")
+                sources = decoded.get("sources", [])
+                processed = decoded.get("processed", {})
+                table = decoded.get("table")
+                extra = decoded.get("extra", {})
+                if not isinstance(sources, list) or not all(
+                    isinstance(entry, str) for entry in sources
+                ):
+                    raise SafeCodecError("Builder store sources must be a list of strings")
+                if not isinstance(processed, dict) or not all(
+                    isinstance(path, str)
+                    and isinstance(timestamp, (int, float))
+                    and not isinstance(timestamp, bool)
+                    for path, timestamp in processed.items()
+                ):
+                    raise SafeCodecError(
+                        "Builder store processed must map strings to numeric timestamps"
+                    )
+                if not isinstance(table, pd.DataFrame):
+                    raise SafeCodecError("Builder store table must be a pandas DataFrame")
+                if not isinstance(extra, dict):
+                    raise SafeCodecError("Builder store extra must be a mapping")
+                data.sources = list(sources)
+                data.processed = {
+                    path: float(timestamp) for path, timestamp in processed.items()
+                }
                 data.table = table
+                data.extra = extra
+                self._blocked_sections.discard(self.section)
+            except Exception as exc:
+                message = f"Failed to decode safe Builder store {self._data_path}: {exc}"
+                LOGGER.error(message)
+                self._blocked_sections.add(self.section)
+                raise SafeCodecError(message) from exc
+        elif self._meta_path.exists():
+            # Version-1 metadata was plain JSON and can be recovered safely.  Its
+            # companion DataFrame pickle remains blocked.
+            try:
+                payload = read_json_file(self._meta_path)
+                if not isinstance(payload, dict):
+                    raise SafeCodecError("Legacy Builder metadata root must be an object")
+                sources = payload.get("sources", [])
+                processed = payload.get("processed", {})
+                extra = payload.get("extra", {})
+                if not isinstance(sources, list) or not all(
+                    isinstance(entry, str) for entry in sources
+                ):
+                    raise SafeCodecError("Legacy Builder sources must be a list of strings")
+                if not isinstance(processed, dict):
+                    raise SafeCodecError("Legacy Builder processed must be a mapping")
+                if not isinstance(extra, dict):
+                    raise SafeCodecError("Legacy Builder extra must be a mapping")
+                data.sources = list(sources)
+                for path, timestamp in processed.items():
+                    if not isinstance(path, str) or isinstance(timestamp, bool):
+                        raise SafeCodecError("Legacy Builder processed entry is malformed")
+                    try:
+                        data.processed[path] = float(timestamp)
+                    except (TypeError, ValueError) as exc:
+                        raise SafeCodecError(
+                            "Legacy Builder processed timestamp is malformed"
+                        ) from exc
+                data.extra = dict(extra)
+            except Exception as exc:
+                message = f"Failed to read legacy Builder metadata {self._meta_path}: {exc}"
+                LOGGER.error(message)
+                self._blocked_sections.add(self.section)
+                raise SafeCodecError(message) from exc
+            if self._legacy_table_path.exists():
+                self._legacy_diagnostic(self._legacy_table_path, "table")
         if not self._discard_writes_depth and not self._memory_transactions:
             self._memory_data[self.section] = MiniDatabaseData(
                 sources=list(data.sources),
@@ -223,6 +300,11 @@ class MiniDatabaseStore:
     def save(self, data: MiniDatabaseData) -> None:
         if self._discard_writes_depth:
             return
+        if self.section in self._blocked_sections:
+            raise SafeCodecError(
+                f"Builder store {self._data_path} is blocked after a decode failure; "
+                "quarantine or repair it explicitly before saving"
+            )
         cached = MiniDatabaseData(
             sources=list(dict.fromkeys(data.sources)),
             processed=dict(data.processed),
@@ -232,8 +314,8 @@ class MiniDatabaseStore:
         if self._memory_transactions:
             self._memory_transactions[-1].save_data(self.section, cached)
             return
-        self._memory_data[self.section] = cached
         if self._disk_writes_suspended:
+            self._memory_data[self.section] = cached
             self._pending_sections.add(self.section)
             self._pending_section_values[self.section] = MiniDatabaseData(
                 sources=list(cached.sources),
@@ -243,58 +325,67 @@ class MiniDatabaseStore:
             )
             return
         self._write_data_to_disk(data)
+        self._memory_data[self.section] = cached
 
     def _write_data_to_disk(self, data: MiniDatabaseData) -> None:
-        meta = {
+        stored = {
             "sources": list(dict.fromkeys(data.sources)),
             "processed": data.processed,
             "extra": data.extra,
+            "table": _clone_table(data.table),
         }
-        self._meta_path.write_text(
-            json.dumps(meta, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        _clone_table(data.table).to_pickle(self._table_path)
+        atomic_write_json(self._data_path, encode_envelope(stored))
 
     def clear_table(self) -> None:
         if self._discard_writes_depth:
             return
-        if self._memory_transactions:
-            data = self.load()
-            data.table = pd.DataFrame()
-            self.save(data)
-            return
-        cached = self._memory_data.get(self.section)
-        if isinstance(cached, MiniDatabaseData):
-            cached.table = pd.DataFrame()
-        try:
-            self._table_path.unlink()
-        except FileNotFoundError:
-            pass
+        data = self.load()
+        data.table = pd.DataFrame()
+        self.save(data)
 
     def payload_path(self, name: str) -> Path:
-        safe = name.replace(os.sep, "_").replace("..", "_")
-        return self._payload_dir / f"{self.section}_{safe}.pkl"
+        safe = str(name)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", safe) or safe in {".", ".."}:
+            raise ValueError(f"Invalid Builder payload name: {name!r}")
+        path = self._payload_dir / f"{self.section}_{safe}.json"
+        if path.resolve().parent != self._payload_dir.resolve():
+            raise ValueError("Builder payload path escaped its storage directory")
+        return path
+
+    def legacy_payload_path(self, name: str) -> Path:
+        safe = str(name)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", safe) or safe in {".", ".."}:
+            raise ValueError(f"Invalid Builder payload name: {name!r}")
+        path = self._payload_dir / f"{self.section}_{safe}.pkl"
+        if path.resolve().parent != self._payload_dir.resolve():
+            raise ValueError("Builder legacy payload path escaped its storage directory")
+        return path
 
     def save_payload(self, name: str, payload: Any) -> Path:
         path = self.payload_path(name)
         if self._discard_writes_depth:
             return path
         cache_key = (self.section, name)
+        if cache_key in self._blocked_payloads:
+            raise SafeCodecError(
+                f"Builder payload {path} is blocked after a decode failure; "
+                "quarantine or repair it explicitly before saving"
+            )
         if self._memory_transactions:
             self._memory_transactions[-1].save_payload(cache_key, payload)
             return path
-        self._memory_payloads[cache_key] = payload
         if self._disk_writes_suspended:
+            self._memory_payloads[cache_key] = payload
             self._pending_payloads.add((self.section, name))
             self._pending_payload_values[cache_key] = copy.deepcopy(payload)
             return path
         self._write_payload_to_disk(name, payload)
+        self._memory_payloads[cache_key] = payload
         return path
 
     def _write_payload_to_disk(self, name: str, payload: Any) -> Path:
         path = self.payload_path(name)
-        pd.to_pickle(payload, path)
+        atomic_write_json(path, encode_envelope(payload))
         return path
 
     def load_payload(self, name: str) -> Any:
@@ -308,12 +399,18 @@ class MiniDatabaseStore:
         path = self.payload_path(name)
         if path.exists():
             try:
-                payload = pd.read_pickle(path)
+                payload = decode_envelope(read_json_file(path))
                 if not self._discard_writes_depth and not self._memory_transactions:
                     self._memory_payloads[cache_key] = payload
                 return payload
-            except Exception:
-                return None
+            except Exception as exc:
+                message = f"Failed to decode safe Builder payload {path}: {exc}"
+                LOGGER.error(message)
+                self._blocked_payloads.add(cache_key)
+                raise SafeCodecError(message) from exc
+        legacy_path = self.legacy_payload_path(name)
+        if legacy_path.exists():
+            self._legacy_diagnostic(legacy_path, "payload")
         return None
 
     def clear_payload(self, name: str) -> None:
@@ -322,6 +419,10 @@ class MiniDatabaseStore:
         if self._memory_transactions:
             self._memory_transactions[-1].clear_payload((self.section, name))
             return
+        if (self.section, name) in self._blocked_payloads:
+            raise SafeCodecError(
+                "Blocked safe payload must be quarantined or repaired explicitly"
+            )
         self._memory_payloads.pop((self.section, name), None)
         self._pending_payloads.discard((self.section, name))
         self._pending_payload_values.pop((self.section, name), None)
@@ -330,6 +431,36 @@ class MiniDatabaseStore:
             path.unlink()
         except FileNotFoundError:
             pass
+
+    def quarantine_corrupt_store(self, destination: Path) -> Path:
+        """Explicitly move a blocked safe store aside so a clean save may proceed."""
+
+        if self.section not in self._blocked_sections:
+            raise SafeCodecError("Builder store is not marked as corrupt")
+        target = Path(destination)
+        if target.exists():
+            raise FileExistsError(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.link(self._data_path, target)
+        self._data_path.unlink()
+        self._blocked_sections.discard(self.section)
+        return target
+
+    def quarantine_corrupt_payload(self, name: str, destination: Path) -> Path:
+        """Explicitly move a blocked safe payload aside before replacing it."""
+
+        key = (self.section, name)
+        if key not in self._blocked_payloads:
+            raise SafeCodecError("Builder payload is not marked as corrupt")
+        target = Path(destination)
+        if target.exists():
+            raise FileExistsError(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = self.payload_path(name)
+        os.link(source, target)
+        source.unlink()
+        self._blocked_payloads.discard(key)
+        return target
 
 
 _TRANSACTION_MISSING = object()

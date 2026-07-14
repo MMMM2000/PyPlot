@@ -13,7 +13,6 @@ import json
 import logging
 import math
 import os
-import pickle
 import re
 import subprocess
 import sys
@@ -77,6 +76,13 @@ from plotting.shared.utils import (
 from plotting.shared.logfiles import append_text_with_rotation, open_rotating_text_log
 
 from .storage import MiniDatabaseData, MiniDatabaseStore
+from .safe_codec import (
+    MAX_JSON_BYTES,
+    SafeCodecError,
+    atomic_write_json,
+    decode_envelope,
+    encode_envelope,
+)
 
 from .core import (
     LOGGER_NAME,
@@ -1024,30 +1030,22 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def _encode_project_payload(value: Any) -> Optional[Dict[str, str]]:
-    try:
-        raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:
-        return None
-    return {
-        "encoding": "pickle-base64",
-        "value": base64.b64encode(raw).decode("ascii"),
-    }
+def _encode_project_payload(value: Any) -> Dict[str, Any]:
+    return encode_envelope(value)
 
 
 def _decode_project_payload(payload: Any) -> Any:
-    if not isinstance(payload, Mapping):
-        return None
-    if payload.get("encoding") != "pickle-base64":
-        return None
-    value = payload.get("value")
-    if not isinstance(value, str) or not value:
-        return None
     try:
-        raw = base64.b64decode(value.encode("ascii"), validate=True)
-        return pickle.loads(raw)
-    except Exception:
+        return decode_envelope(payload)
+    except SafeCodecError:
         return None
+
+
+LEGACY_PROJECT_PAYLOAD_MESSAGE = (
+    "Legacy Builder payload was not decoded because ordinary project opening never "
+    "executes pickle. Use the explicit trusted-copy migration command on a disposable "
+    "copy if this payload is required."
+)
 
 
 PROJECT_DECODED_PAYLOADS_KEY = "__decoded_payloads"
@@ -1062,12 +1060,18 @@ class _PreparedProjectLoad:
     read_ms: float
     json_ms: float
     decode_ms: float
+    diagnostics: Tuple[str, ...] = ()
 
 
 def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
     """Read, parse, and decode data-only project payloads away from Qt widgets."""
 
     read_started_s = time.perf_counter()
+    file_size = target.stat().st_size
+    if file_size > MAX_JSON_BYTES:
+        raise SafeCodecError(
+            f"Builder project exceeds the safe JSON limit of {MAX_JSON_BYTES} bytes"
+        )
     text = target.read_text(encoding="utf-8")
     read_ms = (time.perf_counter() - read_started_s) * 1000.0
     byte_count = len(text.encode("utf-8", errors="replace"))
@@ -1082,6 +1086,13 @@ def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
     payload: Dict[str, Any] = dict(raw_payload)
     sections_payload = payload.get("sections")
     decoded_payload_count = 0
+    diagnostics: List[str] = []
+    if payload.get("version") != 2:
+        diagnostics.append(
+            "Legacy Builder project opened in degraded safe mode. JSON-safe table and "
+            "review fields remain available, but executable legacy payloads are blocked. "
+            "Use the explicit trusted-copy migration command with a distinct output path."
+        )
     if isinstance(sections_payload, Mapping):
         prepared_sections: Dict[str, Any] = {}
         for section_key, section_payload in sections_payload.items():
@@ -1095,8 +1106,24 @@ def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
                 for name, encoded in encoded_payloads.items():
                     if not isinstance(name, str) or not name.strip():
                         continue
-                    decoded = _decode_project_payload(encoded)
-                    if decoded is None:
+                    if (
+                        isinstance(encoded, Mapping)
+                        and encoded.get("encoding") == "pickle-base64"
+                    ):
+                        diagnostics.append(
+                            f"{section_key}.{name}: {LEGACY_PROJECT_PAYLOAD_MESSAGE}"
+                        )
+                        continue
+                    try:
+                        decoded = decode_envelope(encoded)
+                    except SafeCodecError as exc:
+                        if payload.get("version") == 2:
+                            raise SafeCodecError(
+                                f"Invalid safe Builder payload {section_key}.{name}: {exc}"
+                            ) from exc
+                        diagnostics.append(
+                            f"{section_key}.{name}: unsupported legacy payload was blocked"
+                        )
                         continue
                     decoded_payloads[name.strip()] = decoded
                     decoded_payload_count += 1
@@ -1111,6 +1138,7 @@ def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
         payload=payload,
         byte_count=byte_count,
         decoded_payload_count=decoded_payload_count,
+        diagnostics=tuple(diagnostics),
         read_ms=read_ms,
         json_ms=json_ms,
         decode_ms=decode_ms,
@@ -1920,7 +1948,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
     """Main window that orchestrates the microwire database build."""
 
     PROJECT_EXTENSION = ".pydpj"
-    PROJECT_VERSION = 1
+    PROJECT_VERSION = 2
     PROJECT_KIND = "MicrowireDataBuilder"
     log_message = QtCore.pyqtSignal(int, str)
 
@@ -1966,6 +1994,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         self._last_strain_dir = str(cwd)
         self.settings = _builder_settings()
         self._project_path: Optional[Path] = None
+        self._project_degraded_safe_mode = False
         self._save_project_action: QtGui.QAction | None = None
         self._save_project_as_action: QtGui.QAction | None = None
 
@@ -11228,6 +11257,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.logger = logger
         self._log_callback = log_callback
         self.store = MiniDatabaseStore(self.section_key)
+        self._store_blocked_error = ""
         if self._skip_initial_store_load:
             self.data = MiniDatabaseData()
             _log_builder_timing(
@@ -11238,7 +11268,15 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             )
         else:
             load_started_s = time.perf_counter()
-            self.data = self.store.load()
+            try:
+                self.data = self.store.load()
+            except SafeCodecError as exc:
+                self.data = MiniDatabaseData()
+                self._store_blocked_error = (
+                    f"{self.section_title} storage is blocked and opened read-only: {exc}. "
+                    "Quarantine or repair the safe store explicitly before refreshing."
+                )
+                self.logger.error(self._store_blocked_error)
             _log_builder_timing(
                 self.logger,
                 "section_init_store_load",
@@ -11396,6 +11434,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._refresh_source_filter_options()
         self._auto_fit_columns()
         self._update_status()
+        if self._store_blocked_error:
+            self.source_button.setEnabled(False)
+            self.refresh_button.setEnabled(False)
+            self.status_label.setText(self._store_blocked_error)
+            self.status_label.setWordWrap(True)
         self._reset_progress_ui()
         self._hook_table_selection()
         self._update_open_sources_enabled()
@@ -12418,7 +12461,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         extra_payload = _json_safe(self.data.extra)
         if not isinstance(extra_payload, (dict, list, tuple, str, int, float, bool)) and extra_payload is not None:
             extra_payload = str(extra_payload)
-        project_payloads: Dict[str, Dict[str, str]] = {}
+        project_payloads: Dict[str, Dict[str, Any]] = {}
         payload_refs = {}
         if isinstance(self.data.extra, Mapping):
             payloads_extra = self.data.extra.get("payloads")
@@ -12431,13 +12474,13 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         for name in sorted(set(payload_refs.values())):
             try:
                 stored_payload = self.store.load_payload(name)
+            except SafeCodecError:
+                raise
             except Exception:
                 stored_payload = None
             if stored_payload is None:
                 continue
-            encoded_payload = _encode_project_payload(stored_payload)
-            if encoded_payload is not None:
-                project_payloads[name] = encoded_payload
+            project_payloads[name] = _encode_project_payload(stored_payload)
         return {
             "section": self.section_key,
             "title": self.section_title,
@@ -12628,6 +12671,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             if isinstance(section, MiniDatabaseSection):
                 section.reset_to_blank()
         self._project_path = None
+        self._project_degraded_safe_mode = False
         self._dirty = False
         self._suppress_dirty = False
         self._update_project_title()
@@ -12645,6 +12689,9 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         return bool(self.data.extra)
 
     def refresh(self) -> None:
+        if self._store_blocked_error:
+            self.status_label.setText(self._store_blocked_error)
+            return
         self._cancel_requested = False
         self.stop_button.setEnabled(True)
         owner = MiniDatabaseSection._processing_owner
@@ -37107,7 +37154,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
     """New workbench for preparing and assembling microwire databases."""
 
     PROJECT_EXTENSION = ".pydpj"
-    PROJECT_VERSION = 1
+    PROJECT_VERSION = 2
     PROJECT_KIND = "MicrowireDataBuilder"
 
     def __init__(self) -> None:
@@ -37123,6 +37170,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.resize(1100, 720)
 
         self._project_path: Optional[Path] = None
+        self._project_degraded_safe_mode = False
         self._save_project_action: QtGui.QAction | None = None
         self._save_project_as_action: QtGui.QAction | None = None
         downloads_dir = Path.home() / "Downloads"
@@ -37944,6 +37992,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 else None
             ),
             "project_path": self._project_path,
+            "project_degraded_safe_mode": self._project_degraded_safe_mode,
             "dirty": self._dirty,
             "paused_timers": paused_timers,
         }
@@ -38069,6 +38118,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 finally:
                     del blocker
         self._project_path = snapshot.get("project_path")
+        self._project_degraded_safe_mode = bool(
+            snapshot.get("project_degraded_safe_mode", False)
+        )
         self._dirty = bool(snapshot.get("dirty", False))
         self._update_project_title()
         self._update_project_actions()
@@ -38712,18 +38764,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
             exporter = getattr(section, "export_project_payload", None)
             if not callable(exporter):
                 continue
-            try:
-                sections_payload[key] = exporter()
-            except Exception as exc:
-                self.logger.error("Failed to export section %s: %s", key, exc)
+            sections_payload[key] = exporter()
         assembly = getattr(self, "assembly_section", None)
         if assembly is not None:
             exporter = getattr(assembly, "export_project_payload", None)
             if callable(exporter):
-                try:
-                    sections_payload["assemble"] = exporter()
-                except Exception as exc:
-                    self.logger.error("Failed to export section assemble: %s", exc)
+                sections_payload["assemble"] = exporter()
         return {
             "version": self.PROJECT_VERSION,
             "kind": self.PROJECT_KIND,
@@ -38769,7 +38815,27 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._write_project_file(target)
 
     def _write_project_file(self, target: Path) -> None:
-        payload = self._build_project_payload()
+        if self._project_degraded_safe_mode:
+            message = (
+                "This legacy project is open read-only in degraded safe mode because "
+                "its blocked payloads were not loaded. Normal Save and Save As are "
+                "disabled; use the explicit trusted-copy migration command with a "
+                "distinct output path."
+            )
+            self.logger.warning(message)
+            if not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.warning(self, "Trusted migration required", message)
+            return
+        try:
+            payload = self._build_project_payload()
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Save Project",
+                "Project save was blocked because a section could not be exported "
+                f"safely. The existing file was not changed:\n{exc}",
+            )
+            return
         sections = payload.get("sections", {})
         if not sections:
             QtWidgets.QMessageBox.information(
@@ -38779,7 +38845,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             )
             return
         try:
-            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            atomic_write_json(target, payload)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
                 self,
@@ -38788,6 +38854,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             )
             return
         self._project_path = target
+        self._project_degraded_safe_mode = False
         self._remember_project_directory(target.parent)
         self._remember_recent_project(target)
         try:
@@ -39132,6 +39199,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
             json_ms=f"{prepared_obj.json_ms:.1f}",
             decode_ms=f"{prepared_obj.decode_ms:.1f}",
         )
+        if prepared_obj.diagnostics:
+            diagnostic_text = "\n".join(prepared_obj.diagnostics)
+            self.logger.warning(
+                "Project opened in degraded safe mode; legacy payloads were blocked:\n%s",
+                diagnostic_text,
+            )
+            if not self._project_load_auto_open and not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Legacy project payloads blocked",
+                    "This project contains legacy executable pickle payloads. "
+                    "Safe fields will be opened, but those payloads were not decoded.\n\n"
+                    f"{diagnostic_text}",
+                )
         self._apply_prepared_project_load(
             prepared_obj,
             load_started_s=load_started_s,
@@ -39251,6 +39332,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     load_started_s=load_started_s,
                     auto_open_load=auto_open_load,
                     pump_events=_pump_events,
+                    degraded_safe_mode=bool(prepared.diagnostics),
                 )
                 return
 
@@ -39308,6 +39390,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     fabrication.set_import_separation(separate)
 
             self._project_path = target
+            self._project_degraded_safe_mode = bool(prepared.diagnostics)
             self._remember_project_directory(target.parent)
             self._remember_recent_project(target)
             try:
@@ -39405,6 +39488,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         load_started_s: float,
         auto_open_load: bool,
         pump_events: Callable[[int | None, str | None], None],
+        degraded_safe_mode: bool,
     ) -> None:
         items = list(self.sections.items())
         try:
@@ -39423,6 +39507,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             "auto_open_load": auto_open_load,
             "progress_dialog": progress_dialog,
             "next_callback": None,
+            "degraded_safe_mode": bool(degraded_safe_mode),
         }
         # Hide every old section cache before the first importer runs. Some
         # importers consult peer stores, and must never observe a later section
@@ -39462,6 +39547,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     if isinstance(fabrication, FabricationSection):
                         fabrication.set_import_separation(separate)
                 self._project_path = target
+                self._project_degraded_safe_mode = bool(state["degraded_safe_mode"])
                 self._update_project_title()
                 refresh_started_s = time.perf_counter()
                 self._refresh_sections_after_project_load()
