@@ -11382,10 +11382,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         empty_layout.addStretch(2)
         self._content_stack.addWidget(self._empty_state_widget)
         self._content_stack.addWidget(right_panel)
-        if self.supported_suffixes and not self.data.sources:
-            self._content_stack.setCurrentWidget(self._empty_state_widget)
-        else:
-            self._content_stack.setCurrentWidget(right_panel)
+        self._update_content_stack()
         layout.addWidget(self._content_stack, 1)
         if isinstance(self.table_view, QtWidgets.QTableView):
             self._search_proxy.setSourceModel(self.model)
@@ -11615,8 +11612,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         text = "Remove folder…" if has_sources else "Connect folder…"
         self.source_button.setText(text)
         if has_sources:
+            self.source_button.setAccessibleName(
+                f"Remove a connected folder for {self.section_title}"
+            )
             self.source_button.setToolTip("Disconnect the currently linked folder.")
         else:
+            self.source_button.setAccessibleName(
+                f"Connect a folder for {self.section_title}"
+            )
             self.source_button.setToolTip("Select a folder to analyse.")
 
     def has_project_data(self) -> bool:
@@ -12285,13 +12288,21 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def _update_status(self) -> None:
         sources_count = len(self.data.sources)
-        if self.supported_suffixes:
-            self._content_stack.setCurrentWidget(
-                self._empty_state_widget if sources_count == 0 else self._right_panel
-            )
+        self._update_content_stack()
         pending_count = self._pending_count_cache
         if sources_count == 0:
-            message = "Connect one or more folders to begin."
+            if self.has_project_data():
+                record_count = (
+                    len(self.data.table.index)
+                    if isinstance(self.data.table, pd.DataFrame)
+                    else 0
+                )
+                message = (
+                    f"Restored project data ({record_count} record(s)); "
+                    "connect a folder to scan for updates."
+                )
+            else:
+                message = "Connect one or more folders to begin."
             self.refresh_button.setEnabled(False)
             self._pending_count_cache = 0
         elif self._project_load_batch_mode:
@@ -12328,6 +12339,15 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if not isinstance(stack, QtWidgets.QStackedWidget):
             return True
         return right_panel is not None and stack.currentWidget() is right_panel
+
+    def _update_content_stack(self) -> None:
+        if not self.supported_suffixes:
+            return
+        self._content_stack.setCurrentWidget(
+            self._right_panel
+            if self.data.sources or self.has_project_data()
+            else self._empty_state_widget
+        )
 
     def _dispatch_log(self, level: int, message: str) -> None:
         try:
@@ -12551,6 +12571,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                         self.section_key,
                     )
         self._populate_sources_list()
+        self._update_content_stack()
         if self._project_load_batch_mode:
             self._reset_progress_ui()
             _log_builder_timing(

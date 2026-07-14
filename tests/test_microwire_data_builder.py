@@ -13930,6 +13930,108 @@ def test_source_section_empty_state_is_actionable_and_accessible(
         section.close()
 
 
+def test_source_section_restored_project_data_stays_visible_without_sources(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+
+    class _RestoredSourceSection(builder_ui.MiniDatabaseSection):
+        section_key = "ui_restored_data_test"
+        section_title = "Restored measurements"
+        supported_suffixes = (".txt",)
+
+        def create_right_panel(self, parent):
+            self.table_view = QtWidgets.QTableView(parent)
+            return self.table_view
+
+        def process_source(self, source):
+            return pd.DataFrame()
+
+    section = _RestoredSourceSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    payload = {
+        "columns": ["Composition", "Microwire", "Review state"],
+        "rows": [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Review state": "No transition",
+            }
+        ],
+        "sources": [],
+        "processed": {},
+        "extra": {
+            "transition_reviews": {
+                "synthetic-review": {"status": "no_transition"}
+            }
+        },
+    }
+    try:
+        section._project_load_batch_mode = True  # noqa: SLF001
+        section.import_project_payload(payload)
+        section._project_load_batch_mode = False  # noqa: SLF001
+
+        assert section._content_stack.currentWidget() is section._right_panel  # noqa: SLF001
+        assert len(section.data.table.index) == 1
+        assert section.data.extra["transition_reviews"]
+    finally:
+        section._project_load_batch_mode = False  # noqa: SLF001
+        section.close()
+
+    reopened = _RestoredSourceSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(reopened)
+    try:
+        assert reopened.data.sources == []
+        assert len(reopened.data.table.index) == 1
+        assert reopened.data.extra["transition_reviews"]
+        assert reopened._content_stack.currentWidget() is reopened._right_panel  # noqa: SLF001
+        assert "Restored project data" in reopened.status_label.text()
+    finally:
+        reopened.close()
+
+
+def test_source_button_accessibility_tracks_connect_and_remove_actions(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+
+    class _SourceSection(builder_ui.MiniDatabaseSection):
+        section_key = "ui_source_action_accessibility_test"
+        section_title = "Test measurements"
+        supported_suffixes = (".txt",)
+
+        def create_right_panel(self, parent):
+            return QtWidgets.QLabel("Loaded content", parent)
+
+        def process_source(self, source):
+            return pd.DataFrame()
+
+    section = _SourceSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    try:
+        assert section.source_button.text().startswith("Connect")
+        assert section.source_button.accessibleName().startswith("Connect")
+        assert "Select" in section.source_button.toolTip()
+
+        section.data.sources = [r"C:\synthetic-measurements"]
+        section._populate_sources_list()  # noqa: SLF001
+
+        assert section.source_button.text().startswith("Remove")
+        assert section.source_button.accessibleName().startswith("Remove")
+        assert "Disconnect" in section.source_button.toolTip()
+
+        section.data.sources = []
+        section._populate_sources_list()  # noqa: SLF001
+
+        assert section.source_button.text().startswith("Connect")
+        assert section.source_button.accessibleName().startswith("Connect")
+        assert "Select" in section.source_button.toolTip()
+    finally:
+        section.close()
+
+
 def test_transition_review_controls_wrap_and_empty_state_is_exclusive(qtbot) -> None:
     _ensure_qapp()
     ca_dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
