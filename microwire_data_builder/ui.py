@@ -17,6 +17,7 @@ import pickle
 import re
 import subprocess
 import sys
+import textwrap
 import time
 import traceback
 import unicodedata
@@ -5363,6 +5364,30 @@ def _plot_vsm_hysteresis_figure(
     return figure
 
 
+def _wrap_plot_title(value: object, *, width: int = 52) -> str:
+    """Wrap long review titles without breaking sample identifiers."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return "\n".join(
+        textwrap.wrap(
+            text,
+            width=max(int(width), 20),
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )
+
+
+def _configure_review_canvas(canvas: FigureCanvasQTAgg) -> None:
+    """Let embedded plots yield space to their review controls at high DPI."""
+    canvas.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Ignored,
+        QtWidgets.QSizePolicy.Policy.Expanding,
+    )
+    canvas.setMinimumSize(0, 180)
+
+
 def _plot_vsm_temperature_scan_figure(
     record: VsmTemperatureScanRecord,
     processor: VSMTemperatureScanProcessor,
@@ -5423,9 +5448,11 @@ def _plot_vsm_temperature_scan_figure(
     if isinstance(variant, str) and variant.strip():
         title = f"{title} ({variant.strip()})"
     if preview_mode == "smoothed":
-        ax_left.set_title(f"{title} - Smoothed VSM Temperature Scan")
+        ax_left.set_title(
+            _wrap_plot_title(f"{title} - Smoothed VSM Temperature Scan", width=40)
+        )
     else:
-        ax_left.set_title(f"{title} - VSM Temperature Scan")
+        ax_left.set_title(_wrap_plot_title(f"{title} - VSM Temperature Scan", width=40))
     ax_left.set_xlabel("Temperature (°C)")
     ax_left.set_ylabel("Signal X (emu)")
     if ax_right is not None:
@@ -5433,6 +5460,7 @@ def _plot_vsm_temperature_scan_figure(
     if legend_handles:
         ax_left.legend(legend_handles, legend_labels, loc="best")
     figure.tight_layout()
+    figure.subplots_adjust(left=0.12, right=0.98, top=0.82, bottom=0.15)
     return figure
 
 
@@ -5738,6 +5766,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         layout.setSpacing(2)
 
         self.title_label = QtWidgets.QLabel(title)
+        self.title_label.setWordWrap(True)
         self.title_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
@@ -5831,6 +5860,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self.subtitle_label.setText(" · ".join(details))
 
         canvas = FigureCanvasQTAgg(figure)
+        _configure_review_canvas(canvas)
         if self._canvas is not None:
             self._disconnect_motion_handler()
             self._disconnect_click_handler()
@@ -6063,8 +6093,12 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 axes.tick_params(labelsize=8)
             except Exception:
                 pass
+            try:
+                axes.set_title(_wrap_plot_title(axes.get_title(), width=58))
+            except Exception:
+                pass
         try:
-            figure.subplots_adjust(left=0.08, right=0.98, top=0.88, bottom=0.14)
+            figure.subplots_adjust(left=0.08, right=0.98, top=0.82, bottom=0.22)
         except Exception:
             pass
         return figure
@@ -6852,28 +6886,40 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(6)
         self._accept_next_button = QtWidgets.QPushButton("Accept && next", right)
+        self._accept_next_button.setAccessibleName("Accept current annealing review and go to next")
         self._accept_next_button.clicked.connect(self._accept_current_and_next)
         action_row.addWidget(self._accept_next_button)
         self._no_transition_button = QtWidgets.QPushButton("No transition", right)
+        self._no_transition_button.setAccessibleName("Mark current annealing run as no transition")
         self._no_transition_button.clicked.connect(self._mark_current_no_transition)
         action_row.addWidget(self._no_transition_button)
         self._exclude_button = QtWidgets.QPushButton("Exclude graph", right)
+        self._exclude_button.setAccessibleName("Exclude current annealing graph")
         self._exclude_button.clicked.connect(self._exclude_current_graph)
         action_row.addWidget(self._exclude_button)
-        self._previous_button = QtWidgets.QPushButton("Previous", right)
-        self._previous_button.clicked.connect(self._select_previous_item)
-        action_row.addWidget(self._previous_button)
-        self._next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed", right)
-        self._next_unreviewed_button.clicked.connect(lambda _checked=False: self._select_next_unreviewed())
-        action_row.addWidget(self._next_unreviewed_button)
         action_row.addStretch(1)
         right_layout.addLayout(action_row)
+
+        navigation_row = QtWidgets.QHBoxLayout()
+        navigation_row.setContentsMargins(0, 0, 0, 0)
+        navigation_row.setSpacing(6)
+        self._previous_button = QtWidgets.QPushButton("Previous", right)
+        self._previous_button.setAccessibleName("Go to previous annealing review")
+        self._previous_button.clicked.connect(self._select_previous_item)
+        navigation_row.addWidget(self._previous_button)
+        self._next_unreviewed_button = QtWidgets.QPushButton("Next unreviewed", right)
+        self._next_unreviewed_button.setAccessibleName("Go to next unreviewed annealing run")
+        self._next_unreviewed_button.clicked.connect(lambda _checked=False: self._select_next_unreviewed())
+        navigation_row.addWidget(self._next_unreviewed_button)
+        navigation_row.addStretch(1)
+        right_layout.addLayout(navigation_row)
 
         self._counts_label = QtWidgets.QLabel("", right)
         self._counts_label.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self._counts_label.setStyleSheet("font-size: 10px;")
+        self._counts_label.setWordWrap(True)
         right_layout.addWidget(self._counts_label)
 
         self._summary_label = QtWidgets.QLabel("")
@@ -6896,6 +6942,10 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
             title="Reviewed transition currents I_As/I_Af/I_Ms/I_Mf (mA)",
         )
         self._phase_controls.valuesEdited.connect(self._handle_phase_values_edited)
+        self._phase_controls.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         right_layout.addWidget(self._phase_controls)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -8125,7 +8175,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self._drag_controller: Optional[_TransitionMarkerDragController] = None
 
         main_layout = QtWidgets.QVBoxLayout(self)
-        controls = QtWidgets.QHBoxLayout()
+        filter_row = QtWidgets.QHBoxLayout()
         self.accepted_only_check = QtWidgets.QCheckBox("Accepted only")
         self.rejected_only_check = QtWidgets.QCheckBox("Rejected only")
         self.show_resistance_check = QtWidgets.QCheckBox("Resistance")
@@ -8147,6 +8197,13 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             self.show_resistance_check,
             self.show_fit_lines_check,
             self.show_markers_check,
+        ):
+            filter_row.addWidget(widget)
+        filter_row.addStretch(1)
+        main_layout.addLayout(filter_row)
+
+        review_row = QtWidgets.QHBoxLayout()
+        for widget in (
             self.next_rejected_button,
             self.next_questionable_button,
             self.accept_button,
@@ -8154,10 +8211,19 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
             self.exclude_button,
             self.next_unreviewed_button,
         ):
-            controls.addWidget(widget)
-        controls.addWidget(self.status_label, 1)
-        controls.addStretch(1)
-        main_layout.addLayout(controls)
+            review_row.addWidget(widget)
+        review_row.addStretch(1)
+        main_layout.addLayout(review_row)
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        main_layout.addWidget(self.status_label)
+
+        self.accept_button.setAccessibleName("Accept current TMA target and go to next")
+        self.no_transition_button.setAccessibleName("Mark current TMA target as no transition")
+        self.exclude_button.setAccessibleName("Exclude current TMA target")
+        self.next_unreviewed_button.setAccessibleName("Go to next unreviewed TMA target")
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
         self.tree = QtWidgets.QTreeWidget(splitter)
@@ -8167,14 +8233,28 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         plot_layout = QtWidgets.QVBoxLayout(plot_panel)
         self.figure = Figure(figsize=(8, 6))
         self.canvas = FigureCanvasQTAgg(self.figure)
+        _configure_review_canvas(self.canvas)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.transition_controls = _MiniDmaTransitionEditorControls(plot_panel)
-        self.empty_label = QtWidgets.QLabel("No TMA transition review targets are available.", plot_panel)
+        self.transition_controls.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.empty_label = QtWidgets.QLabel(
+            "No TMA transition review targets are available.\n"
+            "Connect or refresh a TMA source, then select a current-sweep run.",
+            plot_panel,
+        )
         self.empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setAccessibleName("TMA transition review empty-state guidance")
         plot_layout.addWidget(self.toolbar)
         plot_layout.addWidget(self.canvas, 1)
         plot_layout.addWidget(self.transition_controls)
         plot_layout.addWidget(self.empty_label, 1)
+        self.canvas.hide()
+        self.toolbar.hide()
+        self.transition_controls.hide()
         splitter.addWidget(self.tree)
         splitter.addWidget(plot_panel)
         splitter.setStretchFactor(0, 0)
@@ -8968,7 +9048,8 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         self.canvas.hide()
         self.toolbar.hide()
         self.transition_controls.hide()
-        self.empty_label.setText(message)
+        guidance = "Connect or refresh a TMA source, then select a current-sweep run."
+        self.empty_label.setText(f"{message}\n{guidance}")
         self.empty_label.show()
 
     def _plot_entry(self, entry: _MiniDmaTransitionReviewEntry) -> None:
@@ -9026,8 +9107,11 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         if self.show_fit_lines_check.isChecked():
             self._draw_transition_fit_lines(ax, entry, strain)
         ax.set_title(
-            f"{entry.sample} - {entry.run_label} - {entry.target_label} "
-            f"({_mini_dma_display_status(entry, self._review_for_entry(entry))})"
+            _wrap_plot_title(
+                f"{entry.sample} - {entry.run_label} - {entry.target_label} "
+                f"({_mini_dma_display_status(entry, self._review_for_entry(entry))})",
+                width=42,
+            )
         )
         ax.set_ylabel("Strain [%]")
         ax.grid(True, alpha=0.25)
@@ -11196,6 +11280,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         controls = QtWidgets.QHBoxLayout()
         self.source_button = QtWidgets.QPushButton()
         self.source_button.setText("Connect folder…")
+        self.source_button.setAccessibleName(f"Connect a folder for {self.section_title}")
+        self.source_button.setToolTip("Choose the folder that contains this measurement type.")
         self.source_button.clicked.connect(self._toggle_source)
         controls.addWidget(self.source_button)
 
@@ -11266,7 +11352,38 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.sources_list.hide()
 
         right_panel = self.create_right_panel(self)
-        layout.addWidget(right_panel, 1)
+        self._right_panel = right_panel
+        self._content_stack = QtWidgets.QStackedWidget(self)
+        self._content_stack.setObjectName("sectionContentStack")
+        self._empty_state_widget = QtWidgets.QWidget(self._content_stack)
+        empty_layout = QtWidgets.QVBoxLayout(self._empty_state_widget)
+        empty_layout.addStretch(1)
+        empty_title = QtWidgets.QLabel(f"Connect a folder to begin {self.section_title.lower()}.")
+        empty_title.setObjectName("sectionEmptyStateTitle")
+        empty_title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_title.setWordWrap(True)
+        empty_layout.addWidget(empty_title)
+        empty_hint = QtWidgets.QLabel(
+            "Your source files stay in place. Builder scans them only after you press Refresh."
+        )
+        empty_hint.setObjectName("sectionEmptyStateHint")
+        empty_hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_hint.setWordWrap(True)
+        empty_layout.addWidget(empty_hint)
+        self.empty_connect_button = QtWidgets.QPushButton("Connect folder…", self._empty_state_widget)
+        self.empty_connect_button.setAccessibleName(f"Connect a folder for {self.section_title}")
+        self.empty_connect_button.setToolTip("Choose the folder that contains this measurement type.")
+        self.empty_connect_button.clicked.connect(self.source_button.click)
+        empty_layout.addWidget(
+            self.empty_connect_button,
+            0,
+            QtCore.Qt.AlignmentFlag.AlignHCenter,
+        )
+        empty_layout.addStretch(2)
+        self._content_stack.addWidget(self._empty_state_widget)
+        self._content_stack.addWidget(right_panel)
+        self._update_content_stack()
+        layout.addWidget(self._content_stack, 1)
         if isinstance(self.table_view, QtWidgets.QTableView):
             self._search_proxy.setSourceModel(self.model)
             self._search_proxy.set_row_predicate(self._row_filter_accepts)
@@ -11495,8 +11612,14 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         text = "Remove folder…" if has_sources else "Connect folder…"
         self.source_button.setText(text)
         if has_sources:
+            self.source_button.setAccessibleName(
+                f"Remove a connected folder for {self.section_title}"
+            )
             self.source_button.setToolTip("Disconnect the currently linked folder.")
         else:
+            self.source_button.setAccessibleName(
+                f"Connect a folder for {self.section_title}"
+            )
             self.source_button.setToolTip("Select a folder to analyse.")
 
     def has_project_data(self) -> bool:
@@ -12165,9 +12288,21 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def _update_status(self) -> None:
         sources_count = len(self.data.sources)
+        self._update_content_stack()
         pending_count = self._pending_count_cache
         if sources_count == 0:
-            message = "Connect one or more folders to begin."
+            if self.has_project_data():
+                record_count = (
+                    len(self.data.table.index)
+                    if isinstance(self.data.table, pd.DataFrame)
+                    else 0
+                )
+                message = (
+                    f"Restored project data ({record_count} record(s)); "
+                    "connect a folder to scan for updates."
+                )
+            else:
+                message = "Connect one or more folders to begin."
             self.refresh_button.setEnabled(False)
             self._pending_count_cache = 0
         elif self._project_load_batch_mode:
@@ -12197,6 +12332,23 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.status_changed.emit(message)
         except Exception:
             pass
+
+    def _data_page_is_active(self) -> bool:
+        stack = getattr(self, "_content_stack", None)
+        right_panel = getattr(self, "_right_panel", None)
+        if not isinstance(stack, QtWidgets.QStackedWidget):
+            return True
+        return right_panel is not None and stack.currentWidget() is right_panel
+
+    def _update_content_stack(self) -> None:
+        if not self.supported_suffixes:
+            self._content_stack.setCurrentWidget(self._right_panel)
+            return
+        self._content_stack.setCurrentWidget(
+            self._right_panel
+            if self.data.sources or self.has_project_data()
+            else self._empty_state_widget
+        )
 
     def _dispatch_log(self, level: int, message: str) -> None:
         try:
@@ -12420,6 +12572,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                         self.section_key,
                     )
         self._populate_sources_list()
+        self._update_content_stack()
         if self._project_load_batch_mode:
             self._reset_progress_ui()
             _log_builder_timing(
@@ -19140,18 +19293,31 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             self.accept_next_button,
             self.no_transition_button,
             self.exclude_button,
-            self.previous_button,
-            self.next_unreviewed_button,
         ):
             action_row.addWidget(button)
         action_row.addStretch(1)
         layout.addLayout(action_row)
+
+        navigation_row = QtWidgets.QHBoxLayout()
+        navigation_row.setContentsMargins(0, 0, 0, 0)
+        navigation_row.setSpacing(6)
+        navigation_row.addWidget(self.previous_button)
+        navigation_row.addWidget(self.next_unreviewed_button)
+        navigation_row.addStretch(1)
+        layout.addLayout(navigation_row)
+
+        self.accept_next_button.setAccessibleName("Accept current VSM scan and go to next")
+        self.no_transition_button.setAccessibleName("Mark current VSM scan as no transition")
+        self.exclude_button.setAccessibleName("Exclude current VSM scan")
+        self.previous_button.setAccessibleName("Go to previous VSM transition review")
+        self.next_unreviewed_button.setAccessibleName("Go to next unreviewed VSM scan")
 
         self.review_status_label = QtWidgets.QLabel("Review state: Unreviewed", self)
         self.review_status_label.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.review_status_label.setStyleSheet("font-size: 10px;")
+        self.review_status_label.setWordWrap(True)
         layout.addWidget(self.review_status_label)
 
         self.review_counts_label = QtWidgets.QLabel("", self)
@@ -19159,6 +19325,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self.review_counts_label.setStyleSheet("font-size: 10px;")
+        self.review_counts_label.setWordWrap(True)
         layout.addWidget(self.review_counts_label)
 
         self._stack = QtWidgets.QStackedLayout()
@@ -19173,23 +19340,30 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
         self._stack.addWidget(self._tab_widget)
         layout.addLayout(self._stack, 1)
 
-        controls = QtWidgets.QHBoxLayout()
+        target_row = QtWidgets.QHBoxLayout()
         self.cursor_label = QtWidgets.QLabel("Cursor: —")
         self.cursor_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        controls.addWidget(self.cursor_label)
-        controls.addSpacing(20)
+        target_row.addWidget(self.cursor_label)
+        target_row.addSpacing(12)
 
         for label in TRANSITION_TEMP_LABELS:
             radio = QtWidgets.QRadioButton(f"Set {label}")
             if label == "As":
                 radio.setChecked(True)
             self._target_buttons[label] = radio
-            controls.addWidget(radio)
-        controls.addSpacing(20)
+            radio.setAccessibleName(f"Set reviewed VSM {label} temperature")
+            target_row.addWidget(radio)
+        target_row.addStretch(1)
+        layout.addLayout(target_row)
 
-        for label in TRANSITION_TEMP_LABELS:
+        values_grid = QtWidgets.QGridLayout()
+        values_grid.setContentsMargins(0, 0, 0, 0)
+        values_grid.setHorizontalSpacing(8)
+        values_grid.setVerticalSpacing(3)
+
+        for column, label in enumerate(TRANSITION_TEMP_LABELS):
             auto_label = QtWidgets.QLabel("Auto: --")
             auto_label.setStyleSheet("color: #fbbf24; font-size: 10px;")
             value_label = QtWidgets.QLabel("unset")
@@ -19197,16 +19371,17 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
             clear_button = QtWidgets.QPushButton(f"Clear {label}")
             clear_button.setMaximumWidth(66)
             clear_button.setToolTip(f"Remove only the reviewed {label} temperature.")
+            clear_button.setAccessibleName(f"Clear reviewed VSM {label} temperature")
             clear_button.clicked.connect(lambda _checked=False, name=label: self._emit_clear_label(name))
             self._auto_value_labels[label] = auto_label
             self._value_labels[label] = value_label
             self._clear_buttons[label] = clear_button
-            controls.addWidget(QtWidgets.QLabel(f"{label}:"))
-            controls.addWidget(auto_label)
-            controls.addWidget(value_label)
-            controls.addWidget(clear_button)
-        controls.addStretch(1)
-        layout.addLayout(controls)
+            values_grid.addWidget(QtWidgets.QLabel(f"{label}:"), 0, column)
+            values_grid.addWidget(auto_label, 1, column)
+            values_grid.addWidget(value_label, 2, column)
+            values_grid.addWidget(clear_button, 3, column)
+            values_grid.setColumnStretch(column, 1)
+        layout.addLayout(values_grid)
 
     def set_target(self, label: Optional[str]) -> None:
         if not label:
@@ -19281,6 +19456,7 @@ class _TransitionTempPreviewPanel(QtWidgets.QWidget):
                 self._tab_reviewed_values.get(record_id, values),
             )
             canvas = FigureCanvasQTAgg(figure)
+            _configure_review_canvas(canvas)
             try:
                 canvas.setMouseTracking(True)
             except Exception:
@@ -23516,6 +23692,8 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
+            if self.isVisible() and not self._data_page_is_active():
+                return None
             if self._should_defer_preview_render():
                 self._queue_preview_render(cache_key, records)
                 return None
@@ -23527,6 +23705,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
         table = self.table_view
         return bool(
             isinstance(table, QtWidgets.QTableView)
+            and self._data_page_is_active()
             and table.isVisible()
             and self.isVisible()
         )
@@ -24017,6 +24196,8 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
+            if self.isVisible() and not self._data_page_is_active():
+                return None
             if self._should_defer_preview_render():
                 self._queue_preview_render(cache_key, records)
                 return None
@@ -24028,6 +24209,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         table = self.table_view
         return bool(
             isinstance(table, QtWidgets.QTableView)
+            and self._data_page_is_active()
             and table.isVisible()
             and self.isVisible()
         )
@@ -31649,13 +31831,17 @@ class AssemblySection(QtWidgets.QWidget):
 
         settings_row = QtWidgets.QHBoxLayout()
         self.export_button = QtWidgets.QPushButton("Export...")
+        self.export_button.setAccessibleName("Configure and export assembled data")
         self.export_button.clicked.connect(self._open_export_dialog)
         settings_row.addWidget(self.export_button)
-        self.export_summary_label = QtWidgets.QLabel("")
-        self.export_summary_label.setWordWrap(True)
-        settings_row.addWidget(self.export_summary_label, 1)
         settings_row.addStretch(1)
         layout.addLayout(settings_row)
+        self.export_summary_label = QtWidgets.QLabel("")
+        self.export_summary_label.setWordWrap(True)
+        self.export_summary_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.export_summary_label)
         self._update_export_summary()
 
         self.status_label = QtWidgets.QLabel(
@@ -31663,60 +31849,93 @@ class AssemblySection(QtWidgets.QWidget):
         )
         layout.addWidget(self.status_label)
 
-        graph_row = QtWidgets.QHBoxLayout()
+        graph_options_row = QtWidgets.QHBoxLayout()
         self.graph_panel_checkbox = QtWidgets.QCheckBox("Show graph preview panel")
+        self.graph_panel_checkbox.setAccessibleName("Show assembled graph preview panel")
         self.graph_panel_checkbox.setChecked(False)
         self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
-        graph_row.addWidget(self.graph_panel_checkbox)
+        graph_options_row.addWidget(self.graph_panel_checkbox)
         self.oe_samples_checkbox = QtWidgets.QCheckBox("Show oe samples")
+        self.oe_samples_checkbox.setAccessibleName("Show separately grouped oe samples")
         self.oe_samples_checkbox.setChecked(self._show_oe_samples)
         self.oe_samples_checkbox.toggled.connect(self.set_show_oe_samples)
-        graph_row.addWidget(self.oe_samples_checkbox)
-        self.open_high_plot_button = QtWidgets.QPushButton("Open exact 1000 mA graph")
+        graph_options_row.addWidget(self.oe_samples_checkbox)
+        graph_options_row.addStretch(1)
+        layout.addLayout(graph_options_row)
+
+        graph_grid = QtWidgets.QGridLayout()
+        graph_grid.setHorizontalSpacing(6)
+        graph_grid.setVerticalSpacing(4)
+        self.open_high_plot_button = QtWidgets.QPushButton("1000 mA")
+        self.open_high_plot_button.setToolTip("Open the exact 1000 mA annealing graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_high_plot_button)
-        self.open_other_plot_button = QtWidgets.QPushButton("Open other annealing graphs")
+        graph_grid.addWidget(self.open_high_plot_button, 0, 0)
+        self.open_other_plot_button = QtWidgets.QPushButton("Other annealing")
+        self.open_other_plot_button.setToolTip("Open other annealing graphs")
         self.open_other_plot_button.clicked.connect(lambda: self._open_preview_graph("other"))
         self.open_other_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_other_plot_button)
-        self.open_vsm_hysteresis_button = QtWidgets.QPushButton("Open VSM hyst graphs")
+        graph_grid.addWidget(self.open_other_plot_button, 0, 1)
+        self.open_vsm_hysteresis_button = QtWidgets.QPushButton("VSM hysteresis")
+        self.open_vsm_hysteresis_button.setToolTip("Open VSM hysteresis graphs")
         self.open_vsm_hysteresis_button.clicked.connect(
             lambda: self._open_preview_graph("vsm_hysteresis")
         )
         self.open_vsm_hysteresis_button.setEnabled(False)
-        graph_row.addWidget(self.open_vsm_hysteresis_button)
-        self.open_vsm_temperature_button = QtWidgets.QPushButton("Open VSM temp graphs")
+        graph_grid.addWidget(self.open_vsm_hysteresis_button, 0, 2)
+        self.open_vsm_temperature_button = QtWidgets.QPushButton("VSM temperature")
+        self.open_vsm_temperature_button.setToolTip("Open VSM temperature graphs")
         self.open_vsm_temperature_button.clicked.connect(
             lambda: self._open_preview_graph("vsm_temperature")
         )
         self.open_vsm_temperature_button.setEnabled(False)
-        graph_row.addWidget(self.open_vsm_temperature_button)
-        self.open_dma_button = QtWidgets.QPushButton("Open DMA iso-stress graphs")
+        graph_grid.addWidget(self.open_vsm_temperature_button, 0, 3)
+        self.open_dma_button = QtWidgets.QPushButton("DMA iso-stress")
+        self.open_dma_button.setToolTip("Open DMA iso-stress graphs")
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
-        graph_row.addWidget(self.open_dma_button)
-        self.open_shape_memory_button = QtWidgets.QPushButton("Open manual stress/strain graphs")
+        graph_grid.addWidget(self.open_dma_button, 1, 0)
+        self.open_shape_memory_button = QtWidgets.QPushButton("Manual stress/strain")
+        self.open_shape_memory_button.setToolTip("Open manual stress/strain graphs")
         self.open_shape_memory_button.clicked.connect(
             lambda: self._open_preview_graph("shape_memory_stress_strain")
         )
         self.open_shape_memory_button.setEnabled(False)
-        graph_row.addWidget(self.open_shape_memory_button)
-        self.open_fmr_button = QtWidgets.QPushButton("Open FMR graphs")
+        graph_grid.addWidget(self.open_shape_memory_button, 1, 1, 1, 2)
+        self.open_fmr_button = QtWidgets.QPushButton("FMR")
+        self.open_fmr_button.setToolTip("Open FMR graphs")
         self.open_fmr_button.clicked.connect(lambda: self._open_preview_graph("fmr"))
         self.open_fmr_button.setEnabled(False)
-        graph_row.addWidget(self.open_fmr_button)
-        graph_row.addStretch(1)
-        layout.addLayout(graph_row)
+        graph_grid.addWidget(self.open_fmr_button, 1, 3)
+        for button in (
+            self.open_high_plot_button,
+            self.open_other_plot_button,
+            self.open_vsm_hysteresis_button,
+            self.open_vsm_temperature_button,
+            self.open_dma_button,
+            self.open_shape_memory_button,
+            self.open_fmr_button,
+        ):
+            button.setAccessibleName(button.toolTip())
+            button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+        for column in range(4):
+            graph_grid.setColumnStretch(column, 1)
+        layout.addLayout(graph_grid)
 
         tools_row = QtWidgets.QHBoxLayout()
         self.columns_button = QtWidgets.QPushButton("Columns...")
+        self.columns_button.setAccessibleName("Choose visible Assemble columns")
         self.columns_button.clicked.connect(self._open_column_selector)
         tools_row.addWidget(self.columns_button)
         self.order_button = QtWidgets.QPushButton("Order...")
+        self.order_button.setAccessibleName("Change Assemble column order")
         self.order_button.clicked.connect(self._open_column_order_dialog)
         tools_row.addWidget(self.order_button)
         self.sort_button = QtWidgets.QPushButton("Sort...")
+        self.sort_button.setAccessibleName("Configure Assemble row sorting")
         self.sort_button.clicked.connect(self._open_sort_dialog)
         tools_row.addWidget(self.sort_button)
         self.clear_sort_button = QtWidgets.QPushButton("Clear sort")
@@ -31760,6 +31979,7 @@ class AssemblySection(QtWidgets.QWidget):
         self.preview_model = DataFrameModel()
         self.preview_model.set_decoration_provider(self._preview_decoration)
         self.preview_model.set_background_provider(self._preview_background)
+        self.preview_model.set_foreground_provider(self._preview_foreground)
         self.preview_table = QtWidgets.QTableView()
         self.preview_table.setModel(self.preview_model)
         self.preview_table.setAlternatingRowColors(True)
@@ -34306,6 +34526,21 @@ class AssemblySection(QtWidgets.QWidget):
         except Exception:
             brush = None
         return brush
+
+    def _preview_foreground(
+        self,
+        row: pd.Series,
+        column_label: str,
+    ) -> Optional[QtGui.QBrush]:
+        """Pair custom dark group backgrounds with readable table text."""
+        _ = column_label
+        try:
+            has_custom_background = row.name in self._preview_background_cache
+        except Exception:
+            has_custom_background = False
+        if not has_custom_background:
+            return None
+        return QtGui.QBrush(QtGui.QColor("#f5f7fa"))
 
     def _rebuild_preview_background_cache(self, frame: pd.DataFrame) -> None:
         cache: Dict[Any, QtGui.QBrush] = {}

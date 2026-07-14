@@ -596,6 +596,22 @@ def test_vsm_temperature_visible_preview_defers_pixmap_render(
         section.table_view.show()
         QtWidgets.QApplication.processEvents()
 
+        assert section._content_stack.currentWidget() is section._empty_state_widget  # noqa: SLF001
+        result = section._preview_decoration(
+            pd.Series({"_sample": "Sample"}),
+            builder_ui.VSM_TEMPERATURE_SCAN_COLUMN,
+        )
+
+        assert result is None
+        assert render_calls == []
+        assert section._preview_render_pending == set()
+
+        section.data.sources = ["synthetic-vsm-source"]
+        section._pending_count_cache = 0  # noqa: SLF001
+        section._update_status()  # noqa: SLF001
+        QtWidgets.QApplication.processEvents()
+        assert section._content_stack.currentWidget() is section._right_panel  # noqa: SLF001
+
         result = section._preview_decoration(
             pd.Series({"_sample": "Sample"}),
             builder_ui.VSM_TEMPERATURE_SCAN_COLUMN,
@@ -13810,3 +13826,263 @@ def test_assemble_preview_status_reports_hidden_oe_rows(qtbot) -> None:
         assert len(assembly._selected_sections()) == len(assembly._section_choices)  # noqa: SLF001
     finally:
         assembly.close()
+
+
+def test_review_plot_titles_wrap_without_splitting_identifiers() -> None:
+    title = (
+        "Ni50Fe27Ga23 12/2 No1 - very-long-current-sweep-run-name - "
+        "50 MPa / 0.83 g (Reviewed transition)"
+    )
+
+    wrapped = builder_ui._wrap_plot_title(title, width=42)  # noqa: SLF001
+
+    assert "\n" in wrapped
+    assert "Ni50Fe27Ga23" in wrapped
+    assert "12/2" in wrapped
+    assert all(len(line) <= 52 for line in wrapped.splitlines())
+
+
+def test_assemble_actions_fit_compact_width_and_expose_accessible_names(qtbot) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    assembly.resize(940, 760)
+    assembly.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        graph_buttons = (
+            assembly.open_high_plot_button,
+            assembly.open_other_plot_button,
+            assembly.open_vsm_hysteresis_button,
+            assembly.open_vsm_temperature_button,
+            assembly.open_dma_button,
+            assembly.open_shape_memory_button,
+            assembly.open_fmr_button,
+        )
+        for button in graph_buttons:
+            text_width = button.fontMetrics().horizontalAdvance(button.text()) + 16
+            assert button.width() >= text_width
+            assert button.accessibleName()
+            assert button.toolTip()
+            assert button.geometry().right() < assembly.width()
+        assert assembly.export_button.accessibleName()
+        assert assembly.columns_button.accessibleName()
+        assert assembly.graph_panel_checkbox.accessibleName()
+    finally:
+        assembly.close()
+
+
+def test_assemble_dark_group_rows_have_contrast_safe_foreground(qtbot) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        frame = pd.DataFrame(
+            [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2", "State": "No transition"}]
+        )
+        assembly._rebuild_preview_background_cache(frame)  # noqa: SLF001
+        assembly.preview_model.set_frame(frame)
+        background = assembly.preview_model.data(
+            assembly.preview_model.index(0, 0), QtCore.Qt.ItemDataRole.BackgroundRole
+        )
+        foreground = assembly.preview_model.data(
+            assembly.preview_model.index(0, 0), QtCore.Qt.ItemDataRole.ForegroundRole
+        )
+
+        assert isinstance(background, QtGui.QBrush)
+        assert isinstance(foreground, QtGui.QBrush)
+        assert foreground.color().lightnessF() > 0.9
+        assert background.color().lightnessF() < 0.2
+        assert assembly.preview_table.palette().color(
+            QtGui.QPalette.ColorRole.HighlightedText
+        ).isValid()
+    finally:
+        assembly.close()
+
+
+def test_source_section_empty_state_is_actionable_and_accessible(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+
+    class _SourceSection(builder_ui.MiniDatabaseSection):
+        section_key = "ui_empty_state_test"
+        section_title = "Test measurements"
+        supported_suffixes = (".txt",)
+
+        def create_right_panel(self, parent):
+            return QtWidgets.QLabel("Loaded content", parent)
+
+        def process_source(self, source):
+            return pd.DataFrame()
+
+    section = _SourceSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    try:
+        assert section._content_stack.currentWidget() is section._empty_state_widget  # noqa: SLF001
+        assert section.empty_connect_button.isVisibleTo(section)
+        assert section.empty_connect_button.accessibleName()
+        assert "scans them only after" in section._empty_state_widget.findChild(  # noqa: SLF001
+            QtWidgets.QLabel, "sectionEmptyStateHint"
+        ).text()
+    finally:
+        section.close()
+
+
+def test_source_section_restored_project_data_stays_visible_without_sources(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+
+    class _RestoredSourceSection(builder_ui.MiniDatabaseSection):
+        section_key = "ui_restored_data_test"
+        section_title = "Restored measurements"
+        supported_suffixes = (".txt",)
+
+        def create_right_panel(self, parent):
+            self.table_view = QtWidgets.QTableView(parent)
+            return self.table_view
+
+        def process_source(self, source):
+            return pd.DataFrame()
+
+    section = _RestoredSourceSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    payload = {
+        "columns": ["Composition", "Microwire", "Review state"],
+        "rows": [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Review state": "No transition",
+            }
+        ],
+        "sources": [],
+        "processed": {},
+        "extra": {
+            "transition_reviews": {
+                "synthetic-review": {"status": "no_transition"}
+            }
+        },
+    }
+    try:
+        section._project_load_batch_mode = True  # noqa: SLF001
+        section.import_project_payload(payload)
+        section._project_load_batch_mode = False  # noqa: SLF001
+
+        assert section._content_stack.currentWidget() is section._right_panel  # noqa: SLF001
+        assert len(section.data.table.index) == 1
+        assert section.data.extra["transition_reviews"]
+    finally:
+        section._project_load_batch_mode = False  # noqa: SLF001
+        section.close()
+
+    reopened = _RestoredSourceSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(reopened)
+    try:
+        assert reopened.data.sources == []
+        assert len(reopened.data.table.index) == 1
+        assert reopened.data.extra["transition_reviews"]
+        assert reopened._content_stack.currentWidget() is reopened._right_panel  # noqa: SLF001
+        assert "Restored project data" in reopened.status_label.text()
+    finally:
+        reopened.close()
+
+
+def test_source_button_accessibility_tracks_connect_and_remove_actions(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+
+    class _SourceSection(builder_ui.MiniDatabaseSection):
+        section_key = "ui_source_action_accessibility_test"
+        section_title = "Test measurements"
+        supported_suffixes = (".txt",)
+
+        def create_right_panel(self, parent):
+            return QtWidgets.QLabel("Loaded content", parent)
+
+        def process_source(self, source):
+            return pd.DataFrame()
+
+    section = _SourceSection(logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(section)
+    try:
+        assert section.source_button.text().startswith("Connect")
+        assert section.source_button.accessibleName().startswith("Connect")
+        assert "Select" in section.source_button.toolTip()
+
+        section.data.sources = [r"C:\synthetic-measurements"]
+        section._populate_sources_list()  # noqa: SLF001
+
+        assert section.source_button.text().startswith("Remove")
+        assert section.source_button.accessibleName().startswith("Remove")
+        assert "Disconnect" in section.source_button.toolTip()
+
+        section.data.sources = []
+        section._populate_sources_list()  # noqa: SLF001
+
+        assert section.source_button.text().startswith("Connect")
+        assert section.source_button.accessibleName().startswith("Connect")
+        assert "Select" in section.source_button.toolTip()
+    finally:
+        section.close()
+
+
+def test_suffixless_strain_and_compare_sections_show_their_data_panels(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+    logger = logging.getLogger("test")
+    strain = builder_ui.StrainSection(logger, lambda *_: None)
+    compare = builder_ui.CompareSection({}, logger, lambda *_: None)
+    for section in (strain, compare):
+        qtbot.addWidget(section)
+        section.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        for section in (strain, compare):
+            assert section.supported_suffixes == ()
+            assert section._content_stack.currentWidget() is section._right_panel  # noqa: SLF001
+            assert section._data_page_is_active()  # noqa: SLF001
+            assert not section._empty_state_widget.isVisibleTo(section)  # noqa: SLF001
+            assert section.empty_connect_button.text() not in section.status_label.text()
+    finally:
+        strain.close()
+        compare.close()
+
+
+def test_transition_review_controls_wrap_and_empty_state_is_exclusive(qtbot) -> None:
+    _ensure_qapp()
+    ca_dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
+        [], logging.getLogger("test")
+    )
+    tma_dialog = builder_ui._MiniDmaTransitionReviewDialog(  # noqa: SLF001
+        [], logging.getLogger("test")
+    )
+    vsm_panel = builder_ui._TransitionTempPreviewPanel(logging.getLogger("test"))  # noqa: SLF001
+    for widget in (ca_dialog, tma_dialog, vsm_panel):
+        qtbot.addWidget(widget)
+        widget.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        assert ca_dialog._counts_label.wordWrap()  # noqa: SLF001
+        assert ca_dialog._accept_next_button.accessibleName()  # noqa: SLF001
+        assert tma_dialog.status_label.wordWrap()
+        assert tma_dialog.empty_label.wordWrap()
+        assert "Connect or refresh a TMA source" in tma_dialog.empty_label.text()
+        assert tma_dialog.empty_label.isVisibleTo(tma_dialog)
+        assert not tma_dialog.canvas.isVisibleTo(tma_dialog)
+        assert not tma_dialog.transition_controls.isVisibleTo(tma_dialog)
+        assert vsm_panel.review_status_label.wordWrap()
+        assert vsm_panel.review_counts_label.wordWrap()
+        assert vsm_panel.accept_next_button.accessibleName()
+        assert all(button.accessibleName() for button in vsm_panel._clear_buttons.values())  # noqa: SLF001
+    finally:
+        ca_dialog.close()
+        tma_dialog.close()
+        vsm_panel.close()

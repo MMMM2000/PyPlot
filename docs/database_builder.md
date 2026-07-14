@@ -28,6 +28,8 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 - FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
+- High-DPI review layout: at 150% display scaling, Annealing, VSM, and TMA transition titles wrap within the plot, review actions use compact multi-row layouts, and manual-value editors remain visible below the graph. These layout changes do not alter reviewed, excluded, or explicit `No transition` states.
+- Truly empty measurement tabs show a focused connect-folder prompt and explain that scanning begins only after Refresh; restored rows and review payloads remain visible even when no source folder is currently connected. Source-less working sections such as Strain and Compare always show their functional panels instead of folder guidance. Key connect/remove, review, Assemble export, column, and graph actions expose descriptive accessibility names and tooltips that track the live action.
 - Analysis: `Analysis -> Analyze assemble data...` opens the separate Microwire EDA tool using the current filtered Assemble rows. The report generator is read-only, analyses only data already present in Assemble, shows a progress dialog while it runs, and writes into a dedicated report subfolder. When launched from a `.pydpj` path directly, the autonomous CLI flow now uses a disposable copied project file by default so the source project is not mutated during analysis.
 - Assemble imports: spreadsheet rows can be imported and merged with the assembled dataset; imported rows are tagged via the "Data source" column and enriched with fabrication metadata where possible.
 - Data menu: import external workbooks, toggle visibility of imported-only rows, or remove imported data entirely. Optionally separate imported Fabrication rows under an "Imported data:" divider. Imported workbooks appear under Project Explorer.
@@ -75,6 +77,7 @@ For the dedicated manual fabrication-video workflow, see [Universal Video Builde
 - Column selector must include every column from every section, including graph columns; graph columns are off by default.
 - Column order, visibility, and multi-column sort are persisted in the `.pydpj` project.
 - Assemble preview includes a quick search box that filters rows across currently visible columns and a `Source` filter for internal Praha/KoÅ¡ice review; saved projects keep the active search/filter state.
+- Assemble graph actions use a compact two-row toolbar so their full labels remain usable at 150% display scaling. Custom dark sample-group backgrounds always receive a light foreground; the platform selection palette remains responsible for selected-row contrast.
 - Microwire sorting is numeric (10/5 comes after 5/4).
 - Graph preview panel is optional. When enabled, selecting a row shows current annealing, VSM, DMA, manual stress/strain, and FMR previews for that row.
 - "Add to compare" uses the current row selection and populates the Compare tab.
