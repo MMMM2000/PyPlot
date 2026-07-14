@@ -14338,6 +14338,113 @@ def test_shared_broker_preflight_connects_without_serial_auto_detect(
         _close_test_window(window)
 
 
+def test_auto_connect_prefers_running_broker_over_saved_direct_com_profile(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("supply_profile", "hmp4030")
+    settings.setValue("supply_port", "COM3")
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    broker_requests: list[tuple[str, int, str]] = []
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            broker_requests.append((self.host, self.port, action))
+            return {"ok": True, "snapshot": {"model": "hmp4030"}}
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        monkeypatch.setattr(
+            window,
+            "_auto_detect_supply_port",
+            lambda: pytest.fail("auto-connect must not scan serial supplies when the broker is running"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_start_owned_shared_broker",
+            lambda: pytest.fail("auto-connect must join the running broker instead of opening COM3"),
+        )
+
+        assert window.combo_supply_profile.currentData() == "hmp4030"
+        assert window._ensure_supply_ready_for_recipe() is True
+        assert window._ensure_supply_ready_for_recipe() is True
+
+        assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+        assert broker_requests == [
+            ("127.0.0.1", mini_dma_mod.DEFAULT_SHARED_BROKER_PORT, "snapshot"),
+            ("127.0.0.1", mini_dma_mod.DEFAULT_SHARED_BROKER_PORT, "snapshot"),
+        ]
+        log_text = window.log_output.toPlainText()
+        assert "using it instead of saved direct profile hmp4030" in log_text
+        assert "COM3" not in log_text
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_keeps_current_and_motor_supply_on_running_broker(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.combo_supply_profile.setCurrentIndex(window.combo_supply_profile.findData("hmp4030"))
+    window.combo_supply_port.addItem("COM3", "COM3")
+    window.combo_supply_port.setCurrentIndex(window.combo_supply_port.findData("COM3"))
+    broker_requests: list[str] = []
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            assert host == mini_dma_mod.DEFAULT_SHARED_BROKER_HOST
+            assert port == mini_dma_mod.DEFAULT_SHARED_BROKER_PORT
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            broker_requests.append(action)
+            return {"ok": True, "snapshot": {"model": "hmp4030"}}
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        monkeypatch.setattr(
+            window,
+            "_auto_detect_supply_port",
+            lambda: pytest.fail("manual auto-connect must not scan COM3 while the broker is running"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_start_owned_shared_broker",
+            lambda: pytest.fail("manual auto-connect must not take the broker-owned serial port"),
+        )
+        monkeypatch.setattr(window, "_ensure_scale_ready_for_recipe", lambda: True)
+        monkeypatch.setattr(window, "_prepare_current_sweep_supply_channel", lambda: True)
+        monkeypatch.setattr(window, "_enable_motor_supply_output", lambda: True)
+        monkeypatch.setattr(window, "_ensure_tic_ready_for_recipe", lambda: True)
+        monkeypatch.setattr(window, "_apply_manual_auto_connect_tic_settings", lambda: (True, []))
+        monkeypatch.setattr(window, "_manual_auto_connect_should_connect_ir", lambda: False)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+        assert broker_requests == ["snapshot", "snapshot"]
+        log_text = window.log_output.toPlainText()
+        assert "Manual hardware auto-connect completed." in log_text
+        assert "could not open port 'COM3'" not in log_text
+    finally:
+        _close_test_window(window)
+
+
 def test_shared_broker_preflight_repairs_bad_endpoint_without_serial_fallback(
     tmp_path: Path,
     qtbot,

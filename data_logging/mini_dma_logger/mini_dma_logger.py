@@ -71,6 +71,7 @@ DEFAULT_LOG_BASENAME = "mini_dma"
 DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_SHARED_BROKER_HOST = "127.0.0.1"
 DEFAULT_SHARED_BROKER_PORT = 8765
+SHARED_BROKER_SUPPLY_PROFILE_ID = "shared_hmp_broker"
 DEFAULT_ZERO_LOAD_SCALE_G = 21.2
 SESSION_MEASUREMENT_TX = "measurement.txt"
 SESSION_MEASUREMENT_CSV = "measurement.csv"
@@ -10369,6 +10370,35 @@ class MainWindow(QtWidgets.QMainWindow):
     def _using_shared_broker_supply(self) -> bool:
         profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         return bool(SUPPLY_PROFILES.get(profile_id, {}).get("shared_broker", False))
+
+    def _prefer_running_shared_broker_for_auto_connect(self) -> bool:
+        if self._using_shared_broker_supply():
+            return True
+        try:
+            client = BrokerJsonClient(
+                host=DEFAULT_SHARED_BROKER_HOST,
+                port=DEFAULT_SHARED_BROKER_PORT,
+            )
+            response = client.request("snapshot")
+            snapshot = response.get("snapshot")
+            model = str(snapshot.get("model") or "") if isinstance(snapshot, dict) else ""
+            if model not in {"hmp4030", "hmp4040"}:
+                return False
+        except Exception:
+            return False
+        profile_index = self.combo_supply_profile.findData(SHARED_BROKER_SUPPLY_PROFILE_ID)
+        if profile_index < 0:
+            return False
+        previous_profile = str(self.combo_supply_profile.currentData() or "hmp4030")
+        self.edit_shared_broker_host.setText(DEFAULT_SHARED_BROKER_HOST)
+        self.spin_shared_broker_port.setValue(DEFAULT_SHARED_BROKER_PORT)
+        self.combo_supply_profile.setCurrentIndex(profile_index)
+        self._log(
+            f"Auto-connect found the shared HMP broker at "
+            f"{DEFAULT_SHARED_BROKER_HOST}:{DEFAULT_SHARED_BROKER_PORT}; "
+            f"using it instead of saved direct profile {previous_profile}."
+        )
+        return True
 
     def _shared_broker_endpoint(self) -> tuple[str, int]:
         return self.edit_shared_broker_host.text().strip(), int(self.spin_shared_broker_port.value())
@@ -22634,6 +22664,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._supply_controller is not None and self._supply_controller.is_connected():
             return True
         self._log("Preflight: power supply is not connected, trying auto-detect/connect.")
+        self._prefer_running_shared_broker_for_auto_connect()
         if self._using_shared_broker_supply():
             self._apply_shared_broker_bench_defaults_for_tic_preflight()
             self._apply_shared_broker_endpoint_defaults_for_preflight()
