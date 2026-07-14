@@ -71,7 +71,7 @@ class TmaPlugin(PyPlotPlugin):
         baseline_combo = QtWidgets.QComboBox()
         baseline_combo.setToolTip(
             "Choose how TMA recalculates the strain-current Y axis. "
-            "Global minimum uses one shared l0 from all target-stress curves; "
+            "Global minimum uses one shared l₀ from all target-stress curves; "
             "each target minimum gives every stress plateau its own zero."
         )
         baseline_combo.addItem(
