@@ -6475,8 +6475,8 @@ def test_project_auto_import_skips_condition_only_name_changes(
         window.edit_name_wire.setText("12/3")
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
         qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
-        state_key = window._builder_project_last_auto_import_state_key
-        assert state_key is not None
+        request_key = window._builder_project_last_auto_import_request_key
+        assert request_key is not None
         assert "#16a34a" in window.spin_diameter.styleSheet()
 
         window.edit_name_condition.setText("temperature test")
@@ -6484,9 +6484,72 @@ def test_project_auto_import_skips_condition_only_name_changes(
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/3 temperature test"
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "#16a34a" in window.spin_diameter.styleSheet()
-        assert window._builder_project_last_auto_import_state_key == state_key
+        assert window._builder_project_last_auto_import_request_key == request_key
         assert window._builder_project_import_thread is None
         assert not window._builder_project_import_timer.isActive()
+    finally:
+        _close_test_window(window)
+
+
+def test_builder_project_startup_import_never_probes_saved_path_on_gui_thread(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+    original_exists = Path.exists
+    original_stat = Path.stat
+    original_resolve = Path.resolve
+
+    def assert_worker_thread(path: Path) -> None:
+        if path == project_path:
+            assert mini_dma_mod.QtCore.QThread.currentThread() is not window.thread()
+
+    def guarded_exists(path: Path) -> bool:
+        assert_worker_thread(path)
+        return original_exists(path)
+
+    def guarded_stat(path: Path, *args, **kwargs):
+        assert_worker_thread(path)
+        return original_stat(path, *args, **kwargs)
+
+    def guarded_resolve(path: Path, *args, **kwargs) -> Path:
+        assert_worker_thread(path)
+        return original_resolve(path, *args, **kwargs)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        monkeypatch.setattr(Path, "exists", guarded_exists)
+        monkeypatch.setattr(Path, "stat", guarded_stat)
+        monkeypatch.setattr(Path, "resolve", guarded_resolve)
+
+        window.edit_project_path.setText(str(project_path))
+        started = window._auto_import_builder_project_if_possible(async_load=True)
+
+        assert started is True
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        assert "Imported" in window.label_project_status.text()
     finally:
         _close_test_window(window)
 

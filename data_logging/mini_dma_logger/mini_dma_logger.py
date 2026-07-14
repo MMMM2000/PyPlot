@@ -2006,6 +2006,7 @@ class BuilderProjectCacheEntry:
 
 _BUILDER_PROJECT_CACHE_LOCK = RLock()
 _BUILDER_PROJECT_CACHE: dict[tuple[str, int, int], BuilderProjectCacheEntry] = {}
+_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH: dict[str, BuilderProjectCacheEntry] = {}
 _BUILDER_PROJECT_CACHE_LIMIT = 4
 
 
@@ -2023,6 +2024,10 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
     with _BUILDER_PROJECT_CACHE_LOCK:
         cached = _BUILDER_PROJECT_CACHE.get(cache_key)
         if cached is not None:
+            _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH[str(path)] = cached
+            while len(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH) > _BUILDER_PROJECT_CACHE_LIMIT:
+                oldest_path = next(iter(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH))
+                _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(oldest_path, None)
             return cached
     payload = json.loads(path.read_text(encoding="utf-8"))
     entry = BuilderProjectCacheEntry(
@@ -2031,22 +2036,22 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
     )
     with _BUILDER_PROJECT_CACHE_LOCK:
         _BUILDER_PROJECT_CACHE[cache_key] = entry
+        _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH[str(path)] = entry
         stale_keys = [key for key in _BUILDER_PROJECT_CACHE if key[0] == cache_key[0] and key != cache_key]
         for key in stale_keys:
             _BUILDER_PROJECT_CACHE.pop(key, None)
         while len(_BUILDER_PROJECT_CACHE) > _BUILDER_PROJECT_CACHE_LIMIT:
             oldest_key = next(iter(_BUILDER_PROJECT_CACHE))
             _BUILDER_PROJECT_CACHE.pop(oldest_key, None)
+        while len(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH) > _BUILDER_PROJECT_CACHE_LIMIT:
+            oldest_path = next(iter(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH))
+            _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(oldest_path, None)
     return entry
 
 
 def _peek_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry | None:
-    try:
-        cache_key = _builder_project_cache_key(path)
-    except OSError:
-        return None
     with _BUILDER_PROJECT_CACHE_LOCK:
-        return _BUILDER_PROJECT_CACHE.get(cache_key)
+        return _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.get(str(path))
 
 
 def _project_match_score_for_sample(
@@ -5762,7 +5767,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
-        self._builder_project_last_auto_import_state_key: tuple[tuple[str, int, int], str, str, str] | None = None
+        self._builder_project_last_auto_import_request_key: tuple[str, str, str, str] | None = None
         self._builder_project_import_retry_pending = False
         self._builder_project_sample_suggestions: dict[str, tuple[str, ...]] = {}
         self._builder_project_import_timer = QtCore.QTimer(self)
@@ -12354,17 +12359,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_name_specimen.text(),
         )
 
-    def _builder_project_auto_import_state_key(
-        self,
-        path: Path,
-    ) -> tuple[tuple[str, int, int], str, str, str] | None:
-        try:
-            file_key = _builder_project_cache_key(path)
-        except OSError:
-            return None
-        _path_text, composition, microwire, specimen = self._project_import_request_key(path)
-        return (file_key, composition, microwire, specimen)
-
     def _start_saved_builder_project_auto_import(self, path: Path, *, quiet: bool = True) -> bool:
         if self._builder_project_import_thread is not None:
             return False
@@ -12468,7 +12462,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_diameter_imported(False)
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return
-        self._builder_project_last_auto_import_state_key = self._builder_project_auto_import_state_key(Path(path_obj))
+        self._builder_project_last_auto_import_request_key = self._project_import_request_key(Path(path_obj))
 
     def _handle_builder_project_auto_import_failure(
         self,
@@ -12512,7 +12506,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._apply_fabrication_sample_if_possible(force=True):
             self._mark_diameter_imported(False)
-        self._builder_project_last_auto_import_state_key = self._builder_project_auto_import_state_key(Path(path_obj))
+        self._builder_project_last_auto_import_request_key = self._project_import_request_key(Path(path_obj))
         self.label_project_status.setText(
             "Project loaded, but no matching sample row was found from the current naming fields."
         )
@@ -12531,26 +12525,21 @@ class MainWindow(QtWidgets.QMainWindow):
         path_text = self.edit_project_path.text().strip()
         if not path_text:
             self._mark_diameter_imported(False)
-            self._builder_project_last_auto_import_state_key = None
+            self._builder_project_last_auto_import_request_key = None
             return False
         path = Path(path_text)
         self._builder_project_path = path
-        if not path.exists():
-            self._mark_diameter_imported(False)
-            self._builder_project_last_auto_import_state_key = None
-            self.label_project_status.setText("Builder project path is saved, but the file was not found.")
-            return False
-        state_key = self._builder_project_auto_import_state_key(path)
-        if (
-            async_load
-            and not update_identity
-            and state_key is not None
-            and self._builder_project_last_auto_import_state_key == state_key
-        ):
-            return True
+        request_key = self._project_import_request_key(path)
         if async_load and not update_identity:
+            if self._builder_project_last_auto_import_request_key == request_key:
+                return True
             self._builder_project_import_retry_pending = False
             return self._start_saved_builder_project_auto_import(path, quiet=quiet)
+        if not path.exists():
+            self._mark_diameter_imported(False)
+            self._builder_project_last_auto_import_request_key = None
+            self.label_project_status.setText("Builder project path is saved, but the file was not found.")
+            return False
         try:
             payload = self._read_builder_project_payload(path)
         except Exception as exc:
@@ -12576,7 +12565,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return False
         if not update_identity:
-            self._builder_project_last_auto_import_state_key = state_key
+            self._builder_project_last_auto_import_request_key = request_key
         return True
 
     def _schedule_builder_project_auto_import(self) -> None:
@@ -12588,8 +12577,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_diameter_imported(False)
             self._builder_project_import_retry_pending = False
             return
-        state_key = self._builder_project_auto_import_state_key(Path(path_text))
-        if state_key is not None and self._builder_project_last_auto_import_state_key == state_key:
+        request_key = self._project_import_request_key(Path(path_text))
+        if self._builder_project_last_auto_import_request_key == request_key:
             self._builder_project_import_retry_pending = False
             return
         self._builder_project_import_timer.start()
