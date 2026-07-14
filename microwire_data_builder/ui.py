@@ -12342,6 +12342,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     def _update_content_stack(self) -> None:
         if not self.supported_suffixes:
+            self._content_stack.setCurrentWidget(self._right_panel)
             return
         self._content_stack.setCurrentWidget(
             self._right_panel

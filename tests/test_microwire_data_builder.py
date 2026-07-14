@@ -14032,6 +14032,30 @@ def test_source_button_accessibility_tracks_connect_and_remove_actions(
         section.close()
 
 
+def test_suffixless_strain_and_compare_sections_show_their_data_panels(
+    qtbot, tmp_path, monkeypatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "builder-store"))
+    logger = logging.getLogger("test")
+    strain = builder_ui.StrainSection(logger, lambda *_: None)
+    compare = builder_ui.CompareSection({}, logger, lambda *_: None)
+    for section in (strain, compare):
+        qtbot.addWidget(section)
+        section.show()
+    QtWidgets.QApplication.processEvents()
+    try:
+        for section in (strain, compare):
+            assert section.supported_suffixes == ()
+            assert section._content_stack.currentWidget() is section._right_panel  # noqa: SLF001
+            assert section._data_page_is_active()  # noqa: SLF001
+            assert not section._empty_state_widget.isVisibleTo(section)  # noqa: SLF001
+            assert section.empty_connect_button.text() not in section.status_label.text()
+    finally:
+        strain.close()
+        compare.close()
+
+
 def test_transition_review_controls_wrap_and_empty_state_is_exclusive(qtbot) -> None:
     _ensure_qapp()
     ca_dialog = builder_ui._AnnealingTransitionReviewDialog(  # noqa: SLF001
