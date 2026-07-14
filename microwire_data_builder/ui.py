@@ -135,6 +135,7 @@ from .core import (
     SHAPE_MEMORY_FRACTURE_STRAIN_COLUMN,
     SHAPE_MEMORY_FRACTURE_STRESS_COLUMN,
     FMR_COLUMN,
+    resolve_assemble_projection,
     build_database,
     build_fabrication_index,
     _normalise_output_name,
@@ -35418,12 +35419,21 @@ class AssemblySection(QtWidgets.QWidget):
         analysis_frame = self._raw_preview_frame
         if not isinstance(analysis_frame, pd.DataFrame) or analysis_frame.empty:
             analysis_frame = frame
+        projection = resolve_assemble_projection(
+            analysis_frame.columns,
+            selected_columns=tuple(self._selected_columns or ()),
+            column_order=self._current_column_order_for_export(),
+        )
         launcher_module._write_assemble_workbook(
             output_path=path,
             frame=frame,
             preset="public",
             extra_frames=extra_frames,
             analysis_frame=analysis_frame,
+            selected_columns=(
+                tuple(self._selected_columns or ()) if projection.explicit else None
+            ),
+            column_order=self._current_column_order_for_export(),
         )
 
     def analysis_source_frame(self) -> pd.DataFrame:
