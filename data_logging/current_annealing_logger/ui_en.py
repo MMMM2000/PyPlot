@@ -228,6 +228,12 @@ class Ui_MainWindow(object):
         gb_serial = QtWidgets.QGroupBox("Hardware connection", self.frame_serial_settings)
         gb_layout = QtWidgets.QVBoxLayout(gb_serial)
         gb_layout.setContentsMargins(12, 10, 12, 10)
+
+        self.label_hardware_status = QtWidgets.QLabel("Hardware status: Disconnected")
+        self.label_hardware_status.setObjectName("label_hardware_status")
+        self.label_hardware_status.setWordWrap(True)
+        self.label_hardware_status.setStyleSheet("color: #6b7280;")
+        gb_layout.addWidget(self.label_hardware_status)
         gb_layout.setSpacing(8)
         self.groupBox_serial_settings = gb_serial
 
@@ -674,7 +680,13 @@ class Ui_MainWindow(object):
         grid.addWidget(self.groupBox_microwire_metadata, 7, 0, 1, 2)
 
         # Process progress and time remaining
+        self.label_process_state = QtWidgets.QLabel("Idle — no run active")
+        self.label_process_state.setObjectName("label_process_state")
+        self.label_process_state.setWordWrap(True)
+        self.label_process_state.setStyleSheet("font-weight: 600; color: #6b7280;")
+        sticky_status_layout.addWidget(self.label_process_state)
         self.progressBar_process = QtWidgets.QProgressBar()
+        self.progressBar_process.setFormat("Idle")
         sticky_status_layout.addWidget(self.progressBar_process)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
         sticky_status_layout.addWidget(self.label_time_remaining)

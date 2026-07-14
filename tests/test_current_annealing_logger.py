@@ -523,6 +523,33 @@ def test_current_annealing_progress_is_pinned_above_run_buttons(qtbot) -> None:
     assert progress_top < button_top
 
 
+@pytest.mark.parametrize("size", [(1600, 1000), (1366, 768)])
+def test_current_annealing_operator_state_layout_has_no_overlap_or_crop(qtbot, size) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.resize(*size)
+    window._set_process_state("failed", "Measurement file write failed; output stopped safely.")
+    window.show()
+    qtbot.wait(20)
+
+    def _rect(widget):
+        return logger_mod.QtCore.QRect(widget.mapTo(window, logger_mod.QtCore.QPoint(0, 0)), widget.size())
+
+    state_rect = _rect(window.ui.label_process_state)
+    progress_rect = _rect(window.ui.progressBar_process)
+    assert not state_rect.intersects(progress_rect)
+    buttons = [
+        window.ui.pushButton_start_process,
+        window.ui.pushButton_show_history,
+        window.ui.pushButton_reverse_now,
+    ]
+    button_rects = [_rect(button) for button in buttons]
+    assert not button_rects[0].intersects(button_rects[1])
+    assert not button_rects[1].intersects(button_rects[2])
+    assert all(button.width() >= button.minimumSizeHint().width() for button in buttons)
+    assert window.ui.left_scroll.horizontalScrollBar().maximum() == 0
+
+
 def test_current_annealing_imports_project_diameter_and_autocomplete(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
@@ -799,54 +826,33 @@ def test_current_annealing_planned_time_has_no_hidden_hold_duration(qtbot) -> No
     assert window.compute_planned_seconds() == 4
 
 
-def test_current_annealing_runtime_recipe_fields_stay_editable(qtbot) -> None:
+def test_current_annealing_runtime_recipe_fields_are_locked(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
 
     window._set_process_controls_enabled(False)
 
-    assert window.ui.spinBox_max_current.isEnabled()
-    assert window.ui.spinBox_step_mA.isEnabled()
-    assert window.ui.spinBox_start_current.isEnabled()
-    assert window.ui.spinBox_loops.isEnabled()
-    assert window.ui.checkBox_infinite_loops.isEnabled()
-    assert window.ui.label_max_current.isEnabled()
+    assert not window.ui.spinBox_max_current.isEnabled()
+    assert not window.ui.spinBox_step_mA.isEnabled()
+    assert not window.ui.spinBox_start_current.isEnabled()
+    assert not window.ui.spinBox_loops.isEnabled()
+    assert not window.ui.checkBox_infinite_loops.isEnabled()
+    assert not window.ui.label_max_current.isEnabled()
     assert not window.ui.lineEdit_log_dir.isEnabled()
+    assert "locked for this run" in window.ui.spinBox_max_current.toolTip()
 
 
-def test_current_annealing_update_running_recipe_refreshes_live_plan(qtbot) -> None:
+def test_current_annealing_running_recipe_update_action_stays_unavailable(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
-    window.operation_mode = 2
     window.process_running = True
-    window.direction_ascending = True
-    window.current_current_set = 0.007
-    window.current_increment = 0.001
-    window.current_step_mA = 1.0
-    window.current_step_A = 0.001
-    window.loop_idx = 0
-    window.ui.spinBox_start_current.setValue(1)
-    window.ui.spinBox_max_current.setValue(10)
-    window.ui.spinBox_step_mA.setValue(1.0)
-    window.ui.spinBox_loops.setValue(2)
-    window._init_loop_tracking(window._planned_automatic_loop_steps(), 2, False)
+    window._set_process_controls_enabled(False)
 
-    window.ui.spinBox_max_current.setValue(6)
-    window.ui.spinBox_step_mA.setValue(0.2)
-    window.ui.spinBox_loops.setValue(3)
-    window.handle_update_running_recipe_clicked()
-
-    assert window.max_current_mA == 6
-    assert window.current_step_mA == pytest.approx(0.2)
-    assert window.current_step_A == pytest.approx(0.0002)
-    assert window.current_increment == pytest.approx(-0.0002)
-    assert window.direction_ascending is False
-    assert window.loop_target == 3
-    assert window._planned_loop_steps == 50
-    assert window.total_steps >= window.step_idx
+    assert window.ui.pushButton_update_running_recipe.isHidden()
+    assert not window.ui.pushButton_update_running_recipe.isEnabled()
 
 
-def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
+def test_current_annealing_reverses_at_max_without_hidden_hold(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     fake = _FakeScheduledBrokerClient()
@@ -867,6 +873,7 @@ def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
     window.current_current_set = 0.003
     window.current_increment = 0.001
     window.reverse_enabled = True
+    window.f_name = str(tmp_path / "annealing.tsv")
 
     window.handle_send_new_command()
 
@@ -1100,23 +1107,19 @@ def test_current_annealing_start_auto_connects_selected_shared_broker(qtbot, mon
     qtbot.addWidget(window)
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 1
-    window.operation_mode = 0
     calls: list[str] = []
-    errors: list[list[str]] = []
 
     def _connect() -> None:
         calls.append("connect")
         window.is_connected = True
 
     monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
-    monkeypatch.setattr(window, "_start_preflight_errors", lambda **_kwargs: [])
-    monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: errors.append(payload))
 
-    window.handle_toggle_process_clicked()
+    connected = window._auto_connect_for_start()
 
+    assert connected is True
     assert calls == ["connect"]
-    assert errors == []
-    assert window.process_running is True
+    assert window.is_connected is True
 
 
 def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1124,7 +1127,6 @@ def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch:
     qtbot.addWidget(window)
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 1
-    window.operation_mode = 0
     progress_seen: list[str] = []
 
     def _connect() -> None:
@@ -1134,13 +1136,12 @@ def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch:
         window.is_connected = True
 
     monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
-    monkeypatch.setattr(window, "_start_preflight_errors", lambda **_kwargs: [])
+    connected = window._auto_connect_for_start()
 
-    window.handle_toggle_process_clicked()
-
+    assert connected is True
     assert progress_seen == ["Connecting shared HMP broker..."]
     assert window._hardware_auto_connect_progress is None
-    assert window.process_running is True
+    assert window.is_connected is True
 
 
 def test_current_annealing_start_reports_auto_connect_failure_detail(
@@ -1151,7 +1152,6 @@ def test_current_annealing_start_reports_auto_connect_failure_detail(
     qtbot.addWidget(window)
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 1
-    window.operation_mode = 0
     warnings: list[tuple[str, str]] = []
     preflight: list[list[str]] = []
 
@@ -1164,12 +1164,10 @@ def test_current_annealing_start_reports_auto_connect_failure_detail(
         "warning",
         lambda _parent, title, message: warnings.append((str(title), str(message))),
     )
-    monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: preflight.append(payload))
+    connected = window._auto_connect_for_start()
 
-    window.handle_toggle_process_clicked()
-
+    assert connected is False
     assert warnings == [("Hardware auto-connect failed", "Hardware auto-connect failed: broker is busy")]
-    assert preflight == [["Hardware auto-connect failed: broker is busy"]]
     assert window.process_running is False
 
 
@@ -2030,6 +2028,244 @@ def test_record_acquired_sample_writes_each_non_initial_sample_once(tmp_path, qt
     ]
     assert window._samples_current == [2.0, 3.0]
     assert window._samples_resistance == [250.0, 200.0]
+
+
+def test_measurement_write_failure_stops_without_plot_or_progress(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    output = tmp_path / "blocked" / "annealing.tsv"
+    window.f_name = str(output)
+    window.process_running = True
+    window.first_sample = False
+    window.step_idx = 4
+    window.current_current_read = 0.003
+    window.current_voltage = 0.6
+    window.current_resistance = 200.0
+    window.curr_value_x = 3.0
+    window.curr_value_y = 200.0
+    window._samples_current = [2.0]
+    window._samples_resistance = [250.0]
+    window._samples_voltage = [0.5]
+    safe_end: list[str] = []
+    progress_calls: list[str] = []
+    dialogs: list[str] = []
+
+    def _raise_open(*_args, **_kwargs):
+        raise OSError("disk is read-only")
+
+    monkeypatch.setattr(logger_mod, "open", _raise_open, raising=False)
+    monkeypatch.setattr(window, "send_serial_command", lambda: None)
+    monkeypatch.setattr(window, "simple_delay", lambda _ms: None)
+    monkeypatch.setattr(window, "send_safe_end_commands", lambda: safe_end.append("safe"))
+    monkeypatch.setattr(window, "_record_sample_progress", lambda: progress_calls.append("advanced"))
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    with caplog.at_level("ERROR"):
+        accepted = window._record_acquired_sample()
+
+    assert accepted is False
+    assert window.process_running is False
+    assert safe_end == ["safe"]
+    assert window._samples_current == [2.0]
+    assert window._samples_resistance == [250.0]
+    assert progress_calls == []
+    assert window._process_state == "failed"
+    assert window._last_stop_reason == window._last_run_error
+    assert str(output) in window.ui.label_process_state.text()
+    assert "disk is read-only" in window.statusBar().currentMessage()
+    assert "disk is read-only" in dialogs[0]
+    assert "Measurement file write failed" in caplog.text
+
+
+def test_measurement_write_error_after_open_stops_before_accepting_sample(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = str(tmp_path / "annealing.tsv")
+    window.process_running = True
+    window.first_sample = False
+    window.current_current_read = 0.003
+    window.current_voltage = 0.6
+    window.current_resistance = 200.0
+    window.curr_value_x = 3.0
+    window.curr_value_y = 200.0
+    dialogs: list[str] = []
+
+    class _FailingWriter:
+        def write(self, _line: str) -> None:
+            raise OSError("device ran out of space")
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    window.f_out = _FailingWriter()
+    monkeypatch.setattr(window, "send_serial_command", lambda: None)
+    monkeypatch.setattr(window, "simple_delay", lambda _ms: None)
+    monkeypatch.setattr(window, "send_safe_end_commands", lambda: None)
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    accepted = window._record_acquired_sample()
+
+    assert accepted is False
+    assert window.process_running is False
+    assert window._samples_current == []
+    assert window._process_state == "failed"
+    assert "device ran out of space" in dialogs[0]
+
+
+def test_metadata_sidecar_write_failure_aborts_start_and_is_persistent(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("metadata_failure")
+    dialogs: list[str] = []
+    real_write_text = logger_mod.Path.write_text
+
+    def _write_text(path, *args, **kwargs):
+        if path.name == "metadata.json":
+            raise OSError("sidecar directory denied")
+        return real_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(logger_mod.Path, "write_text", _write_text)
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    with caplog.at_level("ERROR"):
+        prepared = window.prepare_output_file()
+
+    assert prepared is False
+    assert window._process_state == "failed"
+    assert "sidecar directory denied" in window.ui.label_process_state.text()
+    assert "sidecar directory denied" in window.statusBar().currentMessage()
+    assert "Metadata sidecar write failed" in dialogs[0]
+    assert "Metadata sidecar write failed" in caplog.text
+
+
+def test_raw_vcp_is_explicit_manual_mode_and_recipe_start_is_guarded(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.is_connected = True
+
+    window.handle_mode_changed(0)
+    window.handle_toggle_process_clicked()
+
+    assert window.process_running is False
+    assert not window.ui.pushButton_start_process.isEnabled()
+    assert window.ui.pushButton_start_process.text() == "Recipe disabled (Raw VCP)"
+    assert "manual mode" in window.ui.label_process_state.text()
+    assert "manual serial-console mode" in window.statusBar().currentMessage()
+
+
+def test_process_state_text_distinguishes_run_lifecycle(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    expected = {
+        "idle": "Idle",
+        "connecting": "Connecting",
+        "finite-running": "Running — finite",
+        "infinite-running": "Running continuously",
+        "stopping": "Stopping safely",
+        "completed": "Completed",
+        "failed": "Failed",
+    }
+
+    for state, text in expected.items():
+        window._set_process_state(state, "write denied" if state == "failed" else None)
+        assert text in window.ui.label_process_state.text()
+        assert window.ui.progressBar_process.format()
+
+
+def test_direct_serial_open_failure_surfaces_error_string(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    dialogs: list[str] = []
+    window._apply_supply_profile("hmp4030")
+
+    class _Signal:
+        def connect(self, _callback) -> None:
+            pass
+
+        def disconnect(self, _callback) -> None:
+            pass
+
+    class _FailingSerialPort:
+        readyRead = _Signal()
+
+        def setPortName(self, _value) -> None:
+            pass
+
+        def setBaudRate(self, _value) -> None:
+            pass
+
+        def setFlowControl(self, _value) -> None:
+            pass
+
+        def setDataBits(self, _value) -> None:
+            pass
+
+        def setParity(self, _value) -> None:
+            pass
+
+        def setStopBits(self, _value) -> None:
+            pass
+
+        def open(self, _mode) -> bool:
+            return False
+
+        def errorString(self) -> str:
+            return "Access is denied by another process"
+
+        def isOpen(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    window.ser_mcu = _FailingSerialPort()
+    window.port_name = "COM77"
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    window.handle_connect_port_clicked()
+
+    assert window.is_connected is False
+    assert "COM77" in window.ui.label_hardware_status.text()
+    assert "Access is denied" in window.ui.label_hardware_status.text()
+    assert window._last_auto_connect_error == dialogs[0]
+    assert window.statusBar().currentMessage() == dialogs[0]
 
 
 def test_invalid_near_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:
