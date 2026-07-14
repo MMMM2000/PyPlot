@@ -14353,15 +14353,16 @@ def test_auto_connect_prefers_running_broker_over_saved_direct_com_profile(
     window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
     window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
     qtbot.addWidget(window)
-    broker_requests: list[tuple[str, int, str]] = []
+    broker_requests: list[tuple[str, int, float, str]] = []
 
     class _FakeBrokerClient:
-        def __init__(self, *, host: str, port: int) -> None:
+        def __init__(self, *, host: str, port: int, timeout_s: float = 8.0) -> None:
             self.host = host
             self.port = port
+            self.timeout_s = timeout_s
 
         def request(self, action: str, **_payload: object) -> dict[str, object]:
-            broker_requests.append((self.host, self.port, action))
+            broker_requests.append((self.host, self.port, self.timeout_s, action))
             return {"ok": True, "snapshot": {"model": "hmp4030"}}
 
     try:
@@ -14384,8 +14385,18 @@ def test_auto_connect_prefers_running_broker_over_saved_direct_com_profile(
         assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
         assert broker_requests == [
-            ("127.0.0.1", mini_dma_mod.DEFAULT_SHARED_BROKER_PORT, "snapshot"),
-            ("127.0.0.1", mini_dma_mod.DEFAULT_SHARED_BROKER_PORT, "snapshot"),
+            (
+                "127.0.0.1",
+                mini_dma_mod.DEFAULT_SHARED_BROKER_PORT,
+                mini_dma_mod.SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S,
+                "snapshot",
+            ),
+            (
+                "127.0.0.1",
+                mini_dma_mod.DEFAULT_SHARED_BROKER_PORT,
+                8.0,
+                "snapshot",
+            ),
         ]
         log_text = window.log_output.toPlainText()
         assert "using it instead of saved direct profile hmp4030" in log_text
@@ -14406,9 +14417,10 @@ def test_manual_auto_connect_keeps_current_and_motor_supply_on_running_broker(
     broker_requests: list[str] = []
 
     class _FakeBrokerClient:
-        def __init__(self, *, host: str, port: int) -> None:
+        def __init__(self, *, host: str, port: int, timeout_s: float = 8.0) -> None:
             assert host == mini_dma_mod.DEFAULT_SHARED_BROKER_HOST
             assert port == mini_dma_mod.DEFAULT_SHARED_BROKER_PORT
+            assert timeout_s in {mini_dma_mod.SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S, 8.0}
 
         def request(self, action: str, **_payload: object) -> dict[str, object]:
             broker_requests.append(action)

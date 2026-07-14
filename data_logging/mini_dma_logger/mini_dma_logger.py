@@ -72,6 +72,7 @@ DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_SHARED_BROKER_HOST = "127.0.0.1"
 DEFAULT_SHARED_BROKER_PORT = 8765
 SHARED_BROKER_SUPPLY_PROFILE_ID = "shared_hmp_broker"
+SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S = 0.5
 DEFAULT_ZERO_LOAD_SCALE_G = 21.2
 SESSION_MEASUREMENT_TX = "measurement.txt"
 SESSION_MEASUREMENT_CSV = "measurement.csv"
@@ -10378,6 +10379,7 @@ class MainWindow(QtWidgets.QMainWindow):
             client = BrokerJsonClient(
                 host=DEFAULT_SHARED_BROKER_HOST,
                 port=DEFAULT_SHARED_BROKER_PORT,
+                timeout_s=SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S,
             )
             response = client.request("snapshot")
             snapshot = response.get("snapshot")
