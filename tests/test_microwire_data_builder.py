@@ -6880,7 +6880,9 @@ def test_word_report_export_embeds_available_origin_objects(
 
     assert "Ni55Fe18Ga27 1/1" in document_xml
     assert "Microwire data" in document_xml
-    assert "Stress/strain current (mA)" in document_xml
+    assert "Composition" in document_xml
+    assert "Microwire" in document_xml
+    assert "Stress/strain current (mA)" not in document_xml
     assert 'w:pStyle w:val="Heading1"' in document_xml
     assert "Microscope and dimensions" in document_xml
     assert "Current annealing" in document_xml
@@ -7012,6 +7014,146 @@ def test_word_report_microwire_data_uses_requested_column_order_and_empty_values
     assert "R vs T graphs (Origin)" not in value_map
 
 
+def test_assemble_projection_legacy_empty_selection_preserves_available_schema() -> None:
+    available = ("Notes", "Composition", "Microwire", "Data source")
+
+    projection = core.resolve_assemble_projection(
+        available,
+        selected_columns=[],
+        column_order=["Microwire"],
+    )
+
+    assert projection.explicit is False
+    assert projection.columns == available
+    assert projection.enabled_families == frozenset({"current_annealing", "vsm", "tma"})
+
+
+def test_assemble_projection_forces_identity_first_and_only_selected_family_structure() -> None:
+    available = (
+        "Notes",
+        "Composition",
+        "Microwire",
+        "J_As1 (A/mm^2)",
+        "CA As1 (mA)",
+        "VSM scan",
+        "TMA target",
+    )
+
+    projection = core.resolve_assemble_projection(
+        available,
+        selected_columns=["J_As1 (A/mm²)", "Data source"],
+        column_order=["J_As1 (A/mm²)"],
+        structural_columns_by_family={
+            "current_annealing": ("CA As1 (mA)",),
+            "vsm": ("VSM scan",),
+            "tma": ("TMA target",),
+        },
+    )
+
+    assert projection.explicit is True
+    assert projection.enabled_families == frozenset({"current_annealing"})
+    assert projection.columns == (
+        "Composition",
+        "Microwire",
+        "J_As1 (A/mm^2)",
+        "CA As1 (mA)",
+    )
+
+
+def test_assemble_projection_resolves_legacy_tma_alias_and_rejects_public_unsafe_columns() -> None:
+    projection = core.resolve_assemble_projection(
+        (
+            "Composition",
+            "Microwire",
+            "TMA transition status",
+            "Safe custom result",
+            "TMA graphs (Origin)",
+        ),
+        selected_columns=[
+            "Mini DMA transition status",
+            "Safe custom result",
+            "Mini DMA graphs (Origin)",
+        ],
+        column_order=["Safe custom result", "Mini DMA transition status"],
+    )
+
+    assert projection.enabled_families == frozenset({"tma"})
+    assert projection.columns == (
+        "Composition",
+        "Microwire",
+        "Safe custom result",
+        "TMA transition status",
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_column",
+    [
+        "Measurement file",
+        "Filename",
+        "Plot path",
+        "Annealing graph descriptor",
+        "Origin workbook",
+    ],
+)
+def test_assemble_projection_rejects_tokenized_descriptor_columns(
+    unsafe_column: str,
+) -> None:
+    projection = core.resolve_assemble_projection(
+        ("Composition", "Microwire", "Elastic modulus (GPa)", unsafe_column),
+        selected_columns=["Elastic modulus (GPa)", unsafe_column],
+    )
+
+    assert projection.columns == (
+        "Composition",
+        "Microwire",
+        "Elastic modulus (GPa)",
+    )
+
+
+def test_word_explicit_projection_allows_safe_custom_field_but_keeps_graph_out_of_table() -> None:
+    values = core._word_assemble_values(
+        pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Safe custom result": "kept",
+                "Data source": "hidden",
+                "TMA graphs (Origin)": "hidden.oggu",
+            }
+        ),
+        selected_columns=[
+            "Safe custom result",
+            "Data source",
+            "TMA graphs (Origin)",
+        ],
+        column_order=["Safe custom result"],
+    )
+
+    assert values == [
+        ("Composition", "Ni50Fe27Ga23"),
+        ("Microwire", "12/2"),
+        ("Safe custom result", "kept"),
+    ]
+
+
+def test_word_explicit_empty_table_projection_does_not_fall_back_to_legacy_columns() -> None:
+    xml = core._word_microwire_data_section(
+        pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Stress/strain current (mA)": 20,
+            }
+        ),
+        table_columns=(),
+    )
+
+    assert "Microwire data" in xml
+    assert "Composition" not in xml
+    assert "Stress/strain current (mA)" not in xml
+
+
 def test_word_report_microwire_data_table_only_expands_multi_value_rows() -> None:
     table_xml = core._word_microwire_data_table(
         [
@@ -7094,6 +7236,38 @@ def test_word_report_includes_reference_only_measurement_section() -> None:
     assert "Graphs in Assemble" in xml
     assert "Ni50Fe27Ga23 12_2 iso-current" in xml
     assert "Current annealing" not in xml
+    assert origin_insertions == []
+
+
+def test_word_projection_changes_only_data_table_not_graph_or_microscope_row(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "core-crop.png"
+    image_path.write_bytes(b"fake png")
+    xml, origin_insertions, picture_insertions = core._word_document_xml(
+        pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Safe custom result": "kept",
+                "Data source": "hidden",
+                core.MINI_DMA_COLUMN: "Ni50Fe27Ga23 12_2 iso-current",
+                core.MICROSCOPE_IMAGE_COLUMNS[0]: "core-crop",
+            }
+        ),
+        0,
+        {},
+        {"core-crop": image_path},
+        table_columns=("Composition", "Microwire", "Safe custom result"),
+    )
+
+    assert "Safe custom result" in xml
+    assert "Data source" not in xml
+    assert "TMA" in xml
+    assert "Graphs in Assemble" in xml
+    assert "Ni50Fe27Ga23 12_2 iso-current" in xml
+    assert "Core diameter image" in xml
+    assert [item.image_path for item in picture_insertions] == [image_path]
     assert origin_insertions == []
 
 
@@ -13550,6 +13724,67 @@ def test_assemble_expanded_excel_export_writes_tma_target_sheet(qtbot, tmp_path,
             "1st: 50MPa / 0.83g",
             "50 MPa / 0.83 g",
         ]
+    finally:
+        assembly.close()
+
+
+def test_assemble_direct_excel_export_passes_saved_projection_metadata(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        frame = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Length (m)": 1.2,
+                    "TMA transition status": "No transition",
+                }
+            ]
+        )
+        assembly._raw_preview_frame = frame  # noqa: SLF001
+        assembly._selected_columns = {"Length (m)", "TMA transition status"}  # noqa: SLF001
+        assembly._column_order = ["Length (m)", "TMA transition status"]  # noqa: SLF001
+        captured: dict[str, object] = {}
+
+        def fake_write_workbook(**kwargs: object) -> dict[str, object]:
+            captured.update(kwargs)
+            return {}
+
+        import launcher as launcher_module
+
+        monkeypatch.setattr(launcher_module, "_write_assemble_workbook", fake_write_workbook)
+        monkeypatch.setattr(assembly, "_current_project_section_payloads", lambda: {})
+
+        assembly._write_expanded_excel_export(tmp_path / "direct.xlsx", frame)  # noqa: SLF001
+
+        assert set(captured["selected_columns"]) == {"Length (m)", "TMA transition status"}
+        assert captured["column_order"] == ("Length (m)", "TMA transition status")
+        assert captured["analysis_frame"] is frame
+    finally:
+        assembly.close()
+
+
+def test_assemble_compact_csv_column_filter_behavior_is_unchanged(qtbot) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        assembly._raw_preview_frame = pd.DataFrame(  # noqa: SLF001
+            columns=["Composition", "Microwire", "Data source", "Length (m)"]
+        )
+        assembly._selected_columns = {"Composition", "Microwire", "Data source"}  # noqa: SLF001
+
+        assert assembly._current_column_filter() == (  # noqa: SLF001
+            "Composition",
+            "Microwire",
+            "Data source",
+        )
     finally:
         assembly.close()
 

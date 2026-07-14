@@ -315,6 +315,227 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
 
 
+def test_saved_public_projection_exports_only_selected_tma_family_structure(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    project_path = _write_synthetic_assemble_project(tmp_path / "selected.pydpj")
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["sections"]["assemble"]["selected_columns"] = [
+        "d (µm)",
+        "Mini DMA transition status",
+    ]
+    payload["sections"]["assemble"]["column_order"] = ["d (µm)"]
+    project_path.write_text(json.dumps(payload), encoding="utf-8")
+    workbook_path = tmp_path / "selected.xlsx"
+
+    manifest = launcher_module._export_builder_assemble_workbook(  # noqa: SLF001
+        source_project=project_path,
+        output_path=workbook_path,
+        copy_project=True,
+        working_copy_dir=tmp_path / "working",
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    assert headers[:3] == ["Composition", "Microwire", "d (µm)"]
+    assert "TMA transition status" in headers
+    assert "TMA target" in headers
+    assert "TMA strain (%)" in headers
+    assert "TMA J_As (A/mm^2)" in headers
+    assert "CA graph" not in headers
+    assert "CA As1 (mA)" not in headers
+    assert "VSM scan" not in headers
+    assert "VSM As (°C)" not in headers
+    assert manifest["row_count"] == 4
+    rows = [
+        dict(zip(headers, [cell.value for cell in cells], strict=False))
+        for cells in worksheet.iter_rows(min_row=2)
+    ]
+    assert [row["TMA target"] for row in rows] == [
+        "50 MPa / 1.46 g",
+        "75 MPa / 2.19 g",
+        "100 MPa / 2.92 g",
+        "150 MPa / 4.38 g",
+    ]
+    assert rows[1]["TMA As (mA)"] == "No transition"
+    assert rows[2]["TMA Ms (mA)"] == "Not observed"
+    assert "125 MPa / 3.65 g" not in {row["TMA target"] for row in rows}
+
+
+def test_public_projection_without_measurement_family_keeps_one_compact_row(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "identity_and_length.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Length (m)": 1.2,
+                "Notes": "hidden",
+            }
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA target": "50 MPa / 1 g",
+            }
+        ]
+    )
+
+    info = launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        tma_frame=tma_frame,
+        selected_columns=["Length (m)"],
+        column_order=["Length (m)"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    headers = [cell.value for cell in workbook["Analysis"][1]]
+    assert headers == ["Composition", "Microwire", "Length (m)"]
+    assert info["row_count"] == 1
+    assert info["analysis_sheet"]["row_count"] == 1
+
+
+def test_public_family_projection_without_detail_rows_keeps_explicit_status(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "tma_status_only.xlsx"
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "TMA transition status": "No transition",
+                    "Notes": "hidden",
+                }
+            ]
+        ),
+        preset="public",
+        tma_frame=pd.DataFrame(),
+        selected_columns=["TMA transition status"],
+        column_order=["TMA transition status"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    assert headers[:3] == ["Composition", "Microwire", "TMA transition status"]
+    assert "TMA target" in headers
+    assert "CA graph" not in headers
+    assert "VSM scan" not in headers
+    assert worksheet.cell(2, 3).value == "No transition"
+
+
+def test_public_projection_keeps_compact_fallback_for_sample_without_detail_row(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "mixed_detail.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA transition status": "Reviewed",
+            },
+            {
+                "Composition": "Ni44Fe27Ga23Cu3Co3",
+                "Microwire": "1/2",
+                "TMA transition status": "No transition",
+            },
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA target": "50 MPa / 1 g",
+                "TMA strain (%)": 2.5,
+            }
+        ]
+    )
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="public",
+        tma_frame=tma_frame,
+        selected_columns=["TMA transition status"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    worksheet = workbook["Analysis"]
+    headers = [cell.value for cell in worksheet[1]]
+    rows = [
+        dict(zip(headers, [cell.value for cell in cells], strict=False))
+        for cells in worksheet.iter_rows(min_row=2)
+    ]
+    assert {(row["Composition"], row["Microwire"]) for row in rows} == {
+        ("Ni50Fe27Ga23", "12/2"),
+        ("Ni44Fe27Ga23Cu3Co3", "1/2"),
+    }
+    fallback = next(row for row in rows if row["Microwire"] == "1/2")
+    assert fallback["TMA transition status"] == "No transition"
+    assert fallback["TMA target"] is None
+
+
+def test_full_workbook_ignores_public_projection_and_keeps_legacy_analysis_schema(
+    tmp_path: Path,
+) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook_path = tmp_path / "full.xlsx"
+    frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "d (µm)": 20.0,
+                "Length (m)": 1.2,
+            }
+        ]
+    )
+    tma_frame = pd.DataFrame(
+        [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "TMA target": "50 MPa / 1 g",
+            }
+        ]
+    )
+
+    launcher_module._write_assemble_workbook(  # noqa: SLF001
+        output_path=workbook_path,
+        frame=frame,
+        preset="full",
+        tma_frame=tma_frame,
+        selected_columns=["Length (m)"],
+        column_order=["Length (m)"],
+    )
+
+    workbook = openpyxl.load_workbook(workbook_path, data_only=True)
+    headers = [cell.value for cell in workbook["Analysis"][1]]
+    assert "d (µm)" in headers
+    assert "TMA target" in headers
+    assert "CA As1 (mA)" in headers
+    assert "VSM scan" in headers
+    assert workbook.sheetnames[:3] == ["Analysis", "Assemble", "TMA targets"]
+
+
 def test_public_analysis_export_groups_expanded_rows_by_sample(tmp_path: Path) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     workbook_path = tmp_path / "grouped_analysis.xlsx"
@@ -874,11 +1095,11 @@ def test_builder_automation_recipe_exports_assemble_public_workbook(
     assert exit_code == 0
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["workbook"] == str(workbook_path.resolve())
-    assert manifest["row_count"] == 1
+    assert manifest["row_count"] == 6
     assert "Data source" in manifest["dropped_columns"]
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
-    assert workbook["Assemble audit"].sheet_state == "hidden"
-    assert [cell.value for cell in workbook["Assemble"][1]][:2] == ["Composition", "Microwire"]
+    assert workbook.sheetnames == ["Analysis"]
+    assert [cell.value for cell in workbook["Analysis"][1]][:2] == ["Composition", "Microwire"]
 
 
 def test_builder_update_filters_existing_records_under_refresh_root(tmp_path: Path) -> None:

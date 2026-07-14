@@ -1636,6 +1636,30 @@ ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP = {
     "J_Ms2 (A/mm^2)": "CA J_Ms2 (A/mm^2)",
     "J_Mf2 (A/mm^2)": "CA J_Mf2 (A/mm^2)",
 }
+ANALYSIS_STRUCTURAL_COLUMNS_BY_FAMILY = {
+    "current_annealing": tuple(
+        dict.fromkeys(
+            [
+                *ANALYSIS_CA_COLUMN_MAP.values(),
+                *ANALYSIS_CA_CURRENT_DENSITY_COLUMN_MAP.values(),
+            ]
+        )
+    ),
+    "vsm": tuple(ANALYSIS_VSM_COLUMN_MAP.values()),
+    "tma": tuple(
+        dict.fromkeys(
+            [
+                *ANALYSIS_TMA_COLUMN_MAP.values(),
+                *ANALYSIS_TMA_CURRENT_DENSITY_COLUMN_MAP.values(),
+            ]
+        )
+    ),
+}
+ANALYSIS_EXPORT_SHEET_FAMILIES = {
+    ANNEALING_TRANSITION_EXPORT_SHEET: "current_annealing",
+    VSM_TRANSITION_EXPORT_SHEET: "vsm",
+    TMA_TARGET_EXPORT_SHEET: "tma",
+}
 _TRANSITION_REVIEW_FINAL_STATUSES = {"accepted_auto", "manual_adjusted", "no_transition"}
 _TRANSITION_REVIEW_EXCLUDED_STATUSES = {"excluded"}
 _TRANSITION_REVIEW_NO_TRANSITION_STATUSES = {"no_transition", "No transition"}
@@ -2256,9 +2280,24 @@ def _sections_represented_in_builder_project(sections: Mapping[str, object]) -> 
     return sorted(dict.fromkeys(represented))
 
 
-def _analysis_base_columns(frame: pd.DataFrame) -> list[str]:
+def _analysis_base_columns(
+    frame: pd.DataFrame,
+    *,
+    selected_columns: Sequence[object] | None = None,
+    column_order: Sequence[object] | None = None,
+) -> list[str]:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return []
+    if selected_columns:
+        from microwire_data_builder.core import resolve_assemble_projection
+
+        return list(
+            resolve_assemble_projection(
+                frame.columns,
+                selected_columns=selected_columns,
+                column_order=column_order,
+            ).columns
+        )
     columns = [str(column) for column in frame.columns]
     preferred = [column for column in ANALYSIS_BASE_PREFERRED_COLUMNS if column in columns]
     remaining = [
@@ -2496,10 +2535,17 @@ def _analysis_rows_from_detail_frame(
 def _expanded_analysis_frame(
     assemble_frame: pd.DataFrame,
     extra_frames: Mapping[str, pd.DataFrame | None],
+    *,
+    selected_columns: Sequence[object] | None = None,
+    column_order: Sequence[object] | None = None,
 ) -> pd.DataFrame:
     if not isinstance(assemble_frame, pd.DataFrame) or assemble_frame.empty:
         return pd.DataFrame()
-    base_columns = _analysis_base_columns(assemble_frame)
+    base_columns = _analysis_base_columns(
+        assemble_frame,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
     base_lookup: dict[tuple[str, str], dict[str, object]] = {}
     for base in assemble_frame.to_dict(orient="records"):
         key = _analysis_identity_key(base)
@@ -2532,6 +2578,12 @@ def _expanded_analysis_frame(
             column_map=ANALYSIS_TMA_COLUMN_MAP,
         )
     )
+    if selected_columns:
+        represented_identities = {_analysis_identity_key(row) for row in rows}
+        for identity, base in base_lookup.items():
+            if identity in represented_identities:
+                continue
+            rows.append({column: base.get(column, "") for column in base_columns})
 
     analysis_columns = list(
         dict.fromkeys(
@@ -2571,6 +2623,25 @@ def _current_git_commit() -> str | None:
     return commit or None
 
 
+def _assemble_projection_metadata_from_sections(
+    sections: Mapping[str, object],
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    assemble = sections.get("assemble")
+    if not isinstance(assemble, Mapping):
+        return None, None
+
+    def _values(key: str) -> tuple[str, ...] | None:
+        raw = assemble.get(key)
+        if not isinstance(raw, (list, tuple, set)):
+            return None
+        values = tuple(
+            dict.fromkeys(str(value) for value in raw if str(value or "").strip())
+        )
+        return values or None
+
+    return _values("selected_columns"), _values("column_order")
+
+
 def _write_assemble_workbook(
     *,
     output_path: Path,
@@ -2579,7 +2650,11 @@ def _write_assemble_workbook(
     tma_frame: pd.DataFrame | None = None,
     extra_frames: Mapping[str, pd.DataFrame | None] | None = None,
     analysis_frame: pd.DataFrame | None = None,
+    selected_columns: Sequence[object] | None = None,
+    column_order: Sequence[object] | None = None,
 ) -> dict[str, Any]:
+    from microwire_data_builder.core import resolve_assemble_projection
+
     output_path = output_path.with_suffix(".xlsx")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_frame = frame
@@ -2588,6 +2663,17 @@ def _write_assemble_workbook(
         export_extra_frames.update(dict(extra_frames))
     if tma_frame is not None and TMA_TARGET_EXPORT_SHEET not in export_extra_frames:
         export_extra_frames[TMA_TARGET_EXPORT_SHEET] = tma_frame
+    projection = resolve_assemble_projection(
+        (analysis_frame.columns if isinstance(analysis_frame, pd.DataFrame) else frame.columns),
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
+    if preset == "public" and projection.explicit:
+        export_extra_frames = {
+            sheet_name: sheet_frame
+            for sheet_name, sheet_frame in export_extra_frames.items()
+            if ANALYSIS_EXPORT_SHEET_FAMILIES.get(sheet_name) in projection.enabled_families
+        }
     public_filters: dict[str, dict[str, int]] = {}
     if preset == "public":
         export_frame, public_filters["assemble"] = _prepare_public_assemble_main_frame(frame)
@@ -2598,7 +2684,12 @@ def _write_assemble_workbook(
         analysis_source_frame, public_filters["analysis_base"] = _prepare_public_assemble_main_frame(
             analysis_source_frame
         )
-    analysis_frame = _expanded_analysis_frame(analysis_source_frame, export_extra_frames)
+    analysis_frame = _expanded_analysis_frame(
+        analysis_source_frame,
+        export_extra_frames,
+        selected_columns=selected_columns if preset == "public" else None,
+        column_order=column_order if preset == "public" else None,
+    )
 
     serialised = _serialise_assemble_export_frame(export_frame)
     if preset == "public":
@@ -2617,6 +2708,13 @@ def _write_assemble_workbook(
         visible_columns = [str(column) for column in serialised.columns]
 
     main_frame = serialised.loc[:, visible_columns].copy() if visible_columns else pd.DataFrame(index=serialised.index)
+    if preset == "public" and projection.explicit:
+        compact_projection = resolve_assemble_projection(
+            main_frame.columns,
+            selected_columns=selected_columns,
+            column_order=column_order,
+        )
+        main_frame = main_frame.loc[:, compact_projection.columns].copy()
     identity_columns = [
         column
         for column in ("Composition", "Microwire")
@@ -2629,6 +2727,16 @@ def _write_assemble_workbook(
         analysis_sheet: dict[str, object] | None = None
         if not analysis_frame.empty:
             serialised_analysis = _serialise_assemble_export_frame(analysis_frame)
+            if preset == "public" and projection.explicit:
+                analysis_projection = resolve_assemble_projection(
+                    serialised_analysis.columns,
+                    selected_columns=selected_columns,
+                    column_order=column_order,
+                    structural_columns_by_family=ANALYSIS_STRUCTURAL_COLUMNS_BY_FAMILY,
+                )
+                serialised_analysis = serialised_analysis.loc[
+                    :, analysis_projection.columns
+                ].copy()
             serialised_analysis.to_excel(writer, sheet_name=ANALYSIS_EXPORT_SHEET, index=False)
             analysis_sheet = {
                 "row_count": int(len(serialised_analysis.index)),
@@ -2636,6 +2744,13 @@ def _write_assemble_workbook(
                 "columns": [str(column) for column in serialised_analysis.columns],
             }
         if preset == "public":
+            if analysis_frame.empty:
+                main_frame.to_excel(writer, sheet_name=ANALYSIS_EXPORT_SHEET, index=False)
+                analysis_sheet = {
+                    "row_count": int(len(main_frame.index)),
+                    "column_count": int(len(main_frame.columns)),
+                    "columns": [str(column) for column in main_frame.columns],
+                }
             written_frame = serialised_analysis if not analysis_frame.empty else main_frame
             visible_columns = [str(column) for column in written_frame.columns]
             main_frame = written_frame
@@ -2783,12 +2898,15 @@ def _export_builder_assemble_workbook(
         VSM_TRANSITION_EXPORT_SHEET: _expanded_vsm_transition_frame_from_sections(sections),
         TMA_TARGET_EXPORT_SHEET: _expanded_tma_export_frame_from_sections(sections),
     }
+    selected_columns, column_order = _assemble_projection_metadata_from_sections(sections)
 
     workbook_info = _write_assemble_workbook(
         output_path=output_path,
         frame=frame,
         preset=preset,
         extra_frames=extra_frames,
+        selected_columns=selected_columns,
+        column_order=column_order,
     )
     manifest_target = manifest_path.expanduser() if manifest_path is not None else output_path.with_suffix(".manifest.json")
     export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -2860,11 +2978,14 @@ def _run_builder_export_assemble_command(
         VSM_TRANSITION_EXPORT_SHEET: _expanded_vsm_transition_frame_from_sections(sections),
         TMA_TARGET_EXPORT_SHEET: _expanded_tma_export_frame_from_sections(sections),
     }
+    selected_columns, column_order = _assemble_projection_metadata_from_sections(sections)
     workbook_info = _write_assemble_workbook(
         output_path=output_path,
         frame=frame,
         preset=preset,
         extra_frames=extra_frames,
+        selected_columns=selected_columns,
+        column_order=column_order,
     )
     manifest_target = manifest_path or output_path.with_suffix(".manifest.json")
     payload = _load_json_object(output_project, label="Microwire Data Builder project copy") if output_project.exists() else {}
@@ -5095,6 +5216,17 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
         copied_source = copy_dir / f"{source_path.stem}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}{source_path.suffix}"
         shutil.copy2(source_path, copied_source)
         setattr(args, "_microwire_word_copied_project", str(copied_source))
+        project_payload = _load_json_object(
+            copied_source,
+            label="Microwire Data Builder project copy",
+        )
+        sections = project_payload.get("sections")
+        if isinstance(sections, Mapping):
+            selected_columns, column_order = _assemble_projection_metadata_from_sections(
+                sections
+            )
+            setattr(args, "_microwire_word_selected_columns", selected_columns)
+            setattr(args, "_microwire_word_column_order", column_order)
         print(f"[microwire-word] copied_project={copied_source}")
         return _load_project_word_report_frame(
             copied_source,
@@ -5447,6 +5579,8 @@ def _run_microwire_word_report_cli(args: argparse.Namespace) -> int:
             origin_artifacts=origin_artifacts,
             ole_embedding_results=ole_embedding_results,
             logger=LOGGER,
+            selected_columns=getattr(args, "_microwire_word_selected_columns", None),
+            column_order=getattr(args, "_microwire_word_column_order", None),
         )
         manifest_json, manifest_csv = _write_microwire_word_manifest(
             frame,

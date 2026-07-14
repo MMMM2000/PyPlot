@@ -928,6 +928,220 @@ class BuilderConfig:
     sort_spec: Optional[Tuple[Tuple[str, bool], ...]] = None
 
 
+ASSEMBLE_PROJECTION_IDENTITY_COLUMNS: Tuple[str, ...] = (
+    "Composition",
+    "Microwire",
+)
+ASSEMBLE_PROJECTION_FAMILIES: Tuple[str, ...] = (
+    "current_annealing",
+    "vsm",
+    "tma",
+)
+
+
+@dataclass(frozen=True)
+class AssembleProjection:
+    """Resolved safe public-table projection and enabled measurement families."""
+
+    columns: Tuple[str, ...]
+    enabled_families: frozenset[str]
+    explicit: bool
+
+
+def _assemble_projection_column_key(column: object) -> str:
+    """Return a comparison key shared by current and legacy saved labels."""
+
+    text = str(column or "").strip()
+    for _attempt in range(2):
+        try:
+            repaired = text.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            break
+        if repaired == text:
+            break
+        text = repaired
+    text = (
+        text.replace("Mini DMA", "TMA")
+        .replace("mini DMA", "TMA")
+        .replace("Âµ", "µ")
+        .replace("Î¼", "µ")
+        .replace("μ", "µ")
+        .replace("Â²", "²")
+        .replace("^2", "²")
+        .replace("Ω", "ohm")
+        .replace("Ω", "ohm")
+    )
+    text = text.casefold().replace("µ", "u").replace("²", "2")
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def assemble_projection_column_is_public_safe(column: object) -> bool:
+    """Return whether a column may appear in a projected public data table."""
+
+    text = str(column or "").strip()
+    if not text:
+        return False
+    key = _assemble_projection_column_key(text)
+    always_omit = globals().get("_WORD_ALWAYS_OMIT_COLUMNS", ())
+    if any(key == _assemble_projection_column_key(item) for item in always_omit):
+        return False
+    tokens = set(key.split())
+    if text.endswith("(Origin)") or text.startswith("Figure"):
+        return False
+    denied_tokens = {
+        "audit",
+        "file",
+        "files",
+        "filename",
+        "filenames",
+        "graph",
+        "graphs",
+        "image",
+        "images",
+        "internal",
+        "origin",
+        "path",
+        "paths",
+        "plot",
+        "plots",
+        "provenance",
+        "source",
+        "sources",
+    }
+    return not bool(tokens & denied_tokens)
+
+
+def _assemble_projection_family(column: object) -> Optional[str]:
+    text = str(column or "").strip()
+    compact = _assemble_projection_column_key(text)
+    if not compact:
+        return None
+    if "tma" in compact or "mini dma" in compact:
+        return "tma"
+    vsm_keys = {
+        _assemble_projection_column_key(item)
+        for item in (
+            TRANSITION_TEMP_AS_COLUMN,
+            TRANSITION_TEMP_AF_COLUMN,
+            TRANSITION_TEMP_MS_COLUMN,
+            TRANSITION_TEMP_MF_COLUMN,
+            VSM_TRANSITION_TEMP_STATUS_COLUMN,
+            VSM_TRANSITION_TEMP_COUNTS_COLUMN,
+        )
+    }
+    if "vsm" in compact or compact in vsm_keys:
+        return "vsm"
+    if (
+        "current annealing" in compact
+        or compact.startswith("annealing ")
+        or compact.startswith("ca ")
+        or compact
+        in {
+            _assemble_projection_column_key(item)
+            for item in set(FIGURE_COLUMNS[:2]) | set(ORIGIN_FIGURE_COLUMNS[:2])
+        }
+        or re.match(r"^(?:j )?(?:as|af|ms|mf)[12](?:\s|$)", compact)
+        or compact in {"as current density a mm2", "ms current density a mm2"}
+    ):
+        return "current_annealing"
+    return None
+
+
+def resolve_assemble_projection(
+    available_columns: Sequence[object],
+    *,
+    selected_columns: Optional[Sequence[object]] = None,
+    column_order: Optional[Sequence[object]] = None,
+    structural_columns_by_family: Optional[Mapping[str, Sequence[object]]] = None,
+) -> AssembleProjection:
+    """Resolve one safe Assemble projection for UI, CLI, XLSX, and DOCX tables.
+
+    Missing or empty saved selection metadata intentionally preserves the
+    legacy/default schema.  A non-empty selection is explicit: identity is
+    always retained, while structural columns are forced only for measurement
+    families represented by that selection.
+    """
+
+    available = tuple(dict.fromkeys(str(column) for column in available_columns))
+    available_by_key = {
+        _assemble_projection_column_key(column): column for column in available
+    }
+
+    def _resolve_columns(columns: Optional[Sequence[object]]) -> Tuple[str, ...]:
+        resolved: List[str] = []
+        for raw_column in columns or ():
+            key = _assemble_projection_column_key(raw_column)
+            column = available_by_key.get(key)
+            if column and column not in resolved:
+                resolved.append(column)
+        return tuple(resolved)
+
+    raw_selected = tuple(
+        dict.fromkeys(
+            str(column)
+            for column in (selected_columns or ())
+            if str(column or "").strip()
+        )
+    )
+    explicit = bool(raw_selected)
+    selected = tuple(
+        column
+        for column in _resolve_columns(raw_selected)
+        if assemble_projection_column_is_public_safe(column)
+    )
+    enabled_families = frozenset(
+        family
+        for family in (_assemble_projection_family(column) for column in raw_selected)
+        if family is not None
+    )
+    if not explicit:
+        return AssembleProjection(
+            columns=available,
+            enabled_families=frozenset(ASSEMBLE_PROJECTION_FAMILIES),
+            explicit=False,
+        )
+
+    included = set(selected)
+    included.update(_resolve_columns(ASSEMBLE_PROJECTION_IDENTITY_COLUMNS))
+    for family in enabled_families:
+        included.update(
+            column
+            for column in _resolve_columns(
+                (structural_columns_by_family or {}).get(family, ())
+            )
+            if assemble_projection_column_is_public_safe(column)
+        )
+
+    requested_order = _resolve_columns(column_order)
+    ordered = [
+        column
+        for column in requested_order
+        if column in included and column in available
+    ]
+    identity_columns = _resolve_columns(ASSEMBLE_PROJECTION_IDENTITY_COLUMNS)
+    missing_identity = [column for column in identity_columns if column not in ordered]
+    if missing_identity:
+        first_nonidentity = next(
+            (
+                index
+                for index, column in enumerate(ordered)
+                if column not in identity_columns
+            ),
+            len(ordered),
+        )
+        ordered[first_nonidentity:first_nonidentity] = missing_identity
+    ordered.extend(
+        column
+        for column in available
+        if column in included and column not in ordered
+    )
+    return AssembleProjection(
+        columns=tuple(ordered),
+        enabled_families=enabled_families,
+        explicit=True,
+    )
+
+
 @dataclass
 class BuildStats:
     """Accumulates processing statistics."""
@@ -5612,9 +5826,13 @@ def _word_section(
     return "".join(parts)
 
 
-def _word_microwire_data_section(row: pd.Series) -> str:
+def _word_microwire_data_section(
+    row: pd.Series,
+    table_columns: Optional[Sequence[str]] = None,
+) -> str:
     rows: List[Tuple[str, List[str]]] = []
-    for column in WORD_MICROWIRE_DATA_COLUMNS:
+    columns = WORD_MICROWIRE_DATA_COLUMNS if table_columns is None else table_columns
+    for column in columns:
         column_text = str(column)
         lowered = column_text.casefold()
         if (
@@ -5719,9 +5937,22 @@ def _word_additional_values(row: pd.Series, used_columns: Sequence[str]) -> List
     return values
 
 
-def _word_assemble_values(row: pd.Series) -> List[Tuple[str, str]]:
+def _word_assemble_values(
+    row: pd.Series,
+    *,
+    selected_columns: Optional[Sequence[object]] = None,
+    column_order: Optional[Sequence[object]] = None,
+) -> List[Tuple[str, str]]:
     values: List[Tuple[str, str]] = []
-    for column in WORD_MICROWIRE_DATA_COLUMNS:
+    available_columns: Sequence[object] = (
+        tuple(row.index) if selected_columns else WORD_MICROWIRE_DATA_COLUMNS
+    )
+    projection = resolve_assemble_projection(
+        available_columns,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
+    for column in projection.columns:
         column_text = str(column)
         lowered = column_text.casefold()
         if (
@@ -6059,11 +6290,12 @@ def _word_document_xml(
     fallback_index: int,
     origin_artifacts: Mapping[str, OriginArtifact],
     microscope_crops: Mapping[str, Path],
+    table_columns: Optional[Sequence[str]] = None,
 ) -> Tuple[str, List[WordOleInsertion], List[WordPictureInsertion]]:
     title = _word_sample_title(row, fallback_index)
     body: List[str] = [
         _word_paragraph(title, bold=True, size=40, spacing_after=220, style="Title"),
-        _word_microwire_data_section(row),
+        _word_microwire_data_section(row, table_columns),
     ]
     microscope_xml, picture_insertions, bookmark_id = _word_microscope_section(
         row,
@@ -6742,6 +6974,7 @@ def _export_word_reports(
     log: logging.Logger,
     microscope_crops: Mapping[str, Path] | None = None,
     ole_embedding_results: Dict[Path, List[WordOleEmbeddingResult]] | None = None,
+    table_columns: Optional[Sequence[str]] = None,
 ) -> List[Path]:
     if dataframe.empty:
         return []
@@ -6766,6 +6999,7 @@ def _export_word_reports(
                 index,
                 origin_artifacts,
                 microscope_crops or {},
+                table_columns,
             )
             used_live_origin_clipboard = used_live_origin_clipboard or any(
                 insertion.clipboard_fallback for insertion in origin_insertions
@@ -6822,10 +7056,20 @@ def export_word_reports(
     microscope_crops: Mapping[str, Path] | None = None,
     ole_embedding_results: Dict[Path, List[WordOleEmbeddingResult]] | None = None,
     logger: logging.Logger | None = None,
+    selected_columns: Optional[Sequence[object]] = None,
+    column_order: Optional[Sequence[object]] = None,
 ) -> List[Path]:
     """Write one Word sample report per row without requiring the Builder UI."""
 
     log = logger if logger is not None else logging.getLogger(LOGGER_NAME)
+    available_columns: Sequence[object] = (
+        tuple(dataframe.columns) if selected_columns else WORD_MICROWIRE_DATA_COLUMNS
+    )
+    table_projection = resolve_assemble_projection(
+        available_columns,
+        selected_columns=selected_columns,
+        column_order=column_order,
+    )
     return _export_word_reports(
         dataframe,
         Path(output_dir),
@@ -6833,6 +7077,7 @@ def export_word_reports(
         log,
         microscope_crops=microscope_crops,
         ole_embedding_results=ole_embedding_results,
+        table_columns=table_projection.columns,
     )
 
 
@@ -8989,12 +9234,18 @@ def build_database(
             exports["excel"] = excel_path
         elif fmt_lower in {"word", "docx", "word_reports"}:
             report_dir = output_dir / f"{output_name}_{WORD_REPORT_DIR_NAME}"
+            table_projection = resolve_assemble_projection(
+                tuple(df_word.columns) if column_filter else WORD_MICROWIRE_DATA_COLUMNS,
+                selected_columns=column_filter,
+                column_order=column_order,
+            )
             word_reports = _export_word_reports(
                 df_word,
                 report_dir,
                 origin_artifacts,
                 log,
                 microscope_crops=microscope_crop_map if include_crops else None,
+                table_columns=table_projection.columns,
             )
             if word_reports:
                 exports["word"] = report_dir
@@ -9030,6 +9281,9 @@ def build_database(
 
 
 __all__ = [
+    "ASSEMBLE_PROJECTION_FAMILIES",
+    "ASSEMBLE_PROJECTION_IDENTITY_COLUMNS",
+    "AssembleProjection",
     "BuilderConfig",
     "BuildResult",
     "BuildStats",
@@ -9079,7 +9333,9 @@ __all__ = [
     "RVT_RESISTANCE_RANGE_COLUMN",
     "build_database",
     "build_fabrication_index",
+    "assemble_projection_column_is_public_safe",
     "export_word_reports",
+    "resolve_assemble_projection",
     "word_report_section_manifest_for_row",
     "_compute_ea_from_composition",
     "LOGGER_NAME",
