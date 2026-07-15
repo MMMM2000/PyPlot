@@ -3344,6 +3344,30 @@ class BuilderProjectImportWorker(QtCore.QObject):
             self.finished.emit()
 
 
+@dataclass(frozen=True)
+class SerialPortDescriptor:
+    device: str
+    description: str
+
+
+class SerialPortEnumerationSignals(QtCore.QObject):
+    succeeded = QtCore.pyqtSignal(int, object)
+    failed = QtCore.pyqtSignal(int, str)
+
+
+def _enumerate_serial_port_descriptors() -> tuple[SerialPortDescriptor, ...]:
+    if list_ports is None:
+        raise RuntimeError("pyserial is unavailable.")
+    return tuple(
+        SerialPortDescriptor(
+            device=str(getattr(port, "device", "") or "").strip(),
+            description=str(getattr(port, "description", "") or "").strip(),
+        )
+        for port in list_ports.comports()
+        if str(getattr(port, "device", "") or "").strip()
+    )
+
+
 class AutomationControlLoop:
     """Run recipe-control ticks on a plain thread, independent of Qt repaint timing."""
 
@@ -5991,6 +6015,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recipe_progress_update_queued = False
         self._recipe_progress_pending_complete = False
         self._window_closing = False
+        self._serial_port_descriptors: tuple[SerialPortDescriptor, ...] = ()
+        self._serial_port_scan_thread: Thread | None = None
+        self._serial_port_scan_generation = 0
+        self._serial_port_scan_completed = False
+        self._serial_port_scan_signals = SerialPortEnumerationSignals(self)
+        self._serial_port_scan_signals.succeeded.connect(self._handle_serial_port_enumeration_success)
+        self._serial_port_scan_signals.failed.connect(self._handle_serial_port_enumeration_failure)
         self.action_timing_settings: QtGui.QAction | None = None
         self.action_current_sweep_advanced_settings: QtGui.QAction | None = None
         self.action_show_recipe_file_controls: QtGui.QAction | None = None
@@ -6023,8 +6054,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.setSingleShot(True)
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
         self._restore_settings()
-        self._refresh_scale_ports()
-        self._refresh_ir_ports()
+        self._start_serial_port_enumeration()
         self._refresh_live_labels()
 
     def _menu_by_text(self, text: str) -> QtWidgets.QMenu | None:
@@ -6727,7 +6757,7 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_advanced_form = QtWidgets.QFormLayout(scale_advanced_box)
         self.combo_scale_port = QtWidgets.QComboBox(scale_advanced_box)
         refresh_ports_button = QtWidgets.QPushButton("Refresh ports", scale_advanced_box)
-        refresh_ports_button.clicked.connect(self._refresh_scale_ports)
+        refresh_ports_button.clicked.connect(self._start_serial_port_enumeration)
         port_row = QtWidgets.QHBoxLayout()
         port_row.addWidget(self.combo_scale_port, stretch=1)
         port_row.addWidget(refresh_ports_button)
@@ -7081,7 +7111,7 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form = QtWidgets.QFormLayout(supply_box)
         self.combo_supply_port = QtWidgets.QComboBox(supply_box)
         refresh_supply_button = QtWidgets.QPushButton("Refresh ports", supply_box)
-        refresh_supply_button.clicked.connect(self._refresh_supply_ports)
+        refresh_supply_button.clicked.connect(self._start_serial_port_enumeration)
         detect_supply_button = QtWidgets.QPushButton("Auto-detect", supply_box)
         detect_supply_button.clicked.connect(self._auto_detect_supply_port)
         supply_port_row = QtWidgets.QHBoxLayout()
@@ -7244,7 +7274,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ir_form.addRow("", self.check_ir_enabled)
         self.combo_ir_port = QtWidgets.QComboBox(ir_box)
         refresh_ir_button = QtWidgets.QPushButton("Refresh ports", ir_box)
-        refresh_ir_button.clicked.connect(self._refresh_ir_ports)
+        refresh_ir_button.clicked.connect(self._start_serial_port_enumeration)
         ir_port_row = QtWidgets.QHBoxLayout()
         ir_port_row.addWidget(self.combo_ir_port, stretch=1)
         ir_port_row.addWidget(refresh_ir_button)
@@ -9175,7 +9205,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_steps_per_mm.valueChanged.connect(self._update_recipe_mode_ui)
 
         self.statusBar().showMessage("Ready")
-        self._refresh_supply_ports()
+        self._refresh_all_serial_port_controls()
         self._apply_supply_profile_defaults()
         self._update_distribution_basis_ui()
         self._update_current_sweep_basis_ui()
@@ -9834,7 +9864,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if list_ports is None:
             self._log("Supply auto-detect unavailable because pyserial is missing.")
             return False
-        for port in list_ports.comports():
+        if not self._serial_port_descriptors and not self._serial_port_scan_completed:
+            self._start_serial_port_enumeration()
+            self._log("Supply auto-detect is waiting for the background serial-port scan; try again when it finishes.")
+            return False
+        for port in self._serial_port_descriptors:
             match = self._probe_supply_candidate(port.device)
             if match is None:
                 continue
@@ -9854,19 +9888,92 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Automatic supply detection did not find a supported serial power supply.")
         return False
 
-    def _refresh_supply_ports(self) -> None:
+    def _start_serial_port_enumeration(self) -> bool:
+        thread = self._serial_port_scan_thread
+        if thread is not None and thread.is_alive():
+            self.statusBar().showMessage("Serial-port scan is already running in the background.")
+            return False
+        if list_ports is None:
+            self._serial_port_descriptors = ()
+            self._refresh_all_serial_port_controls()
+            self.statusBar().showMessage("Serial-port scan unavailable because pyserial is missing.")
+            return False
+        self._serial_port_scan_generation += 1
+        generation = self._serial_port_scan_generation
+        self._serial_port_scan_completed = False
+        signals = self._serial_port_scan_signals
+        self.statusBar().showMessage("Scanning serial ports in the background...")
+
+        def _scan() -> None:
+            try:
+                descriptors = _enumerate_serial_port_descriptors()
+            except Exception as exc:
+                try:
+                    signals.failed.emit(generation, str(exc) or exc.__class__.__name__)
+                except RuntimeError:
+                    pass
+                return
+            try:
+                signals.succeeded.emit(generation, descriptors)
+            except RuntimeError:
+                pass
+
+        thread = Thread(target=_scan, name="tma-serial-port-scan", daemon=True)
+        self._serial_port_scan_thread = thread
+        thread.start()
+        return True
+
+    def _handle_serial_port_enumeration_success(self, generation: int, descriptors_obj: object) -> None:
+        if self._window_closing or generation != self._serial_port_scan_generation:
+            return
+        descriptors = descriptors_obj if isinstance(descriptors_obj, tuple) else ()
+        self._serial_port_descriptors = tuple(
+            descriptor for descriptor in descriptors if isinstance(descriptor, SerialPortDescriptor)
+        )
+        self._serial_port_scan_thread = None
+        self._serial_port_scan_completed = True
+        self._refresh_all_serial_port_controls()
+        count = len(self._serial_port_descriptors)
+        self.statusBar().showMessage(f"Serial-port scan completed: {count} port(s) found.", 5000)
+
+    def _handle_serial_port_enumeration_failure(self, generation: int, message: str) -> None:
+        if self._window_closing or generation != self._serial_port_scan_generation:
+            return
+        self._serial_port_scan_thread = None
+        self._serial_port_scan_completed = True
+        self._serial_port_descriptors = ()
+        self._refresh_all_serial_port_controls(scan_error=message)
+        self.statusBar().showMessage(f"Serial-port scan failed: {message}")
+        self._log(f"Serial-port scan failed: {message}")
+
+    def _refresh_all_serial_port_controls(self, *, scan_error: str | None = None) -> None:
+        self._refresh_supply_ports(scan_error=scan_error)
+        self._refresh_scale_ports(scan_error=scan_error)
+        self._refresh_ir_ports(scan_error=scan_error)
+
+    def _refresh_supply_ports(self, *, scan_error: str | None = None) -> None:
         current = self.combo_supply_port.currentData() or self.settings.value("supply_port", "", type=str)
         self.combo_supply_port.clear()
         if list_ports is None:
             self.combo_supply_port.addItem("pyserial unavailable", "")
             return
-        for port in list_ports.comports():
+        if scan_error:
+            if current:
+                self.combo_supply_port.addItem(f"{current} - saved (serial-port scan failed)", current)
+            else:
+                self.combo_supply_port.addItem("Serial-port scan failed", "")
+            return
+        for port in self._serial_port_descriptors:
             label = f"{port.device} - {port.description}"
             self.combo_supply_port.addItem(label, port.device)
         if current:
             index = self.combo_supply_port.findData(current)
             if index >= 0:
                 self.combo_supply_port.setCurrentIndex(index)
+            else:
+                state = "not detected" if self._serial_port_scan_completed else "scan pending"
+                self.combo_supply_port.addItem(f"{current} - saved ({state})", current)
+                self.combo_supply_port.setCurrentIndex(self.combo_supply_port.count() - 1)
 
     def _auto_select_shared_broker_hmp_port(self) -> bool:
         if str(self.combo_supply_port.currentData() or "").strip():
@@ -9875,7 +9982,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log("Shared HMP broker auto-start cannot scan supply ports because pyserial is missing.")
             return False
         self._refresh_supply_ports()
-        for port in list_ports.comports():
+        if not self._serial_port_descriptors and not self._serial_port_scan_completed:
+            self._start_serial_port_enumeration()
+            self._log("Shared HMP broker auto-start is waiting for the background serial-port scan.")
+            return False
+        for port in self._serial_port_descriptors:
             match = self._probe_supply_candidate(port.device)
             if match is None:
                 continue
@@ -10008,7 +10119,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if list_ports is None:
             self._log("Scale auto-detect unavailable because pyserial is missing.")
             return False
-        for port in list_ports.comports():
+        if not self._serial_port_descriptors and not self._serial_port_scan_completed:
+            self._start_serial_port_enumeration()
+            self._log("Scale auto-detect is waiting for the background serial-port scan; try again when it finishes.")
+            return False
+        for port in self._serial_port_descriptors:
             match = self._probe_scale_candidate(port.device)
             if match is None:
                 continue
@@ -10085,9 +10200,7 @@ class MainWindow(QtWidgets.QMainWindow):
         selected = str(self.combo_scale_port.currentData() or "").strip()
         if selected:
             candidates.append(selected)
-        if list_ports is None:
-            return candidates
-        port_infos = list(list_ports.comports())
+        port_infos = list(self._serial_port_descriptors)
 
         def _priority(port: object) -> tuple[int, str]:
             description = str(getattr(port, "description", "") or "").lower()
@@ -10135,15 +10248,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Fast scale auto-detect did not find a responding serial balance.")
         return False
 
-    def _refresh_scale_ports(self) -> None:
+    def _refresh_scale_ports(self, *, scan_error: str | None = None) -> None:
         current = self.combo_scale_port.currentData() or self.settings.value("scale_port", "", type=str)
         self.combo_scale_port.clear()
         if list_ports is None:
             self.combo_scale_port.addItem("pyserial unavailable", "")
             return
+        if scan_error:
+            if current:
+                self.combo_scale_port.addItem(f"{current} - saved (serial-port scan failed)", current)
+            else:
+                self.combo_scale_port.addItem("Serial-port scan failed", "")
+            return
         seen = False
         preferred_index = -1
-        for port in list_ports.comports():
+        for port in self._serial_port_descriptors:
             label = f"{port.device} - {port.description}"
             self.combo_scale_port.addItem(label, port.device)
             if current and port.device == current:
@@ -10161,16 +10280,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_port.setCurrentIndex(preferred_index)
         elif self.combo_scale_port.count():
             self.combo_scale_port.setCurrentIndex(0)
+        elif current:
+            state = "not detected" if self._serial_port_scan_completed else "scan pending"
+            self.combo_scale_port.addItem(f"{current} - saved ({state})", current)
 
-    def _refresh_ir_ports(self) -> None:
+    def _refresh_ir_ports(self, *, scan_error: str | None = None) -> None:
         current = self.combo_ir_port.currentData() or self.settings.value("ir_port", "", type=str)
         self.combo_ir_port.clear()
         if list_ports is None:
             self.combo_ir_port.addItem("pyserial unavailable", "")
             return
+        if scan_error:
+            if current:
+                self.combo_ir_port.addItem(f"{current} - saved (serial-port scan failed)", current)
+            else:
+                self.combo_ir_port.addItem("Serial-port scan failed", "")
+            return
         seen = False
         preferred_index = -1
-        for port in list_ports.comports():
+        for port in self._serial_port_descriptors:
             label = f"{port.device} - {port.description}"
             self.combo_ir_port.addItem(label, port.device)
             if current and port.device == current:
@@ -10186,6 +10314,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_ir_port.setCurrentIndex(preferred_index)
         elif self.combo_ir_port.count():
             self.combo_ir_port.setCurrentIndex(0)
+        elif current:
+            state = "not detected" if self._serial_port_scan_completed else "scan pending"
+            self.combo_ir_port.addItem(f"{current} - saved ({state})", current)
 
     def _auto_detect_tic(self) -> bool:
         candidates: list[str] = []
