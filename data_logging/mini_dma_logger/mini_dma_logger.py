@@ -55,6 +55,12 @@ from data_logging.mini_dma_logger.run_cleanup import (
     format_duration_s,
     sanitize_archive_name,
 )
+from data_logging.mini_dma_logger.kosice_import import (
+    AnnealingFolderIndex,
+    AnnealingFolderRecord,
+    build_annealing_folder_index,
+    load_annealing_curve,
+)
 
 try:
     import serial
@@ -67,6 +73,9 @@ except Exception:  # pragma: no cover - import guard
 
 
 APP_NAME = "TMA Logger"
+DEFAULT_KOSICE_FOLDER = Path(
+    r"G:\Shared drives\Charakterizácia mikrodrôtov\shape memory database\Kosice"
+)
 DEFAULT_LOG_BASENAME = "mini_dma"
 DEFAULT_RUN_LOG_MIRROR_PATH = Path("logs") / "mini_dma_run_log.txt"
 DEFAULT_SHARED_BROKER_HOST = "127.0.0.1"
@@ -2461,9 +2470,12 @@ class AnnealingPreviewDialog(QtWidgets.QDialog):
         parent: QtWidgets.QWidget | None,
         title: str,
         series: list[dict[str, Any]],
+        *,
+        source_label: str | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Current Annealing Preview - {title}")
+        source_suffix = f" [{source_label}]" if source_label else ""
+        self.setWindowTitle(f"Current Annealing Preview - {title}{source_suffix}")
         self.resize(980, 820)
         self._canvases: list[Any] = []
         self._scroll_area: QtWidgets.QScrollArea | None = None
@@ -2490,7 +2502,11 @@ class AnnealingPreviewDialog(QtWidgets.QDialog):
             return
         self._annealing_core = annealing_core
 
-        summary = QtWidgets.QLabel(f"{len(series)} current annealing graph(s) for {title}", self)
+        summary_text = f"{len(series)} current annealing graph(s) for {title}"
+        if source_label:
+            summary_text += f"\nSource: {source_label}"
+        summary = QtWidgets.QLabel(summary_text, self)
+        summary.setWordWrap(True)
         summary.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(summary)
 
@@ -3280,6 +3296,47 @@ class FabricationSuggestionWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def cancel(self) -> None:
         self._cancel_event.set()
+
+
+class AnnealingFolderScanWorker(QtCore.QObject):
+    """Build a read-only annealing folder index outside the GUI thread."""
+
+    progress_changed = QtCore.pyqtSignal(str)
+    succeeded = QtCore.pyqtSignal(object, object)
+    failed = QtCore.pyqtSignal(object, str)
+    cancelled = QtCore.pyqtSignal(object)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, root: Path, *, source_label: str) -> None:
+        super().__init__()
+        self.root = root
+        self.source_label = source_label
+        self._cancel_event = Event()
+
+    @QtCore.pyqtSlot()
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            index = build_annealing_folder_index(
+                self.root,
+                source_label=self.source_label,
+                cancelled=self._cancel_event.is_set,
+                progress=self.progress_changed.emit,
+            )
+        except InterruptedError:
+            self.cancelled.emit(self.root)
+        except Exception as exc:
+            self.failed.emit(self.root, f"Failed to scan {self.source_label}: {exc}")
+        else:
+            if self._cancel_event.is_set():
+                self.cancelled.emit(self.root)
+            else:
+                self.succeeded.emit(self.root, index)
+        finally:
+            self.finished.emit()
 
 
 class BuilderProjectImportWorker(QtCore.QObject):
@@ -5914,6 +5971,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._fabrication_thread: QtCore.QThread | None = None
         self._fabrication_worker: FabricationSuggestionWorker | None = None
+        self._kosice_folder_path: Path | None = None
+        self._kosice_index: AnnealingFolderIndex | None = None
+        self._kosice_sample_suggestions: dict[str, tuple[str, ...]] = {}
+        self._fabrication_annealing_index: AnnealingFolderIndex | None = None
+        self._annealing_folder_scan_threads: dict[str, QtCore.QThread] = {}
+        self._annealing_folder_scan_workers: dict[str, AnnealingFolderScanWorker] = {}
         self._annealing_preview_windows: list[QtWidgets.QWidget] = []
         self._supply_controller: PowerSupplyController | None = None
         self._supply_snapshot: dict[str, float | None] = {
@@ -7516,15 +7579,39 @@ class MainWindow(QtWidgets.QMainWindow):
         browse_project_button = QtWidgets.QPushButton("Browse", project_box)
         browse_project_button.clicked.connect(self._choose_builder_project)
         project_path_row.addWidget(browse_project_button)
-        self.button_show_annealing = QtWidgets.QPushButton("Show annealing", project_box)
-        self.button_show_annealing.clicked.connect(self.show_project_annealing_graphs)
-        project_path_row.addWidget(self.button_show_annealing)
         project_form.addRow("Project (.pydpj)", project_path_row)
         self.label_project_status = QtWidgets.QLabel(
             "Load a Microwire Data Builder project to auto-fill diameter and sample metadata."
         )
         self.label_project_status.setWordWrap(True)
+        self.label_project_status.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
+        )
+        self.label_project_status.setMinimumHeight(self.label_project_status.fontMetrics().lineSpacing() * 3 + 8)
         project_form.addRow("", self.label_project_status)
+
+        self.edit_kosice_folder = QtWidgets.QLineEdit(project_box)
+        self.edit_kosice_folder.setPlaceholderText(str(DEFAULT_KOSICE_FOLDER))
+        kosice_path_row = QtWidgets.QHBoxLayout()
+        kosice_path_row.addWidget(self.edit_kosice_folder, stretch=1)
+        browse_kosice_button = QtWidgets.QPushButton("Browse", project_box)
+        browse_kosice_button.clicked.connect(self._choose_kosice_folder)
+        kosice_path_row.addWidget(browse_kosice_button)
+        self.button_scan_kosice = QtWidgets.QPushButton("Scan", project_box)
+        self.button_scan_kosice.clicked.connect(self._handle_kosice_scan_button)
+        kosice_path_row.addWidget(self.button_scan_kosice)
+        project_form.addRow("Košice folder", kosice_path_row)
+        self.label_kosice_status = QtWidgets.QLabel(
+            "Optional source priority 2: select the Košice database folder to index matching annealing files."
+        )
+        self.label_kosice_status.setWordWrap(True)
+        self.label_kosice_status.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
+        )
+        self.label_kosice_status.setMinimumHeight(self.label_kosice_status.fontMetrics().lineSpacing() * 5 + 8)
+        project_form.addRow("", self.label_kosice_status)
 
         self.edit_fabrication_folder = QtWidgets.QLineEdit(project_box)
         fabrication_path_row = QtWidgets.QHBoxLayout()
@@ -7537,10 +7624,23 @@ class MainWindow(QtWidgets.QMainWindow):
         fabrication_path_row.addWidget(self.button_load_fabrication)
         project_form.addRow("Fabrication folder", fabrication_path_row)
         self.label_fabrication_status = QtWidgets.QLabel(
-            "Connect a fabrication folder to suggest compositions and microwires while typing."
+            "Optional source priority 3: connect a fabrication folder for metadata and annealing fallback."
         )
         self.label_fabrication_status.setWordWrap(True)
+        self.label_fabrication_status.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
+        )
+        self.label_fabrication_status.setMinimumHeight(
+            self.label_fabrication_status.fontMetrics().lineSpacing() * 3 + 8
+        )
         project_form.addRow("", self.label_fabrication_status)
+        self.button_show_annealing = QtWidgets.QPushButton("Show annealing", project_box)
+        self.button_show_annealing.setToolTip(
+            "Preview the highest-priority matching source: .pydpj, then Košice, then fabrication."
+        )
+        self.button_show_annealing.clicked.connect(self.show_project_annealing_graphs)
+        project_form.addRow("Annealing preview", self.button_show_annealing)
         specimen_layout.addWidget(project_box)
 
         logging_box = self._group_box("Session")
@@ -9185,6 +9285,8 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.edit_project_path.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_kosice_folder.editingFinished.connect(self._load_kosice_folder_from_ui)
+        self.edit_kosice_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_fabrication_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.spin_diameter.valueChanged.connect(self._refresh_recipe_sample_label)
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
@@ -11746,12 +11848,198 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if path_str:
             self.edit_project_path.setText(path_str)
+            self.edit_project_path.setCursorPosition(0)
             self._builder_project_path = Path(path_str)
             self._auto_import_builder_project_if_possible(
                 update_identity=False,
                 quiet=True,
                 async_load=True,
                 force_reload=True,
+            )
+
+    def _annealing_folder_scan_active(self, source_kind: str) -> bool:
+        thread = self._annealing_folder_scan_threads.get(source_kind)
+        return thread is not None and thread.isRunning()
+
+    def _choose_kosice_folder(self) -> None:
+        start_dir = self.edit_kosice_folder.text().strip() or str(DEFAULT_KOSICE_FOLDER)
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select Košice database folder",
+            start_dir,
+        )
+        if folder:
+            self.edit_kosice_folder.setText(folder)
+            self.edit_kosice_folder.setCursorPosition(0)
+            self._load_kosice_folder_from_ui()
+
+    def _handle_kosice_scan_button(self) -> None:
+        if self._annealing_folder_scan_active("kosice"):
+            self._cancel_annealing_folder_scan("kosice")
+            return
+        self._load_kosice_folder_from_ui()
+
+    def _load_kosice_folder_from_ui(self) -> None:
+        path_text = self.edit_kosice_folder.text().strip()
+        if not path_text:
+            self._cancel_annealing_folder_scan("kosice")
+            self._kosice_folder_path = None
+            self._kosice_index = None
+            self._kosice_sample_suggestions = {}
+            self._refresh_fabrication_completers()
+            self.label_kosice_status.setText(
+                "Optional source priority 2: select the Košice database folder to index matching annealing files."
+            )
+            return
+        self._start_annealing_folder_scan("kosice", Path(path_text))
+
+    def _start_annealing_folder_scan(self, source_kind: str, root: Path) -> None:
+        self._cancel_annealing_folder_scan(source_kind)
+        if source_kind == "kosice":
+            self._kosice_folder_path = root
+            self._kosice_index = None
+            self._kosice_sample_suggestions = {}
+            source_label = "Košice folder"
+            self.label_kosice_status.setText(f"Scanning Košice folder: {root}")
+            self.button_scan_kosice.setText("Cancel")
+        else:
+            self._fabrication_annealing_index = None
+            source_label = "fabrication folder"
+
+        thread = QtCore.QThread(self)
+        worker = AnnealingFolderScanWorker(root, source_label=source_label)
+        worker.moveToThread(thread)
+        if source_kind == "kosice":
+            worker.progress_changed.connect(self.label_kosice_status.setText)
+        worker.succeeded.connect(
+            lambda root_obj, index_obj, kind=source_kind: self._handle_annealing_folder_scan_success(
+                kind, root_obj, index_obj
+            )
+        )
+        worker.failed.connect(
+            lambda root_obj, message, kind=source_kind: self._handle_annealing_folder_scan_failure(
+                kind, root_obj, message
+            )
+        )
+        worker.cancelled.connect(
+            lambda root_obj, kind=source_kind: self._handle_annealing_folder_scan_cancelled(kind, root_obj)
+        )
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda kind=source_kind, scan_thread=thread, scan_worker=worker: self._finish_annealing_folder_scan(
+                kind, scan_thread, scan_worker
+            )
+        )
+        thread.started.connect(worker.run)
+        self._annealing_folder_scan_threads[source_kind] = thread
+        self._annealing_folder_scan_workers[source_kind] = worker
+        thread.start()
+
+    def _cancel_annealing_folder_scan(self, source_kind: str) -> None:
+        worker = self._annealing_folder_scan_workers.get(source_kind)
+        if worker is not None:
+            try:
+                worker.cancel()
+            except RuntimeError:
+                pass
+
+    def _stop_annealing_folder_scans(self) -> None:
+        scan_items = list(self._annealing_folder_scan_threads.items())
+        for source_kind, _thread in scan_items:
+            self._cancel_annealing_folder_scan(source_kind)
+        for _source_kind, thread in scan_items:
+            try:
+                thread.quit()
+                thread.wait(1500)
+            except RuntimeError:
+                pass
+        self._annealing_folder_scan_threads.clear()
+        self._annealing_folder_scan_workers.clear()
+
+    def _finish_annealing_folder_scan(
+        self,
+        source_kind: str,
+        thread: QtCore.QThread,
+        worker: AnnealingFolderScanWorker,
+    ) -> None:
+        if self._annealing_folder_scan_threads.get(source_kind) is thread:
+            self._annealing_folder_scan_threads.pop(source_kind, None)
+            self._annealing_folder_scan_workers.pop(source_kind, None)
+            if source_kind == "kosice":
+                self.button_scan_kosice.setText("Scan")
+                self._update_kosice_match_status()
+        thread.deleteLater()
+
+    def _handle_annealing_folder_scan_success(
+        self,
+        source_kind: str,
+        root_obj: object,
+        index_obj: object,
+    ) -> None:
+        if not isinstance(index_obj, AnnealingFolderIndex):
+            return
+        root = Path(root_obj)
+        if source_kind == "kosice":
+            if self._kosice_folder_path != root:
+                return
+            self._kosice_index = index_obj
+            self._kosice_sample_suggestions = index_obj.suggestions()
+            self._refresh_fabrication_completers()
+            self._update_kosice_match_status()
+        else:
+            if self._fabrication_folder_path != root:
+                return
+            self._fabrication_annealing_index = index_obj
+
+    def _handle_annealing_folder_scan_failure(
+        self,
+        source_kind: str,
+        root_obj: object,
+        message: str,
+    ) -> None:
+        root = Path(root_obj)
+        if source_kind == "kosice":
+            if self._kosice_folder_path != root:
+                return
+            self._kosice_index = None
+            self._kosice_sample_suggestions = {}
+            self._refresh_fabrication_completers()
+            self.label_kosice_status.setText(message)
+        elif self._fabrication_folder_path == root:
+            self._fabrication_annealing_index = None
+
+    def _handle_annealing_folder_scan_cancelled(self, source_kind: str, root_obj: object) -> None:
+        root = Path(root_obj)
+        if source_kind == "kosice" and self._kosice_folder_path == root:
+            self.label_kosice_status.setText("Košice folder scan cancelled.")
+
+    def _update_kosice_match_status(self) -> None:
+        index = self._kosice_index
+        if index is None or self._annealing_folder_scan_active("kosice"):
+            return
+        matches = index.matching(self.edit_name_composition.text(), self.edit_name_wire.text())
+        unsupported_note = ""
+        if index.unsupported_files:
+            unsupported_note = (
+                f" {len(index.unsupported_files)} .opju discovered; unsupported and not imported."
+            )
+        if matches:
+            self.label_kosice_status.setText(
+                f"Košice match: {len(matches)} curve(s) for "
+                f"{matches[0].composition} {matches[0].microwire} (priority 2 after .pydpj)."
+                f"{unsupported_note}"
+            )
+        elif self.edit_name_composition.text().strip() and self.edit_name_wire.text().strip():
+            self.label_kosice_status.setText(
+                f"Košice indexed {len(index.records)} annealing file(s), but none match the current sample."
+                f"{unsupported_note}"
+            )
+        else:
+            self.label_kosice_status.setText(
+                f"Košice indexed {len(index.records)} annealing file(s) from "
+                f"{len(index.data_directories)} folder(s). Select a composition and microwire to see match status."
+                f"{unsupported_note}"
             )
 
     def _fabrication_load_active(self) -> bool:
@@ -11775,6 +12063,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if folder:
             self.edit_fabrication_folder.setText(folder)
+            self.edit_fabrication_folder.setCursorPosition(0)
             self._load_fabrication_folder_from_ui(async_load=True)
 
     def _handle_fabrication_load_button(self) -> None:
@@ -11787,7 +12076,9 @@ class MainWindow(QtWidgets.QMainWindow):
         path_text = self.edit_fabrication_folder.text().strip()
         if not path_text:
             self._cancel_fabrication_folder_load()
+            self._cancel_annealing_folder_scan("fabrication")
             self._fabrication_folder_path = None
+            self._fabrication_annealing_index = None
             self._fabrication_records_by_composition = {}
             self._fabrication_loaded_compositions = set()
             self._fabrication_failed_composition_loads.clear()
@@ -11810,6 +12101,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_failed_composition_loads.clear()
         self._fabrication_folder_path = root
         self._fabrication_loading_composition = composition
+        if composition is None:
+            self._start_annealing_folder_scan("fabrication", root)
         if composition:
             self.label_fabrication_status.setText(f"Loading fabrication data for {composition}...")
         else:
@@ -11973,7 +12266,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_microwire_completer_key = None
         compositions = tuple(
             sorted(
-                set(self._fabrication_records_by_composition) | set(self._builder_project_sample_suggestions),
+                set(self._fabrication_records_by_composition)
+                | set(self._kosice_sample_suggestions)
+                | set(self._builder_project_sample_suggestions),
                 key=str.lower,
             )
         )
@@ -12009,6 +12304,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     record.label
                     for record in self._fabrication_records_by_composition.get(composition or "", [])
                 }
+                | set(self._kosice_sample_suggestions.get(composition or "", ()))
                 | set(self._builder_project_sample_suggestions.get(composition or "", ())),
                 key=_microwire_sort_key,
             )
@@ -12035,7 +12331,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_composition_lookup = {
             normalized: composition
             for composition in (
-                set(self._fabrication_records_by_composition) | set(self._builder_project_sample_suggestions)
+                set(self._fabrication_records_by_composition)
+                | set(self._kosice_sample_suggestions)
+                | set(self._builder_project_sample_suggestions)
             )
             if (normalized := _normalized_token(composition))
         }
@@ -12420,79 +12718,48 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return loaded_series, missing_sources, failed_sources
 
-    def show_project_annealing_graphs(self) -> None:
-        path_text = self.edit_project_path.text().strip()
-        if not path_text:
-            QtWidgets.QMessageBox.information(self, APP_NAME, "Connect a .pydpj project first.")
-            return
-        project_path = Path(path_text)
-        if not project_path.exists():
-            QtWidgets.QMessageBox.warning(self, APP_NAME, "Choose a valid .pydpj file first.")
-            return
-        try:
-            payload = self._read_builder_project_payload(project_path)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to read project file: {exc}")
-            return
-        candidates = self._extract_project_annealing_candidates(payload)
-        if not candidates:
-            QtWidgets.QMessageBox.warning(
-                self,
-                APP_NAME,
-                "No annealing source files were found in this project.",
-            )
-            return
-
-        candidate_index = self._choose_project_annealing_candidate(candidates)
-        if candidate_index is None:
-            labels = [self._annealing_candidate_label(candidate) for candidate in candidates]
-            selected_label, confirmed = QtWidgets.QInputDialog.getItem(
-                self,
-                "Select annealing sample",
-                "Choose which project row to preview:",
-                labels,
-                0,
-                False,
-            )
-            if not confirmed:
-                return
+    def _load_folder_annealing_preview_series(
+        self,
+        records: Sequence[AnnealingFolderRecord],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        loaded_series: list[dict[str, Any]] = []
+        failed_sources: list[str] = []
+        for record in records:
             try:
-                candidate_index = labels.index(selected_label)
-            except ValueError:
-                candidate_index = None
-        if candidate_index is None:
-            return
+                frame = load_annealing_curve(record.path)
+                currents = frame["I_mA"].to_numpy(dtype=float)
+                resistances = frame["R_Ohm"].to_numpy(dtype=float)
+            except Exception as exc:
+                failed_sources.append(f"{record.path.name}: {exc}")
+                continue
+            setpoint_mA = record.setpoint_mA
+            if setpoint_mA is None:
+                setpoint_mA = max((abs(float(value)) for value in currents), default=None)
+            loaded_series.append(
+                {
+                    "label": record.curve_label,
+                    "frame": frame,
+                    "currents": currents,
+                    "resistances": resistances,
+                    "path": str(record.path),
+                    "setpoint_mA": setpoint_mA,
+                }
+            )
+        return loaded_series, failed_sources
 
-        candidate = candidates[candidate_index]
-        sources = [str(source).strip() for source in candidate.get("sources", []) if str(source).strip()]
-        series, missing_sources, failed_sources = self._load_annealing_preview_series(
-            project_path=project_path,
-            sources=sources,
+    def _open_annealing_preview(
+        self,
+        *,
+        title: str,
+        series: list[dict[str, Any]],
+        source_label: str,
+    ) -> None:
+        dialog = AnnealingPreviewDialog(
+            self,
+            title,
+            series,
+            source_label=source_label,
         )
-        if not series:
-            details: list[str] = []
-            if missing_sources:
-                details.append("Missing source files:")
-                details.extend(f"  - {self._source_basename(path)}" for path in missing_sources[:12])
-            if failed_sources:
-                details.append("Failed to parse:")
-                details.extend(f"  - {item}" for item in failed_sources[:12])
-            QtWidgets.QMessageBox.warning(
-                self,
-                APP_NAME,
-                "\n".join(details) if details else "No valid annealing curves found.",
-            )
-            return
-
-        title = " ".join(
-            part
-            for part in (
-                str(candidate.get("composition", "")).strip(),
-                str(candidate.get("microwire", "")).strip(),
-            )
-            if part
-        ) or "Current annealing preview"
-        dialog = AnnealingPreviewDialog(self, title, series)
         dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dialog.destroyed.connect(
             lambda _obj=None, dlg=dialog: self._annealing_preview_windows.remove(dlg)
@@ -12504,13 +12771,150 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
-        if missing_sources or failed_sources:
-            message_lines: list[str] = []
-            if missing_sources:
-                message_lines.append(f"Some files were not found ({len(missing_sources)}).")
+    def show_project_annealing_graphs(self) -> None:
+        """Preview the highest-priority matching annealing source."""
+
+        composition = self.edit_name_composition.text().strip()
+        microwire = self.edit_name_wire.text().strip()
+        diagnostics: list[str] = []
+
+        path_text = self.edit_project_path.text().strip()
+        if path_text:
+            project_path = Path(path_text)
+            if not project_path.exists():
+                diagnostics.append("The saved .pydpj project was not found.")
+            else:
+                try:
+                    payload = self._read_builder_project_payload(project_path)
+                    candidates = self._extract_project_annealing_candidates(payload)
+                except Exception as exc:
+                    diagnostics.append(f"Failed to read .pydpj project: {exc}")
+                    candidates = []
+                candidate_index: int | None = None
+                if candidates and composition and microwire:
+                    composition_key = _normalized_token(composition)
+                    wire_key = _normalized_microwire_token(microwire)
+                    candidate_index = next(
+                        (
+                            index
+                            for index, candidate in enumerate(candidates)
+                            if candidate.get("composition_norm") == composition_key
+                            and candidate.get("microwire_norm") == wire_key
+                        ),
+                        None,
+                    )
+                elif candidates:
+                    candidate_index = self._choose_project_annealing_candidate(candidates)
+                    if candidate_index is None:
+                        labels = [self._annealing_candidate_label(candidate) for candidate in candidates]
+                        selected_label, confirmed = QtWidgets.QInputDialog.getItem(
+                            self,
+                            "Select annealing sample",
+                            "Choose which project row to preview:",
+                            labels,
+                            0,
+                            False,
+                        )
+                        if not confirmed:
+                            return
+                        try:
+                            candidate_index = labels.index(selected_label)
+                        except ValueError:
+                            candidate_index = None
+                if candidate_index is not None:
+                    candidate = candidates[candidate_index]
+                    sources = [
+                        str(source).strip()
+                        for source in candidate.get("sources", [])
+                        if str(source).strip()
+                    ]
+                    series, missing_sources, failed_sources = self._load_annealing_preview_series(
+                        project_path=project_path,
+                        sources=sources,
+                    )
+                    if series:
+                        title = " ".join(
+                            part
+                            for part in (
+                                str(candidate.get("composition", "")).strip(),
+                                str(candidate.get("microwire", "")).strip(),
+                            )
+                            if part
+                        ) or "Current annealing preview"
+                        source_label = f"Builder project (.pydpj): {project_path.name}"
+                        self.label_project_status.setText(
+                            f"Annealing preview source: {source_label} (priority 1)."
+                        )
+                        self._open_annealing_preview(
+                            title=title,
+                            series=series,
+                            source_label=source_label,
+                        )
+                        if missing_sources or failed_sources:
+                            QtWidgets.QMessageBox.information(
+                                self,
+                                APP_NAME,
+                                f"The project preview opened, but {len(missing_sources)} file(s) were missing "
+                                f"and {len(failed_sources)} file(s) failed to parse.",
+                            )
+                        return
+                    diagnostics.append("Matching .pydpj annealing files were unavailable or unreadable.")
+                elif candidates:
+                    diagnostics.append("The .pydpj has annealing data, but no row matches the current sample.")
+                else:
+                    diagnostics.append("The .pydpj contains no annealing source rows.")
+
+        for source_kind, index in (
+            ("kosice", self._kosice_index),
+            ("fabrication", self._fabrication_annealing_index),
+        ):
+            if index is None:
+                continue
+            records = index.matching(composition, microwire)
+            if not records:
+                diagnostics.append(f"No {index.source_label} annealing files match the current sample.")
+                continue
+            series, failed_sources = self._load_folder_annealing_preview_series(records)
+            if not series:
+                diagnostics.append(
+                    f"Matching {index.source_label} files were found, but all failed to parse."
+                )
+                diagnostics.extend(failed_sources[:4])
+                continue
+            source_priority = 2 if source_kind == "kosice" else 3
+            source_label = f"{index.source_label}: {index.root}"
+            if source_kind == "kosice":
+                self.label_kosice_status.setText(
+                    f"Annealing preview source: Košice folder (priority {source_priority}); "
+                    f"{len(series)} matching curve(s)."
+                )
+            else:
+                self.label_fabrication_status.setText(
+                    f"Annealing preview source: fabrication folder (priority {source_priority}); "
+                    f"{len(series)} matching curve(s)."
+                )
+            self._open_annealing_preview(
+                title=f"{composition} {MicrowireLineEdit.to_display_text(microwire) or microwire}".strip(),
+                series=series,
+                source_label=source_label,
+            )
             if failed_sources:
-                message_lines.append(f"Some files failed to parse ({len(failed_sources)}).")
-            QtWidgets.QMessageBox.information(self, APP_NAME, " ".join(message_lines))
+                QtWidgets.QMessageBox.information(
+                    self,
+                    APP_NAME,
+                    f"The preview opened, but {len(failed_sources)} matching file(s) failed to parse.",
+                )
+            return
+
+        if self._annealing_folder_scan_active("kosice"):
+            diagnostics.append("The Košice folder is still being scanned; try again when indexing finishes.")
+        if not (path_text or self._kosice_index is not None or self._fabrication_annealing_index is not None):
+            diagnostics.append("Connect a .pydpj, Košice folder, or fabrication folder first.")
+        QtWidgets.QMessageBox.warning(
+            self,
+            APP_NAME,
+            "No matching annealing preview is available.\n\n" + "\n".join(diagnostics),
+        )
 
     def _project_match_score(self, row: Mapping[str, Any]) -> int:
         return _project_match_score_for_sample(
@@ -13662,6 +14066,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_auto_log_name = safe_name
             self._refresh_recipe_sample_label()
             self._update_fabrication_microwire_completer()
+            self._update_kosice_match_status()
             self._schedule_builder_project_auto_import()
             try:
                 self._apply_fabrication_sample_if_possible()
@@ -29602,6 +30007,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("sample_name", self.edit_sample_name.text())
         self.settings.setValue("run_notes", self.edit_run_notes.toPlainText())
         self.settings.setValue("builder_project_path", self.edit_project_path.text())
+        self.settings.setValue("kosice_folder_path", self.edit_kosice_folder.text())
         self.settings.setValue("fabrication_folder_path", self.edit_fabrication_folder.text())
         log_dir_to_save = self.edit_log_dir.text()
         if self._provided_log_dir and log_dir_to_save == self._provided_log_dir:
@@ -30067,9 +30473,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_run_notes.setPlainText(self.settings.value("run_notes", "", type=str))
         builder_project_path = self.settings.value("builder_project_path", "", type=str)
         self.edit_project_path.setText(builder_project_path)
+        self.edit_project_path.setCursorPosition(0)
         self._builder_project_path = Path(builder_project_path) if builder_project_path else None
+        kosice_folder_path = self.settings.value("kosice_folder_path", "", type=str)
+        self.edit_kosice_folder.setText(kosice_folder_path)
+        self.edit_kosice_folder.setCursorPosition(0)
+        self._kosice_folder_path = Path(kosice_folder_path) if kosice_folder_path else None
+        if kosice_folder_path:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda path=kosice_folder_path: self._start_annealing_folder_scan("kosice", Path(path)),
+            )
         fabrication_folder_path = self.settings.value("fabrication_folder_path", "", type=str)
         self.edit_fabrication_folder.setText(fabrication_folder_path)
+        self.edit_fabrication_folder.setCursorPosition(0)
         if fabrication_folder_path:
             QtCore.QTimer.singleShot(
                 0,
@@ -30622,6 +31039,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_tic_dispatcher()
         self._builder_project_import_timer.stop()
         self._stop_builder_project_import_thread()
+        self._stop_annealing_folder_scans()
         self._cancel_fabrication_folder_load()
         self._disconnect_scale()
         self._disconnect_ir_thermometer()
