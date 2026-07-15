@@ -4036,7 +4036,13 @@ def test_sensor_disconnect_wins_for_callback_blocked_before_state_lock(
 
         def _deliver() -> None:
             attempting.set()
-            window._record_scale_measurement_from_worker(token, 17.0, "stale-scale", 2.0)
+            window._record_scale_measurement_from_worker(
+                token,
+                window._session_raw_scale_target,
+                17.0,
+                "stale-scale",
+                2.0,
+            )
             completed.set()
 
         disconnect = window._disconnect_scale
@@ -4050,7 +4056,11 @@ def test_sensor_disconnect_wins_for_callback_blocked_before_state_lock(
 
             def _deliver() -> None:
                 attempting.set()
-                window._record_ir_sample_from_worker(token, stale_ir_sample)
+                window._record_ir_sample_from_worker(
+                    token,
+                    window._session_ir_temperature_target,
+                    stale_ir_sample,
+                )
                 completed.set()
 
         else:
@@ -4199,10 +4209,20 @@ def _install_blocking_sensor_target(
 ]:
     handle = _BlockingSensorHandle()
     writer = _RecordingSensorWriter(handle)
+    target = _replace_session_sensor_target(window, sensor_kind, handle, writer)
+    return target, handle, writer
+
+
+def _replace_session_sensor_target(
+    window: mini_dma_mod.MainWindow,
+    sensor_kind: str,
+    handle: object,
+    writer: object,
+) -> mini_dma_mod.SessionSensorCsvTarget:
     target = mini_dma_mod.SessionSensorCsvTarget(
         handle,
         writer,
-        name=f"test-{sensor_kind}",
+        name="raw_scale" if sensor_kind == "scale" else "ir_temperature",
     )
     if sensor_kind == "scale":
         lock = window._scale_state_lock
@@ -4222,7 +4242,7 @@ def _install_blocking_sensor_target(
     assert previous_target is not None
     previous_target.detach_and_close()
     assert previous_target.wait_closed(2.0)
-    return target, handle, writer
+    return target
 
 
 @pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
@@ -4270,6 +4290,8 @@ def test_session_stop_detaches_sensor_target_during_inflight_file_io(
     monkeypatch.setattr(mini_dma_mod.time, "time", lambda: 1000.0)
     window.edit_log_name.setText(f"blocked_{sensor_kind}_log")
     window._start_session(enable_logging=False, record_initial_point=False)
+    metadata_path = window._session_json_path
+    assert metadata_path is not None
     if sensor_kind == "ir":
         window._session_logging_enabled = True
         window._session_ir_temperature_count = 9
@@ -4294,6 +4316,18 @@ def test_session_stop_detaches_sensor_target_during_inflight_file_io(
         assert elapsed_s < 0.6
         assert not target.closed_event.is_set()
         assert handle.close_calls == 0
+        sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert metadata["logging"]["sensor_sidecars"][sidecar_name] == {
+            "status": "incomplete",
+            "complete": False,
+            "accepted_rows": 1,
+            "written_rows": 0,
+            "lost_rows": 1,
+            "pending_rows": 0,
+            "reason": "close_timeout",
+        }
+        assert "close_timeout" in window.statusBar().currentMessage()
         accepted_count = (
             window._session_raw_scale_count
             if sensor_kind == "scale"
@@ -4318,7 +4352,7 @@ def test_session_stop_detaches_sensor_target_during_inflight_file_io(
 
         handle.release_flush.set()
         assert target.wait_closed(2.0)
-        assert target.write_error is None
+        assert target.failure_reason is None
         assert handle.close_calls == 1
         assert not handle.closed_during_flush
         assert not writer.write_after_close
@@ -4367,9 +4401,279 @@ def test_tma_close_is_bounded_while_sensor_file_flush_remains_blocked(
     finally:
         handle.release_flush.set()
         assert target.wait_closed(2.0)
-        assert target.write_error is None
+        assert target.failure_reason is None
         assert handle.close_calls == 1
         assert not handle.closed_during_flush
+        _close_test_window(window)
+
+
+class _FailingSensorHandle:
+    def __init__(self, *, fail_first_flush: bool) -> None:
+        self.fail_first_flush = fail_first_flush
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+        if self.fail_first_flush and self.flush_calls == 1:
+            raise OSError("synthetic sensor flush failure")
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _FailingSensorWriter:
+    def __init__(self, *, fail_first_write: bool) -> None:
+        self.fail_first_write = fail_first_write
+        self.calls = 0
+        self.rows: list[dict[str, object]] = []
+
+    def writerow(self, row: Mapping[str, object]) -> None:
+        self.calls += 1
+        if self.fail_first_write and self.calls == 1:
+            raise OSError("synthetic sensor writerow failure")
+        self.rows.append(dict(row))
+
+
+@pytest.mark.parametrize(
+    ("sensor_kind", "failure_stage"),
+    [("scale", "writerow"), ("ir", "flush")],
+)
+def test_sensor_sidecar_failure_stops_acceptance_warns_on_gui_and_finalizes_metadata(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+    failure_stage: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    worker_done = threading.Event()
+    warning_threads: list[object] = []
+    warning_reasons: list[str] = []
+    original_warning = window._handle_session_sensor_log_failure
+
+    def _record_warning(
+        target: mini_dma_mod.SessionSensorCsvTarget,
+        reason: str,
+    ) -> None:
+        warning_threads.append(QtCore.QThread.currentThread())
+        warning_reasons.append(reason)
+        original_warning(target, reason)
+
+    monkeypatch.setattr(window, "_handle_session_sensor_log_failure", _record_warning)
+    ir_samples = [
+        mini_dma_mod.IrTemperatureSample(
+            timestamp_s=time.time() + index * 0.01,
+            raw_text=f"ir-{index}",
+            sequence=index,
+            device_elapsed_ms=index * 10,
+            read_us=20,
+            ambient_c=21.0,
+            object_c_apparent=31.0 + index,
+            raw_ambient=100,
+            raw_object=200,
+            flags=0,
+        )
+        for index in (1, 2)
+    ]
+
+    if sensor_kind == "scale":
+        def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+            worker.measurement_received.emit(17.0, "first", time.time())
+            worker.measurement_received.emit(18.0, "rejected", time.time())
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-failing-scale", "COM-failing-scale")
+    else:
+        def _run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+            for sample in ir_samples:
+                worker.sample_received.emit(sample)
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _run)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-failing-ir", "COM-failing-ir")
+
+    window.edit_log_name.setText(f"{sensor_kind}_{failure_stage}_failure")
+    window._start_session(enable_logging=True, record_initial_point=False)
+    metadata_path = window._session_json_path
+    assert metadata_path is not None
+    if sensor_kind == "ir":
+        window._session_ir_temperature_count = 9
+    handle = _FailingSensorHandle(fail_first_flush=failure_stage == "flush")
+    writer = _FailingSensorWriter(fail_first_write=failure_stage == "writerow")
+    target = _replace_session_sensor_target(window, sensor_kind, handle, writer)
+
+    try:
+        if sensor_kind == "scale":
+            assert window._connect_scale(show_errors=False)
+        else:
+            assert window._connect_ir_thermometer(show_errors=False)
+        assert worker_done.wait(timeout=2.0)
+        qtbot.waitUntil(lambda: len(warning_reasons) == 1, timeout=2000)
+
+        outcome = target.outcome()
+        assert outcome["accepted_rows"] == 1
+        assert outcome["written_rows"] == 0
+        assert outcome["lost_rows"] == 1
+        assert str(outcome["reason"]).startswith(f"{failure_stage}_failed:")
+        assert writer.calls == 1
+        assert warning_threads == [window.thread()]
+        assert str(outcome["reason"]) in warning_reasons[0]
+        assert (
+            window._session_raw_scale_count
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_count
+        ) == (1 if sensor_kind == "scale" else 10)
+
+        window._stop_session(reason="manual_session_stop")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
+        finalized = metadata["logging"]["sensor_sidecars"][sidecar_name]
+        assert finalized == {
+            "status": "incomplete",
+            "complete": False,
+            "accepted_rows": 1,
+            "written_rows": 0,
+            "lost_rows": 1,
+            "pending_rows": 0,
+            "reason": outcome["reason"],
+        }
+        assert handle.close_calls == 1
+        assert len(warning_reasons) == 1
+    finally:
+        if window._session_active:
+            window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_pre_restart_sensor_callback_cannot_mutate_replacement_session(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    callback_entered = threading.Event()
+    release_callback = threading.Event()
+    worker_done = threading.Event()
+    stale_ir_sample = mini_dma_mod.IrTemperatureSample(
+        timestamp_s=time.time(),
+        raw_text="stale-ir",
+        sequence=22,
+        device_elapsed_ms=20,
+        read_us=20,
+        ambient_c=21.0,
+        object_c_apparent=99.0,
+        raw_ambient=100,
+        raw_object=200,
+        flags=0,
+    )
+
+    window.edit_log_name.setText(f"session_a_{sensor_kind}")
+    window._start_session(enable_logging=True, record_initial_point=False)
+    if sensor_kind == "scale":
+        session_a_target = window._session_raw_scale_target
+        original_record = window._record_scale_measurement_from_worker
+
+        def _blocked_record(token, session_target, value_g, raw_text, timestamp_s):
+            assert session_target is session_a_target
+            callback_entered.set()
+            assert release_callback.wait(timeout=5.0)
+            return original_record(token, session_target, value_g, raw_text, timestamp_s)
+
+        def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+            worker.measurement_received.emit(77.0, "stale-scale", time.time())
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(window, "_record_scale_measurement_from_worker", _blocked_record)
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+        window._latest_scale_value_g = 12.0
+        window._latest_scale_text = "sentinel-scale"
+        window._latest_scale_timestamp = 123.0
+        sentinel_scale = window._scale_signal_buffer.add_sample(
+            timestamp_s=123.0,
+            raw_g=12.0,
+            applied_load_g=3.0,
+            raw_text="sentinel-scale",
+        )
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-restart-scale", "COM-restart-scale")
+        connect = window._connect_scale
+    else:
+        session_a_target = window._session_ir_temperature_target
+        original_record = window._record_ir_sample_from_worker
+
+        def _blocked_record(token, session_target, sample):
+            assert session_target is session_a_target
+            callback_entered.set()
+            assert release_callback.wait(timeout=5.0)
+            return original_record(token, session_target, sample)
+
+        def _run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+            worker.sample_received.emit(stale_ir_sample)
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(window, "_record_ir_sample_from_worker", _blocked_record)
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _run)
+        sentinel_ir = dataclasses.replace(stale_ir_sample, raw_text="sentinel-ir", object_c_apparent=31.0)
+        window._latest_ir_sample = sentinel_ir
+        window._ir_temperature_buffer.add_sample(sentinel_ir)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-restart-ir", "COM-restart-ir")
+        connect = window._connect_ir_thermometer
+
+    try:
+        assert connect(show_errors=False)
+        assert callback_entered.wait(timeout=2.0)
+        window._stop_session(reason="manual_session_stop")
+
+        window.edit_log_name.setText(f"session_b_{sensor_kind}")
+        window._start_session(enable_logging=True, record_initial_point=False)
+        metadata_path = window._session_json_path
+        sidecar_path = (
+            window._session_raw_scale_path
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_path
+        )
+        assert metadata_path is not None and sidecar_path is not None
+
+        release_callback.set()
+        assert worker_done.wait(timeout=2.0)
+        qtbot.waitUntil(
+            lambda: (window._scale_thread if sensor_kind == "scale" else window._ir_thread) is None,
+            timeout=3000,
+        )
+
+        assert window._session_raw_scale_count == 0
+        assert window._session_ir_temperature_count == 0
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == pytest.approx(12.0)
+            assert window._latest_scale_text == "sentinel-scale"
+            assert window._latest_scale_timestamp == pytest.approx(123.0)
+            assert window._scale_signal_buffer.latest() == sentinel_scale
+        else:
+            assert window._latest_ir_sample == sentinel_ir
+            assert window._ir_temperature_buffer.latest() == sentinel_ir
+
+        window._stop_session(reason="manual_session_stop")
+        assert list(csv.DictReader(sidecar_path.open(encoding="utf-8", newline=""))) == []
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
+        assert metadata["logging"]["sensor_sidecars"][sidecar_name]["accepted_rows"] == 0
+    finally:
+        release_callback.set()
+        if window._session_active:
+            window._stop_session()
         _close_test_window(window)
 
 
