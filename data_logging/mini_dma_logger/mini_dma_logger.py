@@ -22,6 +22,7 @@ from pathlib import Path
 from threading import Condition, Event, Lock, RLock, Thread, current_thread, get_ident
 from time import perf_counter
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from uuid import uuid4
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 try:
@@ -3357,6 +3358,48 @@ class Mlx90614Worker(QtCore.QObject):
 _RETAINED_SENSOR_THREAD_LIFETIMES: set["SensorThreadLifetime"] = set()
 
 
+def patch_sensor_sidecar_metadata(
+    metadata_path: Path,
+    *,
+    session_identity: str,
+    target_identity: str,
+    sidecar_name: str,
+    outcome: Mapping[str, object],
+) -> None:
+    """Atomically replace one sidecar outcome in its original valid run metadata."""
+
+    raw_text = metadata_path.read_text(encoding="utf-8")
+    payload = json.loads(raw_text)
+    if not isinstance(payload, dict):
+        raise ValueError("metadata payload is not an object")
+    if payload.get("session_identity") != session_identity:
+        raise ValueError("metadata session identity changed")
+    logging_metadata = payload.get("logging")
+    if not isinstance(logging_metadata, dict):
+        raise ValueError("metadata payload has no logging object")
+    sidecars = logging_metadata.get("sensor_sidecars")
+    if not isinstance(sidecars, dict):
+        raise ValueError("metadata payload has no sensor_sidecars object")
+    current = sidecars.get(sidecar_name)
+    if not isinstance(current, dict) or current.get("target_identity") != target_identity:
+        raise ValueError("metadata sidecar target identity changed")
+    sidecars[sidecar_name] = dict(outcome)
+    replacement = json.dumps(payload, indent=2)
+    if raw_text.endswith("\n"):
+        replacement += "\n"
+    temporary_path = metadata_path.with_name(
+        f".{metadata_path.name}.{uuid4().hex}.tmp"
+    )
+    try:
+        temporary_path.write_text(replacement, encoding="utf-8")
+        os.replace(temporary_path, metadata_path)
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 @dataclass(frozen=True)
 class SessionSensorCsvWrite:
     target: "SessionSensorCsvTarget"
@@ -3370,10 +3413,23 @@ class SessionSensorCsvWrite:
 class SessionSensorCsvTarget:
     """Serialize one sensor CSV and daemon-close it after accepted writes finish."""
 
-    def __init__(self, handle: Any, writer: Any, *, name: str) -> None:
+    def __init__(
+        self,
+        handle: Any,
+        writer: Any,
+        *,
+        name: str,
+        metadata_path: Path | None = None,
+        session_identity: str | None = None,
+        metadata_lock: RLock | None = None,
+    ) -> None:
         self.handle = handle
         self.writer = writer
         self.name = str(name)
+        self.metadata_path = None if metadata_path is None else Path(metadata_path)
+        self.session_identity = str(session_identity or uuid4().hex)
+        self.target_identity = uuid4().hex
+        self.metadata_lock = metadata_lock or RLock()
         self._state_lock = Lock()
         self._io_lock = Lock()
         self._idle_event = Event()
@@ -3383,9 +3439,13 @@ class SessionSensorCsvTarget:
         self.inflight = 0
         self.accepted_rows = 0
         self.written_rows = 0
+        self.failed_rows = 0
         self.failure_reason: str | None = None
         self._failure_notice_taken = False
         self._close_thread: Thread | None = None
+        self._reconciliation_requested = False
+        self.reconciliation_attempts = 0
+        self.reconciliation_result: str | None = None
 
     def reserve(
         self,
@@ -3412,26 +3472,33 @@ class SessionSensorCsvTarget:
 
     def write_reserved(self, row: Mapping[str, object], *, flush: bool) -> str | None:
         new_failure: str | None = None
+        row_failed = False
         try:
             with self._io_lock:
                 with self._state_lock:
                     failed = self.failure_reason is not None
-                if not failed:
+                if failed:
+                    row_failed = True
+                else:
                     try:
                         self.writer.writerow(row)
                     except BaseException as exc:
                         new_failure = self._latch_failure("writerow_failed", exc)
+                        row_failed = True
                     else:
                         if flush:
                             try:
                                 self.handle.flush()
                             except BaseException as exc:
                                 new_failure = self._latch_failure("flush_failed", exc)
+                                row_failed = True
                         if new_failure is None:
                             with self._state_lock:
                                 self.written_rows += 1
         finally:
             with self._state_lock:
+                if row_failed:
+                    self.failed_rows += 1
                 self.inflight -= 1
                 if self.inflight == 0:
                     self._idle_event.set()
@@ -3464,6 +3531,7 @@ class SessionSensorCsvTarget:
         with self._state_lock:
             accepted_rows = self.accepted_rows
             written_rows = self.written_rows
+            failed_rows = self.failed_rows
             failure_reason = self.failure_reason
             inflight = self.inflight
         if close_timed_out:
@@ -3482,16 +3550,61 @@ class SessionSensorCsvTarget:
             status = "active"
             complete = None
             reason = None
-        unresolved_rows = max(0, accepted_rows - written_rows)
+        unresolved_rows = max(0, accepted_rows - written_rows - failed_rows)
         return {
+            "session_identity": self.session_identity,
+            "target_identity": self.target_identity,
             "status": status,
             "complete": complete,
             "accepted_rows": accepted_rows,
             "written_rows": written_rows,
-            "lost_rows": unresolved_rows if status == "incomplete" else 0,
-            "pending_rows": inflight if status == "active" else 0,
+            "lost_rows": failed_rows,
+            "pending_rows": unresolved_rows,
             "reason": reason,
         }
+
+    def request_reconciliation(
+        self,
+        observer: Callable[["SessionSensorCsvTarget"], None] | None = None,
+    ) -> bool:
+        with self._state_lock:
+            if self._reconciliation_requested:
+                return False
+            self._reconciliation_requested = True
+        Thread(
+            target=self._reconcile_when_closed,
+            args=(observer,),
+            name=f"{self.name}-metadata-reconcile",
+            daemon=True,
+        ).start()
+        return True
+
+    def _reconcile_when_closed(
+        self,
+        observer: Callable[["SessionSensorCsvTarget"], None] | None,
+    ) -> None:
+        self.closed_event.wait()
+        outcome = self.outcome()
+        try:
+            if self.metadata_path is None:
+                raise ValueError("sensor sidecar metadata path is unavailable")
+            with self.metadata_lock:
+                patch_sensor_sidecar_metadata(
+                    self.metadata_path,
+                    session_identity=self.session_identity,
+                    target_identity=self.target_identity,
+                    sidecar_name=self.name,
+                    outcome=outcome,
+                )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            result = f"reconcile_failed: {type(exc).__name__}: {exc}"
+        else:
+            result = "reconciled"
+        with self._state_lock:
+            self.reconciliation_attempts += 1
+            self.reconciliation_result = result
+        if observer is not None:
+            observer(self)
 
     def _close_when_idle(self) -> None:
         self._idle_event.wait()
@@ -7059,6 +7172,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ir_temperature_writer: csv.DictWriter[str] | None = None
         self._session_ir_temperature_target: SessionSensorCsvTarget | None = None
         self._session_sensor_log_outcomes: dict[str, dict[str, object]] = {}
+        self._session_identity: str | None = None
         self._session_ir_temperature_path: Path | None = None
         self._session_control_trace_handle: Any = None
         self._session_control_trace_writer: csv.DictWriter[str] | None = None
@@ -23824,6 +23938,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
 
     def _apply_session_runtime_metadata(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload["session_identity"] = self._session_identity
         payload["position_reference_mm"] = float(self._position_reference_mm)
         payload["preload_reference_armed"] = self._preload_reference_armed
         payload["preload_trigger_elapsed_s"] = self._preload_trigger_elapsed_s
@@ -24407,6 +24522,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_session_metadata_write_s = 0.0
         self._session_metadata_dirty = False
         self._session_sensor_log_outcomes = {}
+        self._session_identity = uuid4().hex
         self._acquire_experiment_sleep_guard()
         self._session_txt_handle = txt_handle
         self._session_csv_handle = csv_handle
@@ -24415,11 +24531,17 @@ class MainWindow(QtWidgets.QMainWindow):
             raw_scale_handle,
             raw_scale_writer,
             name="raw_scale",
+            metadata_path=json_path,
+            session_identity=self._session_identity,
+            metadata_lock=self._session_metadata_write_lock,
         )
         ir_temperature_target = SessionSensorCsvTarget(
             ir_temperature_handle,
             ir_temperature_writer,
             name="ir_temperature",
+            metadata_path=json_path,
+            session_identity=self._session_identity,
+            metadata_lock=self._session_metadata_write_lock,
         )
         with self._scale_state_lock:
             self._session_raw_scale_handle = raw_scale_handle
@@ -24535,17 +24657,45 @@ class MainWindow(QtWidgets.QMainWindow):
         target: SessionSensorCsvTarget,
         reason: str,
     ) -> None:
+        current_session = (
+            target.session_identity == self._session_identity
+            and target.metadata_path == self._session_json_path
+        )
+        prefix = "" if current_session else "Earlier session: "
         message = (
-            f"{target.name.replace('_', ' ').title()} CSV is incomplete: {reason}. "
+            f"{prefix}{target.name.replace('_', ' ').title()} CSV is incomplete: {reason}. "
             "Later rows for this sidecar are disabled."
         )
         self.statusBar().showMessage(message)
+        if not current_session:
+            return
         self._log(message)
-        if self._session_active and self._session_json_path is not None:
+        if self._session_active:
             self._write_session_metadata()
 
-    def _detach_and_close_session_sensor_targets(self) -> None:
+    def _queue_session_sensor_reconciliation(
+        self,
+        target: SessionSensorCsvTarget,
+    ) -> None:
+        self._run_on_ui_thread(
+            WeakOwnerCallback(self, "_handle_session_sensor_reconciliation", target)
+        )
+
+    def _handle_session_sensor_reconciliation(
+        self,
+        target: SessionSensorCsvTarget,
+    ) -> None:
+        result = target.reconciliation_result or "reconciliation status unavailable"
+        self.statusBar().showMessage(
+            "Earlier session sensor sidecar metadata "
+            f"{result.replace('_', ' ')}: {target.metadata_path}."
+        )
+
+    def _detach_and_close_session_sensor_targets(
+        self,
+    ) -> list[SessionSensorCsvTarget]:
         targets: list[tuple[str, SessionSensorCsvTarget]] = []
+        timed_out_targets: list[SessionSensorCsvTarget] = []
         with self._scale_state_lock:
             raw_scale_target = self._session_raw_scale_target
             self._session_raw_scale_target = None
@@ -24567,6 +24717,8 @@ class MainWindow(QtWidgets.QMainWindow):
             closed = target.wait_closed(max(0.0, deadline_s - time.monotonic()))
             outcome = target.outcome(close_timed_out=not closed)
             self._session_sensor_log_outcomes[name] = outcome
+            if not closed:
+                timed_out_targets.append(target)
             reason = outcome.get("reason")
             notice = target.take_failure_notice()
             if reason == "close_timeout" or notice is not None:
@@ -24574,6 +24726,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     target,
                     str(notice or reason),
                 )
+        return timed_out_targets
 
     def _stop_session(
         self,
@@ -24631,7 +24784,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_logging_enabled = was_logging_enabled
         self._session_active = False
         self._session_logging_enabled = False
-        self._detach_and_close_session_sensor_targets()
+        timed_out_sensor_targets = self._detach_and_close_session_sensor_targets()
         self._flush_session_data_handles()
         if self._session_txt_handle is not None:
             self._session_txt_handle.close()
@@ -24698,6 +24851,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
             self._schedule_tma_history_scan()
+        for target in timed_out_sensor_targets:
+            target.request_reconciliation(
+                WeakOwnerCallback(self, "_queue_session_sensor_reconciliation")
+            )
         with self._session_metadata_write_lock:
             finished_run_snapshot = self._run_metadata_snapshot
             self._run_metadata_snapshot = None

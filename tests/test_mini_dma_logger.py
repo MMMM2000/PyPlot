@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
@@ -4162,7 +4163,8 @@ def test_first_real_scale_signal_repairs_cached_zero_before_state_and_raw_log(
 
 
 class _BlockingSensorHandle:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_after_release: bool = False) -> None:
+        self.fail_after_release = fail_after_release
         self.flush_entered = threading.Event()
         self.release_flush = threading.Event()
         self.in_flush = threading.Event()
@@ -4179,6 +4181,8 @@ class _BlockingSensorHandle:
         self.flush_entered.set()
         self.release_flush.wait()
         self.in_flush.clear()
+        if self.fail_after_release:
+            raise OSError("synthetic late sensor flush failure")
 
     def close(self) -> None:
         self.close_calls += 1
@@ -4223,6 +4227,9 @@ def _replace_session_sensor_target(
         handle,
         writer,
         name="raw_scale" if sensor_kind == "scale" else "ir_temperature",
+        metadata_path=window._session_json_path,
+        session_identity=window._session_identity,
+        metadata_lock=window._session_metadata_write_lock,
     )
     if sensor_kind == "scale":
         lock = window._scale_state_lock
@@ -4319,12 +4326,14 @@ def test_session_stop_detaches_sensor_target_during_inflight_file_io(
         sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         assert metadata["logging"]["sensor_sidecars"][sidecar_name] == {
+            "session_identity": target.session_identity,
+            "target_identity": target.target_identity,
             "status": "incomplete",
             "complete": False,
             "accepted_rows": 1,
             "written_rows": 0,
-            "lost_rows": 1,
-            "pending_rows": 0,
+            "lost_rows": 0,
+            "pending_rows": 1,
             "reason": "close_timeout",
         }
         assert "close_timeout" in window.statusBar().currentMessage()
@@ -4405,6 +4414,186 @@ def test_tma_close_is_bounded_while_sensor_file_flush_remains_blocked(
         assert handle.close_calls == 1
         assert not handle.closed_during_flush
         _close_test_window(window)
+
+
+@pytest.mark.parametrize("late_result", ["success", "failure"])
+def test_timed_out_sensor_write_reconciles_only_original_session(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    late_result: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    worker_done = threading.Event()
+
+    def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+        worker.measurement_received.emit(17.0, "session-a", time.time())
+        worker_done.set()
+        worker.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+    monkeypatch.setattr(window, "_request_session_source_provenance", lambda: None)
+    window.combo_scale_port.clear()
+    window.combo_scale_port.addItem("COM-reconcile-scale", "COM-reconcile-scale")
+    window.edit_log_name.setText(f"reconcile_a_{late_result}")
+    window._start_session(enable_logging=True, record_initial_point=False)
+    session_a_identity = window._session_identity
+    metadata_a = window._session_json_path
+    run_log_a = window._session_run_log_path
+    assert session_a_identity is not None and metadata_a is not None and run_log_a is not None
+    handle = _BlockingSensorHandle(fail_after_release=late_result == "failure")
+    writer = _RecordingSensorWriter(handle)
+    target = _replace_session_sensor_target(window, "scale", handle, writer)
+
+    try:
+        assert window._connect_scale(show_errors=False)
+        assert handle.flush_entered.wait(timeout=2.0)
+        window._stop_session(reason="manual_session_stop")
+
+        pending_a = json.loads(metadata_a.read_text(encoding="utf-8"))
+        assert pending_a["logging"]["sensor_sidecars"]["raw_scale"] == {
+            "session_identity": session_a_identity,
+            "target_identity": target.target_identity,
+            "status": "incomplete",
+            "complete": False,
+            "accepted_rows": 1,
+            "written_rows": 0,
+            "lost_rows": 0,
+            "pending_rows": 1,
+            "reason": "close_timeout",
+        }
+
+        window.edit_log_name.setText(f"reconcile_b_{late_result}")
+        window._start_session(enable_logging=True, record_initial_point=False)
+        session_b_identity = window._session_identity
+        metadata_b = window._session_json_path
+        run_log_b = window._session_run_log_path
+        target_b = window._session_raw_scale_target
+        assert (
+            session_b_identity is not None
+            and session_b_identity != session_a_identity
+            and metadata_b is not None
+            and metadata_b != metadata_a
+            and run_log_b is not None
+            and target_b is not None
+        )
+        b_sidecar_before = json.loads(metadata_b.read_text(encoding="utf-8"))["logging"][
+            "sensor_sidecars"
+        ]["raw_scale"]
+        assert window._session_sensor_log_outcomes == {}
+
+        late_log_messages: list[str] = []
+        original_log = window._log
+
+        def _track_late_log(message: str) -> None:
+            late_log_messages.append(message)
+            original_log(message)
+
+        monkeypatch.setattr(window, "_log", _track_late_log)
+        handle.release_flush.set()
+        assert worker_done.wait(timeout=2.0)
+        qtbot.waitUntil(lambda: target.reconciliation_result is not None, timeout=3000)
+        qtbot.wait(50)
+
+        reconciled_a = json.loads(metadata_a.read_text(encoding="utf-8"))
+        outcome_a = reconciled_a["logging"]["sensor_sidecars"]["raw_scale"]
+        assert outcome_a["session_identity"] == session_a_identity
+        assert outcome_a["target_identity"] == target.target_identity
+        assert outcome_a["accepted_rows"] == 1
+        assert outcome_a["pending_rows"] == 0
+        if late_result == "success":
+            assert outcome_a["status"] == "complete"
+            assert outcome_a["complete"] is True
+            assert outcome_a["written_rows"] == 1
+            assert outcome_a["lost_rows"] == 0
+            assert outcome_a["reason"] is None
+        else:
+            assert outcome_a["status"] == "incomplete"
+            assert outcome_a["complete"] is False
+            assert outcome_a["written_rows"] == 0
+            assert outcome_a["lost_rows"] == 1
+            assert outcome_a["reason"].startswith("flush_failed:")
+
+        current_b = json.loads(metadata_b.read_text(encoding="utf-8"))
+        assert current_b["session_identity"] == session_b_identity
+        assert current_b["logging"]["sensor_sidecars"]["raw_scale"] == b_sidecar_before
+        assert window._session_sensor_log_outcomes == {}
+        assert target_b.outcome()["accepted_rows"] == 0
+        assert not any(
+            "Earlier session" in message
+            or "flush_failed" in message
+            or "close_timeout" in message
+            for message in late_log_messages
+        )
+        if run_log_b.exists():
+            run_log_b_text = run_log_b.read_text(encoding="utf-8")
+            assert "Earlier session" not in run_log_b_text
+            assert "synthetic late sensor flush failure" not in run_log_b_text
+        assert target.reconciliation_attempts == 1
+        assert target.request_reconciliation() is False
+    finally:
+        handle.release_flush.set()
+        if window._session_active:
+            window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("broken_metadata", ["missing", "malformed"])
+def test_sensor_reconciliation_is_once_and_never_recreates_invalid_metadata(
+    tmp_path: Path,
+    broken_metadata: str,
+) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    session_identity = uuid.uuid4().hex
+    handle = _BlockingSensorHandle()
+    writer = _RecordingSensorWriter(handle)
+    target = mini_dma_mod.SessionSensorCsvTarget(
+        handle,
+        writer,
+        name="raw_scale",
+        metadata_path=metadata_path,
+        session_identity=session_identity,
+    )
+    write = target.reserve({"row": 1}, flush=True)
+    assert write is not None
+    write_thread = threading.Thread(target=write.perform, daemon=True)
+    write_thread.start()
+    assert handle.flush_entered.wait(timeout=2.0)
+    target.detach_and_close()
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "session_identity": session_identity,
+                "logging": {
+                    "sensor_sidecars": {
+                        "raw_scale": target.outcome(close_timed_out=True),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert target.request_reconciliation()
+    assert target.request_reconciliation() is False
+    if broken_metadata == "missing":
+        metadata_path.unlink()
+    else:
+        metadata_path.write_text("{malformed", encoding="utf-8")
+
+    handle.release_flush.set()
+    assert target.wait_closed(2.0)
+    deadline = time.monotonic() + 2.0
+    while target.reconciliation_result is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    write_thread.join(timeout=2.0)
+
+    assert target.reconciliation_attempts == 1
+    assert target.reconciliation_result is not None
+    assert target.reconciliation_result.startswith("reconcile_failed:")
+    if broken_metadata == "missing":
+        assert not metadata_path.exists()
+    else:
+        assert metadata_path.read_text(encoding="utf-8") == "{malformed"
 
 
 class _FailingSensorHandle:
@@ -4536,6 +4725,8 @@ def test_sensor_sidecar_failure_stops_acceptance_warns_on_gui_and_finalizes_meta
         sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
         finalized = metadata["logging"]["sensor_sidecars"][sidecar_name]
         assert finalized == {
+            "session_identity": target.session_identity,
+            "target_identity": target.target_identity,
             "status": "incomplete",
             "complete": False,
             "accepted_rows": 1,
