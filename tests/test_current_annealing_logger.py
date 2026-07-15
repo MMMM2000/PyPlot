@@ -15,6 +15,46 @@ pytest.importorskip("PyQt6.QtWidgets", reason="Qt widgets backend is unavailable
 
 
 logger_mod = importlib.import_module("data_logging.current_annealing_logger.current_annealing_logger")
+source_provenance_mod = importlib.import_module("data_logging.source_provenance")
+
+
+class _ControlledSourceProvenanceCache:
+    def __init__(self) -> None:
+        self.requests: list[tuple[object, str]] = []
+        self.snapshots: dict[str, dict[str, object]] = {}
+
+    def request(self, repo_root: object, *, token: object | None = None) -> str:
+        capture_token = str(token or f"capture-{len(self.requests) + 1}")
+        self.requests.append((repo_root, capture_token))
+        self.snapshots[capture_token] = source_provenance_mod.pending_source_provenance(repo_root)
+        return capture_token
+
+    def snapshot(self, token: object | None) -> dict[str, object] | None:
+        snapshot = self.snapshots.get(str(token)) if token is not None else None
+        return None if snapshot is None else dict(snapshot)
+
+    def complete(
+        self,
+        token: object,
+        *,
+        branch: str = "codex/current-annealing-pyqtgraph",
+        commit: str = "abc123",
+    ) -> dict[str, object]:
+        snapshot = self.snapshots[str(token)]
+        snapshot.update(
+            branch=branch,
+            commit=commit,
+            is_dirty=True,
+            status_short="M changed.py",
+            remote_url="https://example.test/repo.git",
+            capture_state="complete",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            dirty_state="dirty",
+            head_state="attached",
+            remote_state="configured",
+            capture_error=None,
+        )
+        return dict(snapshot)
 
 
 def _wheel_event(delta_y: int = -120) -> object:
@@ -1958,39 +1998,126 @@ def test_current_annealing_metadata_preserves_decimal_ramp_rate(tmp_path, qtbot)
 def test_current_annealing_metadata_records_source_control_snapshot(
     tmp_path,
     qtbot,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     window.ui.lineEdit_log_dir.setText(str(tmp_path))
     window.ui.lineEdit_log_file.setText("metadata_git")
-
-    replies = {
-        ("branch", "--show-current"): "codex/current-annealing-pyqtgraph\n",
-        ("rev-parse", "HEAD"): "abc123\n",
-        ("status", "--short"): " M data_logging/current_annealing_logger/current_annealing_logger.py\n",
-        ("config", "--get", "remote.origin.url"): "https://example.test/repo.git\n",
-    }
-
-    def _fake_run(args: list[str], **_kwargs: object) -> object:
-        class Result:
-            returncode = 0
-            stdout = replies[tuple(args[3:])]
-
-        return Result()
-
-    monkeypatch.setattr(logger_mod.subprocess, "run", _fake_run)
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
 
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
     metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    pending = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    token = window._source_provenance_token
+    assert pending["source_control"]["capture_state"] == "pending"
+    assert pending["source_control"]["dirty_state"] == "unknown"
+    assert pending["source_control"]["is_dirty"] is False
+
+    cache.complete(token)
+    window._poll_source_provenance_capture()
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     source_control = payload["source_control"]
     assert source_control["branch"] == "codex/current-annealing-pyqtgraph"
     assert source_control["commit"] == "abc123"
     assert source_control["is_dirty"] is True
     assert source_control["remote_url"] == "https://example.test/repo.git"
+    assert source_control["dirty_state"] == "dirty"
+    assert len(cache.requests) == 1
+
+
+def test_current_annealing_source_provenance_updates_only_current_prepared_output(
+    tmp_path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    window.ui.lineEdit_composition.setText("original composition")
+    window.ui.lineEdit_log_file.setText("old_output")
+    assert window.prepare_output_file() is True
+    old_token = window._source_provenance_token
+    old_path = logger_mod.Path(window.f_name)
+    old_metadata = window._metadata_path(str(old_path))
+
+    window.ui.lineEdit_log_file.setText("new_output")
+    assert window.prepare_output_file() is True
+    new_token = window._source_provenance_token
+    new_path = logger_mod.Path(window.f_name)
+    new_metadata = window._metadata_path(str(new_path))
+    assert old_token != new_token
+    assert len(cache.requests) == 2
+
+    cache.complete(old_token, branch="codex/stale", commit="stale")
+    window._write_source_provenance_completion(str(old_path), old_token)
+    assert logger_mod.json.loads(old_metadata.read_text(encoding="utf-8"))["source_control"][
+        "capture_state"
+    ] == "pending"
+
+    window.ui.lineEdit_composition.setText("operator changed after prepare")
+    expected_snapshot = cache.complete(new_token, branch="codex/current", commit="current")
+    window._poll_source_provenance_capture()
+    completed_payload = logger_mod.json.loads(new_metadata.read_text(encoding="utf-8"))
+    assert completed_payload["source_control"] == expected_snapshot
+    assert completed_payload["composition"] == "original composition"
+
+
+def test_blocked_source_provenance_does_not_delay_prepare_gui_heartbeat_or_close(
+    tmp_path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("blocked_git")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_collector(repo_root: object, *, requested_utc: str) -> dict[str, object]:
+        entered.set()
+        assert release.wait(timeout=5.0)
+        snapshot = source_provenance_mod.pending_source_provenance(
+            repo_root,
+            requested_utc=requested_utc,
+        )
+        snapshot.update(
+            capture_state="unavailable",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            capture_error="test_blocked",
+        )
+        return snapshot
+
+    window._source_provenance_cache = source_provenance_mod.SourceProvenanceCache(
+        _blocked_collector
+    )
+    heartbeat_count = 0
+
+    def _heartbeat() -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+
+    heartbeat = logger_mod.QtCore.QTimer(window)
+    heartbeat.setInterval(0)
+    heartbeat.timeout.connect(_heartbeat)
+    heartbeat.start()
+
+    try:
+        started = time.monotonic()
+        assert window.prepare_output_file() is True
+        assert time.monotonic() - started < 0.25
+        assert entered.wait(timeout=1.0)
+        qtbot.waitUntil(lambda: heartbeat_count > 0, timeout=500)
+
+        close_started = time.monotonic()
+        window.close()
+        assert time.monotonic() - close_started < 1.5
+    finally:
+        release.set()
 
 
 def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:

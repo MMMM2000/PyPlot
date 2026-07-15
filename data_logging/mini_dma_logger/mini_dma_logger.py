@@ -47,6 +47,11 @@ from data_logging.shared_power_supply.protocol import (
     broker_failure_diagnostic,
     start_broker_server,
 )
+from data_logging.source_provenance import (
+    CAPTURE_PENDING,
+    SourceProvenanceCache,
+    unavailable_source_provenance,
+)
 from data_logging.mini_dma_logger.run_cleanup import (
     MiniDmaRunCleanupCandidate,
     archive_cleanup_candidates,
@@ -6639,6 +6644,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_session_data_flush_s = 0.0
         self._last_session_metadata_write_s = 0.0
         self._session_metadata_dirty = False
+        self._session_metadata_write_lock = RLock()
+        self._source_provenance_cache = SourceProvenanceCache()
+        self._session_source_provenance_token: object | None = None
+        self._source_provenance_poll_timer = QtCore.QTimer(self)
+        self._source_provenance_poll_timer.setInterval(50)
+        self._source_provenance_poll_timer.timeout.connect(self._poll_source_provenance_capture)
         self._session_logging_enabled = True
         self._load_offset_g = 0.0
         self._position_reference_mm = 0.0
@@ -22665,35 +22676,31 @@ class MainWindow(QtWidgets.QMainWindow):
             "frame_height": sample.frame_height,
         }
 
+    def _source_provenance_repo_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _request_session_source_provenance(self) -> None:
+        self._session_source_provenance_token = self._source_provenance_cache.request(
+            self._source_provenance_repo_root()
+        )
+        self._source_provenance_poll_timer.start()
+
+    def _poll_source_provenance_capture(self) -> None:
+        token = self._session_source_provenance_token
+        snapshot = self._source_provenance_cache.snapshot(token)
+        if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
+            return
+        self._source_provenance_poll_timer.stop()
+        if self._window_closing or token != self._session_source_provenance_token:
+            return
+        self._write_session_metadata()
+
     def _source_control_metadata(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]
-
-        def _git_text(*args: str) -> str | None:
-            try:
-                completed = subprocess.run(
-                    ["git", "-C", str(repo_root), *args],
-                    capture_output=True,
-                    text=True,
-                    timeout=1.5,
-                    check=False,
-                    **_hidden_subprocess_kwargs(),
-                )
-            except Exception:
-                return None
-            if completed.returncode != 0:
-                return None
-            text = completed.stdout.strip()
-            return text or None
-
-        status = _git_text("status", "--short")
-        return {
-            "repo_root": str(repo_root),
-            "branch": _git_text("branch", "--show-current"),
-            "commit": _git_text("rev-parse", "HEAD"),
-            "is_dirty": bool(status),
-            "status_short": status or "",
-            "remote_url": _git_text("config", "--get", "remote.origin.url"),
-        }
+        snapshot = self._source_provenance_cache.snapshot(self._session_source_provenance_token)
+        if snapshot is not None:
+            return snapshot
+        return unavailable_source_provenance(repo_root, error="capture_not_requested")
 
     def _control_logic_fingerprint_payload(self) -> dict[str, Any]:
         return {
@@ -23126,6 +23133,15 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
     def _write_session_metadata(self, *, finished_utc: str | None = None, throttle: bool = False) -> None:
+        with self._session_metadata_write_lock:
+            self._write_session_metadata_locked(finished_utc=finished_utc, throttle=throttle)
+
+    def _write_session_metadata_locked(
+        self,
+        *,
+        finished_utc: str | None = None,
+        throttle: bool = False,
+    ) -> None:
         if self._session_json_path is None:
             return
         if throttle and finished_utc is None:
@@ -23371,6 +23387,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_base_path = txt_path
         self._session_csv_path = csv_path
         self._session_json_path = json_path
+        self._request_session_source_provenance()
         self._session_raw_scale_path = raw_scale_path
         self._session_ir_temperature_path = ir_temperature_path
         self._session_control_trace_path = control_trace_path
@@ -32266,6 +32283,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
+        self._source_provenance_poll_timer.stop()
         self._run_summary_pending = None
         self._hide_fabrication_completer_popups()
         app = QtWidgets.QApplication.instance()
