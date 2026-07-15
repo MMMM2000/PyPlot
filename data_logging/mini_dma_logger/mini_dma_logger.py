@@ -13,6 +13,7 @@ import statistics
 import subprocess
 import sys
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -2180,6 +2181,8 @@ def _metadata_tma_history_record(payload: Any, source: str) -> TmaHistoryRecord 
     recipe_mode = payload.get("recipe_mode")
     if not isinstance(recipe_mode, str) or not recipe_mode.strip():
         return None
+    if payload.get("session_state") != "finished":
+        return None
     return TmaHistoryRecord(identity=identity, source=source)
 
 
@@ -3605,6 +3608,31 @@ _LIVE_TMA_HISTORY_SCAN_JOBS: dict[
     QtCore.QThread,
     TmaHistoryIndexWorker,
 ] = {}
+
+
+def _release_tma_history_scan_job(thread: QtCore.QThread) -> None:
+    _LIVE_TMA_HISTORY_SCAN_JOBS.pop(thread, None)
+    try:
+        thread.deleteLater()
+    except RuntimeError:
+        pass
+
+
+def _make_tma_history_scan_window_cleanup_callback(
+    window: Any,
+) -> Callable[[], None]:
+    window_ref = weakref.ref(window)
+
+    def _cleanup_window_state() -> None:
+        live_window = window_ref()
+        if live_window is not None:
+            QtCore.QMetaObject.invokeMethod(
+                live_window,
+                "_finish_tma_history_scan_thread",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+            )
+
+    return _cleanup_window_state
 
 
 @dataclass(frozen=True)
@@ -13486,7 +13514,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(
-            lambda thread=thread, worker=worker: self._finish_tma_history_scan_thread(thread, worker)
+            lambda thread=thread: _release_tma_history_scan_job(thread)
+        )
+        thread.finished.connect(
+            _make_tma_history_scan_window_cleanup_callback(self)
         )
         thread.started.connect(worker.run)
         self._tma_history_scan_thread = thread
@@ -13512,16 +13543,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_records = ()
         self._log(message)
 
-    def _finish_tma_history_scan_thread(
-        self,
-        thread: QtCore.QThread,
-        worker: TmaHistoryIndexWorker,
-    ) -> None:
-        _LIVE_TMA_HISTORY_SCAN_JOBS.pop(thread, None)
-        if self._tma_history_scan_thread is thread:
-            self._tma_history_scan_thread = None
-            self._tma_history_scan_worker = None
-        thread.deleteLater()
+    @QtCore.pyqtSlot()
+    def _finish_tma_history_scan_thread(self) -> None:
+        self._tma_history_scan_thread = None
+        self._tma_history_scan_worker = None
         if not self._window_closing and self._tma_history_scan_pending_root is not None:
             self._tma_history_scan_timer.start()
 
@@ -13535,7 +13560,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if thread is not None:
             try:
                 thread.quit()
-                thread.wait(1500)
             except RuntimeError:
                 pass
 

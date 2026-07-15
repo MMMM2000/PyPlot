@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import csv
 import dataclasses
+import gc
 import importlib
 import json
 import math
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import threading
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -506,13 +508,15 @@ def test_first_overheating_history_accepts_actual_builder_tma_row_without_guessi
     ) is False
 
 
-def test_first_overheating_history_accepts_stopped_local_tma_run_with_points(tmp_path: Path) -> None:
+def test_first_overheating_history_accepts_finalized_fault_run_and_rejects_active_run(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "wire_run01"
     run_dir.mkdir()
     (run_dir / "metadata.json").write_text(
         json.dumps(
             {
-                "session_state": "stopped",
+                "session_state": "finished",
                 "point_count": 3,
                 "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
                 "stop": {"reason": "wire_break_or_contact_loss", "category": "fault"},
@@ -521,6 +525,23 @@ def test_first_overheating_history_accepts_stopped_local_tma_run_with_points(tmp
                     "microwire": "12/2",
                     "specimen": "segment A",
                     "condition": "interrupted",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    active_run = tmp_path / "wire_active_run"
+    active_run.mkdir()
+    (active_run / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "running",
+                "point_count": 1,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "name_fields": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/2",
+                    "specimen": "segment A",
                 },
             }
         ),
@@ -559,7 +580,7 @@ def test_tma_history_metadata_scan_cancels_between_files(tmp_path: Path) -> None
         (run_dir / "metadata.json").write_text(
             json.dumps(
                 {
-                    "session_state": "stopped",
+                    "session_state": "finished",
                     "point_count": 3,
                     "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
                     "name_fields": {
@@ -584,6 +605,24 @@ def test_tma_history_metadata_scan_cancels_between_files(tmp_path: Path) -> None
 
     assert len(records) == 1
     assert cancellation_checks == 3
+
+
+def test_tma_history_window_cleanup_callback_uses_only_a_weak_owner_reference() -> None:
+    class _Owner:
+        def _finish_tma_history_scan_thread(self, _thread: object) -> None:
+            raise AssertionError("collected owner must not be called")
+
+    owner = _Owner()
+    owner_ref = weakref.ref(owner)
+    callback = mini_dma_mod._make_tma_history_scan_window_cleanup_callback(
+        owner,
+    )
+
+    del owner
+    gc.collect()
+
+    assert owner_ref() is None
+    callback()
 
 
 def test_tma_history_blocked_scan_close_retains_thread_until_finished(
@@ -629,8 +668,11 @@ def test_tma_history_blocked_scan_close_retains_thread_until_finished(
         assert thread is not None
         assert worker is not None
 
+        close_started = time.perf_counter()
         window.close()
+        close_elapsed_s = time.perf_counter() - close_started
 
+        assert close_elapsed_s < 0.75
         assert thread.isRunning()
         assert window._tma_history_scan_thread is thread
         assert window._tma_history_scan_worker is worker
@@ -641,7 +683,10 @@ def test_tma_history_blocked_scan_close_retains_thread_until_finished(
             lambda: thread not in mini_dma_mod._LIVE_TMA_HISTORY_SCAN_JOBS,
             timeout=3000,
         )
-        assert window._tma_history_scan_thread is None
+        qtbot.waitUntil(
+            lambda: window._tma_history_scan_thread is None,
+            timeout=3000,
+        )
         assert window._tma_history_scan_worker is None
         assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
     finally:
