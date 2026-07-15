@@ -1,0 +1,1 @@
+- Warn before TMA hardware preflight when first overheating is disabled and no exact previous TMA measurement is cached for the wire, with configure, explicit-continue, and cancel actions plus durable skip metadata/logging.

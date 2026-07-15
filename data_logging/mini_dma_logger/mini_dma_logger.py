@@ -523,6 +523,9 @@ HEATING_MODE_OFF = "off"
 OUTPUT_COLLISION_NEXT = "next"
 OUTPUT_COLLISION_REPLACE = "replace"
 OUTPUT_COLLISION_CANCEL = "cancel"
+FIRST_OVERHEATING_CONFIGURE = "configure"
+FIRST_OVERHEATING_CONTINUE = "continue"
+FIRST_OVERHEATING_CANCEL = "cancel"
 HSW_BASIS_LOAD_G = "load_g"
 HSW_BASIS_STRESS_MPA = "stress_mpa"
 HSW_BASIS_STRAIN_PCT = "strain_pct"
@@ -2013,6 +2016,32 @@ class BuilderProjectCacheEntry:
     suggestions: dict[str, tuple[str, ...]]
 
 
+@dataclass(frozen=True)
+class TmaSampleIdentity:
+    composition: str
+    microwire: str
+    specimen: str = ""
+
+    @property
+    def normalized(self) -> tuple[str, str, str]:
+        return (
+            _normalized_token(self.composition),
+            _normalized_microwire_token(self.microwire),
+            _normalized_token(self.specimen),
+        )
+
+    @property
+    def is_specific(self) -> bool:
+        composition, microwire, _specimen = self.normalized
+        return bool(composition and microwire)
+
+
+@dataclass(frozen=True)
+class TmaHistoryRecord:
+    identity: TmaSampleIdentity
+    source: str
+
+
 _BUILDER_PROJECT_CACHE_LOCK = RLock()
 _BUILDER_PROJECT_CACHE: dict[tuple[str, int, int], BuilderProjectCacheEntry] = {}
 _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH: dict[str, BuilderProjectCacheEntry] = {}
@@ -2061,6 +2090,146 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
 def _peek_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry | None:
     with _BUILDER_PROJECT_CACHE_LOCK:
         return _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.get(str(path))
+
+
+def _tma_identity_from_mapping(payload: Mapping[str, Any]) -> TmaSampleIdentity:
+    return TmaSampleIdentity(
+        composition=str(payload.get("composition") or payload.get("Composition") or "").strip(),
+        microwire=str(
+            payload.get("microwire")
+            or payload.get("Microwire")
+            or payload.get("wire")
+            or ""
+        ).strip(),
+        specimen=str(
+            payload.get("specimen")
+            or payload.get("Specimen")
+            or payload.get("wire_segment")
+            or ""
+        ).strip(),
+    )
+
+
+def _tma_identities_match(current: TmaSampleIdentity, previous: TmaSampleIdentity) -> bool:
+    if not current.is_specific or not previous.is_specific:
+        return False
+    current_composition, current_microwire, current_specimen = current.normalized
+    previous_composition, previous_microwire, previous_specimen = previous.normalized
+    if (current_composition, current_microwire) != (previous_composition, previous_microwire):
+        return False
+    if current_specimen:
+        return bool(previous_specimen and previous_specimen == current_specimen)
+    return True
+
+
+def _has_unambiguous_tma_identity_match(
+    current: TmaSampleIdentity,
+    previous_identities: Iterable[TmaSampleIdentity],
+) -> bool:
+    matching = [
+        previous
+        for previous in previous_identities
+        if _tma_identities_match(current, previous)
+    ]
+    if not matching:
+        return False
+    if current.normalized[2]:
+        return True
+    specimen_tokens = {
+        previous.normalized[2]
+        for previous in matching
+        if previous.normalized[2]
+    }
+    return len(specimen_tokens) <= 1
+
+
+def _project_row_has_tma_evidence(row: Mapping[str, Any]) -> bool:
+    for key in ("_sources", "TMA graphs", "TMA", "mini_dma"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            if any(str(item).strip() for item in value):
+                return True
+    return False
+
+
+def _project_has_previous_tma_measurement(payload: Any, identity: TmaSampleIdentity) -> bool:
+    if not identity.is_specific or not isinstance(payload, Mapping):
+        return False
+    sections = payload.get("sections")
+    if not isinstance(sections, Mapping):
+        return False
+    previous_identities: list[TmaSampleIdentity] = []
+    for section_key in ("mini_dma", "tma"):
+        section = sections.get(section_key)
+        if not isinstance(section, Mapping):
+            continue
+        rows = section.get("rows")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, Mapping) or not _project_row_has_tma_evidence(row):
+                continue
+            previous_identities.append(_tma_identity_from_mapping(row))
+    return _has_unambiguous_tma_identity_match(identity, previous_identities)
+
+
+def _metadata_tma_history_record(payload: Any, source: str) -> TmaHistoryRecord | None:
+    if not isinstance(payload, Mapping):
+        return None
+    name_fields = payload.get("name_fields")
+    if not isinstance(name_fields, Mapping):
+        return None
+    identity = _tma_identity_from_mapping(name_fields)
+    if not identity.is_specific:
+        return None
+    try:
+        point_count = int(payload.get("point_count", 0))
+    except (TypeError, ValueError):
+        return None
+    if point_count <= 0:
+        return None
+    recipe_mode = payload.get("recipe_mode")
+    if not isinstance(recipe_mode, str) or not recipe_mode.strip():
+        return None
+    if payload.get("session_state") != "finished":
+        return None
+    return TmaHistoryRecord(identity=identity, source=source)
+
+
+def _scan_tma_history_metadata(root: Path) -> tuple[TmaHistoryRecord, ...]:
+    if not root.is_dir():
+        return ()
+    records: list[TmaHistoryRecord] = []
+    try:
+        metadata_paths = root.glob(f"*/{SESSION_METADATA_JSON}")
+        for metadata_path in metadata_paths:
+            try:
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            record = _metadata_tma_history_record(payload, str(metadata_path))
+            if record is not None:
+                records.append(record)
+    except OSError:
+        return ()
+    return tuple(records)
+
+
+def _first_overheating_preflight_required(
+    *,
+    recipe_mode: str,
+    first_overheating_enabled: bool,
+    previous_tma_measurement_found: bool,
+    continuation: bool = False,
+) -> bool:
+    return (
+        recipe_mode in CURRENT_SWEEP_MODES
+        and not first_overheating_enabled
+        and not previous_tma_measurement_found
+        and not continuation
+    )
 
 
 def _project_match_score_for_sample(
@@ -3402,6 +3571,27 @@ class BuilderProjectImportWorker(QtCore.QObject):
                 self.no_match.emit(path, self.request_key)
                 return
             self.succeeded.emit(path, self.request_key, match)
+        finally:
+            self.finished.emit()
+
+
+class TmaHistoryIndexWorker(QtCore.QObject):
+    succeeded = QtCore.pyqtSignal(object, object)
+    failed = QtCore.pyqtSignal(object, str)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            records = _scan_tma_history_metadata(self.root)
+        except Exception as exc:
+            self.failed.emit(self.root, f"TMA history index failed: {exc}")
+        else:
+            self.succeeded.emit(self.root, records)
         finally:
             self.finished.emit()
 
@@ -5940,6 +6130,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_timer.setSingleShot(True)
         self._builder_project_import_timer.setInterval(350)
         self._builder_project_import_timer.timeout.connect(self._run_scheduled_builder_project_auto_import)
+        self._tma_history_records: tuple[TmaHistoryRecord, ...] = ()
+        self._tma_history_root: Path | None = None
+        self._tma_history_scan_thread: QtCore.QThread | None = None
+        self._tma_history_scan_worker: TmaHistoryIndexWorker | None = None
+        self._tma_history_scan_pending_root: Path | None = None
+        self._tma_history_scan_timer = QtCore.QTimer(self)
+        self._tma_history_scan_timer.setSingleShot(True)
+        self._tma_history_scan_timer.setInterval(750)
+        self._tma_history_scan_timer.timeout.connect(self._start_pending_tma_history_scan)
+        self._first_overheating_preflight_decision: dict[str, Any] | None = None
         self._settings_save_timer = QtCore.QTimer(self)
         self._settings_save_timer.setSingleShot(True)
         self._settings_save_timer.setInterval(750)
@@ -6208,6 +6408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.setSingleShot(True)
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
         self._restore_settings()
+        self._schedule_tma_history_scan()
         self._start_serial_port_enumeration()
         self._refresh_live_labels()
 
@@ -6788,6 +6989,7 @@ class MainWindow(QtWidgets.QMainWindow):
             hidden_status_label.setVisible(False)
 
         tabs = QtWidgets.QTabWidget(control_panel)
+        self.control_tabs = tabs
         tabs.setMinimumWidth(0)
         tabs.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
@@ -7685,6 +7887,7 @@ class MainWindow(QtWidgets.QMainWindow):
         specimen_layout.addWidget(logging_box)
         specimen_layout.addStretch(1)
         experiment_tab = QtWidgets.QWidget(tabs)
+        self.experiment_tab = experiment_tab
         experiment_layout = QtWidgets.QVBoxLayout(experiment_tab)
         experiment_layout.setContentsMargins(0, 0, 0, 0)
         experiment_layout.setSpacing(10)
@@ -9276,6 +9479,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_sample_name.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_log_name.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_log_dir.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_log_dir.textChanged.connect(lambda *_args: self._schedule_tma_history_scan())
         self.edit_project_path.editingFinished.connect(
             lambda: self._auto_import_builder_project_if_possible(
                 update_identity=False,
@@ -13243,6 +13447,78 @@ class MainWindow(QtWidgets.QMainWindow):
             quiet=True,
             async_load=True,
         )
+
+    def _current_tma_history_root(self) -> Path:
+        return Path(self.edit_log_dir.text().strip() or _default_download_dir()).expanduser()
+
+    def _schedule_tma_history_scan(self) -> None:
+        self._tma_history_scan_pending_root = self._current_tma_history_root()
+        self._tma_history_scan_timer.start()
+
+    def _start_pending_tma_history_scan(self) -> None:
+        root = self._tma_history_scan_pending_root
+        if root is None:
+            return
+        if self._tma_history_scan_thread is not None:
+            return
+        self._tma_history_scan_pending_root = None
+        thread = QtCore.QThread(self)
+        worker = TmaHistoryIndexWorker(root)
+        worker.moveToThread(thread)
+        worker.succeeded.connect(self._handle_tma_history_scan_success)
+        worker.failed.connect(self._handle_tma_history_scan_failure)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda thread=thread, worker=worker: self._finish_tma_history_scan_thread(thread, worker)
+        )
+        thread.started.connect(worker.run)
+        self._tma_history_scan_thread = thread
+        self._tma_history_scan_worker = worker
+        thread.start()
+
+    def _handle_tma_history_scan_success(self, root_obj: object, records_obj: object) -> None:
+        root = Path(root_obj)
+        if root != self._current_tma_history_root():
+            return
+        records = records_obj if isinstance(records_obj, tuple) else ()
+        self._tma_history_root = root
+        self._tma_history_records = tuple(
+            record for record in records if isinstance(record, TmaHistoryRecord)
+        )
+
+    def _handle_tma_history_scan_failure(self, root_obj: object, message: str) -> None:
+        root = Path(root_obj)
+        if root != self._current_tma_history_root():
+            return
+        self._tma_history_root = root
+        self._tma_history_records = ()
+        self._log(message)
+
+    def _finish_tma_history_scan_thread(
+        self,
+        thread: QtCore.QThread,
+        worker: TmaHistoryIndexWorker,
+    ) -> None:
+        if self._tma_history_scan_thread is thread:
+            self._tma_history_scan_thread = None
+            self._tma_history_scan_worker = None
+        thread.deleteLater()
+        if self._tma_history_scan_pending_root is not None:
+            self._tma_history_scan_timer.start()
+
+    def _stop_tma_history_scan_thread(self) -> None:
+        self._tma_history_scan_timer.stop()
+        self._tma_history_scan_pending_root = None
+        thread = self._tma_history_scan_thread
+        self._tma_history_scan_thread = None
+        self._tma_history_scan_worker = None
+        if thread is not None:
+            try:
+                thread.quit()
+                thread.wait(1500)
+            except RuntimeError:
+                pass
 
     def _import_builder_project(self) -> None:
         path = Path(self.edit_project_path.text().strip())
@@ -21998,6 +22274,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
             "recipe_summary": self._last_recipe_summary,
             "recipe_estimated_points": int(self._recipe_estimated_points),
+            "first_overheating_preflight": self._first_overheating_preflight_decision,
             "stop": self._session_stop_metadata(),
             "source_control": self._source_control_metadata(),
             "control_logic": self._control_logic_metadata(),
@@ -22498,6 +22775,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ui_refresh_timer.stop()
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
+            self._schedule_tma_history_scan()
+        self._first_overheating_preflight_decision = None
         if self._session_base_path is not None:
             self._start_run_summary_generation(
                 self._session_base_path.parent,
@@ -25740,6 +26019,138 @@ class MainWindow(QtWidgets.QMainWindow):
             self._automation_control_loop = None
         self._auto_ramp_timer.stop()
 
+    def _current_tma_sample_identity(self) -> TmaSampleIdentity:
+        return TmaSampleIdentity(
+            composition=self.edit_name_composition.text().strip(),
+            microwire=self.edit_name_wire.text().strip(),
+            specimen=self.edit_name_specimen.text().strip(),
+        )
+
+    def _has_previous_tma_measurement(self, identity: TmaSampleIdentity) -> bool:
+        path_text = self.edit_project_path.text().strip()
+        if path_text:
+            cached_project = _peek_builder_project_cache_entry(Path(path_text))
+            if cached_project is not None and _project_has_previous_tma_measurement(
+                cached_project.payload,
+                identity,
+            ):
+                return True
+        if self._tma_history_root != self._current_tma_history_root():
+            return False
+        return _has_unambiguous_tma_identity_match(
+            identity,
+            (record.identity for record in self._tma_history_records),
+        )
+
+    def _build_first_overheating_preflight_dialog(self) -> QtWidgets.QMessageBox:
+        box = QtWidgets.QMessageBox(self)
+        box.setObjectName("firstOverheatingPreflightDialog")
+        box.setWindowTitle("First overheating")
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setText("No previous TMA measurement was found for this wire.")
+        box.setInformativeText(
+            "First overheating is disabled. Configure it before starting, or explicitly continue "
+            "without it for this measurement."
+        )
+        configure_button = box.addButton(
+            "Configure first overheating",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        continue_button = box.addButton(
+            "Continue without it",
+            QtWidgets.QMessageBox.ButtonRole.DestructiveRole,
+        )
+        cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        configure_button.setObjectName("configureFirstOverheatingButton")
+        continue_button.setObjectName("continueWithoutFirstOverheatingButton")
+        cancel_button.setObjectName("cancelFirstOverheatingButton")
+        box.setDefaultButton(configure_button)
+        box.setEscapeButton(cancel_button)
+        return box
+
+    def _ask_first_overheating_preflight_action(self) -> str:
+        box = self._build_first_overheating_preflight_dialog()
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is box.findChild(QtWidgets.QPushButton, "configureFirstOverheatingButton"):
+            return FIRST_OVERHEATING_CONFIGURE
+        if clicked is box.findChild(QtWidgets.QPushButton, "continueWithoutFirstOverheatingButton"):
+            return FIRST_OVERHEATING_CONTINUE
+        return FIRST_OVERHEATING_CANCEL
+
+    def _focus_first_overheating_controls(self) -> None:
+        self.control_tabs.setCurrentWidget(self.experiment_tab)
+        self._update_recipe_mode_ui()
+
+        def _reveal() -> None:
+            if self._control_scroll_area is not None:
+                self._control_scroll_area.ensureWidgetVisible(
+                    self.spin_current_sweep_first_overheating_target_mpa,
+                    24,
+                    48,
+                )
+            self.spin_current_sweep_first_overheating_target_mpa.setFocus(
+                QtCore.Qt.FocusReason.OtherFocusReason
+            )
+            self.spin_current_sweep_first_overheating_target_mpa.selectAll()
+
+        QtCore.QTimer.singleShot(0, _reveal)
+
+    def _first_overheating_preflight_allows_start(self) -> bool:
+        self._first_overheating_preflight_decision = None
+        identity = self._current_tma_sample_identity()
+        recipe_mode = str(self.combo_recipe_mode.currentData() or "")
+        history_found = self._has_previous_tma_measurement(identity)
+        if not _first_overheating_preflight_required(
+            recipe_mode=recipe_mode,
+            first_overheating_enabled=self.check_current_sweep_first_overheating.isChecked(),
+            previous_tma_measurement_found=history_found,
+        ):
+            return True
+        action = self._ask_first_overheating_preflight_action()
+        if action == FIRST_OVERHEATING_CONFIGURE:
+            self.check_current_sweep_first_overheating.setChecked(True)
+            self._focus_first_overheating_controls()
+            return False
+        if action != FIRST_OVERHEATING_CONTINUE:
+            return False
+        normalized_identity = identity.normalized
+        self._first_overheating_preflight_decision = {
+            "decision": "operator_explicitly_skipped_first_overheating",
+            "reason": "no_previous_tma_measurement_found",
+            "recorded_utc": _utc_timestamp(),
+            "sample_identity": {
+                "composition": identity.composition,
+                "microwire": identity.microwire,
+                "specimen": identity.specimen,
+                "normalized": {
+                    "composition": normalized_identity[0],
+                    "microwire": normalized_identity[1],
+                    "specimen": normalized_identity[2],
+                },
+            },
+        }
+        self._log(
+            "First-overheating preflight: operator explicitly chose Continue without it; "
+            "no previous TMA measurement was found for this wire."
+        )
+        return True
+
+    def _record_first_overheating_preflight_skip_for_session(self) -> None:
+        if self._first_overheating_preflight_decision is None or not self._session_active:
+            return
+        self._log(
+            "Run decision: operator explicitly skipped first overheating after no previous "
+            "TMA measurement was found for this wire."
+        )
+        self._write_control_trace(
+            decision="first_overheating_preflight",
+            result="continue_without_it",
+            reason="operator_explicitly_skipped_no_previous_tma_measurement_found",
+            task_text="First overheating explicitly skipped",
+        )
+        self._write_session_metadata()
+
     def _start_auto_ramp(self) -> None:
         if self._automation_paused:
             self._resume_paused_recipe()
@@ -25764,10 +26175,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Discarded stopped-recipe resume state because the visible recipe controls changed."
                 )
             self._resume_recipe_state = None
+        if not self._first_overheating_preflight_allows_start():
+            return
         self._sync_stale_log_name_from_sample()
         if not self._preflight_recipe_hardware(steps, show_progress=True):
+            self._first_overheating_preflight_decision = None
             return
         if not self._prepare_continuity_current_for_recipe(steps):
+            self._first_overheating_preflight_decision = None
             return
         self._manual_jog_uses_last_target = False
         self._clear_run_zero_load_scale_reference()
@@ -25839,7 +26254,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._session_active:
             self._start_session(enable_logging=False, record_initial_point=False)
             if not self._session_active:
+                self._first_overheating_preflight_decision = None
                 return
+        self._record_first_overheating_preflight_skip_for_session()
         self._automation_steps = steps
         self._automation_index = 0
         self._recipe_estimated_points, estimate_ticks = self._estimate_recipe_points_and_ticks(
@@ -31039,6 +31456,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_tic_dispatcher()
         self._builder_project_import_timer.stop()
         self._stop_builder_project_import_thread()
+        self._stop_tma_history_scan_thread()
         self._stop_annealing_folder_scans()
         self._cancel_fabrication_folder_load()
         self._disconnect_scale()
