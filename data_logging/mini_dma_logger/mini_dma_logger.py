@@ -2006,6 +2006,7 @@ class BuilderProjectCacheEntry:
 
 _BUILDER_PROJECT_CACHE_LOCK = RLock()
 _BUILDER_PROJECT_CACHE: dict[tuple[str, int, int], BuilderProjectCacheEntry] = {}
+_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH: dict[str, BuilderProjectCacheEntry] = {}
 _BUILDER_PROJECT_CACHE_LIMIT = 4
 
 
@@ -2023,6 +2024,10 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
     with _BUILDER_PROJECT_CACHE_LOCK:
         cached = _BUILDER_PROJECT_CACHE.get(cache_key)
         if cached is not None:
+            _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH[str(path)] = cached
+            while len(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH) > _BUILDER_PROJECT_CACHE_LIMIT:
+                oldest_path = next(iter(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH))
+                _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(oldest_path, None)
             return cached
     payload = json.loads(path.read_text(encoding="utf-8"))
     entry = BuilderProjectCacheEntry(
@@ -2031,22 +2036,22 @@ def _read_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry:
     )
     with _BUILDER_PROJECT_CACHE_LOCK:
         _BUILDER_PROJECT_CACHE[cache_key] = entry
+        _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH[str(path)] = entry
         stale_keys = [key for key in _BUILDER_PROJECT_CACHE if key[0] == cache_key[0] and key != cache_key]
         for key in stale_keys:
             _BUILDER_PROJECT_CACHE.pop(key, None)
         while len(_BUILDER_PROJECT_CACHE) > _BUILDER_PROJECT_CACHE_LIMIT:
             oldest_key = next(iter(_BUILDER_PROJECT_CACHE))
             _BUILDER_PROJECT_CACHE.pop(oldest_key, None)
+        while len(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH) > _BUILDER_PROJECT_CACHE_LIMIT:
+            oldest_path = next(iter(_BUILDER_PROJECT_CACHE_BY_REQUEST_PATH))
+            _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(oldest_path, None)
     return entry
 
 
 def _peek_builder_project_cache_entry(path: Path) -> BuilderProjectCacheEntry | None:
-    try:
-        cache_key = _builder_project_cache_key(path)
-    except OSError:
-        return None
     with _BUILDER_PROJECT_CACHE_LOCK:
-        return _BUILDER_PROJECT_CACHE.get(cache_key)
+        return _BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.get(str(path))
 
 
 def _project_match_score_for_sample(
@@ -3429,6 +3434,28 @@ class AsyncRunLogWriter:
                 with self._condition:
                     self._in_flight = False
                     self._condition.notify_all()
+@dataclass(frozen=True)
+class SerialPortDescriptor:
+    device: str
+    description: str
+
+
+class SerialPortEnumerationSignals(QtCore.QObject):
+    succeeded = QtCore.pyqtSignal(int, object)
+    failed = QtCore.pyqtSignal(int, str)
+
+
+def _enumerate_serial_port_descriptors() -> tuple[SerialPortDescriptor, ...]:
+    if list_ports is None:
+        raise RuntimeError("pyserial is unavailable.")
+    return tuple(
+        SerialPortDescriptor(
+            device=str(getattr(port, "device", "") or "").strip(),
+            description=str(getattr(port, "description", "") or "").strip(),
+        )
+        for port in list_ports.comports()
+        if str(getattr(port, "device", "") or "").strip()
+    )
 
 
 class AutomationControlLoop:
@@ -5849,7 +5876,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
-        self._builder_project_last_auto_import_state_key: tuple[tuple[str, int, int], str, str, str] | None = None
+        self._builder_project_last_auto_import_request_key: tuple[str, str, str, str] | None = None
         self._builder_project_import_retry_pending = False
         self._builder_project_sample_suggestions: dict[str, tuple[str, ...]] = {}
         self._builder_project_import_timer = QtCore.QTimer(self)
@@ -6079,6 +6106,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recipe_progress_pending_complete = False
         self._window_closing = False
         self._async_run_log_writer = AsyncRunLogWriter(self._handle_async_run_log_write_failure)
+        self._serial_port_descriptors: tuple[SerialPortDescriptor, ...] = ()
+        self._serial_port_scan_thread: Thread | None = None
+        self._serial_port_scan_generation = 0
+        self._serial_port_scan_completed = False
+        self._serial_port_scan_signals = SerialPortEnumerationSignals(self)
+        self._serial_port_scan_signals.succeeded.connect(self._handle_serial_port_enumeration_success)
+        self._serial_port_scan_signals.failed.connect(self._handle_serial_port_enumeration_failure)
         self.action_timing_settings: QtGui.QAction | None = None
         self.action_current_sweep_advanced_settings: QtGui.QAction | None = None
         self.action_show_recipe_file_controls: QtGui.QAction | None = None
@@ -6111,8 +6145,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.setSingleShot(True)
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
         self._restore_settings()
-        self._refresh_scale_ports()
-        self._refresh_ir_ports()
+        self._start_serial_port_enumeration()
         self._refresh_live_labels()
 
     def _menu_by_text(self, text: str) -> QtWidgets.QMenu | None:
@@ -6178,10 +6211,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return get_ident() == self._ui_thread_id
 
     def _run_on_ui_thread(self, callback: Callable[[], None]) -> None:
+        if self._window_closing:
+            return
         if self._is_ui_thread():
             callback()
             return
-        self._control_ui_event.emit(callback)
+        try:
+            self._control_ui_event.emit(callback)
+        except RuntimeError:
+            # A daemon worker may finish after Qt has destroyed the window.
+            return
 
     def _restore_main_window_focus_soon(self) -> None:
         if self._window_closing:
@@ -6817,7 +6856,7 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_advanced_form = QtWidgets.QFormLayout(scale_advanced_box)
         self.combo_scale_port = QtWidgets.QComboBox(scale_advanced_box)
         refresh_ports_button = QtWidgets.QPushButton("Refresh ports", scale_advanced_box)
-        refresh_ports_button.clicked.connect(self._refresh_scale_ports)
+        refresh_ports_button.clicked.connect(self._start_serial_port_enumeration)
         port_row = QtWidgets.QHBoxLayout()
         port_row.addWidget(self.combo_scale_port, stretch=1)
         port_row.addWidget(refresh_ports_button)
@@ -7171,7 +7210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_form = QtWidgets.QFormLayout(supply_box)
         self.combo_supply_port = QtWidgets.QComboBox(supply_box)
         refresh_supply_button = QtWidgets.QPushButton("Refresh ports", supply_box)
-        refresh_supply_button.clicked.connect(self._refresh_supply_ports)
+        refresh_supply_button.clicked.connect(self._start_serial_port_enumeration)
         detect_supply_button = QtWidgets.QPushButton("Auto-detect", supply_box)
         detect_supply_button.clicked.connect(self._auto_detect_supply_port)
         supply_port_row = QtWidgets.QHBoxLayout()
@@ -7334,7 +7373,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ir_form.addRow("", self.check_ir_enabled)
         self.combo_ir_port = QtWidgets.QComboBox(ir_box)
         refresh_ir_button = QtWidgets.QPushButton("Refresh ports", ir_box)
-        refresh_ir_button.clicked.connect(self._refresh_ir_ports)
+        refresh_ir_button.clicked.connect(self._start_serial_port_enumeration)
         ir_port_row = QtWidgets.QHBoxLayout()
         ir_port_row.addWidget(self.combo_ir_port, stretch=1)
         ir_port_row.addWidget(refresh_ir_button)
@@ -9142,6 +9181,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 update_identity=False,
                 quiet=True,
                 async_load=True,
+                force_reload=True,
             )
         )
         self.edit_project_path.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
@@ -9265,7 +9305,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_steps_per_mm.valueChanged.connect(self._update_recipe_mode_ui)
 
         self.statusBar().showMessage("Ready")
-        self._refresh_supply_ports()
+        self._refresh_all_serial_port_controls()
         self._apply_supply_profile_defaults()
         self._update_distribution_basis_ui()
         self._update_current_sweep_basis_ui()
@@ -9924,7 +9964,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if list_ports is None:
             self._log("Supply auto-detect unavailable because pyserial is missing.")
             return False
-        for port in list_ports.comports():
+        if not self._serial_port_descriptors and not self._serial_port_scan_completed:
+            self._start_serial_port_enumeration()
+            self._log("Supply auto-detect is waiting for the background serial-port scan; try again when it finishes.")
+            return False
+        for port in self._serial_port_descriptors:
             match = self._probe_supply_candidate(port.device)
             if match is None:
                 continue
@@ -9944,19 +9988,92 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Automatic supply detection did not find a supported serial power supply.")
         return False
 
-    def _refresh_supply_ports(self) -> None:
+    def _start_serial_port_enumeration(self) -> bool:
+        thread = self._serial_port_scan_thread
+        if thread is not None and thread.is_alive():
+            self.statusBar().showMessage("Serial-port scan is already running in the background.")
+            return False
+        if list_ports is None:
+            self._serial_port_descriptors = ()
+            self._refresh_all_serial_port_controls()
+            self.statusBar().showMessage("Serial-port scan unavailable because pyserial is missing.")
+            return False
+        self._serial_port_scan_generation += 1
+        generation = self._serial_port_scan_generation
+        self._serial_port_scan_completed = False
+        signals = self._serial_port_scan_signals
+        self.statusBar().showMessage("Scanning serial ports in the background...")
+
+        def _scan() -> None:
+            try:
+                descriptors = _enumerate_serial_port_descriptors()
+            except Exception as exc:
+                try:
+                    signals.failed.emit(generation, str(exc) or exc.__class__.__name__)
+                except RuntimeError:
+                    pass
+                return
+            try:
+                signals.succeeded.emit(generation, descriptors)
+            except RuntimeError:
+                pass
+
+        thread = Thread(target=_scan, name="tma-serial-port-scan", daemon=True)
+        self._serial_port_scan_thread = thread
+        thread.start()
+        return True
+
+    def _handle_serial_port_enumeration_success(self, generation: int, descriptors_obj: object) -> None:
+        if self._window_closing or generation != self._serial_port_scan_generation:
+            return
+        descriptors = descriptors_obj if isinstance(descriptors_obj, tuple) else ()
+        self._serial_port_descriptors = tuple(
+            descriptor for descriptor in descriptors if isinstance(descriptor, SerialPortDescriptor)
+        )
+        self._serial_port_scan_thread = None
+        self._serial_port_scan_completed = True
+        self._refresh_all_serial_port_controls()
+        count = len(self._serial_port_descriptors)
+        self.statusBar().showMessage(f"Serial-port scan completed: {count} port(s) found.", 5000)
+
+    def _handle_serial_port_enumeration_failure(self, generation: int, message: str) -> None:
+        if self._window_closing or generation != self._serial_port_scan_generation:
+            return
+        self._serial_port_scan_thread = None
+        self._serial_port_scan_completed = True
+        self._serial_port_descriptors = ()
+        self._refresh_all_serial_port_controls(scan_error=message)
+        self.statusBar().showMessage(f"Serial-port scan failed: {message}")
+        self._log(f"Serial-port scan failed: {message}")
+
+    def _refresh_all_serial_port_controls(self, *, scan_error: str | None = None) -> None:
+        self._refresh_supply_ports(scan_error=scan_error)
+        self._refresh_scale_ports(scan_error=scan_error)
+        self._refresh_ir_ports(scan_error=scan_error)
+
+    def _refresh_supply_ports(self, *, scan_error: str | None = None) -> None:
         current = self.combo_supply_port.currentData() or self.settings.value("supply_port", "", type=str)
         self.combo_supply_port.clear()
         if list_ports is None:
             self.combo_supply_port.addItem("pyserial unavailable", "")
             return
-        for port in list_ports.comports():
+        if scan_error:
+            if current:
+                self.combo_supply_port.addItem(f"{current} - saved (serial-port scan failed)", current)
+            else:
+                self.combo_supply_port.addItem("Serial-port scan failed", "")
+            return
+        for port in self._serial_port_descriptors:
             label = f"{port.device} - {port.description}"
             self.combo_supply_port.addItem(label, port.device)
         if current:
             index = self.combo_supply_port.findData(current)
             if index >= 0:
                 self.combo_supply_port.setCurrentIndex(index)
+            else:
+                state = "not detected" if self._serial_port_scan_completed else "scan pending"
+                self.combo_supply_port.addItem(f"{current} - saved ({state})", current)
+                self.combo_supply_port.setCurrentIndex(self.combo_supply_port.count() - 1)
 
     def _auto_select_shared_broker_hmp_port(self) -> bool:
         if str(self.combo_supply_port.currentData() or "").strip():
@@ -9965,7 +10082,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log("Shared HMP broker auto-start cannot scan supply ports because pyserial is missing.")
             return False
         self._refresh_supply_ports()
-        for port in list_ports.comports():
+        if not self._serial_port_descriptors and not self._serial_port_scan_completed:
+            self._start_serial_port_enumeration()
+            self._log("Shared HMP broker auto-start is waiting for the background serial-port scan.")
+            return False
+        for port in self._serial_port_descriptors:
             match = self._probe_supply_candidate(port.device)
             if match is None:
                 continue
@@ -10104,7 +10225,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if list_ports is None:
             self._log("Scale auto-detect unavailable because pyserial is missing.")
             return False
-        for port in list_ports.comports():
+        if not self._serial_port_descriptors and not self._serial_port_scan_completed:
+            self._start_serial_port_enumeration()
+            self._log("Scale auto-detect is waiting for the background serial-port scan; try again when it finishes.")
+            return False
+        for port in self._serial_port_descriptors:
             match = self._probe_scale_candidate(port.device)
             if match is None:
                 continue
@@ -10181,9 +10306,7 @@ class MainWindow(QtWidgets.QMainWindow):
         selected = str(self.combo_scale_port.currentData() or "").strip()
         if selected:
             candidates.append(selected)
-        if list_ports is None:
-            return candidates
-        port_infos = list(list_ports.comports())
+        port_infos = list(self._serial_port_descriptors)
 
         def _priority(port: object) -> tuple[int, str]:
             description = str(getattr(port, "description", "") or "").lower()
@@ -10231,15 +10354,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log("Fast scale auto-detect did not find a responding serial balance.")
         return False
 
-    def _refresh_scale_ports(self) -> None:
+    def _refresh_scale_ports(self, *, scan_error: str | None = None) -> None:
         current = self.combo_scale_port.currentData() or self.settings.value("scale_port", "", type=str)
         self.combo_scale_port.clear()
         if list_ports is None:
             self.combo_scale_port.addItem("pyserial unavailable", "")
             return
+        if scan_error:
+            if current:
+                self.combo_scale_port.addItem(f"{current} - saved (serial-port scan failed)", current)
+            else:
+                self.combo_scale_port.addItem("Serial-port scan failed", "")
+            return
         seen = False
         preferred_index = -1
-        for port in list_ports.comports():
+        for port in self._serial_port_descriptors:
             label = f"{port.device} - {port.description}"
             self.combo_scale_port.addItem(label, port.device)
             if current and port.device == current:
@@ -10257,16 +10386,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_scale_port.setCurrentIndex(preferred_index)
         elif self.combo_scale_port.count():
             self.combo_scale_port.setCurrentIndex(0)
+        elif current:
+            state = "not detected" if self._serial_port_scan_completed else "scan pending"
+            self.combo_scale_port.addItem(f"{current} - saved ({state})", current)
 
-    def _refresh_ir_ports(self) -> None:
+    def _refresh_ir_ports(self, *, scan_error: str | None = None) -> None:
         current = self.combo_ir_port.currentData() or self.settings.value("ir_port", "", type=str)
         self.combo_ir_port.clear()
         if list_ports is None:
             self.combo_ir_port.addItem("pyserial unavailable", "")
             return
+        if scan_error:
+            if current:
+                self.combo_ir_port.addItem(f"{current} - saved (serial-port scan failed)", current)
+            else:
+                self.combo_ir_port.addItem("Serial-port scan failed", "")
+            return
         seen = False
         preferred_index = -1
-        for port in list_ports.comports():
+        for port in self._serial_port_descriptors:
             label = f"{port.device} - {port.description}"
             self.combo_ir_port.addItem(label, port.device)
             if current and port.device == current:
@@ -10282,6 +10420,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.combo_ir_port.setCurrentIndex(preferred_index)
         elif self.combo_ir_port.count():
             self.combo_ir_port.setCurrentIndex(0)
+        elif current:
+            state = "not detected" if self._serial_port_scan_completed else "scan pending"
+            self.combo_ir_port.addItem(f"{current} - saved ({state})", current)
 
     def _auto_detect_tic(self) -> bool:
         candidates: list[str] = []
@@ -11606,7 +11747,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if path_str:
             self.edit_project_path.setText(path_str)
             self._builder_project_path = Path(path_str)
-            self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+            self._auto_import_builder_project_if_possible(
+                update_identity=False,
+                quiet=True,
+                async_load=True,
+                force_reload=True,
+            )
 
     def _fabrication_load_active(self) -> bool:
         return self._fabrication_thread is not None and self._fabrication_thread.isRunning()
@@ -12450,17 +12596,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.edit_name_specimen.text(),
         )
 
-    def _builder_project_auto_import_state_key(
-        self,
-        path: Path,
-    ) -> tuple[tuple[str, int, int], str, str, str] | None:
-        try:
-            file_key = _builder_project_cache_key(path)
-        except OSError:
-            return None
-        _path_text, composition, microwire, specimen = self._project_import_request_key(path)
-        return (file_key, composition, microwire, specimen)
-
     def _start_saved_builder_project_auto_import(self, path: Path, *, quiet: bool = True) -> bool:
         if self._builder_project_import_thread is not None:
             return False
@@ -12564,7 +12699,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_diameter_imported(False)
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return
-        self._builder_project_last_auto_import_state_key = self._builder_project_auto_import_state_key(Path(path_obj))
+        self._builder_project_last_auto_import_request_key = self._project_import_request_key(Path(path_obj))
 
     def _handle_builder_project_auto_import_failure(
         self,
@@ -12608,7 +12743,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._apply_fabrication_sample_if_possible(force=True):
             self._mark_diameter_imported(False)
-        self._builder_project_last_auto_import_state_key = self._builder_project_auto_import_state_key(Path(path_obj))
+        self._builder_project_last_auto_import_request_key = self._project_import_request_key(Path(path_obj))
         self.label_project_status.setText(
             "Project loaded, but no matching sample row was found from the current naming fields."
         )
@@ -12619,6 +12754,7 @@ class MainWindow(QtWidgets.QMainWindow):
         update_identity: bool = False,
         quiet: bool = True,
         async_load: bool = False,
+        force_reload: bool = False,
     ) -> bool:
         if self._builder_import_in_progress:
             if not update_identity:
@@ -12627,26 +12763,21 @@ class MainWindow(QtWidgets.QMainWindow):
         path_text = self.edit_project_path.text().strip()
         if not path_text:
             self._mark_diameter_imported(False)
-            self._builder_project_last_auto_import_state_key = None
+            self._builder_project_last_auto_import_request_key = None
             return False
         path = Path(path_text)
         self._builder_project_path = path
-        if not path.exists():
-            self._mark_diameter_imported(False)
-            self._builder_project_last_auto_import_state_key = None
-            self.label_project_status.setText("Builder project path is saved, but the file was not found.")
-            return False
-        state_key = self._builder_project_auto_import_state_key(path)
-        if (
-            async_load
-            and not update_identity
-            and state_key is not None
-            and self._builder_project_last_auto_import_state_key == state_key
-        ):
-            return True
+        request_key = self._project_import_request_key(path)
         if async_load and not update_identity:
+            if not force_reload and self._builder_project_last_auto_import_request_key == request_key:
+                return True
             self._builder_project_import_retry_pending = False
             return self._start_saved_builder_project_auto_import(path, quiet=quiet)
+        if not path.exists():
+            self._mark_diameter_imported(False)
+            self._builder_project_last_auto_import_request_key = None
+            self.label_project_status.setText("Builder project path is saved, but the file was not found.")
+            return False
         try:
             payload = self._read_builder_project_payload(path)
         except Exception as exc:
@@ -12672,7 +12803,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return False
         if not update_identity:
-            self._builder_project_last_auto_import_state_key = state_key
+            self._builder_project_last_auto_import_request_key = request_key
         return True
 
     def _schedule_builder_project_auto_import(self) -> None:
@@ -12684,8 +12815,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._mark_diameter_imported(False)
             self._builder_project_import_retry_pending = False
             return
-        state_key = self._builder_project_auto_import_state_key(Path(path_text))
-        if state_key is not None and self._builder_project_last_auto_import_state_key == state_key:
+        request_key = self._project_import_request_key(Path(path_text))
+        if self._builder_project_last_auto_import_request_key == request_key:
             self._builder_project_import_retry_pending = False
             return
         self._builder_project_import_timer.start()
