@@ -825,6 +825,49 @@ def test_tma_history_blocked_scan_close_is_nonblocking_and_qthread_free(
         _close_test_window(window)
 
 
+def test_run_summary_generation_keeps_one_active_and_latest_pending(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    started: list[Path] = []
+    releases = [threading.Event(), threading.Event()]
+
+    def _blocked_generate(run_dir: Path) -> dict[str, Path]:
+        index = len(started)
+        started.append(Path(run_dir))
+        assert releases[index].wait(timeout=5.0)
+        return {
+            "image_path": Path(run_dir) / "summary.png",
+            "detail_image_path": Path(run_dir) / "summary_detail.png",
+        }
+
+    plot_module = importlib.import_module("data_logging.mini_dma_logger.run_core_plot")
+    monkeypatch.setattr(plot_module, "generate_core_run_plot", _blocked_generate)
+    run_dirs = [tmp_path / f"run-{index}" for index in range(6)]
+    try:
+        for run_dir in run_dirs:
+            window._start_run_summary_generation(run_dir)
+
+        qtbot.waitUntil(lambda: started == [run_dirs[0]], timeout=2000)
+        assert window._run_summary_active == (run_dirs[0], False)
+        assert window._run_summary_pending == (run_dirs[-1], False)
+
+        releases[0].set()
+        qtbot.waitUntil(lambda: started == [run_dirs[0], run_dirs[-1]], timeout=3000)
+        assert window._run_summary_active == (run_dirs[-1], False)
+        assert window._run_summary_pending is None
+
+        releases[1].set()
+        qtbot.waitUntil(lambda: window._run_summary_active is None, timeout=3000)
+        assert started == [run_dirs[0], run_dirs[-1]]
+    finally:
+        for release in releases:
+            release.set()
+        _close_test_window(window)
+
+
 def test_first_overheating_history_does_not_count_annealing_only_project() -> None:
     identity = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2")
     payload = {
@@ -6874,6 +6917,233 @@ def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
+def test_pending_run_log_display_history_keeps_recent_lines(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        for index in range(mini_dma_mod.RUN_LOG_PENDING_MAX_LINES + 25):
+            window._queue_run_log_display_line(f"line-{index}")
+
+        assert len(window._pending_run_log_lines) == mini_dma_mod.RUN_LOG_PENDING_MAX_LINES
+        assert window._pending_run_log_lines[0] == "line-25"
+        assert window._pending_run_log_lines[-1].endswith(
+            str(mini_dma_mod.RUN_LOG_PENDING_MAX_LINES + 24)
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_async_run_log_writer_bounds_queue_and_drops_optional_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[tuple[Path, str]] = []
+    warnings: list[str] = []
+
+    def _blocked_append(path: Path, text: str) -> None:
+        writes.append((Path(path), text))
+        if len(writes) == 1:
+            started.set()
+            assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=2,
+        max_bytes=64,
+    )
+    developer_path = tmp_path / "developer.log"
+    session_path = tmp_path / "session.log"
+    try:
+        assert writer.enqueue("developer", developer_path, "in-flight\n")
+        assert started.wait(timeout=2.0)
+        assert writer.enqueue("developer", developer_path, "optional\n")
+        assert writer.enqueue("session", session_path, "session-1\n")
+        assert writer.enqueue("session", session_path, "session-2\n")
+
+        assert writer.queued_request_count <= 2
+        assert writer.queued_bytes <= 64
+        with writer._condition:
+            retained = list(writer._queue)
+        assert [request.channel for request in retained] == ["session", "session"]
+        assert [request.text for request in retained] == ["session-1\n", "session-2\n"]
+        assert len(warnings) == 1
+    finally:
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        writer.stop(timeout_s=1.0)
+
+    assert writes[1:] == [
+        (session_path, "session-1\n"),
+        (session_path, "session-2\n"),
+    ]
+
+
+def test_async_run_log_writer_stop_discards_queued_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[str] = []
+    warnings: list[str] = []
+
+    def _blocked_append(_path: Path, text: str) -> None:
+        writes.append(text)
+        started.set()
+        assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=8,
+        max_bytes=1024,
+    )
+    path = tmp_path / "session.log"
+    assert writer.enqueue("session", path, "in-flight\n")
+    assert started.wait(timeout=2.0)
+    assert writer.enqueue("session", path, "queued-1\nqueued-2\n")
+    assert writer.enqueue("developer", tmp_path / "developer.log", "queued-2\n")
+
+    assert writer.stop(timeout_s=0.05) is False
+    assert writer.queued_request_count == 0
+    assert writer.queued_bytes == 0
+    assert writer.last_stop_discarded_session_requests == 1
+    assert writer.last_stop_discarded_session_bytes == len("queued-1\nqueued-2\n")
+    assert writer.last_stop_discarded_session_lines == 2
+    assert len(warnings) == 1
+    assert "metadata marks the run log incomplete" in warnings[0]
+    assert writer.enqueue("session", path, "after-stop\n") is False
+    release.set()
+    writer._thread.join(timeout=3.0)
+
+    assert writes == ["in-flight\n"]
+
+
+def test_async_run_log_writer_failure_counts_failed_purged_and_coalesced_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    failures: list[tuple[str, Path, int, BaseException]] = []
+
+    def _blocked_failure(_path: Path, _text: str) -> None:
+        started.set()
+        assert release.wait(timeout=5.0)
+        raise OSError("synthetic session append failure")
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda channel, path, generation, error: failures.append(
+            (channel, path, generation, error)
+        ),
+        max_requests=2,
+        max_bytes=1024,
+    )
+    path = tmp_path / "session.log"
+    try:
+        assert writer.enqueue("session", path, "in-flight\n")
+        assert started.wait(timeout=2.0)
+        assert writer.enqueue("session", path, "queued-1\n")
+        assert writer.enqueue("session", path, "queued-2\n")
+        assert writer.enqueue("session", path, "coalesced-1\ncoalesced-2\n")
+
+        with writer._condition:
+            assert len(writer._queue) == 2
+            assert writer._queue[-1].line_count == 3
+
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        failure = writer.take_target_failure("session", path)
+
+        assert failure is not None
+        assert failure.lost_line_count == 5
+        assert len(failures) == 1
+        assert writer.queued_request_count == 0
+    finally:
+        release.set()
+        writer.stop(timeout_s=1.0)
+
+
+def test_async_run_log_writer_reset_purges_stale_queue_and_reclaims_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[str] = []
+    warnings: list[str] = []
+
+    def _blocked_first_append(_path: Path, text: str) -> None:
+        writes.append(text)
+        if len(writes) == 1:
+            started.set()
+            assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_first_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=3,
+        max_bytes=128,
+    )
+    path = tmp_path / "reused-session.log"
+    old_generation = writer.reset_target("session", path)
+    try:
+        assert writer.enqueue(
+            "session",
+            path,
+            "old-in-flight\n",
+            generation=old_generation,
+        )
+        assert started.wait(timeout=2.0)
+        for index in range(3):
+            assert writer.enqueue(
+                "session",
+                path,
+                f"old-queued-{index}\n",
+                generation=old_generation,
+            )
+        assert writer.queued_request_count == 3
+        assert warnings == []
+        assert writer.queued_bytes > 0
+
+        replacement_generation = writer.reset_target("session", path)
+
+        assert replacement_generation > old_generation
+        assert writer.queued_request_count == 0
+        assert writer.queued_bytes == 0
+        for index in range(3):
+            assert writer.enqueue(
+                "session",
+                path,
+                f"replacement-{index}\n",
+                generation=replacement_generation,
+            )
+        assert writer.queued_request_count == 3
+
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        assert writes == [
+            "old-in-flight\n",
+            "replacement-0\n",
+            "replacement-1\n",
+            "replacement-2\n",
+        ]
+        assert not writer.target_is_disabled(
+            "session",
+            path,
+            generation=replacement_generation,
+        )
+    finally:
+        release.set()
+        writer.stop(timeout_s=1.0)
+
+
 def test_blocked_run_log_mirror_write_does_not_block_ui(
     tmp_path: Path,
     qtbot,
@@ -6894,7 +7164,10 @@ def test_blocked_run_log_mirror_write_does_not_block_ui(
         monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
         window._run_log_mirror_path = mirror_path
         window._run_log_mirror_enabled = True
-        window._async_run_log_writer.reset_target("developer", mirror_path)
+        window._run_log_mirror_generation = window._async_run_log_writer.reset_target(
+            "developer",
+            mirror_path,
+        )
 
         window._log("blocked mirror probe")
 
@@ -6926,7 +7199,10 @@ def test_run_log_mirror_failure_is_persistent_and_disables_target(
         monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _failed_append)
         window._run_log_mirror_path = mirror_path
         window._run_log_mirror_enabled = True
-        window._async_run_log_writer.reset_target("developer", mirror_path)
+        window._run_log_mirror_generation = window._async_run_log_writer.reset_target(
+            "developer",
+            mirror_path,
+        )
 
         window._log("first failure")
         window._log("queued after failure")
@@ -6940,6 +7216,66 @@ def test_run_log_mirror_failure_is_persistent_and_disables_target(
             timeout=1000,
         )
     finally:
+        _close_test_window(window)
+
+
+def test_old_developer_mirror_failure_cannot_disable_reenabled_generation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "reused_developer_mirror.log"
+    started = threading.Event()
+    release = threading.Event()
+    successful_writes: list[str] = []
+    first_append = True
+
+    def _old_blocks_then_fails(_path: Path, text: str) -> None:
+        nonlocal first_append
+        if first_append:
+            first_append = False
+            started.set()
+            assert release.wait(timeout=5.0)
+            raise OSError("stale developer mirror failure")
+        successful_writes.append(text)
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_fails)
+        window._run_log_mirror_path = mirror_path
+        window._set_run_log_mirror_enabled(True)
+        old_generation = window._run_log_mirror_generation
+        assert old_generation is not None
+        assert started.wait(timeout=2.0)
+
+        window._set_run_log_mirror_enabled(False)
+        window._set_run_log_mirror_enabled(True)
+        replacement_generation = window._run_log_mirror_generation
+        assert replacement_generation is not None
+        assert replacement_generation > old_generation
+        window._log("replacement developer mirror line")
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: any("replacement developer mirror line" in text for text in successful_writes),
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+
+        assert window._run_log_mirror_enabled is True
+        assert window._run_log_mirror_generation == replacement_generation
+        assert not window._async_run_log_writer.target_is_disabled(
+            "developer",
+            mirror_path,
+            generation=replacement_generation,
+        )
+        assert "Run-log file mirror enabled" in successful_writes[0]
+        assert "replacement developer mirror line" in successful_writes[1]
+        assert "stale developer mirror failure" not in window.statusBar().currentMessage()
+        assert "Run-log file mirror disabled because writing" not in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         _close_test_window(window)
 
 
@@ -7143,6 +7479,218 @@ def test_loading_fabrication_folder_indexes_workbooks_without_blocking_ui(
         assert "composition suggestion" in window.label_fabrication_status.text()
     finally:
         window._cancel_fabrication_folder_load()
+        _close_test_window(window)
+
+
+def test_tma_filesystem_workers_close_bounded_and_remain_owned(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    release = threading.Event()
+    started = {
+        worker_type: threading.Event()
+        for worker_type in (
+            mini_dma_mod.FabricationSuggestionWorker,
+            mini_dma_mod.AnnealingFolderScanWorker,
+            mini_dma_mod.BuilderProjectImportWorker,
+        )
+    }
+    cancelled: list[type[object]] = []
+
+    def _blocked_run(self: object) -> None:
+        started[type(self)].set()
+        assert release.wait(timeout=5.0)
+        cancel_event = getattr(self, "_cancel_event")
+        if cancel_event.is_set():
+            cancelled.append(type(self))
+        getattr(self, "finished").emit()
+
+    for worker_type in started:
+        monkeypatch.setattr(worker_type, "run", _blocked_run)
+
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    project = tmp_path / "project.pydpj"
+    project.write_text("{}", encoding="utf-8")
+    qt_messages: list[str] = []
+    previous_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    tasks: list[mini_dma_mod.DaemonFilesystemTask] = []
+    try:
+        window._start_fabrication_folder_load(root, composition="Ni50Fe27Ga23")
+        window._start_annealing_folder_scan("kosice", root)
+        assert window._start_saved_builder_project_auto_import(project)
+        for event in started.values():
+            assert event.wait(timeout=2.0)
+        tasks = list(window._filesystem_worker_tasks.values())
+        assert len(tasks) >= 3
+
+        close_started = time.perf_counter()
+        window.close()
+        close_elapsed_s = time.perf_counter() - close_started
+
+        assert close_elapsed_s < 0.9
+        assert all(task.isRunning() and task.thread.daemon for task in tasks)
+        assert len(window._filesystem_worker_tasks) >= 3
+        assert window._builder_project_import_thread is not None
+        assert window._fabrication_thread is not None
+        assert window._annealing_folder_scan_threads
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: all(task.done_event.is_set() for task in tasks),
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert set(cancelled) == set(started)
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release.set()
+        for task in tasks:
+            task.wait(3000)
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_handler)
+        _close_test_window(window)
+
+
+def test_blocked_daemon_filesystem_task_does_not_retain_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_run(self: mini_dma_mod.FabricationSuggestionWorker) -> None:
+        started.set()
+        release.wait()
+        self.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.FabricationSuggestionWorker, "run", _blocked_run)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    worker = mini_dma_mod.FabricationSuggestionWorker(
+        root,
+        composition="Ni50Fe27Ga23",
+    )
+    task = mini_dma_mod.DaemonFilesystemTask(worker, kind="fabrication")
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    owner.task = task
+    owner_ref = weakref.ref(owner)
+    task.start()
+    assert started.wait(timeout=2.0)
+
+    del owner
+    gc.collect()
+
+    try:
+        assert owner_ref() is None
+        assert task.thread.daemon is True
+        assert task.isRunning()
+        assert task in mini_dma_mod._RETAINED_DAEMON_FILESYSTEM_TASKS
+    finally:
+        release.set()
+        task.thread.join(timeout=3.0)
+
+
+def test_blocked_daemon_filesystem_tasks_do_not_abort_subprocess_exit() -> None:
+    code = """
+import threading
+from pathlib import Path
+from PyQt6 import QtWidgets
+from data_logging.mini_dma_logger import mini_dma_logger as tma
+from data_logging.current_annealing_logger import current_annealing_logger as current
+
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+blocked = threading.Event()
+tma_worker = tma.FabricationSuggestionWorker(Path('synthetic-tma'), composition='sample')
+tma_worker.run = lambda: blocked.wait()
+tma_task = tma.DaemonFilesystemTask(tma_worker, kind='fabrication')
+tma_task.start()
+current_worker = current.FabricationFolderLoadWorker(Path('synthetic-current'))
+current_worker.run = lambda: blocked.wait()
+current_task = current.DaemonFabricationTask(current_worker)
+current_task.start()
+assert tma_task.thread.daemon and current_task.thread.daemon
+print('daemon-filesystem-tasks-started', flush=True)
+"""
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env.setdefault("MPLBACKEND", "Agg")
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "daemon-filesystem-tasks-started" in result.stdout
+    assert "QThread: Destroyed while thread is still running" not in result.stderr
+    assert "Aborted" not in result.stderr
+
+
+def test_superseded_fabrication_worker_is_retained_and_stale_result_ignored(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+    old_started = threading.Event()
+    release_old = threading.Event()
+    handled_roots: list[Path] = []
+
+    def _run(self: mini_dma_mod.FabricationSuggestionWorker) -> None:
+        if self.root == old_root:
+            old_started.set()
+            assert release_old.wait(timeout=5.0)
+        self.succeeded.emit(self.root, {}, 0, self.composition)
+        self.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.FabricationSuggestionWorker, "run", _run)
+    window._handle_fabrication_load_success = (  # type: ignore[method-assign]
+        lambda root_obj, *_args: handled_roots.append(Path(root_obj))
+    )
+    try:
+        window._start_fabrication_folder_load(old_root, composition="old")
+        old_thread = window._fabrication_thread
+        assert old_thread is not None
+        assert old_started.wait(timeout=2.0)
+
+        window._start_fabrication_folder_load(new_root, composition="new")
+        new_thread = window._fabrication_thread
+        assert new_thread is not None and new_thread is not old_thread
+        assert id(old_thread) in window._filesystem_worker_tasks
+        qtbot.waitUntil(
+            lambda: id(new_thread) not in window._filesystem_worker_tasks,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert handled_roots == [new_root]
+
+        release_old.set()
+        qtbot.waitUntil(
+            lambda: id(old_thread) not in window._filesystem_worker_tasks,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert handled_roots == [new_root]
+    finally:
+        release_old.set()
         _close_test_window(window)
 
 
@@ -8172,7 +8720,7 @@ def test_stopping_builder_project_import_clears_retry_state(tmp_path: Path, qtbo
         assert window._builder_import_in_progress is False
         assert window._builder_project_import_retry_pending is False
         assert thread.quit_called is True
-        assert thread.wait_timeout == 1500
+        assert thread.wait_timeout == 250
     finally:
         _close_test_window(window)
 
@@ -25789,9 +26337,400 @@ def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
         assert window._session_json_path is not None
         payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
         assert payload["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+        assert payload["logging"]["run_log_complete"] is True
+        assert payload["logging"]["run_log_incomplete_lines"] == 0
         assert payload["logging"]["raw_scale_max_gap_s"] == pytest.approx(0.05)
         assert "remote_debugging_observability" in payload["control_logic"]["features"]
     finally:
+        _close_test_window(window)
+
+
+def test_saturated_session_log_queue_persists_incomplete_metadata(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("saturated_session_log")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    window._async_run_log_writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=1,
+        max_bytes=16,
+    )
+
+    try:
+        window._start_session()
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_lines"] >= 1
+        assert payload["logging"]["run_log_incomplete_reason"] == "queue_saturated"
+        assert "metadata records any session-log incompleteness" in window.statusBar().currentMessage()
+    finally:
+        if window._session_active:
+            window._stop_session(reason="manual_session_stop")
+        _close_test_window(window)
+
+
+def test_blocked_session_log_close_persists_final_flush_timeout(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("blocked_session_log_close")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_append(_path: Path, _text: str) -> None:
+        started.set()
+        release.wait()
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    window._async_run_log_writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=32,
+        max_bytes=64 * 1024,
+    )
+    try:
+        window._start_session()
+        assert started.wait(timeout=2.0)
+        metadata_path = window._session_json_path
+        assert metadata_path is not None
+
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Synthetic blocked session log.")
+        stop_elapsed_s = time.perf_counter() - stop_started
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        assert stop_elapsed_s < 0.75
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_lines"] >= 1
+        assert payload["logging"]["run_log_incomplete_reason"] == "close_flush_timeout"
+        assert "run_log_complete=false" in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer._thread.join(timeout=3.0)
+        _close_test_window(window)
+
+
+def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadata(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("failed_during_stop_flush")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    append_started = threading.Event()
+    release_failure = threading.Event()
+    accepted_session_lines = 0
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    def _blocked_failure(_path: Path, _text: str) -> None:
+        append_started.set()
+        assert release_failure.wait(timeout=5.0)
+        raise OSError("synthetic failure during final flush")
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=64,
+        max_bytes=128 * 1024,
+    )
+    original_enqueue = writer.enqueue
+
+    def _tracked_enqueue(
+        channel: str,
+        path: Path,
+        text: str,
+        *,
+        generation: int | None = None,
+    ) -> bool:
+        nonlocal accepted_session_lines
+        accepted = original_enqueue(channel, path, text, generation=generation)
+        if accepted and channel == "session":
+            accepted_session_lines += writer._text_line_count(text)
+        return accepted
+
+    writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+    window._async_run_log_writer = writer
+    timer: threading.Timer | None = None
+    try:
+        window._start_session(record_initial_point=False)
+        assert append_started.wait(timeout=2.0)
+        metadata_path = window._session_json_path
+        assert metadata_path is not None
+
+        timer = threading.Timer(0.05, release_failure.set)
+        timer.start()
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Synthetic stop-time failure.")
+        stop_elapsed_s = time.perf_counter() - stop_started
+        timer.join(timeout=1.0)
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        assert stop_elapsed_s < 1.0
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_reason"] == "write_failed"
+        assert payload["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+        assert accepted_session_lines > 1
+
+        _ensure_app().processEvents()
+        payload_after_callback = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload_after_callback["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+    finally:
+        release_failure.set()
+        if timer is not None:
+            timer.join(timeout=1.0)
+        writer.wait_until_idle(timeout_s=1.0)
+        _close_test_window(window)
+
+
+def test_session_log_final_metadata_follows_sleep_guard_and_closes_enqueue_boundary(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("final_enqueue_boundary")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    events: list[tuple[str, str]] = []
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            events.append(("guard", "acquire"))
+
+        def release(self) -> None:
+            events.append(("guard", "release"))
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    try:
+        window._start_session(record_initial_point=False)
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        original_enqueue = window._async_run_log_writer.enqueue
+        original_write_metadata = window._write_session_metadata
+
+        def _tracked_enqueue(
+            channel: str,
+            path: Path,
+            text: str,
+            *,
+            generation: int | None = None,
+        ) -> bool:
+            if channel == "session":
+                events.append(("session_enqueue", text))
+            return original_enqueue(channel, path, text, generation=generation)
+
+        def _tracked_write_metadata(*args: object, **kwargs: object) -> None:
+            if kwargs.get("finished_utc") is not None:
+                events.append(("metadata", "final"))
+            original_write_metadata(*args, **kwargs)
+
+        window._async_run_log_writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+        window._write_session_metadata = _tracked_write_metadata  # type: ignore[method-assign]
+
+        window._stop_session(reason="manual_session_stop")
+        final_metadata_index = events.index(("metadata", "final"))
+        session_enqueues = [
+            (index, text)
+            for index, (kind, text) in enumerate(events)
+            if kind == "session_enqueue"
+        ]
+
+        assert events.index(("guard", "release")) < final_metadata_index
+        assert any("Sleep prevention released." in text for _index, text in session_enqueues)
+        assert any("Session stopped" in text for _index, text in session_enqueues)
+        assert all(index < final_metadata_index for index, _text in session_enqueues)
+        assert window._session_run_log_accepting is False
+
+        session_enqueue_count = len(session_enqueues)
+        window._log("post-finalization diagnostic")
+        assert sum(kind == "session_enqueue" for kind, _text in events) == session_enqueue_count
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("old_append_fails", [False, True], ids=["success", "failure"])
+def test_old_session_completion_cannot_contaminate_same_path_replacement_generation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    old_append_fails: bool,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("old_generation")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    window._schedule_tma_history_scan = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    old_append_started = threading.Event()
+    release_old_append = threading.Event()
+    successful_writes: list[tuple[Path, str]] = []
+    accepted_lines: dict[tuple[str, int], int] = {}
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    first_append = True
+
+    def _old_blocks_then_completes(path: Path, text: str) -> None:
+        nonlocal first_append
+        if first_append:
+            first_append = False
+            old_append_started.set()
+            assert release_old_append.wait(timeout=5.0)
+            if old_append_fails:
+                raise OSError("old generation failed after replacement started")
+        successful_writes.append((Path(path), text))
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_completes)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=128,
+        max_bytes=256 * 1024,
+    )
+    original_enqueue = writer.enqueue
+
+    def _tracked_enqueue(
+        channel: str,
+        path: Path,
+        text: str,
+        *,
+        generation: int | None = None,
+    ) -> bool:
+        accepted = original_enqueue(channel, path, text, generation=generation)
+        if accepted and channel == "session" and generation is not None:
+            key = (str(path), generation)
+            accepted_lines[key] = accepted_lines.get(key, 0) + writer._text_line_count(text)
+        return accepted
+
+    writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+    window._async_run_log_writer = writer
+    try:
+        window._start_session(record_initial_point=False)
+        assert old_append_started.wait(timeout=2.0)
+        old_run_log_path = window._session_run_log_path
+        old_generation = window._session_run_log_generation
+        old_metadata_path = window._session_json_path
+        assert old_run_log_path is not None
+        assert old_generation is not None
+        assert old_metadata_path is not None
+
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Old generation blocked on close.")
+        assert time.perf_counter() - stop_started < 0.75
+        old_payload = json.loads(old_metadata_path.read_text(encoding="utf-8"))
+        old_expected_lines = accepted_lines[(str(old_run_log_path), old_generation)]
+        assert old_payload["logging"]["run_log_complete"] is False
+        assert old_payload["logging"]["run_log_incomplete_reason"] == "close_flush_timeout"
+        assert old_payload["logging"]["run_log_incomplete_lines"] == old_expected_lines
+
+        window.edit_log_name.setText("replacement_generation")
+        window._start_session(record_initial_point=False)
+        window._ui_refresh_timer.stop()
+        replacement_metadata_path = window._session_json_path
+        assert replacement_metadata_path is not None
+        with writer._condition:
+            stale_old_texts = [
+                request.text
+                for request in writer._queue
+                if request.channel == "session"
+                and request.path == old_run_log_path
+                and request.generation == old_generation
+            ]
+        assert stale_old_texts
+        replacement_generation = writer.reset_target("session", old_run_log_path)
+        assert replacement_generation > old_generation
+        window._session_run_log_path = old_run_log_path
+        window._session_run_log_generation = replacement_generation
+        window._log("replacement same-path line 1")
+        window._log("replacement same-path line 2")
+
+        release_old_append.set()
+        qtbot.waitUntil(
+            lambda: sum(
+                Path(path) == old_run_log_path
+                and "replacement same-path line" in text
+                for path, text in successful_writes
+            )
+            == 2,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+
+        assert not writer.target_is_disabled(
+            "session",
+            old_run_log_path,
+            generation=replacement_generation,
+        )
+        shared_path_texts = [
+            text
+            for path, text in successful_writes
+            if Path(path) == old_run_log_path
+        ]
+        replacement_texts = [
+            text for text in shared_path_texts if "replacement same-path line" in text
+        ]
+        assert ["line 1" in text for text in replacement_texts] == [True, False]
+        assert ["line 2" in text for text in replacement_texts] == [False, True]
+        if old_append_fails:
+            post_old_in_flight_texts = shared_path_texts
+        else:
+            assert shared_path_texts[0] not in stale_old_texts
+            assert "replacement same-path line" not in shared_path_texts[0]
+            post_old_in_flight_texts = shared_path_texts[1:]
+        assert post_old_in_flight_texts[:2] == replacement_texts
+        assert not any(text in stale_old_texts for text in post_old_in_flight_texts)
+        assert window._session_run_log_complete is True
+        assert window._session_run_log_incomplete_lines == 0
+
+        old_payload_after_failure = json.loads(old_metadata_path.read_text(encoding="utf-8"))
+        assert old_payload_after_failure["logging"] == old_payload["logging"]
+
+        window._stop_session(reason="manual_session_stop")
+        replacement_payload = json.loads(
+            replacement_metadata_path.read_text(encoding="utf-8")
+        )
+        assert replacement_payload["logging"]["run_log_complete"] is True
+        assert replacement_payload["logging"]["run_log_incomplete_lines"] == 0
+        assert replacement_payload["logging"]["run_log_incomplete_reason"] is None
+    finally:
+        release_old_append.set()
+        writer.wait_until_idle(timeout_s=2.0)
         _close_test_window(window)
 
 
