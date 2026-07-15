@@ -7005,14 +7005,15 @@ def test_async_run_log_writer_stop_discards_queued_writes(
     path = tmp_path / "session.log"
     assert writer.enqueue("session", path, "in-flight\n")
     assert started.wait(timeout=2.0)
-    assert writer.enqueue("session", path, "queued-1\n")
+    assert writer.enqueue("session", path, "queued-1\nqueued-2\n")
     assert writer.enqueue("developer", tmp_path / "developer.log", "queued-2\n")
 
     assert writer.stop(timeout_s=0.05) is False
     assert writer.queued_request_count == 0
     assert writer.queued_bytes == 0
     assert writer.last_stop_discarded_session_requests == 1
-    assert writer.last_stop_discarded_session_bytes == len("queued-1\n")
+    assert writer.last_stop_discarded_session_bytes == len("queued-1\nqueued-2\n")
+    assert writer.last_stop_discarded_session_lines == 2
     assert len(warnings) == 1
     assert "metadata marks the run log incomplete" in warnings[0]
     assert writer.enqueue("session", path, "after-stop\n") is False
@@ -7020,6 +7021,50 @@ def test_async_run_log_writer_stop_discards_queued_writes(
     writer._thread.join(timeout=3.0)
 
     assert writes == ["in-flight\n"]
+
+
+def test_async_run_log_writer_failure_counts_failed_purged_and_coalesced_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    failures: list[tuple[str, Path, BaseException]] = []
+
+    def _blocked_failure(_path: Path, _text: str) -> None:
+        started.set()
+        assert release.wait(timeout=5.0)
+        raise OSError("synthetic session append failure")
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda channel, path, error: failures.append((channel, path, error)),
+        max_requests=2,
+        max_bytes=1024,
+    )
+    path = tmp_path / "session.log"
+    try:
+        assert writer.enqueue("session", path, "in-flight\n")
+        assert started.wait(timeout=2.0)
+        assert writer.enqueue("session", path, "queued-1\n")
+        assert writer.enqueue("session", path, "queued-2\n")
+        assert writer.enqueue("session", path, "coalesced-1\ncoalesced-2\n")
+
+        with writer._condition:
+            assert len(writer._queue) == 2
+            assert writer._queue[-1].line_count == 3
+
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        failure = writer.take_target_failure("session", path)
+
+        assert failure is not None
+        assert failure.lost_line_count == 5
+        assert len(failures) == 1
+        assert writer.queued_request_count == 0
+    finally:
+        release.set()
+        writer.stop(timeout_s=1.0)
 
 
 def test_blocked_run_log_mirror_write_does_not_block_ui(
@@ -26229,6 +26274,148 @@ def test_blocked_session_log_close_persists_final_flush_timeout(
     finally:
         release.set()
         window._async_run_log_writer._thread.join(timeout=3.0)
+        _close_test_window(window)
+
+
+def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadata(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("failed_during_stop_flush")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    append_started = threading.Event()
+    release_failure = threading.Event()
+    accepted_session_lines = 0
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    def _blocked_failure(_path: Path, _text: str) -> None:
+        append_started.set()
+        assert release_failure.wait(timeout=5.0)
+        raise OSError("synthetic failure during final flush")
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=64,
+        max_bytes=128 * 1024,
+    )
+    original_enqueue = writer.enqueue
+
+    def _tracked_enqueue(channel: str, path: Path, text: str) -> bool:
+        nonlocal accepted_session_lines
+        accepted = original_enqueue(channel, path, text)
+        if accepted and channel == "session":
+            accepted_session_lines += writer._text_line_count(text)
+        return accepted
+
+    writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+    window._async_run_log_writer = writer
+    timer: threading.Timer | None = None
+    try:
+        window._start_session(record_initial_point=False)
+        assert append_started.wait(timeout=2.0)
+        metadata_path = window._session_json_path
+        assert metadata_path is not None
+
+        timer = threading.Timer(0.05, release_failure.set)
+        timer.start()
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Synthetic stop-time failure.")
+        stop_elapsed_s = time.perf_counter() - stop_started
+        timer.join(timeout=1.0)
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        assert stop_elapsed_s < 1.0
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_reason"] == "write_failed"
+        assert payload["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+        assert accepted_session_lines > 1
+
+        _ensure_app().processEvents()
+        payload_after_callback = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload_after_callback["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+    finally:
+        release_failure.set()
+        if timer is not None:
+            timer.join(timeout=1.0)
+        writer.wait_until_idle(timeout_s=1.0)
+        _close_test_window(window)
+
+
+def test_session_log_final_metadata_follows_sleep_guard_and_closes_enqueue_boundary(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("final_enqueue_boundary")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    events: list[tuple[str, str]] = []
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            events.append(("guard", "acquire"))
+
+        def release(self) -> None:
+            events.append(("guard", "release"))
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    try:
+        window._start_session(record_initial_point=False)
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        original_enqueue = window._async_run_log_writer.enqueue
+        original_write_metadata = window._write_session_metadata
+
+        def _tracked_enqueue(channel: str, path: Path, text: str) -> bool:
+            if channel == "session":
+                events.append(("session_enqueue", text))
+            return original_enqueue(channel, path, text)
+
+        def _tracked_write_metadata(*args: object, **kwargs: object) -> None:
+            if kwargs.get("finished_utc") is not None:
+                events.append(("metadata", "final"))
+            original_write_metadata(*args, **kwargs)
+
+        window._async_run_log_writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+        window._write_session_metadata = _tracked_write_metadata  # type: ignore[method-assign]
+
+        window._stop_session(reason="manual_session_stop")
+        final_metadata_index = events.index(("metadata", "final"))
+        session_enqueues = [
+            (index, text)
+            for index, (kind, text) in enumerate(events)
+            if kind == "session_enqueue"
+        ]
+
+        assert events.index(("guard", "release")) < final_metadata_index
+        assert any("Sleep prevention released." in text for _index, text in session_enqueues)
+        assert any("Session stopped" in text for _index, text in session_enqueues)
+        assert all(index < final_metadata_index for index, _text in session_enqueues)
+        assert window._session_run_log_accepting is False
+
+        session_enqueue_count = len(session_enqueues)
+        window._log("post-finalization diagnostic")
+        assert sum(kind == "session_enqueue" for kind, _text in events) == session_enqueue_count
+    finally:
         _close_test_window(window)
 
 

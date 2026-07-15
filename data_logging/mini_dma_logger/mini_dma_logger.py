@@ -3703,6 +3703,22 @@ class AsyncLogWriteRequest:
     channel: str
     path: Path
     text: str
+    line_count: int
+
+
+@dataclass(frozen=True)
+class AsyncLogTargetFailure:
+    error: BaseException
+    lost_line_count: int
+
+
+@dataclass(frozen=True)
+class AsyncLogTargetFlushResult:
+    idle: bool
+    failure: AsyncLogTargetFailure | None
+    pending_request_count: int
+    pending_byte_count: int
+    pending_line_count: int
 
 
 class AsyncRunLogWriter:
@@ -3724,12 +3740,14 @@ class AsyncRunLogWriter:
         self._max_requests = max(1, int(max_requests))
         self._max_bytes = max(1, int(max_bytes))
         self._disabled_targets: set[tuple[str, str]] = set()
+        self._target_failures: dict[tuple[str, str], AsyncLogTargetFailure] = {}
         self._accepting = True
         self._running = True
         self._in_flight_request: AsyncLogWriteRequest | None = None
         self._overload_warning_active = False
         self.last_stop_discarded_session_requests = 0
         self.last_stop_discarded_session_bytes = 0
+        self.last_stop_discarded_session_lines = 0
         self._thread = Thread(target=self._run, name="tma-run-log-writer", daemon=True)
         self._thread.start()
 
@@ -3739,11 +3757,19 @@ class AsyncRunLogWriter:
 
     def reset_target(self, channel: str, path: Path) -> None:
         with self._condition:
-            self._disabled_targets.discard(self._target_key(channel, path))
+            target_key = self._target_key(channel, path)
+            self._disabled_targets.discard(target_key)
+            self._target_failures.pop(target_key, None)
 
     @staticmethod
     def _request_bytes(request: AsyncLogWriteRequest) -> int:
         return len(request.text.encode("utf-8"))
+
+    @staticmethod
+    def _text_line_count(text: str) -> int:
+        if not text:
+            return 0
+        return len(text.splitlines())
 
     @property
     def queued_request_count(self) -> int:
@@ -3778,7 +3804,12 @@ class AsyncRunLogWriter:
         latest = self._queue[-1]
         if self._target_key(latest.channel, latest.path) != self._target_key(request.channel, request.path):
             return False
-        merged = AsyncLogWriteRequest(latest.channel, latest.path, latest.text + request.text)
+        merged = AsyncLogWriteRequest(
+            latest.channel,
+            latest.path,
+            latest.text + request.text,
+            latest.line_count + request.line_count,
+        )
         merged_bytes = self._request_bytes(merged)
         latest_bytes = self._request_bytes(latest)
         if self._queued_bytes - latest_bytes + merged_bytes > self._max_bytes:
@@ -3788,7 +3819,13 @@ class AsyncRunLogWriter:
         return True
 
     def enqueue(self, channel: str, path: Path, text: str) -> bool:
-        request = AsyncLogWriteRequest(str(channel), Path(path), str(text))
+        request_text = str(text)
+        request = AsyncLogWriteRequest(
+            str(channel),
+            Path(path),
+            request_text,
+            self._text_line_count(request_text),
+        )
         request_bytes = self._request_bytes(request)
         overload_callback: Callable[[str], None] | None = None
         with self._condition:
@@ -3861,6 +3898,45 @@ class AsyncRunLogWriter:
                     return False
                 self._condition.wait(timeout=remaining)
 
+    def wait_for_target_flush(
+        self,
+        channel: str,
+        path: Path,
+        timeout_s: float = 0.25,
+    ) -> AsyncLogTargetFlushResult:
+        target_key = self._target_key(channel, path)
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while True:
+                pending = [
+                    request
+                    for request in self._queue
+                    if self._target_key(request.channel, request.path) == target_key
+                ]
+                if (
+                    self._in_flight_request is not None
+                    and self._target_key(
+                        self._in_flight_request.channel,
+                        self._in_flight_request.path,
+                    )
+                    == target_key
+                ):
+                    pending.append(self._in_flight_request)
+                if not pending:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                self._condition.wait(timeout=remaining)
+            failure = self._target_failures.pop(target_key, None)
+            return AsyncLogTargetFlushResult(
+                idle=not pending,
+                failure=failure,
+                pending_request_count=len(pending),
+                pending_byte_count=sum(self._request_bytes(request) for request in pending),
+                pending_line_count=sum(request.line_count for request in pending),
+            )
+
     def target_pending_stats(self, channel: str, path: Path) -> tuple[int, int]:
         target_key = self._target_key(channel, path)
         with self._condition:
@@ -3880,6 +3956,18 @@ class AsyncRunLogWriter:
                 requests.append(self._in_flight_request)
         return len(requests), sum(self._request_bytes(request) for request in requests)
 
+    def take_target_failure(
+        self,
+        channel: str,
+        path: Path,
+    ) -> AsyncLogTargetFailure | None:
+        with self._condition:
+            return self._target_failures.pop(self._target_key(channel, path), None)
+
+    def target_is_disabled(self, channel: str, path: Path) -> bool:
+        with self._condition:
+            return self._target_key(channel, path) in self._disabled_targets
+
     def stop(self, timeout_s: float = 1.0) -> bool:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         overload_callback: Callable[[str], None] | None = None
@@ -3898,6 +3986,9 @@ class AsyncRunLogWriter:
             self.last_stop_discarded_session_requests = len(discarded_session)
             self.last_stop_discarded_session_bytes = sum(
                 self._request_bytes(request) for request in discarded_session
+            )
+            self.last_stop_discarded_session_lines = sum(
+                request.line_count for request in discarded_session
             )
             if discarded_session:
                 overload_callback = self._overload_callback
@@ -3932,14 +4023,24 @@ class AsyncRunLogWriter:
                 append_text_with_rotation(request.path, request.text)
             except Exception as exc:
                 with self._condition:
-                    self._disabled_targets.add(self._target_key(request.channel, request.path))
+                    target_key = self._target_key(request.channel, request.path)
+                    self._disabled_targets.add(target_key)
+                    discarded = [
+                        queued
+                        for queued in self._queue
+                        if self._target_key(queued.channel, queued.path) == target_key
+                    ]
                     retained = deque(
                         queued for queued in self._queue
-                        if self._target_key(queued.channel, queued.path)
-                        != self._target_key(request.channel, request.path)
+                        if self._target_key(queued.channel, queued.path) != target_key
                     )
                     self._queue = retained
                     self._queued_bytes = sum(self._request_bytes(queued) for queued in retained)
+                    self._target_failures[target_key] = AsyncLogTargetFailure(
+                        error=exc,
+                        lost_line_count=request.line_count
+                        + sum(queued.line_count for queued in discarded),
+                    )
                 callback = self._failure_callback
                 if callback is not None:
                     callback(request.channel, request.path, exc)
@@ -6358,6 +6459,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_control_trace_path: Path | None = None
         self._session_run_log_path: Path | None = None
         self._session_run_log_write_failed = False
+        self._session_run_log_accepting = False
         self._session_run_log_complete = True
         self._session_run_log_incomplete_lines = 0
         self._session_run_log_incomplete_reason: str | None = None
@@ -10815,15 +10917,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._flush_pending_run_log_lines()
         else:
             self._schedule_run_log_flush()
-        if self._session_run_log_path is not None and not self._session_run_log_write_failed:
+        if self._session_run_log_path is not None and self._session_run_log_accepting:
+            run_log_path = self._session_run_log_path
             accepted = self._async_run_log_writer.enqueue(
                 "session",
-                self._session_run_log_path,
+                run_log_path,
                 line + "\n",
             )
             if not accepted:
+                self._account_session_run_log_failure(run_log_path)
                 self._record_session_run_log_incomplete(
-                    reason="queue_saturated",
+                    reason=(
+                        "write_failed"
+                        if self._async_run_log_writer.target_is_disabled(
+                            "session",
+                            run_log_path,
+                        )
+                        else "queue_saturated"
+                    ),
                     line_count=1,
                     persist=True,
                 )
@@ -10858,6 +10969,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_run_log_incomplete_metadata_written = True
             self._write_session_metadata()
 
+    def _account_session_run_log_failure(self, path: Path) -> int:
+        if self._session_run_log_path != path:
+            return 0
+        failure = self._async_run_log_writer.take_target_failure("session", path)
+        if failure is None:
+            return 0
+        return self._record_session_run_log_failure(path, failure)
+
+    def _record_session_run_log_failure(
+        self,
+        path: Path,
+        failure: AsyncLogTargetFailure,
+    ) -> int:
+        if self._session_run_log_path != path:
+            return 0
+        self._session_run_log_write_failed = True
+        self._record_session_run_log_incomplete(
+            reason="write_failed",
+            line_count=failure.lost_line_count,
+            persist=True,
+        )
+        return failure.lost_line_count
+
     def _handle_async_run_log_overload(self, message: str) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(lambda message=message: self._handle_async_run_log_overload(message))
@@ -10874,17 +11008,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 lambda: self._handle_async_run_log_write_failure(channel, path, error)
             )
             return
-        if self._window_closing:
-            return
         detail = f"{error.__class__.__name__}: {error}"
         if channel == "session":
             if self._session_run_log_path == path:
-                self._session_run_log_write_failed = True
-                self._record_session_run_log_incomplete(
-                    reason="write_failed",
-                    line_count=1,
-                    persist=True,
-                )
+                self._account_session_run_log_failure(path)
             message = f"Per-run log mirror disabled because writing {path} failed ({detail})."
         else:
             if self._run_log_mirror_path == path:
@@ -10894,6 +11021,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.action_mirror_run_log.setChecked(False)
                     self.action_mirror_run_log.blockSignals(False)
             message = f"Run-log file mirror disabled because writing {path} failed ({detail})."
+        if self._window_closing:
+            return
         self.statusBar().showMessage(message)
         self._queue_run_log_display_line(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
         self._schedule_run_log_flush()
@@ -23034,6 +23163,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_control_trace_path = control_trace_path
         self._session_run_log_path = txt_path.parent / SESSION_RUN_LOG_TXT
         self._session_run_log_write_failed = False
+        self._session_run_log_accepting = True
         self._session_run_log_complete = True
         self._session_run_log_incomplete_lines = 0
         self._session_run_log_incomplete_reason = None
@@ -23182,39 +23312,39 @@ class MainWindow(QtWidgets.QMainWindow):
         point_count = len(self._session_points)
         _stop_category, stop_label = self._session_stop_label(self._session_stop_reason)
         self.label_session_status.setText(f"Session saved ({point_count} point(s)); {stop_label}")
+        if self._supply_output_enabled:
+            self._disable_supply_output()
+        self._ui_refresh_timer.stop()
+        self._clear_run_zero_load_scale_reference()
+        self._release_experiment_sleep_guard()
         if self._session_base_path is not None:
             self._log(
                 f"Session stopped ({stop_label}). "
                 f"Saved {point_count} point(s) to {self._session_base_path}."
             )
         run_log_path = self._session_run_log_path
-        if (
-            run_log_path is not None
-            and not self._async_run_log_writer.wait_for_target_idle(
+        if run_log_path is not None:
+            flush_result = self._async_run_log_writer.wait_for_target_flush(
                 "session",
                 run_log_path,
                 timeout_s=0.25,
             )
-        ):
-            pending_requests, _pending_bytes = self._async_run_log_writer.target_pending_stats(
-                "session",
-                run_log_path,
-            )
-            self._record_session_run_log_incomplete(
-                reason="close_flush_timeout",
-                line_count=max(1, pending_requests),
-            )
-            message = (
-                "Per-run log did not finish its bounded close flush; metadata marks run_log_complete=false."
-            )
-            self.statusBar().showMessage(message)
-            self._queue_run_log_display_line(
-                f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
-            )
-            self._flush_pending_run_log_lines()
-        if self._supply_output_enabled:
-            self._disable_supply_output()
-        self._ui_refresh_timer.stop()
+            if flush_result.failure is not None:
+                self._record_session_run_log_failure(run_log_path, flush_result.failure)
+            if not flush_result.idle and flush_result.pending_line_count > 0:
+                self._record_session_run_log_incomplete(
+                    reason="close_flush_timeout",
+                    line_count=flush_result.pending_line_count,
+                )
+                message = (
+                    "Per-run log did not finish its bounded close flush; metadata marks run_log_complete=false."
+                )
+                self.statusBar().showMessage(message)
+                self._queue_run_log_display_line(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+                )
+                self._flush_pending_run_log_lines()
+        self._session_run_log_accepting = False
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
             self._schedule_tma_history_scan()
@@ -23224,8 +23354,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_base_path.parent,
                 offer_cleanup=self._session_stop_reason == "recipe_completed",
             )
-        self._clear_run_zero_load_scale_reference()
-        self._release_experiment_sleep_guard()
         self._live_plot_points = []
         self._last_live_plot_scale_timestamp = None
         self._refresh_live_labels()
