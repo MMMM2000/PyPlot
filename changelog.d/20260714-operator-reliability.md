@@ -1,0 +1,1 @@
+Current Annealing now stops safely and visibly when measurement or metadata files cannot be written, reports direct serial-open errors, disables recipe starts in Raw VCP mode, locks recipes during active runs, and distinguishes run progress states.

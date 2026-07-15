@@ -13,6 +13,7 @@ import time
 import math
 import re
 import json
+import logging
 import subprocess
 import shutil
 import ctypes
@@ -47,6 +48,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.figure import Figure
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -859,6 +862,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pg_placeholder_labels: list[QtWidgets.QLabel] = []
         self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_auto_connect_error = ""
+        self._last_run_error = ""
+        self._last_stop_reason = ""
+        self._process_state = "idle"
         self._history_settings = QtCore.QSettings("microwire", "current_annealing_history")
         self._measurement_history: List[Dict[str, Any]] = self._load_measurement_history()
 
@@ -1045,8 +1051,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_color="r"
         # Initialize progress UI defaults
         if hasattr(self.ui, 'progressBar_process'):
-            self.ui.progressBar_process.setMaximum(0)
+            self.ui.progressBar_process.setMaximum(1)
             self.ui.progressBar_process.setValue(0)
+        self._set_process_state("idle")
+        self._set_hardware_status("Disconnected", state="idle")
         if hasattr(self.ui, 'label_time_remaining'):
             self.ui.label_time_remaining.setText("Time remaining: N/A")
         # Current step defaults
@@ -1451,7 +1459,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Stopping the process.",
             )
             if self.process_running:
-                self.stop_annealing("Contact lost; stopping measurement.", show_dialog=False)
+                self.stop_annealing(
+                    "Contact lost; stopping measurement.",
+                    show_dialog=False,
+                    final_state="failed",
+                )
 
     def _clear_zero_placeholders(self) -> None:
         """Remove any temporary zero-current markers from the plots."""
@@ -2761,6 +2773,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if bool(getattr(self, "is_connected", False)):
             return True
         self._last_auto_connect_error = ""
+        self._set_process_state("connecting")
+        self._set_hardware_status("Connecting…", state="connecting")
         dialog: QtWidgets.QProgressDialog | None = None
         try:
             text = "Connecting shared HMP broker..." if self._using_shared_broker() else "Connecting hardware..."
@@ -2780,10 +2794,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._connect_shared_broker_mode()
             else:
                 self.handle_connect_port_clicked()
-            return bool(getattr(self, "is_connected", False))
+            connected = bool(getattr(self, "is_connected", False))
+            if connected:
+                self._set_hardware_status("Connected", state="connected")
+            else:
+                detail = str(self._last_auto_connect_error or "Hardware connection did not complete.")
+                self._set_process_state("failed", detail)
+            return connected
         except Exception as exc:
             message = f"Hardware auto-connect failed: {exc}"
             self._last_auto_connect_error = message
+            self._set_hardware_status(message, state="failed")
+            self._set_process_state("failed", message)
             self._show_status_message(message, timeout_ms=15000)
             try:
                 QtWidgets.QMessageBox.warning(self, "Hardware auto-connect failed", message)
@@ -2954,6 +2976,7 @@ class MainWindow(QtWidgets.QMainWindow):
         snapshot = self._ensure_shared_broker_channel_role(snapshot) or snapshot
         self._remember_shared_broker_channel_limit(snapshot)
         self.is_connected = True
+        self._set_hardware_status("Connected to shared HMP broker", state="connected")
         self.ui.pushButton_connect_port.setText("Disconnect broker")
         self._set_port_controls_enabled(False)
         self.ui.frame_command_and_response.setEnabled(False)
@@ -3550,25 +3573,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # Normalise "-0" artefacts from floating point conversion.
         return "0" if text == "-0" else text
 
-    def _write_sample_to_file(self, *, initial_sample: bool) -> None:
+    def _write_sample_to_file(self, *, initial_sample: bool) -> bool:
         """Persist the latest sample to disk if appropriate."""
 
         if initial_sample or not self.f_name:
-            return
+            return True
         current_mA = float(self.current_current_read) * 1000.0
         voltage = float(self.current_voltage)
         resistance = float(self.current_resistance)
         if not self._measurement_sample_is_plottable(current_mA, resistance):
-            return
+            return True
         if not self.f_out:
             try:
                 Path(self.f_name).parent.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
+            except OSError as exc:
+                return self._handle_measurement_write_failure(exc)
             try:
                 self.f_out = open(self.f_name, "a", encoding="utf-8")
-            except OSError:
+            except OSError as exc:
                 self.f_out = None
+                return self._handle_measurement_write_failure(exc)
         if self.f_out:
             line = "\t".join(
                 [
@@ -3577,9 +3601,36 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._format_sample_value(resistance),
                 ]
             ) + "\n"
-            self.f_out.write(line)
-            self.f_out.close()
+            try:
+                self.f_out.write(line)
+                self.f_out.flush()
+                self.f_out.close()
+            except OSError as exc:
+                try:
+                    self.f_out.close()
+                except OSError:
+                    pass
+                self.f_out = None
+                return self._handle_measurement_write_failure(exc)
             self.f_out = None
+            return True
+        return self._handle_measurement_write_failure(OSError("output file is unavailable"))
+
+    def _handle_measurement_write_failure(self, exc: OSError) -> bool:
+        path = str(self.f_name or "the measurement file")
+        message = f"Measurement file write failed for {path}: {exc}"
+        LOGGER.error(message)
+        self._last_run_error = message
+        if self.process_running:
+            self.stop_annealing(message, show_dialog=False, final_state="failed")
+        else:
+            self._set_process_state("failed", message)
+            self._show_status_message(message, timeout_ms=0)
+        try:
+            QtWidgets.QMessageBox.critical(self, "Measurement not saved", message)
+        except Exception:
+            pass
+        return False
 
     def _record_sample_progress(self) -> None:
         """Update progress/rate counters for a persisted non-initial sample."""
@@ -3636,7 +3687,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._first_sample_current_matches_setpoint(current_mA):
             return False
         initial_sample = self.first_sample
-        self._write_sample_to_file(initial_sample=initial_sample)
+        if not self._write_sample_to_file(initial_sample=initial_sample):
+            return False
         if self.first_sample:
             self.first_sample = False
         self._append_measurement_sample(current_mA, resistance, float(getattr(self, "current_voltage", math.nan)))
@@ -3729,6 +3781,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.handle_raw_vcp_mode_selected()
                 self._update_mode_action_state()
                 self._show_connect_overlay(False)
+                self._set_hardware_status(f"Connected to {name}", state="connected")
+            else:
+                detail = str(self.ser_mcu.errorString() or "Unknown serial-port error")
+                message = f"Could not open {name}: {detail}"
+                LOGGER.error(message)
+                self.is_connected = False
+                self._last_auto_connect_error = message
+                self._set_hardware_status(message, state="failed")
+                self._show_status_message(message, timeout_ms=0)
+                try:
+                    QtWidgets.QMessageBox.warning(self, "Serial port open failed", message)
+                except Exception:
+                    pass
 
         else:
             if self.process_running:
@@ -3742,6 +3807,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
             self.ser_mcu.close()
             self.is_connected = False
+            self._set_hardware_status("Disconnected", state="idle")
             self.ui.pushButton_connect_port.setText('Connect to port')
             self._show_connect_overlay(False)
             self.ui.frame_command_and_response.setEnabled(False)
@@ -4691,16 +4757,28 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_raw_vcp_mode_selected(self):
         self.operation_mode = 0
         self.ui.frame_process_settings.setEnabled(False)
+        self.ui.pushButton_start_process.setEnabled(False)
+        self.ui.pushButton_start_process.setText("Recipe disabled (Raw VCP)")
+        self.ui.pushButton_start_process.setToolTip(
+            "Raw VCP is manual serial-console mode. Select Manual or Automatic annealing to run a recipe."
+        )
+        self._set_process_state("idle", "Raw VCP manual mode — recipe actions disabled")
 
     def handle_manual_mode_selected(self):
         self.operation_mode = 1
         self.ui.frame_process_settings.setEnabled(True)
         self.ui.spinBox_max_current.setEnabled(False)
+        self.ui.pushButton_start_process.setEnabled(True)
+        self.ui.pushButton_start_process.setText("Start annealing process")
+        self.ui.pushButton_start_process.setToolTip("")
 
     def handle_automatic_mode_selected(self):
         self.operation_mode = 2
         self.ui.frame_process_settings.setEnabled(True)
         self.ui.spinBox_max_current.setEnabled(True)
+        self.ui.pushButton_start_process.setEnabled(True)
+        self.ui.pushButton_start_process.setText("Start annealing process")
+        self.ui.pushButton_start_process.setToolTip("")
 
     def handle_mode_changed(self, index: int) -> None:
         if index == 0:
@@ -4869,6 +4947,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_toggle_process_clicked(self):
         if not self.process_running:
+            if self.operation_mode == 0:
+                self._set_process_state("idle", "Raw VCP manual mode — recipe actions disabled")
+                self._show_status_message(
+                    "Raw VCP is manual serial-console mode; select an annealing mode to run a recipe.",
+                    timeout_ms=10000,
+                )
+                return
             preflight_errors = self._start_preflight_errors(check_connection=False)
             if preflight_errors:
                 self._show_start_preflight_errors(preflight_errors)
@@ -4882,6 +4967,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._show_start_preflight_errors(preflight_errors)
                 return
             self.process_running = True
+            self._last_run_error = ""
             self._update_mode_action_state()
             self._sync_runtime_settings()
             self._refresh_command_profiles()
@@ -4901,9 +4987,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
                 self.ui.pushButton_reverse_now.setEnabled(True)
-            if hasattr(self.ui, 'pushButton_update_running_recipe'):
-                self.ui.pushButton_update_running_recipe.setVisible(True)
-                self.ui.pushButton_update_running_recipe.setEnabled(True)
             self.force_stop_at_zero = False
             self.command_number = 0
             self.sample_index = 0
@@ -4922,11 +5005,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._process_start_time = None
                     self.ui.pushButton_start_process.setText("Start annealing process")
                     self._restore_idle_controls()
+                    self._set_process_state("idle")
                     return
                 self._record_name_history()
                 if hasattr(self.ui, 'progressBar_process'):
                     self.ui.progressBar_process.setMaximum(0)
                     self.ui.progressBar_process.setValue(0)
+                self._set_process_state("infinite-running", "Manual annealing — running until stopped")
                 if hasattr(self.ui, 'label_time_remaining'):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 if hasattr(self.ui, 'label_time_to_limit'):
@@ -4956,6 +5041,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._process_start_time = None
                     self.ui.pushButton_start_process.setText("Start annealing process")
                     self._restore_idle_controls()
+                    self._set_process_state("idle")
                     return
                 self._record_name_history()
                 self.current_increment = self.current_step_A
@@ -4982,6 +5068,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.ui.progressBar_process.setValue(0)
                     else:
                         self.ui.progressBar_process.setMaximum(0)
+                if self.infinite_loops:
+                    self._set_process_state("infinite-running")
+                else:
+                    self._set_process_state("finite-running")
                 if hasattr(self.ui, 'label_time_to_limit'):
                     self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
                 self.line_color="r"
@@ -5047,29 +5137,15 @@ class MainWindow(QtWidgets.QMainWindow):
             keep.add(self.ui.pushButton_update_running_recipe)
         if hasattr(self.ui, 'groupBox_live_values'):
             keep.add(self.ui.groupBox_live_values)
-        runtime_editable = {
-            getattr(self.ui, name, None)
-            for name in (
-                'spinBox_max_current',
-                'spinBox_step_mA',
-                'spinBox_start_current',
-                'spinBox_loops',
-                'checkBox_infinite_loops',
-                'label_max_current',
-                'label_max_current_density',
-                'label_step',
-                'label_step_density',
-                'label_start_current',
-                'label_start_current_density',
-            )
-        }
         for child in self.ui.groupBox_process_settings.findChildren(QtWidgets.QWidget):
             if child in keep:
                 continue
-            if not enabled and child in runtime_editable:
-                child.setEnabled(True)
-                continue
             child.setEnabled(enabled)
+        recipe_help = "" if enabled else "Recipe is locked for this run. Stop before editing it."
+        for name in ('spinBox_max_current', 'spinBox_step_mA', 'spinBox_start_current', 'spinBox_loops', 'checkBox_infinite_loops'):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setToolTip(recipe_help)
 
     def _restore_idle_controls(self) -> None:
         """Re-enable process controls after a start attempt is canceled."""
@@ -5082,8 +5158,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_update_running_recipe.setEnabled(False)
             self.ui.pushButton_update_running_recipe.setVisible(False)
 
-    def stop_annealing(self, reason: str | None = None, *, show_dialog: bool = False):
+    def stop_annealing(
+        self,
+        reason: str | None = None,
+        *,
+        show_dialog: bool = False,
+        final_state: str | None = None,
+    ):
         """Abort the annealing run and power down the supply safely."""
+        message = reason or "Measurement stopped."
+        self._last_stop_reason = message
+        self._set_process_state("stopping", message)
+        QtWidgets.QApplication.processEvents()
         self.process_running = False
         self.wait = False  # break any pending delays
         self.force_stop_at_zero = False
@@ -5138,8 +5224,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._max_voltage_dialog = False
         self.first_sample = True
         self._reset_loop_tracking()
-        message = reason or "Measurement stopped."
-        self._show_status_message(message, timeout_ms=15000)
+        if final_state is None:
+            final_state = "completed" if message.startswith("Run complete") else "idle"
+        self._set_process_state(final_state, message)
+        self._show_status_message(message, timeout_ms=0 if final_state == "failed" else 15000)
         if show_dialog:
             try:
                 QtWidgets.QMessageBox.information(self, "Measurement stopped", message)
@@ -5290,7 +5378,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.direction_ascending = True
                     self._reset_voltage_projection()
                 else:
-                    self.stop_annealing("Run complete; stopping measurement.", show_dialog=True)
+                    self.stop_annealing(
+                        "Run complete; measurement stopped safely.",
+                        show_dialog=True,
+                        final_state="completed",
+                    )
 
         else:
             pass
@@ -5410,7 +5502,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "No response from power supply. Is it turned on? Aborting the process.",
         )
         if self.process_running:
-            self.stop_annealing("No response from power supply. Measurement stopped.", show_dialog=False)
+            self.stop_annealing(
+                "No response from power supply. Measurement stopped.",
+                show_dialog=False,
+                final_state="failed",
+            )
         self._serial_quiet_failures = 0
 
     def handle_legacy_log_path_changed(self):
@@ -5529,6 +5625,66 @@ class MainWindow(QtWidgets.QMainWindow):
                 status_bar.showMessage(message, timeout_ms)
         except Exception:
             pass
+
+    def _set_hardware_status(self, message: str, *, state: str) -> None:
+        label = getattr(self.ui, "label_hardware_status", None)
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        colors = {"idle": "#6b7280", "connecting": "#b45309", "connected": "#15803d", "failed": "#b91c1c"}
+        label.setText(f"Hardware status: {message}")
+        label.setStyleSheet(f"font-weight: 600; color: {colors.get(state, '#6b7280')};")
+
+    def _set_process_state(self, state: str, detail: str | None = None) -> None:
+        self._process_state = state
+        labels = {
+            "idle": "Idle — no run active",
+            "connecting": "Connecting — waiting for hardware",
+            "finite-running": "Running — finite recipe",
+            "infinite-running": "Running continuously — stop manually",
+            "stopping": "Stopping safely — disabling output",
+            "completed": "Completed — output stopped safely",
+            "failed": "Failed — output stopped; operator action required",
+        }
+        colors = {
+            "idle": "#6b7280", "connecting": "#b45309", "finite-running": "#1d4ed8",
+            "infinite-running": "#7e22ce", "stopping": "#b45309", "completed": "#15803d", "failed": "#b91c1c",
+        }
+        text = labels.get(state, state.replace("-", " ").title())
+        if detail and state in {"failed", "completed", "idle"}:
+            text = f"{text}: {detail}"
+        label = getattr(self.ui, "label_process_state", None)
+        if isinstance(label, QtWidgets.QLabel):
+            label.setText(text)
+            label.setStyleSheet(f"font-weight: 600; color: {colors.get(state, '#6b7280')};")
+        bar = getattr(self.ui, "progressBar_process", None)
+        if not isinstance(bar, QtWidgets.QProgressBar):
+            return
+        if state == "idle":
+            bar.setRange(0, 1)
+            bar.setValue(0)
+            bar.setFormat("Idle")
+        elif state == "connecting":
+            bar.setRange(0, 0)
+            bar.setFormat("Connecting…")
+        elif state == "finite-running":
+            if self.total_steps > 0:
+                bar.setRange(0, self.total_steps)
+                bar.setValue(min(self.step_idx, self.total_steps))
+            bar.setFormat("Running — %p%")
+        elif state == "infinite-running":
+            bar.setRange(0, 0)
+            bar.setFormat("Running continuously")
+        elif state == "stopping":
+            bar.setRange(0, 0)
+            bar.setFormat("Stopping safely…")
+        elif state == "completed":
+            bar.setRange(0, 1)
+            bar.setValue(1)
+            bar.setFormat("Completed")
+        elif state == "failed":
+            bar.setRange(0, 1)
+            bar.setValue(0)
+            bar.setFormat("Failed")
 
     def _adjust_progress_for_reverse(self) -> None:
         if not self.total_steps:
@@ -6073,7 +6229,7 @@ class MainWindow(QtWidgets.QMainWindow):
             },
         }
 
-    def _write_metadata_file(self, output_path: str) -> None:
+    def _write_metadata_file(self, output_path: str) -> bool:
         output = Path(output_path)
         metadata_dir = output.parent / "metadata" / output.stem
         try:
@@ -6082,8 +6238,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 json.dumps(self._metadata_payload(output_path), indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-        except OSError:
-            pass
+        except OSError as exc:
+            message = f"Metadata sidecar write failed for {metadata_dir}: {exc}"
+            LOGGER.error(message)
+            self._last_run_error = message
+            self._set_process_state("failed", message)
+            self._show_status_message(message, timeout_ms=0)
+            try:
+                QtWidgets.QMessageBox.critical(self, "Metadata not saved", message)
+            except Exception:
+                pass
+            return False
+        return True
 
     def _evacuate_existing_output_for_replacement(self, output_path: str) -> None:
         output = Path(output_path)
@@ -6154,7 +6320,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         self.f_name = path
-        self._write_metadata_file(path)
+        if not self._write_metadata_file(path):
+            return False
         # subsequent writes will append
         return True
 
