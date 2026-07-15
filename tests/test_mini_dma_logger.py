@@ -7029,7 +7029,7 @@ def test_async_run_log_writer_failure_counts_failed_purged_and_coalesced_lines(
 ) -> None:
     started = threading.Event()
     release = threading.Event()
-    failures: list[tuple[str, Path, BaseException]] = []
+    failures: list[tuple[str, Path, int, BaseException]] = []
 
     def _blocked_failure(_path: Path, _text: str) -> None:
         started.set()
@@ -7038,7 +7038,9 @@ def test_async_run_log_writer_failure_counts_failed_purged_and_coalesced_lines(
 
     monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
     writer = mini_dma_mod.AsyncRunLogWriter(
-        lambda channel, path, error: failures.append((channel, path, error)),
+        lambda channel, path, generation, error: failures.append(
+            (channel, path, generation, error)
+        ),
         max_requests=2,
         max_bytes=1024,
     )
@@ -26316,9 +26318,15 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
     )
     original_enqueue = writer.enqueue
 
-    def _tracked_enqueue(channel: str, path: Path, text: str) -> bool:
+    def _tracked_enqueue(
+        channel: str,
+        path: Path,
+        text: str,
+        *,
+        generation: int | None = None,
+    ) -> bool:
         nonlocal accepted_session_lines
-        accepted = original_enqueue(channel, path, text)
+        accepted = original_enqueue(channel, path, text, generation=generation)
         if accepted and channel == "session":
             accepted_session_lines += writer._text_line_count(text)
         return accepted
@@ -26385,10 +26393,16 @@ def test_session_log_final_metadata_follows_sleep_guard_and_closes_enqueue_bound
         original_enqueue = window._async_run_log_writer.enqueue
         original_write_metadata = window._write_session_metadata
 
-        def _tracked_enqueue(channel: str, path: Path, text: str) -> bool:
+        def _tracked_enqueue(
+            channel: str,
+            path: Path,
+            text: str,
+            *,
+            generation: int | None = None,
+        ) -> bool:
             if channel == "session":
                 events.append(("session_enqueue", text))
-            return original_enqueue(channel, path, text)
+            return original_enqueue(channel, path, text, generation=generation)
 
         def _tracked_write_metadata(*args: object, **kwargs: object) -> None:
             if kwargs.get("finished_utc") is not None:
@@ -26416,6 +26430,142 @@ def test_session_log_final_metadata_follows_sleep_guard_and_closes_enqueue_bound
         window._log("post-finalization diagnostic")
         assert sum(kind == "session_enqueue" for kind, _text in events) == session_enqueue_count
     finally:
+        _close_test_window(window)
+
+
+def test_old_session_failure_cannot_disable_same_path_replacement_generation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("old_generation")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    window._schedule_tma_history_scan = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    old_append_started = threading.Event()
+    release_old_append = threading.Event()
+    successful_writes: list[tuple[Path, str]] = []
+    accepted_lines: dict[tuple[str, int], int] = {}
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    first_append = True
+
+    def _old_blocks_then_fails(path: Path, text: str) -> None:
+        nonlocal first_append
+        if first_append:
+            first_append = False
+            old_append_started.set()
+            assert release_old_append.wait(timeout=5.0)
+            raise OSError("old generation failed after replacement started")
+        successful_writes.append((Path(path), text))
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_fails)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=128,
+        max_bytes=256 * 1024,
+    )
+    original_enqueue = writer.enqueue
+
+    def _tracked_enqueue(
+        channel: str,
+        path: Path,
+        text: str,
+        *,
+        generation: int | None = None,
+    ) -> bool:
+        accepted = original_enqueue(channel, path, text, generation=generation)
+        if accepted and channel == "session" and generation is not None:
+            key = (str(path), generation)
+            accepted_lines[key] = accepted_lines.get(key, 0) + writer._text_line_count(text)
+        return accepted
+
+    writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+    window._async_run_log_writer = writer
+    try:
+        window._start_session(record_initial_point=False)
+        assert old_append_started.wait(timeout=2.0)
+        old_run_log_path = window._session_run_log_path
+        old_generation = window._session_run_log_generation
+        old_metadata_path = window._session_json_path
+        assert old_run_log_path is not None
+        assert old_generation is not None
+        assert old_metadata_path is not None
+
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Old generation blocked on close.")
+        assert time.perf_counter() - stop_started < 0.75
+        old_payload = json.loads(old_metadata_path.read_text(encoding="utf-8"))
+        old_expected_lines = accepted_lines[(str(old_run_log_path), old_generation)]
+        assert old_payload["logging"]["run_log_complete"] is False
+        assert old_payload["logging"]["run_log_incomplete_reason"] == "close_flush_timeout"
+        assert old_payload["logging"]["run_log_incomplete_lines"] == old_expected_lines
+
+        window.edit_log_name.setText("replacement_generation")
+        window._start_session(record_initial_point=False)
+        replacement_metadata_path = window._session_json_path
+        assert replacement_metadata_path is not None
+        replacement_generation = writer.reset_target("session", old_run_log_path)
+        assert replacement_generation > old_generation
+        window._session_run_log_path = old_run_log_path
+        window._session_run_log_generation = replacement_generation
+        window._log("replacement same-path line 1")
+        window._log("replacement same-path line 2")
+
+        release_old_append.set()
+        qtbot.waitUntil(
+            lambda: sum(
+                Path(path) == old_run_log_path
+                and "replacement same-path line" in text
+                for path, text in successful_writes
+            )
+            == 2,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+
+        assert not writer.target_is_disabled(
+            "session",
+            old_run_log_path,
+            generation=replacement_generation,
+        )
+        replacement_texts = [
+            text
+            for path, text in successful_writes
+            if Path(path) == old_run_log_path and "replacement same-path line" in text
+        ]
+        assert ["line 1" in text for text in replacement_texts] == [True, False]
+        assert ["line 2" in text for text in replacement_texts] == [False, True]
+        assert window._session_run_log_complete is True
+        assert window._session_run_log_incomplete_lines == 0
+
+        old_payload_after_failure = json.loads(old_metadata_path.read_text(encoding="utf-8"))
+        assert old_payload_after_failure["logging"] == old_payload["logging"]
+
+        window._stop_session(reason="manual_session_stop")
+        replacement_payload = json.loads(
+            replacement_metadata_path.read_text(encoding="utf-8")
+        )
+        assert replacement_payload["logging"]["run_log_complete"] is True
+        assert replacement_payload["logging"]["run_log_incomplete_lines"] == 0
+        assert replacement_payload["logging"]["run_log_incomplete_reason"] is None
+    finally:
+        release_old_append.set()
+        writer.wait_until_idle(timeout_s=2.0)
         _close_test_window(window)
 
 
