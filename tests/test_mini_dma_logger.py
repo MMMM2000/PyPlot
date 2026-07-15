@@ -18,6 +18,7 @@ import time
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Mapping
 
 import pytest
 import pandas as pd
@@ -563,7 +564,7 @@ def _install_recording_tic_controller(
 
 
 def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
-    qtbot.waitUntil(lambda: window._serial_port_scan_thread is None, timeout=3000)
+    qtbot.waitUntil(lambda: window._serial_port_scan_task is None, timeout=3000)
 
 
 @pytest.mark.parametrize("section_key", ["mini_dma", "tma"])
@@ -981,20 +982,102 @@ def test_run_summary_generation_keeps_one_active_and_latest_pending(
             window._start_run_summary_generation(run_dir)
 
         qtbot.waitUntil(lambda: started == [run_dirs[0]], timeout=2000)
-        assert window._run_summary_active == (run_dirs[0], False)
+        assert window._run_summary_task is not None
+        assert window._run_summary_task.request == (run_dirs[0], False)
         assert window._run_summary_pending == (run_dirs[-1], False)
 
         releases[0].set()
         qtbot.waitUntil(lambda: started == [run_dirs[0], run_dirs[-1]], timeout=3000)
-        assert window._run_summary_active == (run_dirs[-1], False)
+        assert window._run_summary_task is not None
+        assert window._run_summary_task.request == (run_dirs[-1], False)
         assert window._run_summary_pending is None
 
         releases[1].set()
-        qtbot.waitUntil(lambda: window._run_summary_active is None, timeout=3000)
+        qtbot.waitUntil(lambda: window._run_summary_task is None, timeout=3000)
         assert started == [run_dirs[0], run_dirs[-1]]
     finally:
         for release in releases:
             release.set()
+        _close_test_window(window)
+
+
+def test_run_summary_poll_timer_is_gui_affine_and_rejects_stale_or_closed_tasks(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = [threading.Event(), threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event(), threading.Event()]
+    generated: list[Path] = []
+    finish_threads: list[object] = []
+    finish_calls: list[tuple[Path, bool]] = []
+
+    def _blocked_generate(run_dir: Path) -> dict[str, Path]:
+        index = len(generated)
+        generated.append(Path(run_dir))
+        started[index].set()
+        assert releases[index].wait(timeout=5.0)
+        return {
+            "image_path": Path(run_dir) / "summary.png",
+            "detail_image_path": Path(run_dir) / "summary_detail.png",
+        }
+
+    plot_module = importlib.import_module("data_logging.mini_dma_logger.run_core_plot")
+    monkeypatch.setattr(plot_module, "generate_core_run_plot", _blocked_generate)
+    window = _build_window(tmp_path, qtbot)
+    original_finish = window._finish_run_summary_generation
+
+    def _record_finish(request, summary, error) -> None:
+        finish_threads.append(QtCore.QThread.currentThread())
+        finish_calls.append(request)
+        original_finish(request, summary, error)
+
+    window._finish_run_summary_generation = _record_finish  # type: ignore[method-assign]
+    gui_thread = window.thread()
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+    closed_task = None
+    try:
+        first = (tmp_path / "summary-current", False)
+        window._start_run_summary_generation(first[0])
+        assert started[0].wait(timeout=2.0)
+        releases[0].set()
+        qtbot.waitUntil(lambda: window._run_summary_task is None, timeout=3000)
+        assert finish_calls == [first]
+        assert finish_threads == [gui_thread]
+
+        stale = (tmp_path / "summary-stale", False)
+        window._start_run_summary_generation(stale[0])
+        assert started[1].wait(timeout=2.0)
+        stale_task = window._run_summary_task
+        assert stale_task is not None
+        window._run_summary_task = None
+        window._run_summary_poll_timer.stop()
+        releases[1].set()
+        assert stale_task.done_event.wait(timeout=3.0)
+        _ensure_app().processEvents()
+        assert finish_calls == [first]
+
+        window._run_summary_pending = None
+        window._start_run_summary_generation(tmp_path / "summary-close")
+        assert started[2].wait(timeout=2.0)
+        closed_task = window._run_summary_task
+        assert closed_task is not None
+        close_started = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - close_started < 0.75
+        assert closed_task.thread.is_alive()
+        assert getattr(closed_task.thread, "_target", None).__self__ is closed_task
+        assert all(value is not window for value in vars(closed_task).values())
+
+        releases[2].set()
+        assert closed_task.done_event.wait(timeout=3.0)
+        _ensure_app().processEvents()
+        assert finish_calls == [first]
+    finally:
+        for release in releases:
+            release.set()
+        if closed_task is not None:
+            closed_task.thread.join(timeout=3.0)
         _close_test_window(window)
 
 
@@ -3909,6 +3992,301 @@ def test_scale_measurement_updates_freshness_off_ui_thread(tmp_path: Path, qtbot
         assert window._scale_signal_buffer.latest() is not None
     finally:
         _close_test_window(window)
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_sensor_worker_signals_queue_ui_and_reject_stale_finished_connections(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    source_threads: list[object] = []
+    ui_threads: list[object] = []
+    cleanup_threads: list[object] = []
+    delivered_messages: list[str] = []
+    samples: list[mini_dma_mod.IrTemperatureSample] = []
+    frames = [object(), object(), object()]
+
+    def _sample(value: float) -> mini_dma_mod.IrTemperatureSample:
+        return mini_dma_mod.IrTemperatureSample(
+            timestamp_s=time.time(),
+            raw_text=f"synthetic-{value}",
+            sequence=int(value),
+            device_elapsed_ms=10,
+            read_us=20,
+            ambient_c=21.0,
+            object_c_apparent=value,
+            raw_ambient=100,
+            raw_object=200,
+            flags=0,
+        )
+
+    def _scale_run(worker: mini_dma_mod.ScaleWorker) -> None:
+        index = len(source_threads)
+        source_threads.append(QtCore.QThread.currentThread())
+        worker.status_changed.emit(f"scale status {index}")
+        worker.error_occurred.emit(f"scale error {index}")
+        worker.measurement_received.emit(12.5 + 10.0 * index, f"scale-{index}", time.time())
+        emitted[index].set()
+        if index == 0:
+            worker.finished.emit()
+            return
+        assert releases[index].wait(timeout=5.0)
+        if index == 1:
+            worker.measurement_received.emit(99.0, "stale-scale", time.time())
+            worker.error_occurred.emit("stale scale error")
+        worker.finished.emit()
+
+    def _ir_run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+        index = len(source_threads)
+        source_threads.append(QtCore.QThread.currentThread())
+        sample = _sample(40.0 + index)
+        samples.append(sample)
+        worker.status_changed.emit(f"ir status {index}")
+        worker.error_occurred.emit(f"ir error {index}")
+        worker.sample_received.emit(sample)
+        worker.frame_received.emit(frames[index])
+        emitted[index].set()
+        if index == 0:
+            worker.finished.emit()
+            return
+        assert releases[index].wait(timeout=5.0)
+        if index == 1:
+            worker.sample_received.emit(_sample(99.0))
+            worker.frame_received.emit(frames[2])
+            worker.error_occurred.emit("stale ir error")
+        worker.finished.emit()
+
+    if sensor_kind == "scale":
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _scale_run)
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-test-scale", "COM-test-scale")
+        original_ui_update = window._handle_scale_measurement_ui_update
+
+        def _record_ui_update(value_g: float | None = None) -> None:
+            ui_threads.append(QtCore.QThread.currentThread())
+            original_ui_update(value_g)
+
+        window._handle_scale_measurement_ui_update = _record_ui_update  # type: ignore[method-assign]
+        original_status = window._handle_scale_status
+        original_error = window._handle_scale_error
+
+        def _record_status(message: str) -> None:
+            delivered_messages.append(message)
+            original_status(message)
+
+        def _record_error(message: str) -> None:
+            delivered_messages.append(message)
+            original_error(message)
+
+        window._handle_scale_status = _record_status  # type: ignore[method-assign]
+        window._handle_scale_error = _record_error  # type: ignore[method-assign]
+        original_cleanup = window._handle_sensor_thread_finished
+
+        def _record_cleanup(kind: str, token: object) -> None:
+            cleanup_threads.append(QtCore.QThread.currentThread())
+            original_cleanup(kind, token)
+
+        window._handle_sensor_thread_finished = _record_cleanup  # type: ignore[method-assign]
+        connect = window._connect_scale
+        disconnect = window._disconnect_scale
+    else:
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _ir_run)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-test-ir", "COM-test-ir")
+        original_ui_update = window._handle_ir_camera_frame_ui
+
+        def _record_ui_update(frame: object) -> None:
+            ui_threads.append(QtCore.QThread.currentThread())
+            original_ui_update(frame)
+
+        window._handle_ir_camera_frame_ui = _record_ui_update  # type: ignore[method-assign]
+        original_status = window._handle_ir_status
+        original_error = window._handle_ir_error
+
+        def _record_status(message: str) -> None:
+            delivered_messages.append(message)
+            original_status(message)
+
+        def _record_error(message: str) -> None:
+            delivered_messages.append(message)
+            original_error(message)
+
+        window._handle_ir_status = _record_status  # type: ignore[method-assign]
+        window._handle_ir_error = _record_error  # type: ignore[method-assign]
+        original_cleanup = window._handle_sensor_thread_finished
+
+        def _record_cleanup(kind: str, token: object) -> None:
+            cleanup_threads.append(QtCore.QThread.currentThread())
+            original_cleanup(kind, token)
+
+        window._handle_sensor_thread_finished = _record_cleanup  # type: ignore[method-assign]
+        connect = window._connect_ir_thermometer
+        disconnect = window._disconnect_ir_thermometer
+    gui_thread = window.thread()
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+    try:
+        assert connect(show_errors=False) is True
+        assert emitted[0].wait(timeout=2.0)
+        assert source_threads[0] is not gui_thread
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == pytest.approx(12.5)
+        else:
+            assert window._latest_ir_sample is samples[0]
+            assert window._latest_ir_frame is frames[0]
+        qtbot.waitUntil(lambda: bool(ui_threads), timeout=2000)
+        assert all(thread is gui_thread for thread in ui_threads)
+        assert f"{sensor_kind} status 0" in delivered_messages
+        assert f"{sensor_kind} error 0" in delivered_messages
+
+        releases[0].set()
+        if sensor_kind == "scale":
+            qtbot.waitUntil(lambda: window._scale_thread is None, timeout=3000)
+        else:
+            qtbot.waitUntil(lambda: window._ir_thread is None, timeout=3000)
+        assert cleanup_threads and all(thread is gui_thread for thread in cleanup_threads)
+
+        assert connect(show_errors=False) is True
+        assert emitted[1].wait(timeout=2.0)
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == pytest.approx(22.5)
+            stale_thread = window._scale_thread
+            lifetime = window._scale_thread_lifetime
+            current_value = window._latest_scale_value_g
+            replacement_worker = mini_dma_mod.ScaleWorker(
+                port_name="replacement-scale",
+                baudrate=9600,
+                poll_interval_ms=100,
+                request_command="",
+                request_terminator="",
+            )
+            replacement_thread = QtCore.QThread()
+            window._scale_worker = replacement_worker
+            window._scale_thread = replacement_thread
+            window._scale_thread_lifetime = None
+            window._scale_connection_token = object()
+        else:
+            assert window._latest_ir_sample is samples[1]
+            stale_thread = window._ir_thread
+            lifetime = window._ir_thread_lifetime
+            current_value = window._latest_ir_sample
+            replacement_worker = mini_dma_mod.Mlx90614Worker(
+                port_name="replacement-ir",
+                baudrate=115200,
+                interval_code=7,
+            )
+            replacement_thread = QtCore.QThread()
+            window._ir_worker = replacement_worker
+            window._ir_thread = replacement_thread
+            window._ir_thread_lifetime = None
+            window._ir_connection_token = object()
+        assert stale_thread is not None and lifetime is not None
+
+        releases[1].set()
+        qtbot.waitUntil(lifetime.done_event.is_set, timeout=3000)
+        _ensure_app().processEvents()
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == current_value
+            assert window._scale_thread is replacement_thread
+            assert window._scale_worker is replacement_worker
+        else:
+            assert window._latest_ir_sample is current_value
+            assert window._latest_ir_frame is frames[1]
+            assert window._ir_thread is replacement_thread
+            assert window._ir_worker is replacement_worker
+        assert len(cleanup_threads) == 1
+        assert all(thread is gui_thread for thread in cleanup_threads)
+        assert f"stale {sensor_kind} error" not in delivered_messages
+    finally:
+        for release in releases:
+            release.set()
+        disconnect(timeout_ms=1000)
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_blocked_sensor_qthread_close_is_bounded_and_does_not_retain_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    _ensure_app()
+    settings_snapshot = _snapshot_settings()
+    started = threading.Event()
+    release = threading.Event()
+    qt_messages: list[str] = []
+
+    def _blocked_run(worker: object) -> None:
+        started.set()
+        release.wait(timeout=10.0)
+        getattr(worker, "finished").emit()
+
+    if sensor_kind == "scale":
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _blocked_run)
+    else:
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _blocked_run)
+
+    previous_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    lifetime = None
+    thread = None
+    owner_ref = weakref.ref(window)
+    try:
+        if sensor_kind == "scale":
+            window.combo_scale_port.clear()
+            window.combo_scale_port.addItem("COM-blocked-scale", "COM-blocked-scale")
+            assert window._connect_scale(show_errors=False) is True
+            lifetime = window._scale_thread_lifetime
+            thread = window._scale_thread
+        else:
+            window.check_ir_enabled.setChecked(True)
+            window.combo_ir_port.clear()
+            window.combo_ir_port.addItem("COM-blocked-ir", "COM-blocked-ir")
+            assert window._connect_ir_thermometer(show_errors=False) is True
+            lifetime = window._ir_thread_lifetime
+            thread = window._ir_thread
+        assert started.wait(timeout=2.0)
+        assert lifetime is not None and thread is not None
+
+        close_started = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - close_started < 0.75
+        assert thread.isRunning()
+        assert lifetime in mini_dma_mod._RETAINED_SENSOR_THREAD_LIFETIMES
+        assert all(value is not window for value in vars(lifetime).values())
+
+        window.deleteLater()
+        _ensure_app().processEvents()
+        del window
+        gc.collect()
+        assert owner_ref() is None
+
+        release.set()
+        assert thread.wait(3000)
+        _ensure_app().processEvents()
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release.set()
+        if thread is not None:
+            try:
+                thread.quit()
+                thread.wait(3000)
+            except RuntimeError:
+                pass
+        remaining_owner = owner_ref()
+        if remaining_owner is not None:
+            remaining_owner.close()
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_handler)
+        _restore_settings(settings_snapshot)
 
 
 def _calibration_point(
@@ -7031,6 +7409,35 @@ def test_background_ui_callback_is_dropped_after_window_closes(tmp_path: Path, q
     assert errors == []
 
 
+def test_control_ui_signal_queued_before_close_is_dropped_after_close(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[object] = []
+    errors: list[BaseException] = []
+    gui_thread = window.thread()
+
+    def _callback() -> None:
+        called.append(QtCore.QThread.currentThread())
+
+    def _queue_from_worker() -> None:
+        try:
+            window._run_on_ui_thread(_callback)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=_queue_from_worker, name="test-control-ui-post-close")
+    worker.start()
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert called == []
+
+    window.close()
+    _ensure_app().processEvents()
+
+    assert called == []
+    assert errors == []
+    assert gui_thread is not None
+
+
 def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mirror_path = tmp_path / "mini_dma_run_log.txt"
@@ -7723,7 +8130,7 @@ def test_blocked_daemon_filesystem_task_does_not_retain_owner(
         assert owner_ref() is None
         assert task.thread.daemon is True
         assert task.isRunning()
-        assert task in mini_dma_mod._RETAINED_DAEMON_FILESYSTEM_TASKS
+        assert getattr(task.thread, "_target", None).__self__ is task
     finally:
         release.set()
         task.thread.join(timeout=3.0)
@@ -11240,6 +11647,110 @@ def test_empty_background_serial_scan_preserves_saved_port_settings(
         assert "not detected" in window.combo_scale_port.currentText()
         assert "not detected" in window.combo_ir_port.currentText()
     finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("scan_fails", [False, True], ids=["success", "failure"])
+def test_serial_port_poll_timer_mutates_widgets_only_on_gui_thread(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    scan_fails: bool,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    handler_threads: list[object] = []
+
+    def _blocked_comports() -> list[SimpleNamespace]:
+        started.set()
+        assert release.wait(timeout=5.0)
+        if scan_fails:
+            raise RuntimeError("synthetic affinity scan failure")
+        return [SimpleNamespace(device="COM31", description="Affinity probe")]
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _blocked_comports)
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert started.wait(timeout=1.0)
+        gui_thread = window.thread()
+        if scan_fails:
+            original_handler = window._handle_serial_port_enumeration_failure
+
+            def _record_handler(generation: int, message: str) -> None:
+                handler_threads.append(QtCore.QThread.currentThread())
+                original_handler(generation, message)
+
+            window._handle_serial_port_enumeration_failure = _record_handler  # type: ignore[method-assign]
+        else:
+            original_handler = window._handle_serial_port_enumeration_success
+
+            def _record_handler(generation: int, descriptors: object) -> None:
+                handler_threads.append(QtCore.QThread.currentThread())
+                original_handler(generation, descriptors)
+
+            window._handle_serial_port_enumeration_success = _record_handler  # type: ignore[method-assign]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        release.set()
+
+        if scan_fails:
+            qtbot.waitUntil(
+                lambda: "synthetic affinity scan failure" in window.statusBar().currentMessage(),
+                timeout=3000,
+            )
+        else:
+            qtbot.waitUntil(lambda: window.combo_supply_port.findData("COM31") >= 0, timeout=3000)
+
+        assert handler_threads == [gui_thread]
+    finally:
+        release.set()
+        _close_test_window(window)
+
+
+def test_serial_port_poll_timer_rejects_stale_and_post_close_results(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    calls = 0
+
+    def _blocked_comports() -> list[SimpleNamespace]:
+        nonlocal calls
+        index = calls
+        calls += 1
+        started[index].set()
+        assert releases[index].wait(timeout=5.0)
+        return [SimpleNamespace(device=f"COM4{index}", description="Stale probe")]
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _blocked_comports)
+    window = _build_window(tmp_path, qtbot)
+    second_task = None
+    try:
+        assert started[0].wait(timeout=1.0)
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        window._serial_port_scan_generation += 1
+        releases[0].set()
+        qtbot.waitUntil(lambda: window._serial_port_scan_task is None, timeout=3000)
+        assert window.combo_supply_port.findData("COM40") < 0
+
+        assert window._start_serial_port_enumeration() is True
+        assert started[1].wait(timeout=1.0)
+        second_task = window._serial_port_scan_task
+        assert second_task is not None
+
+        close_started = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - close_started < 0.75
+        releases[1].set()
+        assert second_task.done_event.wait(timeout=3.0)
+        _ensure_app().processEvents()
+        assert window.combo_supply_port.findData("COM41") < 0
+    finally:
+        for release in releases:
+            release.set()
+        if second_task is not None:
+            second_task.thread.join(timeout=3.0)
         _close_test_window(window)
 
 
@@ -26670,12 +27181,21 @@ def test_worker_stop_fault_and_wire_break_finalize_without_widget_access(
 def test_session_metadata_records_source_control_snapshot(
     tmp_path: Path,
     qtbot,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("metadata_git")
     window._record_current_point = lambda: None  # type: ignore[method-assign]
     cache = _ControlledSourceProvenanceCache()
     window._source_provenance_cache = cache
+    patch_threads: list[object] = []
+    original_patch = mini_dma_mod.patch_source_control_metadata
+
+    def _recording_patch(path: Path, snapshot: Mapping[str, object]) -> None:
+        patch_threads.append(QtCore.QThread.currentThread())
+        original_patch(path, snapshot)
+
+    monkeypatch.setattr(mini_dma_mod, "patch_source_control_metadata", _recording_patch)
 
     try:
         window._start_session()
@@ -26687,7 +27207,13 @@ def test_session_metadata_records_source_control_snapshot(
         assert pending["source_control"]["is_dirty"] is False
 
         expected_snapshot = cache.complete(token)
-        window._poll_source_provenance_capture()
+        qtbot.waitUntil(
+            lambda: json.loads(window._session_json_path.read_text(encoding="utf-8"))[
+                "source_control"
+            ]["capture_state"]
+            == "complete",
+            timeout=2000,
+        )
         payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
 
         assert payload["source_control"]["branch"] == "codex/test-branch"
@@ -26695,6 +27221,7 @@ def test_session_metadata_records_source_control_snapshot(
         assert payload["source_control"]["is_dirty"] is True
         assert payload["source_control"]["remote_url"] == "https://example.test/repo.git"
         assert payload["source_control"]["dirty_state"] == "dirty"
+        assert patch_threads == [window.thread()]
 
         window.edit_run_notes.setPlainText("operator changed notes after capture")
         for _ in range(5):

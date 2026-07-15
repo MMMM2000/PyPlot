@@ -736,7 +736,7 @@ def test_current_annealing_fabrication_load_keeps_ui_responsive(
     qtbot.waitUntil(lambda: len(ticks) >= 3, timeout=1000)
     assert window._fabrication_load_active()
 
-    qtbot.waitUntil(lambda: not window._fabrication_load_active(), timeout=5000)
+    qtbot.waitUntil(lambda: window.ui.pushButton_load_fabrication.text() == "Load", timeout=5000)
     timer.stop()
 
     assert worker_thread
@@ -746,6 +746,115 @@ def test_current_annealing_fabrication_load_keeps_ui_responsive(
     assert "Loaded 1 microwire suggestion(s) from 40 fabrication workbook(s)." in (
         window.ui.label_microwire_metadata_status.text()
     )
+
+
+def test_current_annealing_fabrication_timer_delivers_all_results_on_gui_thread(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_threads: list[object] = []
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        @logger_mod.QtCore.pyqtSlot()
+        def _poll_fabrication_tasks(self) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._poll_fabrication_tasks()
+
+        def _set_metadata_status(self, text: str) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._set_metadata_status(text)
+
+    success_root = tmp_path / "success"
+    success_root.mkdir()
+    (success_root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+
+    class _Index:
+        piece_level = {("Ni50Fe27Ga23", 12, 2): {"d (um)": 19.2}}
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = lambda _files, *, cancel_callback: _Index()
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    callback_threads.clear()
+    window.ui.lineEdit_fabrication_folder.setText(str(success_root))
+    assert window._load_fabrication_folder_from_ui()
+    qtbot.waitUntil(
+        lambda: "Loaded 1 microwire suggestion" in window.ui.label_microwire_metadata_status.text(),
+        timeout=3000,
+    )
+
+    failure_root = tmp_path / "failure"
+    failure_root.mkdir()
+    callback_threads.clear()
+    window.ui.lineEdit_fabrication_folder.setText(str(failure_root))
+    assert window._load_fabrication_folder_from_ui()
+    qtbot.waitUntil(
+        lambda: window.ui.label_microwire_metadata_status.text()
+        == "No fabrication Excel workbooks were found.",
+        timeout=3000,
+    )
+
+    assert callback_threads
+    assert all(thread is window.thread() for thread in callback_threads)
+
+
+def test_current_annealing_fabrication_cancel_button_delivers_on_gui_thread(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    callback_threads: list[object] = []
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        @logger_mod.QtCore.pyqtSlot()
+        def _poll_fabrication_tasks(self) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._poll_fabrication_tasks()
+
+        def _handle_fabrication_load_cancelled(self, root_obj: object) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._handle_fabrication_load_cancelled(root_obj)
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        started.set()
+        while not cancel_callback():
+            time.sleep(0.005)
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_fabrication_folder.setText(str(root))
+    assert window._load_fabrication_folder_from_ui()
+    assert started.wait(timeout=2.0)
+    qtbot.mouseClick(
+        window.ui.pushButton_load_fabrication,
+        logger_mod.QtCore.Qt.MouseButton.LeftButton,
+    )
+    qtbot.waitUntil(
+        lambda: window.ui.label_microwire_metadata_status.text()
+        == "Fabrication folder load cancelled.",
+        timeout=3000,
+    )
+
+    assert callback_threads
+    assert all(thread is window.thread() for thread in callback_threads)
 
 
 def test_current_annealing_fabrication_worker_observes_cancel_callback(
@@ -862,7 +971,6 @@ def test_blocked_fabrication_task_does_not_retain_owner(
     def _blocked_run(self: logger_mod.FabricationFolderLoadWorker) -> None:
         started.set()
         release.wait()
-        self.finished.emit()
 
     monkeypatch.setattr(logger_mod.FabricationFolderLoadWorker, "run", _blocked_run)
     root = tmp_path / "fabrication"
@@ -890,6 +998,57 @@ def test_blocked_fabrication_task_does_not_retain_owner(
     finally:
         release.set()
         task.thread.join(timeout=3.0)
+
+
+def test_closed_current_annealing_window_is_not_retained_by_blocked_fabrication_callback(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        started.set()
+        assert release.wait(timeout=5.0)
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+
+    window = logger_mod.MainWindow()
+    window.setAttribute(logger_mod.QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    window.ui.lineEdit_fabrication_folder.setText(str(root))
+    assert window._load_fabrication_folder_from_ui()
+    assert started.wait(timeout=2.0)
+    task = window._fabrication_thread
+    assert task is not None
+    window_ref = weakref.ref(window)
+
+    try:
+        started_at = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - started_at < 0.5
+        from PyQt6 import sip
+
+        if not sip.isdeleted(window):
+            sip.delete(window)
+        window.__dict__.clear()
+        del window
+        logger_mod.QtWidgets.QApplication.processEvents()
+        gc.collect()
+        qtbot.waitUntil(lambda: window_ref() is None, timeout=1000)
+        assert task.isRunning()
+    finally:
+        release.set()
+        task.wait(3000)
 
 
 def test_current_annealing_replacement_retains_old_worker_and_ignores_stale_result(
@@ -943,13 +1102,12 @@ def test_current_annealing_replacement_retains_old_worker_and_ignores_stale_resu
         assert new_thread is not None and new_thread is not old_thread
         assert id(old_thread) in window._fabrication_tasks
         assert old_cancel_callbacks and old_cancel_callbacks[0]() is True
-        qtbot.waitUntil(lambda: id(new_thread) not in window._fabrication_tasks, timeout=3000)
-        logger_mod.QtWidgets.QApplication.processEvents()
+        qtbot.waitUntil(lambda: handled_roots == [new_root], timeout=3000)
         assert handled_roots == [new_root]
 
         release_old.set()
-        qtbot.waitUntil(lambda: id(old_thread) not in window._fabrication_tasks, timeout=3000)
-        logger_mod.QtWidgets.QApplication.processEvents()
+        qtbot.waitUntil(lambda: not old_thread.isRunning(), timeout=3000)
+        qtbot.wait(100)
         assert handled_roots == [new_root]
     finally:
         release_old.set()
@@ -2037,6 +2195,37 @@ def test_current_annealing_metadata_records_source_control_snapshot(
     assert str(token) in cache.released
 
 
+def test_current_annealing_source_provenance_timer_completes_on_gui_thread(
+    tmp_path,
+    qtbot,
+) -> None:
+    callback_threads: list[object] = []
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        @logger_mod.QtCore.pyqtSlot()
+        def _poll_source_provenance_capture(self) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._poll_source_provenance_capture()
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("metadata_timer")
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    assert window.prepare_output_file()
+    token = window._source_provenance_token
+    metadata_path = window._metadata_path(str(window.f_name))
+    cache.complete(token)
+    qtbot.waitUntil(lambda: str(token) in cache.released, timeout=3000)
+
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["source_control"]["capture_state"] == "complete"
+    assert callback_threads
+    assert all(thread is window.thread() for thread in callback_threads)
+
+
 def test_current_annealing_source_provenance_updates_only_current_prepared_output(
     tmp_path,
     qtbot,
@@ -2078,7 +2267,7 @@ def test_current_annealing_source_provenance_updates_only_current_prepared_outpu
 
     window.ui.lineEdit_composition.setText("operator changed after prepare")
     expected_snapshot = cache.complete(new_token, branch="codex/current", commit="current")
-    window._poll_source_provenance_capture()
+    qtbot.waitUntil(lambda: str(new_token) in cache.released, timeout=3000)
     completed_payload = logger_mod.json.loads(new_metadata.read_text(encoding="utf-8"))
     assert completed_payload["source_control"] == expected_snapshot
     assert completed_payload["composition"] == "original composition"
@@ -2629,6 +2818,229 @@ def test_direct_serial_open_failure_surfaces_error_string(
     assert "Access is denied" in window.ui.label_hardware_status.text()
     assert window._last_auto_connect_error == dialogs[0]
     assert window.statusBar().currentMessage() == dialogs[0]
+
+
+def test_current_annealing_serial_and_timer_signals_run_on_gui_thread_and_teardown(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serial_threads: list[object] = []
+    response_timer_threads: list[object] = []
+    time_timer_threads: list[object] = []
+    command_timer_threads: list[object] = []
+    delay_threads: list[object] = []
+    port_threads: list[object] = []
+    setter_threads: list[object] = []
+
+    class _NoPorts:
+        @staticmethod
+        def availablePorts() -> list[object]:
+            return []
+
+    monkeypatch.setattr(logger_mod, "QSerialPortInfo", _NoPorts)
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        def populate_ports(self) -> None:
+            port_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().populate_ports()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def handle_ser_mcu_readyRead(self) -> None:
+            serial_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().handle_ser_mcu_readyRead()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def handle_update_serial_response_label(self) -> None:
+            response_timer_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().handle_update_serial_response_label()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def update_time_estimate(self) -> None:
+            time_timer_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().update_time_estimate()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def handle_send_new_command(self) -> None:
+            command_timer_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().handle_send_new_command()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def _finish_simple_delay(self) -> None:
+            delay_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._finish_simple_delay()
+
+    class _ReadableSerial(logger_mod.QtCore.QObject):
+        readyRead = logger_mod.QtCore.pyqtSignal()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.opened = False
+            self.response = b"12.5\n"
+            self.writes: list[bytes] = []
+
+        def setPortName(self, _value: object) -> None:
+            pass
+
+        def setBaudRate(self, _value: object) -> None:
+            pass
+
+        def setFlowControl(self, _value: object) -> None:
+            pass
+
+        def setDataBits(self, _value: object) -> None:
+            pass
+
+        def setParity(self, _value: object) -> None:
+            pass
+
+        def setStopBits(self, _value: object) -> None:
+            pass
+
+        def open(self, _mode: object) -> bool:
+            self.opened = True
+            return True
+
+        def clear(self) -> None:
+            pass
+
+        def isOpen(self) -> bool:
+            return self.opened
+
+        def close(self) -> None:
+            self.opened = False
+
+        def canReadLine(self) -> bool:
+            return True
+
+        def readLine(self) -> bytes:
+            return self.response
+
+        def write(self, value: bytes) -> None:
+            self.writes.append(value)
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    port_threads.clear()
+    response_timer_threads.clear()
+    time_timer_threads.clear()
+    window.timer.stop()
+    window.time_timer.stop()
+
+    original_response_set_text = window.ui.label_serial_response.setText
+    original_time_set_text = window.ui.label_time_remaining.setText
+
+    def _set_response_text(text: str) -> None:
+        setter_threads.append(logger_mod.QtCore.QThread.currentThread())
+        original_response_set_text(text)
+
+    def _set_time_text(text: str) -> None:
+        setter_threads.append(logger_mod.QtCore.QThread.currentThread())
+        original_time_set_text(text)
+
+    monkeypatch.setattr(window.ui.label_serial_response, "setText", _set_response_text)
+    monkeypatch.setattr(window.ui.label_time_remaining, "setText", _set_time_text)
+
+    qtbot.mouseClick(
+        window.ui.pushButton_refresh_ports,
+        logger_mod.QtCore.Qt.MouseButton.LeftButton,
+    )
+    assert port_threads == [window.thread()]
+
+    serial = _ReadableSerial()
+    window._apply_supply_profile("hmp4030")
+    window.ser_mcu = serial
+    window.port_name = "COM-FAKE"
+    window.operation_mode = 0
+    qtbot.mouseClick(
+        window.ui.pushButton_connect_port,
+        logger_mod.QtCore.Qt.MouseButton.LeftButton,
+    )
+    assert window.is_connected
+    assert serial.opened
+    serial.readyRead.emit()
+    qtbot.waitUntil(lambda: bool(serial_threads), timeout=1000)
+
+    window.timer.setInterval(0)
+    window.timer.start()
+    qtbot.waitUntil(lambda: window.ui.label_serial_response.text().strip() == "12.5", timeout=1000)
+    window.timer.stop()
+
+    window.time_timer.setInterval(0)
+    window.time_timer.start()
+    qtbot.waitUntil(lambda: bool(time_timer_threads), timeout=1000)
+    window.time_timer.stop()
+
+    window.process_running = True
+    window.operation_mode = 99
+    window.timer_command.setInterval(0)
+    window.timer_command.start()
+    qtbot.waitUntil(lambda: window.command_number > 0, timeout=1000)
+    window.timer_command.stop()
+    window.process_running = False
+    window.simple_delay(5)
+
+    qtbot.wait(20)
+    all_threads = (
+        serial_threads
+        + response_timer_threads
+        + time_timer_threads
+        + command_timer_threads
+        + delay_threads
+        + port_threads
+        + setter_threads
+    )
+    assert all_threads
+    assert all(thread is window.thread() for thread in all_threads)
+
+    serial.close()
+    window.is_connected = False
+    window.close()
+    callback_counts = (
+        len(serial_threads),
+        len(response_timer_threads),
+        len(time_timer_threads),
+        len(command_timer_threads),
+    )
+    serial.readyRead.emit()
+    window.timer.timeout.emit()
+    window.time_timer.timeout.emit()
+    window.timer_command.timeout.emit()
+    logger_mod.QtWidgets.QApplication.processEvents()
+    assert callback_counts == (
+        len(serial_threads),
+        len(response_timer_threads),
+        len(time_timer_threads),
+        len(command_timer_threads),
+    )
+    assert window._callbacks_torn_down
+    assert not window.timer.isActive()
+    assert not window.time_timer.isActive()
+    assert not window.timer_command.isActive()
+
+
+def test_current_annealing_close_reentry_during_safe_end_runs_once(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    disconnect_calls: list[object] = []
+
+    class _OpenSerial:
+        @staticmethod
+        def isOpen() -> bool:
+            return True
+
+    def _disconnect_with_nested_close() -> None:
+        disconnect_calls.append(logger_mod.QtCore.QThread.currentThread())
+        logger_mod.QtCore.QTimer.singleShot(0, window.close)
+        window.simple_delay(10)
+
+    window.ser_mcu = _OpenSerial()
+    window.handle_connect_port_clicked = _disconnect_with_nested_close  # type: ignore[method-assign]
+
+    window.close()
+
+    assert disconnect_calls == [window.thread()]
+    assert window._callbacks_torn_down
+    assert not window._close_in_progress
 
 
 def test_invalid_near_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:

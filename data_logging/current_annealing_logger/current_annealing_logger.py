@@ -467,7 +467,6 @@ class FabricationFolderLoadWorker(QtCore.QObject):
     succeeded = QtCore.pyqtSignal(object, object, int)
     failed = QtCore.pyqtSignal(object, str)
     cancelled = QtCore.pyqtSignal(object)
-    finished = QtCore.pyqtSignal()
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -477,7 +476,6 @@ class FabricationFolderLoadWorker(QtCore.QObject):
     def cancel(self) -> None:
         self._cancel_event.set()
 
-    @QtCore.pyqtSlot()
     def run(self) -> None:
         try:
             if self._cancel_event.is_set():
@@ -519,8 +517,6 @@ class FabricationFolderLoadWorker(QtCore.QObject):
                 self.cancelled.emit(self.root)
             else:
                 self.failed.emit(self.root, f"Failed to load fabrication spreadsheets: {exc}")
-        finally:
-            self.finished.emit()
 
 
 _RETAINED_FABRICATION_TASKS: set["DaemonFabricationTask"] = set()
@@ -534,12 +530,22 @@ class DaemonFabricationTask:
         self.done_event = Event()
         self._event_lock = Lock()
         self._events: deque[tuple[str, tuple[object, ...]]] = deque()
-        for signal_name in ("progress_changed", "succeeded", "failed", "cancelled"):
-            signal = getattr(worker, signal_name)
-            signal.connect(
-                lambda *args, event_name=signal_name: self._record_event(event_name, args),
-                QtCore.Qt.ConnectionType.DirectConnection,
-            )
+        worker.progress_changed.connect(
+            self._record_progress_changed,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        worker.succeeded.connect(
+            self._record_succeeded,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        worker.failed.connect(
+            self._record_failed,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        worker.cancelled.connect(
+            self._record_cancelled,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
         self.thread = Thread(
             target=self._run,
             name="current-annealing-fabrication-filesystem",
@@ -549,6 +555,18 @@ class DaemonFabricationTask:
     def _record_event(self, name: str, args: tuple[object, ...]) -> None:
         with self._event_lock:
             self._events.append((name, args))
+
+    def _record_progress_changed(self, message: str) -> None:
+        self._record_event("progress_changed", (message,))
+
+    def _record_succeeded(self, root: object, records: object, file_count: int) -> None:
+        self._record_event("succeeded", (root, records, file_count))
+
+    def _record_failed(self, root: object, message: str) -> None:
+        self._record_event("failed", (root, message))
+
+    def _record_cancelled(self, root: object) -> None:
+        self._record_event("cancelled", (root,))
 
     def drain_events(self) -> list[tuple[str, tuple[object, ...]]]:
         with self._event_lock:
@@ -785,14 +803,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_tasks: dict[int, DaemonFabricationTask] = {}
         self._fabrication_poll_timer = QtCore.QTimer(self)
         self._fabrication_poll_timer.setInterval(50)
-        self._fabrication_poll_timer.timeout.connect(self._poll_fabrication_tasks)
+        self._fabrication_poll_timer.timeout.connect(
+            self._poll_fabrication_tasks,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self._source_provenance_cache = SourceProvenanceCache()
         self._source_provenance_token: object | None = None
         self._source_provenance_output_path: str | None = None
         self._source_provenance_poll_timer = QtCore.QTimer(self)
         self._source_provenance_poll_timer.setInterval(50)
-        self._source_provenance_poll_timer.timeout.connect(self._poll_source_provenance_capture)
+        self._source_provenance_poll_timer.timeout.connect(
+            self._poll_source_provenance_capture,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self._window_closing = False
+        self._closing_safe_end = False
+        self._close_in_progress = False
+        self._callbacks_torn_down = False
+        self._delay_timer = QtCore.QTimer(self)
+        self._delay_timer.setSingleShot(True)
+        self._delay_timer.timeout.connect(
+            self._finish_simple_delay,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         self.supply_profile_id = "hmp4030"
         self.min_start_current_mA = 1
@@ -843,20 +876,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
         self.ser_mcu = QtSerialPort.QSerialPort()
         self.lock = QtCore.QMutex()
-        self.timer = QtCore.QTimer()
-        self.timer.stop();
-        self.timer.timeout.connect(self.handle_update_serial_response_label)
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(
+            self.handle_update_serial_response_label,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self.timer.start(50)
         # timer for time remaining label
-        self.time_timer = QtCore.QTimer()
-        self.time_timer.timeout.connect(self.update_time_estimate)
+        self.time_timer = QtCore.QTimer(self)
+        self.time_timer.timeout.connect(
+            self.update_time_estimate,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self.time_timer.start(1000)
         
         # Timer that schedules outgoing commands
         self.command_number = 0
-        self.timer_command = QtCore.QTimer()
-        self.timer_command.stop();
-        self.timer_command.timeout.connect(self.handle_send_new_command)
+        self.timer_command = QtCore.QTimer(self)
+        self.timer_command.timeout.connect(
+            self.handle_send_new_command,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         
         self.f_name: str | None = None
         self.f_out: TextIO | None = None
@@ -1828,6 +1868,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._release_fabrication_task(task)
         return all_finished
 
+    @QtCore.pyqtSlot()
     def _poll_fabrication_tasks(self) -> None:
         for task in list(self._fabrication_tasks.values()):
             current = self._fabrication_thread is task and not self._window_closing
@@ -3869,7 +3910,10 @@ class MainWindow(QtWidgets.QMainWindow):
             
             if self.ser_mcu.open(QtCore.QIODeviceBase.OpenModeFlag.ReadWrite):
                 self.ser_mcu.clear()
-                self.ser_mcu.readyRead.connect(self.handle_ser_mcu_readyRead)
+                self.ser_mcu.readyRead.connect(
+                    self.handle_ser_mcu_readyRead,
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                )
                 self.is_connected = True
                 self.ui.pushButton_connect_port.setText('Disconnect')
                 self._set_port_controls_enabled(False)
@@ -3901,10 +3945,7 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.send_safe_end_commands()
             # Proactively disconnect signal-slot before closing the port
-            try:
-                self.ser_mcu.readyRead.disconnect(self.handle_ser_mcu_readyRead)
-            except Exception:
-                pass
+            self._disconnect_serial_ready_read()
             self.ser_mcu.close()
             self.is_connected = False
             self._set_hardware_status("Disconnected", state="idle")
@@ -3934,7 +3975,16 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _disconnect_serial_ready_read(self) -> None:
+        try:
+            self.ser_mcu.readyRead.disconnect(self.handle_ser_mcu_readyRead)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    @QtCore.pyqtSlot()
     def handle_ser_mcu_readyRead(self):
+        if self._window_closing or not self.is_connected:
+            return
         if self.ser_mcu.canReadLine():
             self.lock.lock()
             try:
@@ -3993,7 +4043,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.sample_ready = True
             self.lock.unlock()
                     
+    @QtCore.pyqtSlot()
     def handle_update_serial_response_label(self):
+        if self._window_closing:
+            return
         self.ui.label_serial_response.setText(self.serial_response)
 
     def _reset_voltage_projection(self) -> None:
@@ -4151,7 +4204,10 @@ class MainWindow(QtWidgets.QMainWindow):
             text += f" (≈ {self._estimated_limit_current_mA:.0f} mA)"
         return text
 
+    @QtCore.pyqtSlot()
     def update_time_estimate(self):
+        if self._window_closing:
+            return
         label = getattr(self.ui, 'label_time_remaining', None)
         limit_label = getattr(self.ui, 'label_time_to_limit', None)
         if label is None:
@@ -5334,8 +5390,9 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         
+    @QtCore.pyqtSlot()
     def handle_send_new_command(self):
-        if not self.process_running:
+        if self._window_closing or not self.process_running:
             return
 
         self._sync_runtime_settings()
@@ -5552,12 +5609,23 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._show_status_message(f"Could not release sleep prevention: {exc}", timeout_ms=10000)
             
+    @QtCore.pyqtSlot()
+    def _finish_simple_delay(self) -> None:
+        if self._window_closing and not self._closing_safe_end:
+            return
+        self.wait = False
+
     def simple_delay(self, delay_ms):
+        if self._window_closing and not self._closing_safe_end:
+            self.wait = False
+            return
         self.wait = True
-        QtCore.QTimer.singleShot(delay_ms, lambda: setattr(self, 'wait', False))
-        
-        while self.wait:
+        self._delay_timer.start(max(0, int(delay_ms)))
+
+        while self.wait and (not self._window_closing or self._closing_safe_end):
             QtWidgets.QApplication.processEvents()
+        self.wait = False
+        self._delay_timer.stop()
         
     def wait_for_sample(self, timeout_ms: int) -> bool:
         """Spin the event loop until a sample arrives, stop requested, or timeout."""
@@ -6237,6 +6305,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._source_provenance_poll_timer.start()
         return token
 
+    @QtCore.pyqtSlot()
     def _poll_source_provenance_capture(self) -> None:
         token = self._source_provenance_token
         output_path = self._source_provenance_output_path
@@ -6518,19 +6587,53 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.ui.comboBox_port.count() > 0:
                 self.port_name = self.ui.comboBox_port.currentData()
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
-        self._window_closing = True
-        self._release_source_provenance()
-        self._fabrication_poll_timer.stop()
-        self._cancel_fabrication_folder_load()
-        self._wait_for_fabrication_tasks(timeout_ms=250)
-        self._release_experiment_sleep_guard()
-        self._stop_owned_shared_broker()
-        if self.ser_mcu.isOpen():
-            self.handle_connect_port_clicked()
-            # self.ser_mcu.close()
+    def _teardown_gui_callbacks(self) -> None:
+        if self._callbacks_torn_down:
+            return
+        self._callbacks_torn_down = True
+        timer_callbacks = (
+            (self.timer, self.handle_update_serial_response_label),
+            (self.time_timer, self.update_time_estimate),
+            (self.timer_command, self.handle_send_new_command),
+            (self._fabrication_poll_timer, self._poll_fabrication_tasks),
+            (self._source_provenance_poll_timer, self._poll_source_provenance_capture),
+            (self._delay_timer, self._finish_simple_delay),
+        )
+        for timer, callback in timer_callbacks:
+            timer.stop()
+            try:
+                timer.timeout.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        self.wait = False
+        self._disconnect_serial_ready_read()
 
-        super().closeEvent(event)
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._callbacks_torn_down:
+            super().closeEvent(event)
+            return
+        if self._close_in_progress:
+            event.accept()
+            return
+        self._close_in_progress = True
+        try:
+            self._window_closing = True
+            self._closing_safe_end = True
+            try:
+                if self.ser_mcu.isOpen():
+                    self.handle_connect_port_clicked()
+            finally:
+                self._closing_safe_end = False
+            self._teardown_gui_callbacks()
+            self._release_source_provenance()
+            self._cancel_fabrication_folder_load()
+            self._wait_for_fabrication_tasks(timeout_ms=250)
+            self._release_experiment_sleep_guard()
+            self._stop_owned_shared_broker()
+
+            super().closeEvent(event)
+        finally:
+            self._close_in_progress = False
 
     # --- Overlay helpers
     def _setup_connect_overlay(self) -> None:
