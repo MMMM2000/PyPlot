@@ -3043,6 +3043,24 @@ def test_current_annealing_close_reentry_during_safe_end_runs_once(qtbot) -> Non
     assert not window._close_in_progress
 
 
+def test_current_annealing_main_releases_closed_windows(qtbot) -> None:
+    first = logger_mod.main()
+    qtbot.addWidget(first)
+    assert first in logger_mod.WINDOWS
+
+    first.close()
+    first.close()
+    assert first not in logger_mod.WINDOWS
+
+    second = logger_mod.main()
+    qtbot.addWidget(second)
+    assert second in logger_mod.WINDOWS
+    assert first not in logger_mod.WINDOWS
+
+    second.close()
+    assert second not in logger_mod.WINDOWS
+
+
 def test_invalid_near_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)

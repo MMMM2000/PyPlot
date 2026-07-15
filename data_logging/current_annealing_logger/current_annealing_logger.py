@@ -6609,6 +6609,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._disconnect_serial_ready_read()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        try:
+            WINDOWS.remove(self)
+        except ValueError:
+            pass
         if self._callbacks_torn_down:
             super().closeEvent(event)
             return

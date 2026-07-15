@@ -5,4 +5,5 @@
 - Detach TMA raw scale and IR log targets before session shutdown, then close them after any accepted in-flight write finishes without blocking the GUI.
 - Record truthful TMA scale/IR sidecar outcomes after write failures or bounded-close timeouts, warn on the GUI thread, and reject callbacks captured against an earlier session target.
 - Keep timed-out TMA sidecar rows pending until detached I/O finishes, then atomically reconcile only the originating run metadata without contaminating a replacement session.
+- Release closed Current Annealing windows from the module entrypoint retention list so close/reopen does not retain old interfaces.
 - Stop and disconnect Current Annealing GUI timers and serial callbacks during close so late progress, delay, provenance, and experiment events cannot touch closed widgets.
