@@ -5,14 +5,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import csv
 import dataclasses
+import gc
 import importlib
 import json
 import math
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -402,6 +405,7 @@ def _build_window(
     qtbot,
     *,
     preserve_settings: bool = False,
+    enable_first_overheating_preflight: bool = False,
 ) -> mini_dma_mod.MainWindow:
     _ensure_app()
     snapshot = _snapshot_settings() if preserve_settings else {}
@@ -415,6 +419,8 @@ def _build_window(
     window.check_zero_position_on_start.setChecked(False)
     window.check_tare_on_start.setChecked(False)
     window.spin_zero_load_scale_g.setValue(0.0)
+    if not enable_first_overheating_preflight:
+        window._has_previous_tma_measurement = lambda _identity: True  # type: ignore[method-assign]
     return window
 
 
@@ -428,6 +434,677 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
 
 def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
     qtbot.waitUntil(lambda: window._serial_port_scan_thread is None, timeout=3000)
+
+
+@pytest.mark.parametrize("section_key", ["mini_dma", "tma"])
+def test_first_overheating_history_finds_exact_pydpj_tma_match(section_key: str) -> None:
+    identity = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12_2", "segment A")
+    payload = {
+        "sections": {
+            section_key: {
+                "rows": [
+                    {
+                        "Composition": " ni50-fe27 ga23 ",
+                        "Microwire": "12/2",
+                        "Specimen": "Segment-A",
+                        "TMA": ["run01"],
+                    }
+                ]
+            }
+        }
+    }
+
+    assert mini_dma_mod._project_has_previous_tma_measurement(payload, identity) is True
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/3", "segment A"),
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("current_specimen", "previous_specimen", "expected"),
+    [
+        ("", "", True),
+        ("segment A", "segment-a", True),
+        ("", "segment A", False),
+        ("segment A", "", False),
+        ("segment A", "segment B", False),
+    ],
+)
+def test_first_overheating_history_requires_exact_specimen_presence(
+    current_specimen: str,
+    previous_specimen: str,
+    expected: bool,
+) -> None:
+    current = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2", current_specimen)
+    previous = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12_2", previous_specimen)
+
+    assert mini_dma_mod._tma_identities_match(current, previous) is expected
+
+
+def test_first_overheating_history_accepts_actual_builder_tma_row_without_guessing_specimen(
+    tmp_path: Path,
+) -> None:
+    builder_core = importlib.import_module("microwire_data_builder.core")
+    builder_ui = importlib.import_module("microwire_data_builder.ui")
+    record = builder_core.MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 tma_run01",
+        sample="Ni50Fe27Ga23 12_2 display segment A",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="tma_run01",
+    )
+    row = builder_ui._mini_dma_records_to_frame([record]).iloc[0].to_dict()
+    payload = {"sections": {"mini_dma": {"rows": [row]}}}
+
+    assert set(("_sample", "Composition", "Microwire", "TMA graphs", "_sources")) <= set(row)
+    assert "Specimen" not in row
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is True
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2", "segment A"),
+    ) is False
+
+
+def test_first_overheating_history_accepts_finalized_fault_run_and_rejects_active_run(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "wire_run01"
+    run_dir.mkdir()
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "point_count": 3,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "stop": {"reason": "wire_break_or_contact_loss", "category": "fault"},
+                "name_fields": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/2",
+                    "specimen": "segment A",
+                    "condition": "interrupted",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    active_run = tmp_path / "wire_active_run"
+    active_run.mkdir()
+    (active_run / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "running",
+                "point_count": 1,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "name_fields": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/2",
+                    "specimen": "segment A",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    setup_only = tmp_path / "wire_setup_only"
+    setup_only.mkdir()
+    (setup_only / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "point_count": 0,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "name_fields": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/3",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    records = mini_dma_mod._scan_tma_history_metadata(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].identity == mini_dma_mod.TmaSampleIdentity(
+        "Ni50Fe27Ga23", "12/2", "segment A"
+    )
+    assert "wire_run01" in records[0].source
+
+
+def test_tma_history_metadata_scan_cancels_between_files(tmp_path: Path) -> None:
+    for index in range(3):
+        run_dir = tmp_path / f"wire_run{index + 1:02d}"
+        run_dir.mkdir()
+        (run_dir / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "session_state": "finished",
+                    "point_count": 3,
+                    "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                    "name_fields": {
+                        "composition": "Ni50Fe27Ga23",
+                        "microwire": f"12/{index + 1}",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    cancellation_checks = 0
+
+    def _cancel_after_first_file() -> bool:
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return cancellation_checks >= 3
+
+    records = mini_dma_mod._scan_tma_history_metadata(
+        tmp_path,
+        cancelled=_cancel_after_first_file,
+    )
+
+    assert len(records) == 1
+    assert cancellation_checks == 3
+
+
+def test_tma_history_daemon_task_does_not_retain_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def _blocked_scan(
+        _root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scan_started.set()
+        release_scan.wait(timeout=5.0)
+        return ()
+
+    monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _blocked_scan)
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    task = mini_dma_mod.TmaHistoryScanTask(tmp_path)
+    owner.scan_task = task
+    owner_ref = weakref.ref(owner)
+    task.start()
+    assert scan_started.wait(timeout=2.0)
+
+    del owner
+    gc.collect()
+
+    assert owner_ref() is None
+    assert task.thread.daemon is True
+    assert getattr(task.thread, "_target", None).__self__ is task
+
+    task.cancel()
+    release_scan.set()
+    task.thread.join(timeout=3.0)
+    assert task.done_event.is_set()
+
+
+def test_tma_history_blocked_daemon_task_does_not_block_process_exit() -> None:
+    code = """
+import threading
+from pathlib import Path
+from data_logging.mini_dma_logger import mini_dma_logger as module
+
+blocked = threading.Event()
+
+def blocked_scan(_root, *, cancelled=None):
+    blocked.wait()
+    return ()
+
+module._scan_tma_history_metadata = blocked_scan
+task = module.TmaHistoryScanTask(Path("synthetic-output"))
+task.start()
+assert task.thread.daemon
+print("daemon-started", flush=True)
+"""
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env.setdefault("MPLBACKEND", "Agg")
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "daemon-started" in result.stdout
+
+
+def test_tma_history_scan_keeps_only_latest_pending_root(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
+    first_root = tmp_path / "first"
+    latest_root = tmp_path / "latest"
+    first_root.mkdir()
+    latest_root.mkdir()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    scanned_roots: list[Path] = []
+    latest_record = mini_dma_mod.TmaHistoryRecord(
+        identity=mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+        source="latest synthetic metadata",
+    )
+
+    def _scan(
+        root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scanned_roots.append(root)
+        if root == first_root:
+            first_started.set()
+            release_first.wait(timeout=5.0)
+            return ()
+        return (latest_record,)
+
+    monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _scan)
+    try:
+        window._tma_history_scan_pending_root = first_root
+        window._start_pending_tma_history_scan()
+        first_task = window._tma_history_scan_task
+        assert first_task is not None
+        window._tma_history_scan_poll_timer.stop()
+        assert first_started.wait(timeout=2.0)
+
+        with QtCore.QSignalBlocker(window.edit_log_dir):
+            window.edit_log_dir.setText(str(latest_root))
+        window._tma_history_scan_pending_root = latest_root
+        window._start_pending_tma_history_scan()
+
+        assert first_task.cancel_event.is_set()
+        assert window._tma_history_scan_pending_root == latest_root
+        release_first.set()
+        qtbot.waitUntil(first_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+        window._tma_history_scan_poll_timer.stop()
+
+        latest_task = window._tma_history_scan_task
+        assert latest_task is not None
+        assert latest_task.root == latest_root
+        qtbot.waitUntil(latest_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+
+        assert scanned_roots == [first_root, latest_root]
+        assert window._tma_history_root == latest_root
+        assert window._tma_history_records == (latest_record,)
+    finally:
+        release_first.set()
+        _close_test_window(window)
+
+
+def test_tma_history_blocked_scan_close_is_nonblocking_and_qthread_free(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
+    if window._tma_history_scan_task is not None:
+        qtbot.waitUntil(window._tma_history_scan_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    qt_messages: list[str] = []
+
+    def _blocked_scan(
+        _root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scan_started.set()
+        release_scan.wait(timeout=5.0)
+        assert cancelled is not None and cancelled()
+        return ()
+
+    previous_message_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    task = None
+    try:
+        monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _blocked_scan)
+        window._tma_history_scan_pending_root = tmp_path
+        window._start_pending_tma_history_scan()
+        assert scan_started.wait(timeout=2.0)
+        task = window._tma_history_scan_task
+        assert task is not None
+        assert task.thread.daemon is True
+
+        close_started = time.perf_counter()
+        window.close()
+        close_elapsed_s = time.perf_counter() - close_started
+
+        assert close_elapsed_s < 0.75
+        assert task.thread.is_alive()
+        assert task.cancel_event.is_set()
+        assert window._tma_history_scan_task is None
+        assert all(value is not window for value in vars(task).values())
+        assert getattr(task.thread, "_target", None).__self__ is task
+
+        release_scan.set()
+        task.thread.join(timeout=3.0)
+        assert task.done_event.is_set()
+        assert not task.thread.is_alive()
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release_scan.set()
+        if task is not None:
+            task.cancel()
+            task.thread.join(timeout=3.0)
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_message_handler)
+        _close_test_window(window)
+
+
+def test_first_overheating_history_does_not_count_annealing_only_project() -> None:
+    identity = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2")
+    payload = {
+        "sections": {
+            "current_annealing": {
+                "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]
+            },
+            "fabrication": {
+                "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]
+            },
+        }
+    }
+
+    assert mini_dma_mod._project_has_previous_tma_measurement(payload, identity) is False
+
+
+def test_first_overheating_history_rejects_ambiguous_or_malformed_tma_evidence() -> None:
+    ambiguous = {
+        "sections": {
+            "mini_dma": {
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Specimen": "segment A",
+                        "TMA graphs": ["run01"],
+                    },
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Specimen": "segment B",
+                        "TMA graphs": ["run02"],
+                    },
+                ]
+            }
+        }
+    }
+
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        ambiguous,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is False
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        {"sections": {"mini_dma": {"rows": "unreadable"}}},
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is False
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        {
+            "sections": {
+                "mini_dma": {
+                    "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]
+                }
+            }
+        },
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is False
+
+
+def test_first_overheating_history_uses_loaded_pydpj_cache_without_ui_thread_read(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    project_path = tmp_path / "synthetic.pydpj"
+    cache_entry = mini_dma_mod.BuilderProjectCacheEntry(
+        payload={
+            "sections": {
+                "mini_dma": {
+                    "rows": [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "12/2",
+                            "Specimen": "segment A",
+                            "_sources": ["synthetic/run01/measurement.csv"],
+                        }
+                    ]
+                }
+            }
+        },
+        suggestions={},
+    )
+    try:
+        window.edit_project_path.setText(str(project_path))
+        mini_dma_mod._BUILDER_PROJECT_CACHE_BY_REQUEST_PATH[str(project_path)] = cache_entry
+        monkeypatch.setattr(
+            mini_dma_mod,
+            "_read_builder_project_cache_entry",
+            lambda _path: pytest.fail("history lookup read the project on the UI thread"),
+        )
+
+        assert window._has_previous_tma_measurement(
+            mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12_2", "segment-a")
+        ) is True
+    finally:
+        mini_dma_mod._BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(str(project_path), None)
+        _close_test_window(window)
+
+
+def _prepare_first_overheating_preflight_window(
+    tmp_path: Path,
+    qtbot,
+) -> mini_dma_mod.MainWindow:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("12/2")
+    window.edit_name_specimen.setText("segment A")
+    window.check_current_sweep_first_overheating.setChecked(False)
+    window._tma_history_root = window._current_tma_history_root()
+    window._tma_history_records = ()
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic current sweep",
+        100,
+    )
+    return window
+
+
+def test_first_overheating_preflight_configure_returns_idle_before_hardware(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    side_effects: list[str] = []
+    try:
+        window.show()
+        qtbot.waitExposed(window)
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: mini_dma_mod.FIRST_OVERHEATING_CONFIGURE
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("hardware_preflight") or True
+        )
+        window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("continuity_current") or True
+        )
+        window._start_session = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("session_start")
+        )
+
+        window._start_auto_ramp()
+        qtbot.wait(1)
+
+        assert side_effects == []
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert window.check_current_sweep_first_overheating.isChecked() is True
+        assert window.row_current_sweep_first_overheating_target.isHidden() is False
+        assert window.control_tabs.currentWidget() is window.experiment_tab
+        assert window.spin_current_sweep_first_overheating_target_mpa.hasFocus() is True
+    finally:
+        _close_test_window(window)
+
+
+def test_first_overheating_preflight_cancel_keeps_settings_and_avoids_hardware(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    side_effects: list[str] = []
+    original_target = window.spin_current_sweep_first_overheating_target_mpa.value()
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: mini_dma_mod.FIRST_OVERHEATING_CANCEL
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("hardware_preflight") or True
+        )
+        window._start_session = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("session_start")
+        )
+
+        window._start_auto_ramp()
+
+        assert side_effects == []
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert window.check_current_sweep_first_overheating.isChecked() is False
+        assert window.spin_current_sweep_first_overheating_target_mpa.value() == pytest.approx(
+            original_target
+        )
+        assert window._first_overheating_preflight_decision is None
+    finally:
+        _close_test_window(window)
+
+
+def test_first_overheating_preflight_continue_is_logged_and_recorded(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    events: list[str] = []
+    traces: list[dict[str, object]] = []
+    metadata_writes: list[dict[str, object] | None] = []
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: mini_dma_mod.FIRST_OVERHEATING_CONTINUE
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: events.append("hardware_preflight") or True
+        )
+        window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: events.append("continuity_current") or True
+        )
+
+        def _fake_start_session(*_args: object, **_kwargs: object) -> None:
+            events.append("session_start")
+            window._session_active = True
+
+        window._start_session = _fake_start_session  # type: ignore[method-assign]
+        window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+        window._write_control_trace = lambda **kwargs: traces.append(kwargs)  # type: ignore[method-assign]
+        window._write_session_metadata = lambda **_kwargs: metadata_writes.append(  # type: ignore[method-assign]
+            window._first_overheating_preflight_decision
+        )
+
+        window._start_auto_ramp()
+
+        assert events == ["hardware_preflight", "continuity_current", "session_start"]
+        assert window._automation_active is True
+        assert window.check_current_sweep_first_overheating.isChecked() is False
+        decision = window._first_overheating_preflight_decision
+        assert decision is not None
+        assert decision["decision"] == "operator_explicitly_skipped_first_overheating"
+        assert decision["reason"] == "no_previous_tma_measurement_found"
+        assert metadata_writes[-1] == decision
+        assert traces == [
+            {
+                "decision": "first_overheating_preflight",
+                "result": "continue_without_it",
+                "reason": "operator_explicitly_skipped_no_previous_tma_measurement_found",
+                "task_text": "First overheating explicitly skipped",
+            }
+        ]
+        window._flush_pending_run_log_lines()
+        assert "operator explicitly skipped first overheating" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        window._session_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_preflight_skips_prompt_when_enabled_or_history_exists(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    prompts: list[str] = []
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: prompts.append("prompt") or mini_dma_mod.FIRST_OVERHEATING_CANCEL
+        )
+        window.check_current_sweep_first_overheating.setChecked(True)
+        assert window._first_overheating_preflight_allows_start() is True
+        assert prompts == []
+
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window._tma_history_records = (
+            mini_dma_mod.TmaHistoryRecord(
+                identity=mini_dma_mod.TmaSampleIdentity(
+                    "Ni50Fe27Ga23", "12_2", "segment-a"
+                ),
+                source="synthetic metadata",
+            ),
+        )
+        assert window._first_overheating_preflight_allows_start() is True
+        assert prompts == []
+    finally:
+        _close_test_window(window)
 
 
 def test_current_sweep_hold_bands_are_bounded_processed_signal_multipliers() -> None:
