@@ -4151,6 +4151,228 @@ def test_first_real_scale_signal_repairs_cached_zero_before_state_and_raw_log(
         _close_test_window(window)
 
 
+class _BlockingSensorHandle:
+    def __init__(self) -> None:
+        self.flush_entered = threading.Event()
+        self.release_flush = threading.Event()
+        self.in_flush = threading.Event()
+        self.closed_event = threading.Event()
+        self.flush_calls = 0
+        self.close_calls = 0
+        self.closed_during_flush = False
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+        if self.flush_calls != 1:
+            return
+        self.in_flush.set()
+        self.flush_entered.set()
+        self.release_flush.wait()
+        self.in_flush.clear()
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed_during_flush = self.in_flush.is_set()
+        self.closed_event.set()
+
+
+class _RecordingSensorWriter:
+    def __init__(self, handle: _BlockingSensorHandle) -> None:
+        self.handle = handle
+        self.rows: list[dict[str, object]] = []
+        self.write_after_close = False
+
+    def writerow(self, row: Mapping[str, object]) -> None:
+        if self.handle.closed_event.is_set():
+            self.write_after_close = True
+            raise ValueError("write after close")
+        self.rows.append(dict(row))
+
+
+def _install_blocking_sensor_target(
+    window: mini_dma_mod.MainWindow,
+    sensor_kind: str,
+) -> tuple[
+    mini_dma_mod.SessionSensorCsvTarget,
+    _BlockingSensorHandle,
+    _RecordingSensorWriter,
+]:
+    handle = _BlockingSensorHandle()
+    writer = _RecordingSensorWriter(handle)
+    target = mini_dma_mod.SessionSensorCsvTarget(
+        handle,
+        writer,
+        name=f"test-{sensor_kind}",
+    )
+    if sensor_kind == "scale":
+        lock = window._scale_state_lock
+        target_attr = "_session_raw_scale_target"
+        handle_attr = "_session_raw_scale_handle"
+        writer_attr = "_session_raw_scale_writer"
+    else:
+        lock = window._ir_state_lock
+        target_attr = "_session_ir_temperature_target"
+        handle_attr = "_session_ir_temperature_handle"
+        writer_attr = "_session_ir_temperature_writer"
+    with lock:
+        previous_target = getattr(window, target_attr)
+        setattr(window, target_attr, target)
+        setattr(window, handle_attr, handle)
+        setattr(window, writer_attr, writer)
+    assert previous_target is not None
+    previous_target.detach_and_close()
+    assert previous_target.wait_closed(2.0)
+    return target, handle, writer
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_session_stop_detaches_sensor_target_during_inflight_file_io(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = threading.Event()
+    ir_sample = mini_dma_mod.IrTemperatureSample(
+        timestamp_s=1000.1,
+        raw_text="ir-first",
+        sequence=1,
+        device_elapsed_ms=10,
+        read_us=20,
+        ambient_c=21.0,
+        object_c_apparent=31.0,
+        raw_ambient=100,
+        raw_object=200,
+        flags=0,
+    )
+
+    if sensor_kind == "scale":
+        def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+            emitted.set()
+            worker.measurement_received.emit(17.0, "17.0 g", 1000.1)
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-blocked-log", "COM-blocked-log")
+    else:
+        def _run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+            emitted.set()
+            worker.sample_received.emit(ir_sample)
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _run)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-blocked-ir-log", "COM-blocked-ir-log")
+
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: 1000.0)
+    window.edit_log_name.setText(f"blocked_{sensor_kind}_log")
+    window._start_session(enable_logging=False, record_initial_point=False)
+    if sensor_kind == "ir":
+        window._session_logging_enabled = True
+        window._session_ir_temperature_count = 9
+    target, handle, writer = _install_blocking_sensor_target(window, sensor_kind)
+
+    try:
+        if sensor_kind == "scale":
+            assert window._connect_scale(show_errors=False)
+            worker = window._scale_worker
+        else:
+            assert window._connect_ir_thermometer(show_errors=False)
+            worker = window._ir_worker
+        assert worker is not None
+        assert emitted.wait(timeout=2.0)
+        assert handle.flush_entered.wait(timeout=2.0)
+        assert len(writer.rows) == 1
+
+        started_s = time.perf_counter()
+        window._stop_session(reason="manual_session_stop")
+        elapsed_s = time.perf_counter() - started_s
+
+        assert elapsed_s < 0.6
+        assert not target.closed_event.is_set()
+        assert handle.close_calls == 0
+        accepted_count = (
+            window._session_raw_scale_count
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_count
+        )
+        if sensor_kind == "scale":
+            relay = window._scale_thread_lifetime.relay
+            relay.record_scale_measurement(16.0, "late-scale", 1000.2)
+            assert window._session_raw_scale_target is None
+        else:
+            relay = window._ir_thread_lifetime.relay
+            relay.record_ir_sample(
+                dataclasses.replace(ir_sample, sequence=2, raw_text="late-ir")
+            )
+            assert window._session_ir_temperature_target is None
+        assert len(writer.rows) == 1
+        assert (
+            window._session_raw_scale_count
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_count
+        ) == accepted_count
+
+        handle.release_flush.set()
+        assert target.wait_closed(2.0)
+        assert target.write_error is None
+        assert handle.close_calls == 1
+        assert not handle.closed_during_flush
+        assert not writer.write_after_close
+        assert len(writer.rows) == 1
+    finally:
+        handle.release_flush.set()
+        target.wait_closed(2.0)
+        _close_test_window(window)
+
+
+def test_tma_close_is_bounded_while_sensor_file_flush_remains_blocked(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = threading.Event()
+
+    def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+        emitted.set()
+        worker.measurement_received.emit(17.0, "17.0 g", 1000.1)
+        worker.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: 1000.0)
+    window.edit_log_name.setText("permanently_blocked_scale_flush")
+    window.combo_scale_port.clear()
+    window.combo_scale_port.addItem("COM-permanent-log", "COM-permanent-log")
+    window._start_session(enable_logging=False, record_initial_point=False)
+    target, handle, writer = _install_blocking_sensor_target(window, "scale")
+
+    try:
+        assert window._connect_scale(show_errors=False)
+        assert emitted.wait(timeout=2.0)
+        assert handle.flush_entered.wait(timeout=2.0)
+
+        started_s = time.perf_counter()
+        window.close()
+        elapsed_s = time.perf_counter() - started_s
+
+        assert elapsed_s < 1.2
+        assert not target.closed_event.is_set()
+        assert handle.close_calls == 0
+        assert len(writer.rows) == 1
+        assert window._session_raw_scale_target is None
+    finally:
+        handle.release_flush.set()
+        assert target.wait_closed(2.0)
+        assert target.write_error is None
+        assert handle.close_calls == 1
+        assert not handle.closed_during_flush
+        _close_test_window(window)
+
+
 @pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
 def test_sensor_worker_signals_queue_ui_and_reject_stale_finished_connections(
     tmp_path: Path,
@@ -20066,7 +20288,6 @@ def test_setup_raw_scale_samples_are_logged_before_main_measurement_starts(
                 raw_text="21.190 g",
             )
         )
-
         rows = list(csv.DictReader(window._session_raw_scale_path.open(encoding="utf-8", newline="")))
         assert len(rows) == 1
         assert rows[0]["raw_load_g"] == "21.190000"
@@ -20104,7 +20325,6 @@ def test_raw_scale_elapsed_stays_continuous_when_measurement_logging_starts(
                 raw_text="21.180 g",
             )
         )
-
         rows = list(csv.DictReader(window._session_raw_scale_path.open(encoding="utf-8", newline="")))
         assert [row["elapsed_s"] for row in rows] == ["1.000000", "2.000000"]
     finally:

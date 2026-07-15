@@ -434,6 +434,7 @@ KOSICE_SCALE_CONTROL_INTERVAL_MS = 50
 KOSICE_SCALE_UI_REFRESH_INTERVAL_MS = 200
 KOSICE_SCALE_GRAPH_REFRESH_INTERVAL_MS = 500
 SESSION_DATA_FLUSH_INTERVAL_S = 2.0
+SESSION_SENSOR_FILE_CLOSE_WAIT_S = 0.1
 SESSION_METADATA_WRITE_INTERVAL_S = 5.0
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
 LIVE_PLOT_MAX_POINTS = 3000
@@ -3356,6 +3357,94 @@ class Mlx90614Worker(QtCore.QObject):
 _RETAINED_SENSOR_THREAD_LIFETIMES: set["SensorThreadLifetime"] = set()
 
 
+@dataclass(frozen=True)
+class SessionSensorCsvWrite:
+    target: "SessionSensorCsvTarget"
+    row: Mapping[str, object]
+    flush: bool
+
+    def perform(self) -> None:
+        self.target.write_reserved(self.row, flush=self.flush)
+
+
+class SessionSensorCsvTarget:
+    """Serialize one sensor CSV and daemon-close it after accepted writes finish."""
+
+    def __init__(self, handle: Any, writer: Any, *, name: str) -> None:
+        self.handle = handle
+        self.writer = writer
+        self.name = str(name)
+        self._state_lock = Lock()
+        self._io_lock = Lock()
+        self._idle_event = Event()
+        self._idle_event.set()
+        self.closed_event = Event()
+        self.accepting = True
+        self.inflight = 0
+        self.write_error: BaseException | None = None
+        self._close_thread: Thread | None = None
+
+    def reserve(
+        self,
+        row: Mapping[str, object],
+        *,
+        flush: bool,
+    ) -> SessionSensorCsvWrite | None:
+        with self._state_lock:
+            if not self.accepting:
+                return None
+            self.inflight += 1
+            self._idle_event.clear()
+        return SessionSensorCsvWrite(self, dict(row), bool(flush))
+
+    def write_reserved(self, row: Mapping[str, object], *, flush: bool) -> None:
+        try:
+            with self._io_lock:
+                self.writer.writerow(row)
+                if flush:
+                    self.handle.flush()
+        except BaseException as exc:
+            self.write_error = exc
+        finally:
+            with self._state_lock:
+                self.inflight -= 1
+                if self.inflight == 0:
+                    self._idle_event.set()
+
+    def detach_and_close(self) -> None:
+        with self._state_lock:
+            self.accepting = False
+            if self._close_thread is not None:
+                return
+            thread = Thread(
+                target=self._close_when_idle,
+                name=f"{self.name}-close",
+                daemon=True,
+            )
+            self._close_thread = thread
+        thread.start()
+
+    def wait_closed(self, timeout_s: float) -> bool:
+        return self.closed_event.wait(timeout=max(0.0, float(timeout_s)))
+
+    def _close_when_idle(self) -> None:
+        self._idle_event.wait()
+        try:
+            with self._io_lock:
+                try:
+                    self.handle.flush()
+                except BaseException as exc:
+                    if self.write_error is None:
+                        self.write_error = exc
+                try:
+                    self.handle.close()
+                except BaseException as exc:
+                    if self.write_error is None:
+                        self.write_error = exc
+        finally:
+            self.closed_event.set()
+
+
 class SensorSharedStateRelay:
     """Accept direct sensor delivery while retaining only a weak window reference."""
 
@@ -3364,19 +3453,30 @@ class SensorSharedStateRelay:
         self.token = token
 
     def record_scale_measurement(self, value_g: float, raw_text: str, timestamp_s: float) -> None:
+        write: SessionSensorCsvWrite | None = None
         owner = self._owner_ref()
         if owner is not None:
-            owner._record_scale_measurement_from_worker(  # type: ignore[attr-defined]
+            write = owner._record_scale_measurement_from_worker(  # type: ignore[attr-defined]
                 self.token,
                 value_g,
                 raw_text,
                 timestamp_s,
             )
+        owner = None
+        if write is not None:
+            write.perform()
 
     def record_ir_sample(self, sample: object) -> None:
+        write: SessionSensorCsvWrite | None = None
         owner = self._owner_ref()
         if owner is not None:
-            owner._record_ir_sample_from_worker(self.token, sample)  # type: ignore[attr-defined]
+            write = owner._record_ir_sample_from_worker(  # type: ignore[attr-defined]
+                self.token,
+                sample,
+            )
+        owner = None
+        if write is not None:
+            write.perform()
 
     def record_ir_frame(self, frame: object) -> None:
         owner = self._owner_ref()
@@ -6879,8 +6979,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_csv_writer: csv.DictWriter[str] | None = None
         self._session_raw_scale_handle: Any = None
         self._session_raw_scale_writer: csv.DictWriter[str] | None = None
+        self._session_raw_scale_target: SessionSensorCsvTarget | None = None
         self._session_ir_temperature_handle: Any = None
         self._session_ir_temperature_writer: csv.DictWriter[str] | None = None
+        self._session_ir_temperature_target: SessionSensorCsvTarget | None = None
         self._session_ir_temperature_path: Path | None = None
         self._session_control_trace_handle: Any = None
         self._session_control_trace_writer: csv.DictWriter[str] | None = None
@@ -14833,8 +14935,14 @@ class MainWindow(QtWidgets.QMainWindow):
         value_g: float,
         raw_text: str,
         timestamp_s: float,
-    ) -> None:
+        *,
+        token: object | None = None,
+    ) -> SessionSensorCsvWrite | None:
         with self._scale_state_lock:
+            if token is not None and (
+                self._window_closing or token is not self._scale_connection_token
+            ):
+                return None
             self._restore_cached_zero_load_reference_for_measurement(value_g)
             self._latest_scale_value_g = value_g
             self._latest_scale_text = raw_text
@@ -14845,8 +14953,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 applied_load_g=self._effective_load_from_cached_scale_state(value_g),
                 raw_text=raw_text,
             )
-            self._write_raw_scale_sample(sample)
+            write = self._reserve_raw_scale_sample_locked(sample)
             self._scale_no_data_hint_emitted = True
+        return write
 
     def _record_scale_measurement_from_worker(
         self,
@@ -14854,14 +14963,18 @@ class MainWindow(QtWidgets.QMainWindow):
         value_g: float,
         raw_text: str,
         timestamp_s: float,
-    ) -> None:
-        with self._scale_state_lock:
-            if self._window_closing or token is not self._scale_connection_token:
-                return
-            self._record_scale_measurement_state(value_g, raw_text, timestamp_s)
+    ) -> SessionSensorCsvWrite | None:
+        return self._record_scale_measurement_state(
+            value_g,
+            raw_text,
+            timestamp_s,
+            token=token,
+        )
 
     def _handle_scale_measurement(self, value_g: float, raw_text: str, timestamp_s: float) -> None:
-        self._record_scale_measurement_state(value_g, raw_text, timestamp_s)
+        write = self._record_scale_measurement_state(value_g, raw_text, timestamp_s)
+        if write is not None:
+            write.perform()
         if not self._is_ui_thread():
             self._run_on_ui_thread(
                 WeakOwnerCallback(self, "_handle_scale_measurement_ui_update", value_g)
@@ -15285,20 +15398,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "button_ir_connect"):
             self.button_ir_connect.setText("Connect IR")
 
-    def _record_ir_sample_state(self, sample: IrTemperatureSample) -> None:
+    def _record_ir_sample_state(
+        self,
+        sample: IrTemperatureSample,
+        *,
+        token: object | None = None,
+    ) -> SessionSensorCsvWrite | None:
         with self._ir_state_lock:
+            if token is not None and (
+                self._window_closing or token is not self._ir_connection_token
+            ):
+                return None
             self._latest_ir_sample = sample
             self._ir_temperature_buffer.add_sample(sample)
             if self._ir_baseline_object_c is None:
                 self._ir_baseline_object_c = sample.object_c_apparent
-            self._write_ir_temperature_sample(sample)
+            write = self._reserve_ir_temperature_sample_locked(sample)
+        return write
 
-    def _record_ir_sample_from_worker(self, token: object, sample: object) -> None:
-        with self._ir_state_lock:
-            if self._window_closing or token is not self._ir_connection_token:
-                return
-            if isinstance(sample, IrTemperatureSample):
-                self._record_ir_sample_state(sample)
+    def _record_ir_sample_from_worker(
+        self,
+        token: object,
+        sample: object,
+    ) -> SessionSensorCsvWrite | None:
+        if isinstance(sample, IrTemperatureSample):
+            return self._record_ir_sample_state(sample, token=token)
+        return None
 
     def _record_ir_frame_from_worker(self, token: object, frame: object) -> None:
         with self._ir_state_lock:
@@ -15308,7 +15433,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def _handle_ir_sample(self, sample: IrTemperatureSample) -> None:
-        self._record_ir_sample_state(sample)
+        write = self._record_ir_sample_state(sample)
+        if write is not None:
+            write.perform()
         if not self._is_ui_thread():
             self._run_on_ui_thread(WeakOwnerCallback(self, "_refresh_live_labels"))
             return
@@ -24168,10 +24295,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_txt_handle = txt_handle
         self._session_csv_handle = csv_handle
         self._session_csv_writer = csv_writer
-        self._session_raw_scale_handle = raw_scale_handle
-        self._session_raw_scale_writer = raw_scale_writer
-        self._session_ir_temperature_handle = ir_temperature_handle
-        self._session_ir_temperature_writer = ir_temperature_writer
+        raw_scale_target = SessionSensorCsvTarget(
+            raw_scale_handle,
+            raw_scale_writer,
+            name="tma-raw-scale",
+        )
+        ir_temperature_target = SessionSensorCsvTarget(
+            ir_temperature_handle,
+            ir_temperature_writer,
+            name="tma-ir-temperature",
+        )
+        with self._scale_state_lock:
+            self._session_raw_scale_handle = raw_scale_handle
+            self._session_raw_scale_writer = raw_scale_writer
+            self._session_raw_scale_target = raw_scale_target
+        with self._ir_state_lock:
+            self._session_ir_temperature_handle = ir_temperature_handle
+            self._session_ir_temperature_writer = ir_temperature_writer
+            self._session_ir_temperature_target = ir_temperature_target
         self._session_ir_temperature_path = ir_temperature_path
         self._session_control_trace_handle = control_trace_handle
         self._session_control_trace_writer = control_trace_writer
@@ -24257,6 +24398,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_live_labels()
         self._record_current_point()
 
+    def _detach_and_close_session_sensor_targets(self) -> None:
+        targets: list[SessionSensorCsvTarget] = []
+        with self._scale_state_lock:
+            raw_scale_target = self._session_raw_scale_target
+            self._session_raw_scale_target = None
+            self._session_raw_scale_handle = None
+            self._session_raw_scale_writer = None
+            if raw_scale_target is not None:
+                raw_scale_target.detach_and_close()
+                targets.append(raw_scale_target)
+        with self._ir_state_lock:
+            ir_temperature_target = self._session_ir_temperature_target
+            self._session_ir_temperature_target = None
+            self._session_ir_temperature_handle = None
+            self._session_ir_temperature_writer = None
+            if ir_temperature_target is not None:
+                ir_temperature_target.detach_and_close()
+                targets.append(ir_temperature_target)
+        deadline_s = time.monotonic() + SESSION_SENSOR_FILE_CLOSE_WAIT_S
+        for target in targets:
+            target.wait_closed(max(0.0, deadline_s - time.monotonic()))
+
     def _stop_session(
         self,
         *_args: object,
@@ -24313,6 +24476,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._session_logging_enabled = was_logging_enabled
         self._session_active = False
         self._session_logging_enabled = False
+        self._detach_and_close_session_sensor_targets()
         self._flush_session_data_handles()
         if self._session_txt_handle is not None:
             self._session_txt_handle.close()
@@ -24321,14 +24485,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_csv_handle.close()
             self._session_csv_handle = None
         self._session_csv_writer = None
-        if self._session_raw_scale_handle is not None:
-            self._session_raw_scale_handle.close()
-            self._session_raw_scale_handle = None
-        self._session_raw_scale_writer = None
-        if self._session_ir_temperature_handle is not None:
-            self._session_ir_temperature_handle.close()
-            self._session_ir_temperature_handle = None
-        self._session_ir_temperature_writer = None
         if self._session_control_trace_handle is not None:
             self._session_control_trace_handle.close()
             self._session_control_trace_handle = None
@@ -24600,14 +24756,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
             self._log(f"Control trace disabled after write failure; recipe will continue: {exc}")
 
-    def _write_raw_scale_sample(self, sample: ScaleSample) -> None:
+    def _reserve_raw_scale_sample_locked(
+        self,
+        sample: ScaleSample,
+    ) -> SessionSensorCsvWrite | None:
+        target = self._session_raw_scale_target
         if (
             not self._session_active
-            or self._session_raw_scale_writer is None
-            or self._session_raw_scale_handle is None
+            or target is None
             or (self._session_raw_scale_start_wall_s or self._session_start_wall_s) <= 0.0
         ):
-            return
+            return None
         started_s = self._session_raw_scale_start_wall_s or self._session_start_wall_s
         elapsed_s = max(0.0, sample.timestamp_s - started_s)
         previous_sample_s = self._session_last_raw_scale_wall_s
@@ -24615,10 +24774,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if previous_sample_s is not None:
             sample_gap_s = max(0.0, float(sample.timestamp_s) - float(previous_sample_s))
             sample_interval_ms = sample_gap_s * 1000.0
-            self._session_raw_scale_max_gap_s = max(self._session_raw_scale_max_gap_s, sample_gap_s)
-        self._session_last_raw_scale_wall_s = float(sample.timestamp_s)
+        else:
+            sample_gap_s = None
         sample_index = self._session_raw_scale_count + 1
-        self._session_raw_scale_writer.writerow(
+        write = target.reserve(
             {
                 "elapsed_s": f"{elapsed_s:.6f}",
                 "timestamp_utc": _utc_timestamp_from_epoch(sample.timestamp_s),
@@ -24627,10 +24786,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 "raw_load_g": f"{sample.raw_g:.6f}",
                 "applied_load_g": f"{sample.applied_load_g:.6f}",
                 "raw_text": sample.raw_text,
-            }
+            },
+            flush=True,
         )
+        if write is None:
+            return None
+        if sample_gap_s is not None:
+            self._session_raw_scale_max_gap_s = max(
+                self._session_raw_scale_max_gap_s,
+                sample_gap_s,
+            )
+        self._session_last_raw_scale_wall_s = float(sample.timestamp_s)
         self._session_raw_scale_count = sample_index
-        self._session_raw_scale_handle.flush()
+        return write
+
+    def _write_raw_scale_sample(self, sample: ScaleSample) -> None:
+        with self._scale_state_lock:
+            write = self._reserve_raw_scale_sample_locked(sample)
+        if write is not None:
+            write.perform()
 
     def _session_accepts_recipe_log_samples(self) -> bool:
         return (
@@ -24638,19 +24812,23 @@ class MainWindow(QtWidgets.QMainWindow):
             and not (bool(self._automation_active) and bool(self._automation_paused))
         )
 
-    def _write_ir_temperature_sample(self, sample: IrTemperatureSample) -> None:
+    def _reserve_ir_temperature_sample_locked(
+        self,
+        sample: IrTemperatureSample,
+    ) -> SessionSensorCsvWrite | None:
+        target = self._session_ir_temperature_target
         if (
             not self._session_accepts_recipe_log_samples()
-            or self._session_ir_temperature_writer is None
-            or self._session_ir_temperature_handle is None
+            or target is None
             or self._session_start_wall_s <= 0.0
         ):
-            return
+            return None
         elapsed_s = max(0.0, sample.timestamp_s - self._session_start_wall_s)
         baseline_c = self._ir_baseline_object_c
         delta_c = None if baseline_c is None else sample.object_c_apparent - baseline_c
         sample_rate_hz = self._ir_temperature_buffer.sample_rate_hz(now_s=sample.timestamp_s)
-        self._session_ir_temperature_writer.writerow(
+        sample_count = self._session_ir_temperature_count + 1
+        write = target.reserve(
             {
                 "elapsed_s": f"{elapsed_s:.6f}",
                 "timestamp_utc": _utc_timestamp_from_epoch(sample.timestamp_s),
@@ -24675,11 +24853,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 "flags": sample.flags,
                 "sample_rate_hz": "" if sample_rate_hz is None else f"{sample_rate_hz:.6f}",
                 "config1": sample.config1,
-            }
+            },
+            flush=sample_count % 10 == 0,
         )
-        self._session_ir_temperature_count += 1
-        if self._session_ir_temperature_count % 10 == 0:
-            self._session_ir_temperature_handle.flush()
+        if write is None:
+            return None
+        self._session_ir_temperature_count = sample_count
+        return write
+
+    def _write_ir_temperature_sample(self, sample: IrTemperatureSample) -> None:
+        with self._ir_state_lock:
+            write = self._reserve_ir_temperature_sample_locked(sample)
+        if write is not None:
+            write.perform()
 
     def _scale_reading_age_s(self) -> float | None:
         with self._scale_state_lock:
