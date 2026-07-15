@@ -3350,6 +3350,91 @@ class BuilderProjectImportWorker(QtCore.QObject):
 
 
 @dataclass(frozen=True)
+class AsyncLogWriteRequest:
+    channel: str
+    path: Path
+    text: str
+
+
+class AsyncRunLogWriter:
+    """Serialize optional text-log mirrors without blocking control or Qt threads."""
+
+    def __init__(self, failure_callback: Callable[[str, Path, BaseException], None]) -> None:
+        self._failure_callback: Callable[[str, Path, BaseException], None] | None = failure_callback
+        self._condition = Condition()
+        self._queue: deque[AsyncLogWriteRequest] = deque()
+        self._disabled_targets: set[tuple[str, str]] = set()
+        self._running = True
+        self._in_flight = False
+        self._thread = Thread(target=self._run, name="tma-run-log-writer", daemon=True)
+        self._thread.start()
+
+    @staticmethod
+    def _target_key(channel: str, path: Path) -> tuple[str, str]:
+        return (str(channel), str(path))
+
+    def reset_target(self, channel: str, path: Path) -> None:
+        with self._condition:
+            self._disabled_targets.discard(self._target_key(channel, path))
+
+    def enqueue(self, channel: str, path: Path, text: str) -> bool:
+        request = AsyncLogWriteRequest(str(channel), Path(path), str(text))
+        with self._condition:
+            if not self._running or self._target_key(request.channel, request.path) in self._disabled_targets:
+                return False
+            self._queue.append(request)
+            self._condition.notify_all()
+        return True
+
+    def wait_until_idle(self, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while self._queue or self._in_flight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._condition.wait(timeout=remaining)
+            return True
+
+    def stop(self, timeout_s: float = 1.0) -> bool:
+        with self._condition:
+            self._running = False
+            self._condition.notify_all()
+        self._thread.join(timeout=max(0.0, float(timeout_s)))
+        stopped = not self._thread.is_alive()
+        if not stopped:
+            self._failure_callback = None
+        return stopped
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._queue and self._running:
+                    self._condition.wait()
+                if not self._queue:
+                    self._condition.notify_all()
+                    return
+                request = self._queue.popleft()
+                self._in_flight = True
+            try:
+                append_text_with_rotation(request.path, request.text)
+            except Exception as exc:
+                with self._condition:
+                    self._disabled_targets.add(self._target_key(request.channel, request.path))
+                    self._queue = deque(
+                        queued
+                        for queued in self._queue
+                        if self._target_key(queued.channel, queued.path)
+                        != self._target_key(request.channel, request.path)
+                    )
+                callback = self._failure_callback
+                if callback is not None:
+                    callback(request.channel, request.path, exc)
+            finally:
+                with self._condition:
+                    self._in_flight = False
+                    self._condition.notify_all()
+@dataclass(frozen=True)
 class SerialPortDescriptor:
     device: str
     description: str
@@ -6020,6 +6105,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recipe_progress_update_queued = False
         self._recipe_progress_pending_complete = False
         self._window_closing = False
+        self._async_run_log_writer = AsyncRunLogWriter(self._handle_async_run_log_write_failure)
         self._serial_port_descriptors: tuple[SerialPortDescriptor, ...] = ()
         self._serial_port_scan_thread: Thread | None = None
         self._serial_port_scan_generation = 0
@@ -6125,10 +6211,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return get_ident() == self._ui_thread_id
 
     def _run_on_ui_thread(self, callback: Callable[[], None]) -> None:
+        if self._window_closing:
+            return
         if self._is_ui_thread():
             callback()
             return
-        self._control_ui_event.emit(callback)
+        try:
+            self._control_ui_event.emit(callback)
+        except RuntimeError:
+            # A daemon worker may finish after Qt has destroyed the window.
+            return
 
     def _restore_main_window_focus_soon(self) -> None:
         if self._window_closing:
@@ -6446,6 +6538,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_run_log_mirror_enabled(self, enabled: bool) -> None:
         self._run_log_mirror_enabled = bool(enabled)
+        if self._run_log_mirror_enabled:
+            self._async_run_log_writer.reset_target("developer", self._run_log_mirror_path)
         if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
             self.action_mirror_run_log.blockSignals(True)
             self.action_mirror_run_log.setChecked(self._run_log_mirror_enabled)
@@ -10027,28 +10121,34 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._schedule_run_log_flush()
         if self._session_run_log_path is not None and not self._session_run_log_write_failed:
-            try:
-                append_text_with_rotation(self._session_run_log_path, line + "\n")
-            except Exception:
-                self._session_run_log_write_failed = True
-                self._pending_run_log_lines.append(
-                    f"[{timestamp}] Per-run log mirror disabled because writing "
-                    f"{self._session_run_log_path} failed."
-                )
-                self._schedule_run_log_flush()
+            self._async_run_log_writer.enqueue("session", self._session_run_log_path, line + "\n")
         if self._run_log_mirror_enabled:
-            try:
-                append_text_with_rotation(self._run_log_mirror_path, line + "\n")
-            except Exception:
+            self._async_run_log_writer.enqueue("developer", self._run_log_mirror_path, line + "\n")
+
+    def _handle_async_run_log_write_failure(self, channel: str, path: Path, error: BaseException) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(
+                lambda: self._handle_async_run_log_write_failure(channel, path, error)
+            )
+            return
+        if self._window_closing:
+            return
+        detail = f"{error.__class__.__name__}: {error}"
+        if channel == "session":
+            if self._session_run_log_path == path:
+                self._session_run_log_write_failed = True
+            message = f"Per-run log mirror disabled because writing {path} failed ({detail})."
+        else:
+            if self._run_log_mirror_path == path:
                 self._run_log_mirror_enabled = False
                 if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
                     self.action_mirror_run_log.blockSignals(True)
                     self.action_mirror_run_log.setChecked(False)
                     self.action_mirror_run_log.blockSignals(False)
-                self._pending_run_log_lines.append(
-                    f"[{timestamp}] Run-log file mirror disabled because writing {self._run_log_mirror_path} failed."
-                )
-                self._schedule_run_log_flush()
+            message = f"Run-log file mirror disabled because writing {path} failed ({detail})."
+        self.statusBar().showMessage(message)
+        self._pending_run_log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        self._schedule_run_log_flush()
 
     def _schedule_run_log_flush(self) -> None:
         if not self._is_ui_thread():
@@ -21839,6 +21939,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_control_trace_path = control_trace_path
         self._session_run_log_path = txt_path.parent / SESSION_RUN_LOG_TXT
         self._session_run_log_write_failed = False
+        self._async_run_log_writer.reset_target("session", self._session_run_log_path)
         self._session_ui_telemetry_path = ui_telemetry_path
         self._session_setup_txt_path = setup_txt_path
         self._session_setup_csv_path = setup_csv_path
@@ -30528,6 +30629,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._release_experiment_sleep_guard()
         self._disconnect_supply()
         self._stop_owned_shared_broker()
+        self._async_run_log_writer.stop(timeout_s=1.0)
         super().closeEvent(event)
 
 

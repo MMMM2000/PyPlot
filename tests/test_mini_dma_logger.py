@@ -6157,6 +6157,27 @@ def test_status_bar_is_hidden_so_run_log_is_not_duplicated(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_background_ui_callback_is_dropped_after_window_closes(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[bool] = []
+    errors: list[BaseException] = []
+    _close_test_window(window)
+
+    def _invoke_after_close() -> None:
+        try:
+            window._run_on_ui_thread(lambda: called.append(True))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_invoke_after_close)
+    thread.start()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert called == []
+    assert errors == []
+
+
 def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mirror_path = tmp_path / "mini_dma_run_log.txt"
@@ -6167,7 +6188,77 @@ def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> Non
 
         window._log("mirror probe")
 
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         assert "mirror probe" in mirror_path.read_text(encoding="utf-8")
+    finally:
+        _close_test_window(window)
+
+
+def test_blocked_run_log_mirror_write_does_not_block_ui(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "blocked_run_log.txt"
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_append(path: Path, text: str) -> None:
+        assert Path(path) == mirror_path
+        assert "blocked mirror probe" in text
+        started.set()
+        assert release.wait(timeout=5.0)
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+        window._run_log_mirror_path = mirror_path
+        window._run_log_mirror_enabled = True
+        window._async_run_log_writer.reset_target("developer", mirror_path)
+
+        window._log("blocked mirror probe")
+
+        assert started.wait(timeout=1.0)
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: heartbeat == [True], timeout=1000)
+        assert "blocked mirror probe" in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        _close_test_window(window)
+
+
+def test_run_log_mirror_failure_is_persistent_and_disables_target(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "failed_run_log.txt"
+    attempts: list[Path] = []
+
+    def _failed_append(path: Path, _text: str) -> None:
+        attempts.append(Path(path))
+        raise OSError("synthetic synced-drive failure")
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _failed_append)
+        window._run_log_mirror_path = mirror_path
+        window._run_log_mirror_enabled = True
+        window._async_run_log_writer.reset_target("developer", mirror_path)
+
+        window._log("first failure")
+        window._log("queued after failure")
+
+        qtbot.waitUntil(lambda: not window._run_log_mirror_enabled, timeout=3000)
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        assert attempts == [mirror_path]
+        assert "synthetic synced-drive failure" in window.statusBar().currentMessage()
+        qtbot.waitUntil(
+            lambda: "Run-log file mirror disabled" in window.log_output.toPlainText(),
+            timeout=1000,
+        )
     finally:
         _close_test_window(window)
 
@@ -24802,6 +24893,7 @@ def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
         window._stop_session(reason="recipe_completed", detail="Recipe completed.")
 
         assert run_log_path is not None
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         assert run_log_path.name == mini_dma_mod.SESSION_RUN_LOG_TXT
         text = run_log_path.read_text(encoding="utf-8")
         assert "Session started" in text
