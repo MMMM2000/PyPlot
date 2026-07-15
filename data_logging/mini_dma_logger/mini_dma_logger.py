@@ -4650,6 +4650,18 @@ class MiniDmaControlConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TicConnectionSettings:
+    """Plain immutable Tic transport settings safe to cross thread boundaries."""
+
+    command_path: str
+    device_serial: str
+    prefer_native_usb: bool
+
+    def key(self) -> tuple[str, str, bool]:
+        return self.command_path, self.device_serial, self.prefer_native_usb
+
+
+@dataclass(frozen=True, slots=True)
 class MiniDmaRunMetadataSnapshot:
     """Immutable GUI-thread capture consumed by recipe/control workers."""
 
@@ -4675,6 +4687,13 @@ class MiniDmaRunMetadataSnapshot:
 
     def effective_metadata(self) -> dict[str, Any]:
         return json.loads(self.effective_json)
+
+    def tic_settings(self) -> TicConnectionSettings:
+        return TicConnectionSettings(
+            command_path=self.ticcmd_path,
+            device_serial=self.tic_serial,
+            prefer_native_usb=self.tic_native_usb,
+        )
 
 
 def _find_libusb_wheel_library(candidate: str) -> str | None:
@@ -6555,6 +6574,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tic_controller_key: tuple[str, str, bool] | None = None
         self._tic_command_dispatcher: TicCommandDispatcher | None = None
         self._tic_command_dispatcher_key: tuple[str, str, bool] | None = None
+        self._tic_settings_lock = RLock()
+        self._manual_tic_settings_snapshot: TicConnectionSettings | None = None
+        self._automatic_tic_settings_snapshot: TicConnectionSettings | None = None
+        self._recovery_tic_settings_snapshot: TicConnectionSettings | None = None
         self._tic_status_text = ""
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
@@ -6989,6 +7012,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.setSingleShot(True)
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
         self._restore_settings()
+        self._publish_manual_tic_settings_snapshot()
         self._schedule_tma_history_scan()
         self._start_serial_port_enumeration()
         self._refresh_live_labels()
@@ -10184,6 +10208,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_kosice_folder.editingFinished.connect(self._load_kosice_folder_from_ui)
         self.edit_kosice_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_fabrication_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_ticcmd_path.textChanged.connect(self._publish_manual_tic_settings_snapshot)
+        self.edit_tic_serial.textChanged.connect(self._publish_manual_tic_settings_snapshot)
+        self.check_tic_native_usb.toggled.connect(self._publish_manual_tic_settings_snapshot)
+        self._publish_manual_tic_settings_snapshot()
         self.spin_diameter.valueChanged.connect(self._refresh_recipe_sample_label)
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
         self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
@@ -11610,26 +11638,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"status median {result['status_median_ms']:.1f} ms over {result['iterations']} trials."
             )
 
-    def _build_tic_controller(self) -> TicController:
-        key = self._run_tic_settings()
+    def _build_tic_controller(
+        self,
+        settings: TicConnectionSettings | None = None,
+    ) -> TicController:
+        selected = settings or self._tic_settings_for_current_command()
+        key = selected.key()
         if self._tic_controller is None or self._tic_controller_key != key:
             self._tic_controller = TicController(
-                command_path=key[0],
-                device_serial=key[1],
-                prefer_native_usb=key[2],
-                allow_ticcmd_fallback=not key[2],
+                command_path=selected.command_path,
+                device_serial=selected.device_serial,
+                prefer_native_usb=selected.prefer_native_usb,
+                allow_ticcmd_fallback=not selected.prefer_native_usb,
                 transport_logger=self._log,
             )
             self._tic_controller_key = key
         return self._tic_controller
 
-    def _build_tic_dispatcher(self) -> TicCommandDispatcher:
-        key = self._run_tic_settings()
+    def _build_tic_dispatcher(
+        self,
+        settings: TicConnectionSettings | None = None,
+    ) -> TicCommandDispatcher:
+        selected = settings or self._tic_settings_for_current_command()
+        key = selected.key()
         if self._tic_command_dispatcher is not None and self._tic_command_dispatcher_key != key:
             self._tic_command_dispatcher.stop()
             self._tic_command_dispatcher = None
         if self._tic_command_dispatcher is None:
-            self._tic_command_dispatcher = TicCommandDispatcher(self._build_tic_controller)
+            self._tic_command_dispatcher = TicCommandDispatcher(
+                lambda selected=selected: self._build_tic_controller(selected)
+            )
             self._tic_command_dispatcher_key = key
         return self._tic_command_dispatcher
 
@@ -12026,15 +12064,50 @@ class MainWindow(QtWidgets.QMainWindow):
             return float(snapshot.supply_voltage_limit_v)
         return float(self.spin_supply_voltage_limit.value())
 
-    def _run_tic_settings(self) -> tuple[str, str, bool]:
-        snapshot = self._run_metadata_snapshot
-        if not self._is_ui_thread() and snapshot is not None:
-            return snapshot.ticcmd_path, snapshot.tic_serial, snapshot.tic_native_usb
-        return (
-            self.edit_ticcmd_path.text().strip(),
-            self.edit_tic_serial.text().strip(),
-            bool(self.check_tic_native_usb.isChecked()),
+    def _publish_manual_tic_settings_snapshot(self, *_args: object) -> TicConnectionSettings:
+        if not self._is_ui_thread():
+            raise RuntimeError("Manual Tic settings must be published from the GUI thread.")
+        snapshot = TicConnectionSettings(
+            command_path=self.edit_ticcmd_path.text().strip(),
+            device_serial=self.edit_tic_serial.text().strip(),
+            prefer_native_usb=bool(self.check_tic_native_usb.isChecked()),
         )
+        with self._tic_settings_lock:
+            self._manual_tic_settings_snapshot = snapshot
+        return snapshot
+
+    def _manual_tic_settings(self) -> TicConnectionSettings:
+        with self._tic_settings_lock:
+            snapshot = self._manual_tic_settings_snapshot
+        if snapshot is None:
+            if not self._is_ui_thread():
+                raise RuntimeError("Manual Tic settings have not been published by the GUI thread.")
+            return self._publish_manual_tic_settings_snapshot()
+        return snapshot
+
+    def _tic_settings_for_current_command(self) -> TicConnectionSettings:
+        with self._tic_settings_lock:
+            automatic = self._automatic_tic_settings_snapshot
+        if automatic is not None:
+            return automatic
+        if self._automation_active and not self._is_ui_thread():
+            raise RuntimeError("Automatic Tic settings were not captured before a worker command.")
+        return self._manual_tic_settings()
+
+    def _activate_recovery_tic_settings(self) -> TicConnectionSettings:
+        with self._tic_settings_lock:
+            recovery = self._recovery_tic_settings_snapshot
+            selected = recovery or self._manual_tic_settings_snapshot
+            if selected is None:
+                raise RuntimeError("Recovery Tic settings have not been captured on the GUI thread.")
+            self._automatic_tic_settings_snapshot = selected
+        return selected
+
+    def _clear_recovery_tic_command_context(self, *, retain_capture: bool) -> None:
+        with self._tic_settings_lock:
+            self._automatic_tic_settings_snapshot = None
+            if not retain_capture:
+                self._recovery_tic_settings_snapshot = None
 
     def _select_combo_data(self, combo: QtWidgets.QComboBox, value: int) -> bool:
         index = combo.findData(int(value))
@@ -23030,6 +23103,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         with self._session_metadata_write_lock:
             self._run_metadata_snapshot = snapshot
+        with self._tic_settings_lock:
+            self._automatic_tic_settings_snapshot = snapshot.tic_settings()
         return snapshot
 
     def _publish_current_sweep_metadata_effective_values(
@@ -23534,7 +23609,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_session(self, *, enable_logging: bool = True, record_initial_point: bool = True) -> None:
         if self._session_active:
             return
-        self._run_metadata_snapshot = None
+        with self._session_metadata_write_lock:
+            self._run_metadata_snapshot = None
+        with self._tic_settings_lock:
+            self._automatic_tic_settings_snapshot = None
+            self._recovery_tic_settings_snapshot = None
         self._persist_settings_if_enabled(immediate=True)
         self._clear_run_zero_load_scale_reference()
         created_utc = _utc_timestamp()
@@ -23865,6 +23944,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
             self._schedule_tma_history_scan()
+        with self._session_metadata_write_lock:
+            finished_run_snapshot = self._run_metadata_snapshot
+            self._run_metadata_snapshot = None
+        with self._tic_settings_lock:
+            if finished_run_snapshot is not None:
+                self._recovery_tic_settings_snapshot = finished_run_snapshot.tic_settings()
+            self._automatic_tic_settings_snapshot = None
         self._first_overheating_preflight_decision = None
         if self._session_base_path is not None:
             self._start_run_summary_generation(
@@ -27113,8 +27199,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_automation_control_loop(self, interval_ms: int) -> None:
         if not self._is_ui_thread():
             raise RuntimeError("The TMA control worker must be started from the GUI thread.")
-        if self._run_metadata_snapshot is None or not self._session_active:
+        if self._session_active and self._run_metadata_snapshot is None:
             self._freeze_run_metadata_snapshot()
+        with self._tic_settings_lock:
+            if self._automation_active and self._automatic_tic_settings_snapshot is None:
+                raise RuntimeError("Tic command settings were not captured before control-worker start.")
         self._automation_control_error = None
         if self._automation_control_loop is not None:
             self._automation_control_loop.stop()
@@ -27405,7 +27494,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_duration_overheads_s = []
         self._current_sweep_recipe_overrides = []
         self._current_sweep_runtime_applied_values = None
-        self._run_metadata_snapshot = None
+        with self._session_metadata_write_lock:
+            self._run_metadata_snapshot = None
+        with self._tic_settings_lock:
+            self._automatic_tic_settings_snapshot = None
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
@@ -28085,7 +28177,9 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_ms = self._control_interval_ms()
         move_duration_s = self._move_duration_s(distance_mm, speed_mm_s)
         steps = [AutomationStep("move", target_mm=target_mm, duration_s=move_duration_s, note=label)]
+        self._activate_recovery_tic_settings()
         if not self._preflight_recipe_hardware(steps):
+            self._clear_recovery_tic_command_context(retain_capture=True)
             return
         self._show_recovery_plot_dialog(f"TMA Recovery: {label}")
         self._automation_steps = steps
@@ -28116,6 +28210,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_recovery_position_target(self._position_reference_mm, "displacement to 0")
 
     def _start_recovery_load_zero(self) -> None:
+        self._activate_recovery_tic_settings()
         self._sync_manual_motion_base_from_current_position()
         steps = [
             AutomationStep(
@@ -28127,6 +28222,7 @@ class MainWindow(QtWidgets.QMainWindow):
             AutomationStep("record", target_value=0.0, basis=HSW_BASIS_LOAD_G, note="0"),
         ]
         if not self._preflight_recipe_hardware(steps):
+            self._clear_recovery_tic_command_context(retain_capture=True)
             return
         self._show_recovery_plot_dialog("TMA Recovery: load to zero")
         self._automation_steps = steps
@@ -28163,6 +28259,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
 
     def start_bench_stress_recovery(self, target_stress_mpa: float, *, reason: str) -> bool:
+        self._activate_recovery_tic_settings()
         self._sync_manual_motion_base_from_current_position()
         target = max(0.0, float(target_stress_mpa))
         steps = [
@@ -28180,6 +28277,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         ]
         if not self._preflight_recipe_hardware(steps):
+            self._clear_recovery_tic_command_context(retain_capture=True)
             return False
         self._show_recovery_plot_dialog("TMA Recovery: bench stress guard")
         self._automation_steps = steps
@@ -28322,6 +28420,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._close_length_setup_dialog()
         if (user_initiated or offer_recovery) and self._session_active:
             self._stop_session()
+        elif not self._session_active:
+            self._clear_recovery_tic_command_context(retain_capture=False)
         if not keep_progress:
             self._update_recipe_progress()
         self._update_recipe_buttons()
