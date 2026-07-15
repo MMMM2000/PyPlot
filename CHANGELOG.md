@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-07-15 13:12 UTC
+
+- TMA and Current Annealing now capture Git/source provenance exactly once per run or prepared output on bounded daemon tasks, preventing source-control queries from delaying control or GUI threads.
+- Git branch, commit, and worktree state now come from one coherent status query, and late completion atomically patches only `source_control` in the matching metadata file.
+- Source-control metadata retains its existing keys and adds explicit pending, complete, and unavailable states and timestamps, including `dirty_state` values that distinguish unknown capture results from a clean worktree.
+
 ## 2026-07-15 12:19 UTC
 
 - Bound TMA run-log backlogs, prefer per-run logs over optional mirrors under load, and report overload once without flooding the operator log.

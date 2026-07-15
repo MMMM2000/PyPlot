@@ -46,6 +46,55 @@ kosice_mod = importlib.import_module(
 stiff_guard_mod = importlib.import_module(
     "data_logging.mini_dma_logger.stiff_sample_guard"
 )
+source_provenance_mod = importlib.import_module("data_logging.source_provenance")
+
+
+class _ControlledSourceProvenanceCache:
+    def __init__(self) -> None:
+        self.requests: list[tuple[Path, str]] = []
+        self.snapshots: dict[str, dict[str, object]] = {}
+        self.released: list[str] = []
+
+    def request(self, repo_root: Path, *, token: object | None = None) -> str:
+        capture_token = str(token or f"capture-{len(self.requests) + 1}")
+        self.requests.append((Path(repo_root), capture_token))
+        self.snapshots[capture_token] = source_provenance_mod.pending_source_provenance(repo_root)
+        return capture_token
+
+    def snapshot(self, token: object | None) -> dict[str, object] | None:
+        snapshot = self.snapshots.get(str(token)) if token is not None else None
+        return None if snapshot is None else dict(snapshot)
+
+    def release(self, token: object | None) -> None:
+        if token is None:
+            return
+        capture_token = str(token)
+        self.released.append(capture_token)
+        self.snapshots.pop(capture_token, None)
+
+    def complete(
+        self,
+        token: object,
+        *,
+        branch: str = "codex/test-branch",
+        commit: str = "abc123",
+        dirty: bool = True,
+    ) -> dict[str, object]:
+        snapshot = self.snapshots[str(token)]
+        snapshot.update(
+            branch=branch,
+            commit=commit,
+            is_dirty=dirty,
+            status_short="M changed.py" if dirty else "",
+            remote_url="https://example.test/repo.git",
+            capture_state="complete",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            dirty_state="dirty" if dirty else "clean",
+            head_state="attached",
+            remote_state="configured",
+            capture_error=None,
+        )
+        return dict(snapshot)
 
 
 @pytest.fixture(autouse=True)
@@ -26044,41 +26093,228 @@ def test_session_metadata_keeps_original_created_timestamp(
 
 def test_session_metadata_records_source_control_snapshot(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("metadata_git")
     window._record_current_point = lambda: None  # type: ignore[method-assign]
-
-    replies = {
-        ("branch", "--show-current"): "codex/test-branch\n",
-        ("rev-parse", "HEAD"): "abc123\n",
-        ("status", "--short"): " M data_logging/mini_dma_logger/mini_dma_logger.py\n",
-        ("config", "--get", "remote.origin.url"): "https://example.test/repo.git\n",
-    }
-
-    def _fake_run(args: list[str], **_kwargs: object) -> object:
-        class Result:
-            returncode = 0
-            stdout = replies[tuple(args[3:])]
-
-        return Result()
-
-    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
 
     try:
         window._start_session()
         assert window._session_json_path is not None
+        pending = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        token = window._session_source_provenance_token
+        assert pending["source_control"]["capture_state"] == "pending"
+        assert pending["source_control"]["dirty_state"] == "unknown"
+        assert pending["source_control"]["is_dirty"] is False
+
+        expected_snapshot = cache.complete(token)
+        window._poll_source_provenance_capture()
         payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
 
         assert payload["source_control"]["branch"] == "codex/test-branch"
         assert payload["source_control"]["commit"] == "abc123"
         assert payload["source_control"]["is_dirty"] is True
         assert payload["source_control"]["remote_url"] == "https://example.test/repo.git"
+        assert payload["source_control"]["dirty_state"] == "dirty"
+
+        window.edit_run_notes.setPlainText("operator changed notes after capture")
+        for _ in range(5):
+            window._last_session_metadata_write_s = 0.0
+            window._write_session_metadata(throttle=True)
+        window._write_session_metadata()
+        rewritten = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert rewritten["source_control"] == expected_snapshot
+        assert len(cache.requests) == 1
     finally:
         window._stop_session()
         _close_test_window(window)
+
+
+def test_session_source_provenance_stale_completion_is_ignored(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window.edit_log_name.setText("old_output")
+        window._start_session()
+        old_token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        old_metadata_path = window._session_json_path
+        stale_snapshot = dict(cache.snapshots[str(old_token)])
+        window._stop_session()
+
+        window.edit_log_name.setText("new_output")
+        window._start_session()
+        new_token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        new_metadata_path = window._session_json_path
+        assert old_token != new_token
+        assert str(old_token) in cache.released
+
+        stale_snapshot.update(
+            capture_state="complete",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            branch="codex/stale",
+            commit="stale",
+        )
+        cache.snapshots[str(old_token)] = stale_snapshot
+        window._write_session_source_provenance_completion(old_metadata_path, old_token)
+        assert json.loads(old_metadata_path.read_text(encoding="utf-8"))["source_control"][
+            "capture_state"
+        ] == "pending"
+        assert json.loads(new_metadata_path.read_text(encoding="utf-8"))["source_control"][
+            "capture_state"
+        ] == "pending"
+
+        unavailable = cache.snapshots[str(new_token)]
+        unavailable.update(
+            capture_state="unavailable",
+            capture_completed_utc="2026-07-15T10:00:02.000Z",
+            dirty_state="unknown",
+            capture_error="status:timeout",
+        )
+        window._poll_source_provenance_capture()
+        current = json.loads(new_metadata_path.read_text(encoding="utf-8"))["source_control"]
+        assert current["capture_state"] == "unavailable"
+        assert current["dirty_state"] == "unknown"
+        assert current["capture_error"] == "status:timeout"
+        assert len(cache.requests) == 2
+    finally:
+        window._stop_session()
+        _close_test_window(window)
+
+
+def test_late_session_source_provenance_patches_only_final_source_control(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("late_metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window._start_session()
+        token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        window._session_run_log_complete = False
+        window._session_run_log_incomplete_lines = 3
+        window._session_run_log_incomplete_reason = "synthetic_incomplete_log"
+
+        window._stop_session(reason="manual_session_stop", detail="Synthetic finalization.")
+        finalized = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert finalized["finished_utc"]
+        assert finalized["stop"]["reason"] == "manual_session_stop"
+        assert finalized["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+        assert finalized["logging"]["run_log_complete"] is False
+        assert finalized["logging"]["run_log_incomplete_lines"] == 3
+        assert finalized["logging"]["run_log_incomplete_reason"] == "synthetic_incomplete_log"
+
+        expected_source = cache.complete(token, branch="codex/final", commit="final123")
+        window._poll_source_provenance_capture()
+        patched = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        finalized_without_source = dict(finalized)
+        patched_without_source = dict(patched)
+        finalized_without_source.pop("source_control")
+        patched_without_source.pop("source_control")
+        assert patched_without_source == finalized_without_source
+        assert patched["source_control"] == expected_source
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("broken_metadata", [None, "{malformed"])
+def test_late_session_source_provenance_never_recreates_missing_or_malformed_metadata(
+    tmp_path: Path,
+    qtbot,
+    broken_metadata: str | None,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("broken_late_metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window._start_session()
+        token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        window._stop_session(reason="manual_session_stop")
+        cache.complete(token)
+        if broken_metadata is None:
+            metadata_path.unlink()
+        else:
+            metadata_path.write_text(broken_metadata, encoding="utf-8")
+
+        window._poll_source_provenance_capture()
+
+        if broken_metadata is None:
+            assert not metadata_path.exists()
+        else:
+            assert metadata_path.read_text(encoding="utf-8") == broken_metadata
+        assert "Source provenance metadata update failed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_blocked_source_provenance_does_not_delay_session_or_control_metadata_tick(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("blocked_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_collector(repo_root: Path, *, requested_utc: str) -> dict[str, object]:
+        entered.set()
+        assert release.wait(timeout=5.0)
+        snapshot = source_provenance_mod.pending_source_provenance(
+            repo_root,
+            requested_utc=requested_utc,
+        )
+        snapshot.update(
+            capture_state="unavailable",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            capture_error="test_blocked",
+        )
+        return snapshot
+
+    provenance_cache = source_provenance_mod.SourceProvenanceCache(_blocked_collector)
+    window._source_provenance_cache = provenance_cache
+
+    try:
+        started = time.monotonic()
+        window._start_session()
+        assert time.monotonic() - started < 0.25
+        assert entered.wait(timeout=1.0)
+        token = window._session_source_provenance_token
+
+        tick = threading.Thread(target=window._write_session_metadata, daemon=True)
+        tick.start()
+        tick.join(timeout=0.25)
+        assert not tick.is_alive()
+
+        close_started = time.monotonic()
+        window.close()
+        assert time.monotonic() - close_started < 1.5
+        assert provenance_cache.snapshot(token) is None
+    finally:
+        release.set()
+        _ensure_app().processEvents()
 
 
 def test_session_metadata_records_control_logic_version_and_fingerprint(

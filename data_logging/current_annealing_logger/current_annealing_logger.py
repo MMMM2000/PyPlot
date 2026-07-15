@@ -14,7 +14,6 @@ import math
 import re
 import json
 import logging
-import subprocess
 import shutil
 import ctypes
 from ctypes import wintypes
@@ -43,6 +42,12 @@ from data_logging.shared_power_supply.protocol import (
     start_broker_server,
 )
 from plotting.shared.power_guard import create_experiment_sleep_guard
+from data_logging.source_provenance import (
+    CAPTURE_PENDING,
+    SourceProvenanceCache,
+    patch_source_control_metadata,
+    unavailable_source_provenance,
+)
 
 import numpy as np
 import matplotlib
@@ -82,18 +87,6 @@ fig_size[1] = 10 #10
 plt.rcParams["figure.figsize"] = fig_size
 plt.rcParams["font.family"] = ["sans-serif"]
 plt.rcParams["font.size"] = 12
-
-
-def _hidden_subprocess_kwargs() -> dict[str, object]:
-    if os.name != "nt":
-        return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    return {
-        "startupinfo": startupinfo,
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    }
 
 
 def _apply_app_font_to_matplotlib(app: QtWidgets.QApplication | None = None) -> None:
@@ -793,6 +786,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fabrication_poll_timer = QtCore.QTimer(self)
         self._fabrication_poll_timer.setInterval(50)
         self._fabrication_poll_timer.timeout.connect(self._poll_fabrication_tasks)
+        self._source_provenance_cache = SourceProvenanceCache()
+        self._source_provenance_token: object | None = None
+        self._source_provenance_output_path: str | None = None
+        self._source_provenance_poll_timer = QtCore.QTimer(self)
+        self._source_provenance_poll_timer.setInterval(50)
+        self._source_provenance_poll_timer.timeout.connect(self._poll_source_provenance_capture)
         self._window_closing = False
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         self.supply_profile_id = "hmp4030"
@@ -6227,37 +6226,54 @@ class MainWindow(QtWidgets.QMainWindow):
                 return ""
         return ""
 
-    def _source_control_metadata(self) -> Dict[str, Any]:
+    def _source_provenance_repo_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _request_source_provenance(self, output_path: str) -> object:
+        self._release_source_provenance()
+        token = self._source_provenance_cache.request(self._source_provenance_repo_root())
+        self._source_provenance_token = token
+        self._source_provenance_output_path = str(output_path)
+        self._source_provenance_poll_timer.start()
+        return token
+
+    def _poll_source_provenance_capture(self) -> None:
+        token = self._source_provenance_token
+        output_path = self._source_provenance_output_path
+        snapshot = self._source_provenance_cache.snapshot(token)
+        if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
+            return
+        self._source_provenance_poll_timer.stop()
+        if (
+            self._window_closing
+            or token != self._source_provenance_token
+            or output_path != self._source_provenance_output_path
+            or output_path is None
+        ):
+            return
+        self._write_source_provenance_completion(output_path, token)
+
+    def _release_source_provenance(self) -> None:
+        self._source_provenance_poll_timer.stop()
+        self._source_provenance_cache.release(self._source_provenance_token)
+        self._source_provenance_token = None
+        self._source_provenance_output_path = None
+
+    def _source_control_metadata(self, token: object | None = None) -> Dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]
+        snapshot = self._source_provenance_cache.snapshot(
+            self._source_provenance_token if token is None else token
+        )
+        if snapshot is not None:
+            return snapshot
+        return unavailable_source_provenance(repo_root, error="capture_not_requested")
 
-        def _git_text(*args: str) -> str | None:
-            try:
-                completed = subprocess.run(
-                    ["git", "-C", str(repo_root), *args],
-                    capture_output=True,
-                    text=True,
-                    timeout=1.5,
-                    check=False,
-                    **_hidden_subprocess_kwargs(),
-                )
-            except Exception:
-                return None
-            if completed.returncode != 0:
-                return None
-            text = completed.stdout.strip()
-            return text or None
-
-        status = _git_text("status", "--short")
-        return {
-            "repo_root": str(repo_root),
-            "branch": _git_text("branch", "--show-current"),
-            "commit": _git_text("rev-parse", "HEAD"),
-            "is_dirty": bool(status),
-            "status_short": status or "",
-            "remote_url": _git_text("config", "--get", "remote.origin.url"),
-        }
-
-    def _metadata_payload(self, output_path: str) -> Dict[str, Any]:
+    def _metadata_payload(
+        self,
+        output_path: str,
+        *,
+        source_provenance_token: object | None = None,
+    ) -> Dict[str, Any]:
         output = Path(output_path)
         loops, infinite = self._current_loop_settings()
         reverse = self._reverse_to_zero_after_max_enabled()
@@ -6317,7 +6333,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "builder_project": self._ui_text("lineEdit_builder_project"),
                 "fabrication_folder": self._ui_text("lineEdit_fabrication_folder"),
             },
-            "source_control": self._source_control_metadata(),
+            "source_control": self._source_control_metadata(source_provenance_token),
             "recipe": {
                 "start_current_mA": float(getattr(self, "start_current_mA", 0.0) or 0.0),
                 "max_current_mA": float(getattr(self, "max_current_mA", 0.0) or 0.0),
@@ -6330,13 +6346,30 @@ class MainWindow(QtWidgets.QMainWindow):
             },
         }
 
-    def _write_metadata_file(self, output_path: str) -> bool:
+    def _metadata_path(self, output_path: str) -> Path:
+        output = Path(output_path)
+        return output.parent / "metadata" / output.stem / "metadata.json"
+
+    def _write_metadata_file(
+        self,
+        output_path: str,
+        *,
+        source_provenance_token: object | None = None,
+    ) -> bool:
         output = Path(output_path)
         metadata_dir = output.parent / "metadata" / output.stem
         try:
             metadata_dir.mkdir(parents=True, exist_ok=True)
-            (metadata_dir / "metadata.json").write_text(
-                json.dumps(self._metadata_payload(output_path), indent=2, ensure_ascii=False) + "\n",
+            self._metadata_path(output_path).write_text(
+                json.dumps(
+                    self._metadata_payload(
+                        output_path,
+                        source_provenance_token=source_provenance_token,
+                    ),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
                 encoding="utf-8",
             )
         except OSError as exc:
@@ -6351,6 +6384,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
             return False
         return True
+
+    def _write_source_provenance_completion(self, output_path: str, token: object) -> None:
+        if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
+            return
+        snapshot = self._source_provenance_cache.snapshot(token)
+        if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
+            return
+        metadata_path = self._metadata_path(output_path)
+        try:
+            if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
+                return
+            patch_source_control_metadata(metadata_path, snapshot, ensure_ascii=False)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            message = f"Source provenance metadata update failed for {metadata_path}: {exc}"
+            LOGGER.error(message)
+            self._show_status_message(message, timeout_ms=12000)
+        finally:
+            if token == self._source_provenance_token and output_path == self._source_provenance_output_path:
+                self._release_source_provenance()
 
     def _evacuate_existing_output_for_replacement(self, output_path: str) -> None:
         output = Path(output_path)
@@ -6421,7 +6473,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         self.f_name = path
-        if not self._write_metadata_file(path):
+        source_provenance_token = self._request_source_provenance(path)
+        if not self._write_metadata_file(
+            path,
+            source_provenance_token=source_provenance_token,
+        ):
+            if source_provenance_token == self._source_provenance_token:
+                self._release_source_provenance()
             return False
         # subsequent writes will append
         return True
@@ -6462,6 +6520,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
+        self._release_source_provenance()
         self._fabrication_poll_timer.stop()
         self._cancel_fabrication_folder_load()
         self._wait_for_fabrication_tasks(timeout_ms=250)
