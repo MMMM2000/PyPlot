@@ -458,13 +458,61 @@ def test_first_overheating_history_finds_exact_pydpj_tma_match(section_key: str)
     ) is False
 
 
+@pytest.mark.parametrize(
+    ("current_specimen", "previous_specimen", "expected"),
+    [
+        ("", "", True),
+        ("segment A", "segment-a", True),
+        ("", "segment A", False),
+        ("segment A", "", False),
+        ("segment A", "segment B", False),
+    ],
+)
+def test_first_overheating_history_requires_exact_specimen_presence(
+    current_specimen: str,
+    previous_specimen: str,
+    expected: bool,
+) -> None:
+    current = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2", current_specimen)
+    previous = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12_2", previous_specimen)
+
+    assert mini_dma_mod._tma_identities_match(current, previous) is expected
+
+
+def test_first_overheating_history_accepts_actual_builder_tma_row_without_guessing_specimen(
+    tmp_path: Path,
+) -> None:
+    builder_core = importlib.import_module("microwire_data_builder.core")
+    builder_ui = importlib.import_module("microwire_data_builder.ui")
+    record = builder_core.MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 tma_run01",
+        sample="Ni50Fe27Ga23 12_2 display segment A",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="tma_run01",
+    )
+    row = builder_ui._mini_dma_records_to_frame([record]).iloc[0].to_dict()
+    payload = {"sections": {"mini_dma": {"rows": [row]}}}
+
+    assert set(("_sample", "Composition", "Microwire", "TMA graphs", "_sources")) <= set(row)
+    assert "Specimen" not in row
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is True
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2", "segment A"),
+    ) is False
+
+
 def test_first_overheating_history_accepts_stopped_local_tma_run_with_points(tmp_path: Path) -> None:
     run_dir = tmp_path / "wire_run01"
     run_dir.mkdir()
     (run_dir / "metadata.json").write_text(
         json.dumps(
             {
-                "session_state": "finished",
+                "session_state": "stopped",
                 "point_count": 3,
                 "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
                 "stop": {"reason": "wire_break_or_contact_loss", "category": "fault"},
@@ -502,6 +550,112 @@ def test_first_overheating_history_accepts_stopped_local_tma_run_with_points(tmp
         "Ni50Fe27Ga23", "12/2", "segment A"
     )
     assert "wire_run01" in records[0].source
+
+
+def test_tma_history_metadata_scan_cancels_between_files(tmp_path: Path) -> None:
+    for index in range(3):
+        run_dir = tmp_path / f"wire_run{index + 1:02d}"
+        run_dir.mkdir()
+        (run_dir / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "session_state": "stopped",
+                    "point_count": 3,
+                    "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                    "name_fields": {
+                        "composition": "Ni50Fe27Ga23",
+                        "microwire": f"12/{index + 1}",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    cancellation_checks = 0
+
+    def _cancel_after_first_file() -> bool:
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return cancellation_checks >= 3
+
+    records = mini_dma_mod._scan_tma_history_metadata(
+        tmp_path,
+        cancelled=_cancel_after_first_file,
+    )
+
+    assert len(records) == 1
+    assert cancellation_checks == 3
+
+
+def test_tma_history_blocked_scan_close_retains_thread_until_finished(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
+    if window._tma_history_scan_thread is not None:
+        qtbot.waitUntil(lambda: window._tma_history_scan_thread is None, timeout=3000)
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    qt_messages: list[str] = []
+
+    def _blocked_scan(
+        _root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scan_started.set()
+        release_scan.wait(timeout=5.0)
+        assert cancelled is not None and cancelled()
+        return ()
+
+    previous_message_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    thread = None
+    try:
+        monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _blocked_scan)
+        window._tma_history_scan_pending_root = tmp_path
+        window._start_pending_tma_history_scan()
+        assert scan_started.wait(timeout=2.0)
+        thread = window._tma_history_scan_thread
+        worker = window._tma_history_scan_worker
+        assert thread is not None
+        assert worker is not None
+
+        window.close()
+
+        assert thread.isRunning()
+        assert window._tma_history_scan_thread is thread
+        assert window._tma_history_scan_worker is worker
+        assert mini_dma_mod._LIVE_TMA_HISTORY_SCAN_JOBS.get(thread) is worker
+
+        release_scan.set()
+        qtbot.waitUntil(
+            lambda: thread not in mini_dma_mod._LIVE_TMA_HISTORY_SCAN_JOBS,
+            timeout=3000,
+        )
+        assert window._tma_history_scan_thread is None
+        assert window._tma_history_scan_worker is None
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release_scan.set()
+        if thread is not None:
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(3000)
+            except RuntimeError:
+                pass
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_message_handler)
+        _close_test_window(window)
 
 
 def test_first_overheating_history_does_not_count_annealing_only_project() -> None:

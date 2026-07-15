@@ -2117,30 +2117,17 @@ def _tma_identities_match(current: TmaSampleIdentity, previous: TmaSampleIdentit
     previous_composition, previous_microwire, previous_specimen = previous.normalized
     if (current_composition, current_microwire) != (previous_composition, previous_microwire):
         return False
-    if current_specimen:
-        return bool(previous_specimen and previous_specimen == current_specimen)
-    return True
+    return current_specimen == previous_specimen
 
 
 def _has_unambiguous_tma_identity_match(
     current: TmaSampleIdentity,
     previous_identities: Iterable[TmaSampleIdentity],
 ) -> bool:
-    matching = [
-        previous
+    return any(
+        _tma_identities_match(current, previous)
         for previous in previous_identities
-        if _tma_identities_match(current, previous)
-    ]
-    if not matching:
-        return False
-    if current.normalized[2]:
-        return True
-    specimen_tokens = {
-        previous.normalized[2]
-        for previous in matching
-        if previous.normalized[2]
-    }
-    return len(specimen_tokens) <= 1
+    )
 
 
 def _project_row_has_tma_evidence(row: Mapping[str, Any]) -> bool:
@@ -2193,18 +2180,25 @@ def _metadata_tma_history_record(payload: Any, source: str) -> TmaHistoryRecord 
     recipe_mode = payload.get("recipe_mode")
     if not isinstance(recipe_mode, str) or not recipe_mode.strip():
         return None
-    if payload.get("session_state") != "finished":
-        return None
     return TmaHistoryRecord(identity=identity, source=source)
 
 
-def _scan_tma_history_metadata(root: Path) -> tuple[TmaHistoryRecord, ...]:
+def _scan_tma_history_metadata(
+    root: Path,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[TmaHistoryRecord, ...]:
+    is_cancelled = cancelled or (lambda: False)
+    if is_cancelled():
+        return ()
     if not root.is_dir():
         return ()
     records: list[TmaHistoryRecord] = []
     try:
         metadata_paths = root.glob(f"*/{SESSION_METADATA_JSON}")
         for metadata_path in metadata_paths:
+            if is_cancelled():
+                break
             try:
                 payload = json.loads(metadata_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError):
@@ -3583,17 +3577,34 @@ class TmaHistoryIndexWorker(QtCore.QObject):
     def __init__(self, root: Path) -> None:
         super().__init__()
         self.root = root
+        self._cancel_event = Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
         try:
-            records = _scan_tma_history_metadata(self.root)
+            records = _scan_tma_history_metadata(
+                self.root,
+                cancelled=self._cancel_event.is_set,
+            )
         except Exception as exc:
-            self.failed.emit(self.root, f"TMA history index failed: {exc}")
+            if not self._cancel_event.is_set():
+                self.failed.emit(self.root, f"TMA history index failed: {exc}")
         else:
-            self.succeeded.emit(self.root, records)
+            if not self._cancel_event.is_set():
+                self.succeeded.emit(self.root, records)
         finally:
             self.finished.emit()
+
+
+# A cloud-backed read can remain blocked after a window close. Keep every live
+# scan owned independently of the window until QThread.finished is delivered.
+_LIVE_TMA_HISTORY_SCAN_JOBS: dict[
+    QtCore.QThread,
+    TmaHistoryIndexWorker,
+] = {}
 
 
 @dataclass(frozen=True)
@@ -13460,14 +13471,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if root is None:
             return
         if self._tma_history_scan_thread is not None:
+            if self._tma_history_scan_worker is not None:
+                self._tma_history_scan_worker.cancel()
             return
         self._tma_history_scan_pending_root = None
-        thread = QtCore.QThread(self)
+        thread = QtCore.QThread()
         worker = TmaHistoryIndexWorker(root)
         worker.moveToThread(thread)
         worker.succeeded.connect(self._handle_tma_history_scan_success)
         worker.failed.connect(self._handle_tma_history_scan_failure)
-        worker.finished.connect(thread.quit)
+        worker.finished.connect(
+            thread.quit,
+            type=QtCore.Qt.ConnectionType.DirectConnection,
+        )
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(
             lambda thread=thread, worker=worker: self._finish_tma_history_scan_thread(thread, worker)
@@ -13475,6 +13491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.started.connect(worker.run)
         self._tma_history_scan_thread = thread
         self._tma_history_scan_worker = worker
+        _LIVE_TMA_HISTORY_SCAN_JOBS[thread] = worker
         thread.start()
 
     def _handle_tma_history_scan_success(self, root_obj: object, records_obj: object) -> None:
@@ -13500,19 +13517,21 @@ class MainWindow(QtWidgets.QMainWindow):
         thread: QtCore.QThread,
         worker: TmaHistoryIndexWorker,
     ) -> None:
+        _LIVE_TMA_HISTORY_SCAN_JOBS.pop(thread, None)
         if self._tma_history_scan_thread is thread:
             self._tma_history_scan_thread = None
             self._tma_history_scan_worker = None
         thread.deleteLater()
-        if self._tma_history_scan_pending_root is not None:
+        if not self._window_closing and self._tma_history_scan_pending_root is not None:
             self._tma_history_scan_timer.start()
 
     def _stop_tma_history_scan_thread(self) -> None:
         self._tma_history_scan_timer.stop()
         self._tma_history_scan_pending_root = None
         thread = self._tma_history_scan_thread
-        self._tma_history_scan_thread = None
-        self._tma_history_scan_worker = None
+        worker = self._tma_history_scan_worker
+        if worker is not None:
+            worker.cancel()
         if thread is not None:
             try:
                 thread.quit()
