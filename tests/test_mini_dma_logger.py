@@ -52,6 +52,12 @@ def _block_real_tic_usb_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mini_dma_mod, "_load_pyusb_backend", _blocked_backend)
 
 
+@pytest.fixture(autouse=True)
+def _block_real_serial_port_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must not enumerate or claim the machine's serial devices."""
+    monkeypatch.setattr(mini_dma_mod, "list_ports", SimpleNamespace(comports=lambda: []))
+
+
 def _test_settings() -> QtCore.QSettings:
     return QtCore.QSettings(
         str(TEST_QSETTINGS_ROOT / "mini_dma_logger.ini"),
@@ -415,6 +421,10 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
     _ensure_app().processEvents()
     if isinstance(snapshot, dict):
         _restore_settings(snapshot)
+
+
+def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
+    qtbot.waitUntil(lambda: window._serial_port_scan_thread is None, timeout=3000)
 
 
 def test_current_sweep_hold_bands_are_bounded_processed_signal_multipliers() -> None:
@@ -6147,6 +6157,27 @@ def test_status_bar_is_hidden_so_run_log_is_not_duplicated(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_background_ui_callback_is_dropped_after_window_closes(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[bool] = []
+    errors: list[BaseException] = []
+    _close_test_window(window)
+
+    def _invoke_after_close() -> None:
+        try:
+            window._run_on_ui_thread(lambda: called.append(True))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_invoke_after_close)
+    thread.start()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert called == []
+    assert errors == []
+
+
 def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mirror_path = tmp_path / "mini_dma_run_log.txt"
@@ -6157,7 +6188,77 @@ def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> Non
 
         window._log("mirror probe")
 
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         assert "mirror probe" in mirror_path.read_text(encoding="utf-8")
+    finally:
+        _close_test_window(window)
+
+
+def test_blocked_run_log_mirror_write_does_not_block_ui(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "blocked_run_log.txt"
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_append(path: Path, text: str) -> None:
+        assert Path(path) == mirror_path
+        assert "blocked mirror probe" in text
+        started.set()
+        assert release.wait(timeout=5.0)
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+        window._run_log_mirror_path = mirror_path
+        window._run_log_mirror_enabled = True
+        window._async_run_log_writer.reset_target("developer", mirror_path)
+
+        window._log("blocked mirror probe")
+
+        assert started.wait(timeout=1.0)
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: heartbeat == [True], timeout=1000)
+        assert "blocked mirror probe" in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        _close_test_window(window)
+
+
+def test_run_log_mirror_failure_is_persistent_and_disables_target(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "failed_run_log.txt"
+    attempts: list[Path] = []
+
+    def _failed_append(path: Path, _text: str) -> None:
+        attempts.append(Path(path))
+        raise OSError("synthetic synced-drive failure")
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _failed_append)
+        window._run_log_mirror_path = mirror_path
+        window._run_log_mirror_enabled = True
+        window._async_run_log_writer.reset_target("developer", mirror_path)
+
+        window._log("first failure")
+        window._log("queued after failure")
+
+        qtbot.waitUntil(lambda: not window._run_log_mirror_enabled, timeout=3000)
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        assert attempts == [mirror_path]
+        assert "synthetic synced-drive failure" in window.statusBar().currentMessage()
+        qtbot.waitUntil(
+            lambda: "Run-log file mirror disabled" in window.log_output.toPlainText(),
+            timeout=1000,
+        )
     finally:
         _close_test_window(window)
 
@@ -6475,8 +6576,8 @@ def test_project_auto_import_skips_condition_only_name_changes(
         window.edit_name_wire.setText("12/3")
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
         qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
-        state_key = window._builder_project_last_auto_import_state_key
-        assert state_key is not None
+        request_key = window._builder_project_last_auto_import_request_key
+        assert request_key is not None
         assert "#16a34a" in window.spin_diameter.styleSheet()
 
         window.edit_name_condition.setText("temperature test")
@@ -6484,9 +6585,156 @@ def test_project_auto_import_skips_condition_only_name_changes(
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/3 temperature test"
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "#16a34a" in window.spin_diameter.styleSheet()
-        assert window._builder_project_last_auto_import_state_key == state_key
+        assert window._builder_project_last_auto_import_request_key == request_key
         assert window._builder_project_import_thread is None
         assert not window._builder_project_import_timer.isActive()
+    finally:
+        _close_test_window(window)
+
+
+def test_builder_project_startup_import_never_probes_saved_path_on_gui_thread(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+    original_exists = Path.exists
+    original_stat = Path.stat
+    original_resolve = Path.resolve
+
+    def assert_worker_thread(path: Path) -> None:
+        if path == project_path:
+            assert mini_dma_mod.QtCore.QThread.currentThread() is not window.thread()
+
+    def guarded_exists(path: Path) -> bool:
+        assert_worker_thread(path)
+        return original_exists(path)
+
+    def guarded_stat(path: Path, *args, **kwargs):
+        assert_worker_thread(path)
+        return original_stat(path, *args, **kwargs)
+
+    def guarded_resolve(path: Path, *args, **kwargs) -> Path:
+        assert_worker_thread(path)
+        return original_resolve(path, *args, **kwargs)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        monkeypatch.setattr(Path, "exists", guarded_exists)
+        monkeypatch.setattr(Path, "stat", guarded_stat)
+        monkeypatch.setattr(Path, "resolve", guarded_resolve)
+
+        window.edit_project_path.setText(str(project_path))
+        started = window._auto_import_builder_project_if_possible(async_load=True)
+
+        assert started is True
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        assert "Imported" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_builder_project_explicit_reload_refreshes_replaced_file_in_background(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+
+    def write_project(diameter_um: float) -> None:
+        project_path.write_text(
+            json.dumps(
+                {
+                    "sections": {
+                        "microscope": {
+                            "rows": [
+                                {
+                                    "Composition": "Ni50Fe27Ga23",
+                                    "Microwire": "12/3",
+                                    "d (um)": diameter_um,
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_project(19.1)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        window.edit_project_path.setText(str(project_path))
+        assert window._auto_import_builder_project_if_possible(async_load=True) is True
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+
+        write_project(21.35)
+        assert window._auto_import_builder_project_if_possible(async_load=True, force_reload=True) is True
+
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.02135), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        assert "diameter 21.35 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_choose_builder_project_starts_forced_background_reload(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text("{}", encoding="utf-8")
+    window = _build_window(tmp_path, qtbot)
+    calls: list[dict[str, object]] = []
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *_args, **_kwargs: (str(project_path), "Microwire Project"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_auto_import_builder_project_if_possible",
+            lambda **kwargs: calls.append(kwargs) or True,
+        )
+
+        window._choose_builder_project()
+
+        assert window.edit_project_path.text() == str(project_path)
+        assert calls == [
+            {
+                "update_identity": False,
+                "quiet": True,
+                "async_load": True,
+                "force_reload": True,
+            }
+        ]
     finally:
         _close_test_window(window)
 
@@ -9328,11 +9576,13 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
             lambda: [SimpleNamespace(device="COM7", description="Rohde supply")],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_supply(port_name: str):
             assert port_name == "COM7"
@@ -9354,6 +9604,92 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
         assert window.combo_supply_profile.currentData() == "hmp4040"
         assert window.combo_current_sweep_supply_channel.currentData() == 0
         assert window.combo_motor_supply_channel.currentData() == 0
+    finally:
+        _close_test_window(window)
+
+
+def test_startup_serial_port_enumeration_is_single_pass_and_nonblocking(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    scan_thread_ids: list[int] = []
+
+    def _blocking_comports() -> list[SimpleNamespace]:
+        scan_thread_ids.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=5.0)
+        return [SimpleNamespace(device="COM8", description="Synthetic serial port")]
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _blocking_comports)
+    main_thread_id = threading.get_ident()
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert started.wait(timeout=1.0)
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: heartbeat == [True], timeout=1000)
+        assert len(scan_thread_ids) == 1
+        assert scan_thread_ids[0] != main_thread_id
+        assert "background" in window.statusBar().currentMessage().lower()
+
+        release.set()
+
+        qtbot.waitUntil(lambda: window.combo_supply_port.findData("COM8") >= 0, timeout=3000)
+        assert window.combo_scale_port.findData("COM8") >= 0
+        assert window.combo_ir_port.findData("COM8") >= 0
+        assert len(scan_thread_ids) == 1
+    finally:
+        release.set()
+        _close_test_window(window)
+
+
+def test_startup_serial_port_enumeration_failure_is_persistent(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _failed_comports() -> list[SimpleNamespace]:
+        raise RuntimeError("synthetic SetupAPI failure")
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _failed_comports)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        qtbot.waitUntil(
+            lambda: "synthetic SetupAPI failure" in window.statusBar().currentMessage(),
+            timeout=3000,
+        )
+        assert window.combo_supply_port.currentText() == "Serial-port scan failed"
+        assert window.combo_scale_port.currentText() == "Serial-port scan failed"
+        assert window.combo_ir_port.currentText() == "Serial-port scan failed"
+        assert "Serial-port scan failed: synthetic SetupAPI failure" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_empty_background_serial_scan_preserves_saved_port_settings(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    settings = _test_settings()
+    settings.setValue("supply_port", "COM21")
+    settings.setValue("scale_port", "COM22")
+    settings.setValue("ir_port", "COM23")
+    settings.sync()
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        _wait_for_serial_port_scan(window, qtbot)
+        assert window.combo_supply_port.currentData() == "COM21"
+        assert window.combo_scale_port.currentData() == "COM22"
+        assert window.combo_ir_port.currentData() == "COM23"
+        assert "not detected" in window.combo_supply_port.currentText()
+        assert "not detected" in window.combo_scale_port.currentText()
+        assert "not detected" in window.combo_ir_port.currentText()
     finally:
         _close_test_window(window)
 
@@ -13990,6 +14326,7 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
         assert profile_index >= 0
         window.combo_supply_profile.setCurrentIndex(profile_index)
@@ -14625,6 +14962,7 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
             "list_ports",
             SimpleNamespace(comports=lambda: [SimpleNamespace(device="COM7", description="HMP")]),
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
         monkeypatch.setattr(
             window,
             "_probe_supply_candidate",
@@ -24555,6 +24893,7 @@ def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
         window._stop_session(reason="recipe_completed", detail="Recipe completed.")
 
         assert run_log_path is not None
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         assert run_log_path.name == mini_dma_mod.SESSION_RUN_LOG_TXT
         text = run_log_path.read_text(encoding="utf-8")
         assert "Session started" in text
@@ -25187,6 +25526,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -25195,6 +25535,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
                 SimpleNamespace(device="COM3", description="USB Serial B"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_scale(port_name: str):
             if port_name == "COM6":
@@ -25230,6 +25571,7 @@ def test_fast_scale_auto_connect_prefers_ch340_scale_over_saved_prolific_port(
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -25238,6 +25580,7 @@ def test_fast_scale_auto_connect_prefers_ch340_scale_over_saved_prolific_port(
                 SimpleNamespace(device="COM5", description="USB-SERIAL CH340"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
         window.combo_scale_port.clear()
         window.combo_scale_port.addItem("COM4 - Prolific", "COM4")
         window.combo_scale_port.addItem("COM5 - CH340", "COM5")
@@ -25273,6 +25616,7 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -25281,6 +25625,7 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
                 SimpleNamespace(device="COM3", description="USB Serial B"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_supply(port_name: str):
             if port_name == "COM3":
