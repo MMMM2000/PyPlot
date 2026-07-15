@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from importlib import import_module
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import Any, Deque, Dict, List, Mapping, Optional, SupportsBytes, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
@@ -530,7 +530,59 @@ class FabricationFolderLoadWorker(QtCore.QObject):
             self.finished.emit()
 
 
-_RETAINED_FABRICATION_TASKS: dict[int, tuple[QtCore.QThread, FabricationFolderLoadWorker]] = {}
+_RETAINED_FABRICATION_TASKS: set["DaemonFabricationTask"] = set()
+
+
+class DaemonFabricationTask:
+    """Run a fabrication scan without any reference back to its window."""
+
+    def __init__(self, worker: FabricationFolderLoadWorker) -> None:
+        self.worker = worker
+        self.done_event = Event()
+        self._event_lock = Lock()
+        self._events: deque[tuple[str, tuple[object, ...]]] = deque()
+        for signal_name in ("progress_changed", "succeeded", "failed", "cancelled"):
+            signal = getattr(worker, signal_name)
+            signal.connect(
+                lambda *args, event_name=signal_name: self._record_event(event_name, args),
+                QtCore.Qt.ConnectionType.DirectConnection,
+            )
+        self.thread = Thread(
+            target=self._run,
+            name="current-annealing-fabrication-filesystem",
+            daemon=True,
+        )
+
+    def _record_event(self, name: str, args: tuple[object, ...]) -> None:
+        with self._event_lock:
+            self._events.append((name, args))
+
+    def drain_events(self) -> list[tuple[str, tuple[object, ...]]]:
+        with self._event_lock:
+            events = list(self._events)
+            self._events.clear()
+        return events
+
+    def start(self) -> None:
+        _RETAINED_FABRICATION_TASKS.add(self)
+        self.thread.start()
+
+    def cancel(self) -> None:
+        self.worker.cancel()
+
+    def isRunning(self) -> bool:  # noqa: N802 - compatibility with previous QThread owner
+        return self.thread.is_alive()
+
+    def wait(self, timeout_ms: int) -> bool:
+        self.thread.join(timeout=max(0, int(timeout_ms)) / 1000.0)
+        return not self.thread.is_alive()
+
+    def _run(self) -> None:
+        try:
+            self.worker.run()
+        finally:
+            self.done_event.set()
+            _RETAINED_FABRICATION_TASKS.discard(self)
 
 
 class MeasurementHistoryDialog(QtWidgets.QDialog):
@@ -735,9 +787,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._metadata_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
         self._metadata_diameter_imported = False
         self._metadata_diameter_import_sample_key: tuple[str, str] | None = None
-        self._fabrication_thread: QtCore.QThread | None = None
+        self._fabrication_thread: DaemonFabricationTask | None = None
         self._fabrication_worker: FabricationFolderLoadWorker | None = None
-        self._fabrication_tasks: dict[int, tuple[QtCore.QThread, FabricationFolderLoadWorker]] = {}
+        self._fabrication_tasks: dict[int, DaemonFabricationTask] = {}
+        self._fabrication_poll_timer = QtCore.QTimer(self)
+        self._fabrication_poll_timer.setInterval(50)
+        self._fabrication_poll_timer.timeout.connect(self._poll_fabrication_tasks)
         self._window_closing = False
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         self.supply_profile_id = "hmp4030"
@@ -1718,14 +1773,14 @@ class MainWindow(QtWidgets.QMainWindow):
         thread = self._fabrication_thread
         if thread is None:
             return False
+        if thread.done_event.is_set():
+            self._poll_fabrication_tasks()
+            thread = self._fabrication_thread
+            if thread is None:
+                return False
         if thread.isRunning():
             return True
-        worker = self._fabrication_worker
-        if worker is not None:
-            self._finish_fabrication_thread(thread, worker)
-        else:
-            self._fabrication_thread = None
-            self._set_fabrication_loading_ui(False)
+        self._poll_fabrication_tasks()
         return False
 
     def _set_fabrication_loading_ui(self, loading: bool) -> None:
@@ -1745,25 +1800,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_fabrication_folder_from_ui()
 
     def _cancel_fabrication_folder_load(self) -> None:
-        for _thread, worker in list(self._fabrication_tasks.values()):
-            worker.cancel()
+        for task in list(self._fabrication_tasks.values()):
+            task.cancel()
 
     def _retain_fabrication_task(
         self,
-        thread: QtCore.QThread,
-        worker: FabricationFolderLoadWorker,
+        task: DaemonFabricationTask,
     ) -> None:
-        task = (thread, worker)
-        self._fabrication_tasks[id(thread)] = task
-        _RETAINED_FABRICATION_TASKS[id(thread)] = task
+        self._fabrication_tasks[id(task)] = task
+        self._fabrication_poll_timer.start()
 
-    def _release_fabrication_task(self, thread: QtCore.QThread) -> None:
-        self._fabrication_tasks.pop(id(thread), None)
-        _RETAINED_FABRICATION_TASKS.pop(id(thread), None)
-        try:
-            thread.deleteLater()
-        except RuntimeError:
-            pass
+    def _release_fabrication_task(self, task: DaemonFabricationTask) -> None:
+        self._fabrication_tasks.pop(id(task), None)
 
     def _wait_for_fabrication_tasks(self, timeout_ms: int = 250) -> bool:
         tasks = list(self._fabrication_tasks.values())
@@ -1771,23 +1819,40 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
         all_finished = True
-        for thread, _worker in tasks:
+        for task in tasks:
             remaining_ms = max(0, int((deadline - time.monotonic()) * 1000.0))
-            try:
-                if thread.isRunning() and remaining_ms > 0:
-                    thread.wait(remaining_ms)
-                running = thread.isRunning()
-            except RuntimeError:
-                running = False
-            if running:
+            if task.isRunning() and remaining_ms > 0:
+                task.wait(remaining_ms)
+            if task.isRunning():
                 all_finished = False
             else:
-                self._release_fabrication_task(thread)
+                self._release_fabrication_task(task)
         return all_finished
+
+    def _poll_fabrication_tasks(self) -> None:
+        for task in list(self._fabrication_tasks.values()):
+            current = self._fabrication_thread is task and not self._window_closing
+            for event_name, args in task.drain_events():
+                if not current:
+                    continue
+                if event_name == "progress_changed" and args:
+                    self._set_metadata_status(str(args[0]))
+                elif event_name == "succeeded" and len(args) == 3:
+                    self._handle_fabrication_load_success(args[0], args[1], int(args[2]))
+                elif event_name == "failed" and len(args) == 2:
+                    self._handle_fabrication_load_failure(args[0], str(args[1]))
+                elif event_name == "cancelled" and args:
+                    self._handle_fabrication_load_cancelled(args[0])
+            if task.done_event.is_set():
+                self._finish_fabrication_thread(task, task.worker)
+        if self._fabrication_tasks and not self._window_closing:
+            self._fabrication_poll_timer.start()
+        else:
+            self._fabrication_poll_timer.stop()
 
     def _finish_fabrication_thread(
         self,
-        thread: QtCore.QThread,
+        thread: DaemonFabricationTask,
         worker: FabricationFolderLoadWorker,
     ) -> None:
         if self._fabrication_thread is thread:
@@ -1944,47 +2009,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not root.exists() or not root.is_dir():
             self._set_metadata_status("Fabrication folder was not found.")
             return False
-        thread = QtCore.QThread()
         worker = FabricationFolderLoadWorker(root)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress_changed.connect(
-            lambda message, load_thread=thread: (
-                self._set_metadata_status(message)
-                if self._fabrication_thread is load_thread and not self._window_closing
-                else None
-            )
-        )
-        worker.succeeded.connect(
-            lambda root_obj, records_obj, file_count, load_thread=thread: (
-                self._handle_fabrication_load_success(root_obj, records_obj, file_count)
-                if self._fabrication_thread is load_thread and not self._window_closing
-                else None
-            )
-        )
-        worker.failed.connect(
-            lambda root_obj, message, load_thread=thread: (
-                self._handle_fabrication_load_failure(root_obj, message)
-                if self._fabrication_thread is load_thread and not self._window_closing
-                else None
-            )
-        )
-        worker.cancelled.connect(
-            lambda root_obj, load_thread=thread: (
-                self._handle_fabrication_load_cancelled(root_obj)
-                if self._fabrication_thread is load_thread and not self._window_closing
-                else None
-            )
-        )
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda thread=thread, worker=worker: self._finish_fabrication_thread(thread, worker))
-        self._fabrication_thread = thread
+        task = DaemonFabricationTask(worker)
+        self._fabrication_thread = task
         self._fabrication_worker = worker
-        self._retain_fabrication_task(thread, worker)
+        self._retain_fabrication_task(task)
         self._set_fabrication_loading_ui(True)
         self._set_metadata_status(f"Scanning fabrication folder: {root}")
-        thread.start()
+        task.start()
         return True
 
     def _refresh_metadata_completers(self) -> None:
@@ -6430,6 +6462,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
+        self._fabrication_poll_timer.stop()
         self._cancel_fabrication_folder_load()
         self._wait_for_fabrication_tasks(timeout_ms=250)
         self._release_experiment_sleep_guard()

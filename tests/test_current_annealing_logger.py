@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import gc
 import json
 import sys
 import threading
 import time
 import types
+import weakref
 
 import pytest
 
@@ -787,7 +789,7 @@ def test_current_annealing_blocked_fabrication_close_is_bounded_and_retained(
         assert callbacks and callbacks[0]() is True
 
         release.set()
-        qtbot.waitUntil(lambda: id(thread) not in window._fabrication_tasks, timeout=3000)
+        qtbot.waitUntil(thread.done_event.is_set, timeout=3000)
         logger_mod.QtWidgets.QApplication.processEvents()
         assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
     finally:
@@ -800,6 +802,46 @@ def test_current_annealing_blocked_fabrication_close_is_bounded_and_retained(
         logger_mod.QtWidgets.QApplication.processEvents()
         logger_mod.QtCore.qInstallMessageHandler(previous_handler)
         window.close()
+
+
+def test_blocked_fabrication_task_does_not_retain_owner(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_run(self: logger_mod.FabricationFolderLoadWorker) -> None:
+        started.set()
+        release.wait()
+        self.finished.emit()
+
+    monkeypatch.setattr(logger_mod.FabricationFolderLoadWorker, "run", _blocked_run)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    worker = logger_mod.FabricationFolderLoadWorker(root)
+    task = logger_mod.DaemonFabricationTask(worker)
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    owner.task = task
+    owner_ref = weakref.ref(owner)
+    task.start()
+    assert started.wait(timeout=2.0)
+
+    del owner
+    gc.collect()
+
+    try:
+        assert owner_ref() is None
+        assert task.thread.daemon is True
+        assert task.isRunning()
+        assert task in logger_mod._RETAINED_FABRICATION_TASKS
+    finally:
+        release.set()
+        task.thread.join(timeout=3.0)
 
 
 def test_current_annealing_replacement_retains_old_worker_and_ignores_stale_result(

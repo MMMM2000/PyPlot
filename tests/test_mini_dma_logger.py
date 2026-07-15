@@ -6988,6 +6988,7 @@ def test_async_run_log_writer_stop_discards_queued_writes(
     started = threading.Event()
     release = threading.Event()
     writes: list[str] = []
+    warnings: list[str] = []
 
     def _blocked_append(_path: Path, text: str) -> None:
         writes.append(text)
@@ -6997,6 +6998,7 @@ def test_async_run_log_writer_stop_discards_queued_writes(
     monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
     writer = mini_dma_mod.AsyncRunLogWriter(
         lambda *_args: None,
+        warnings.append,
         max_requests=8,
         max_bytes=1024,
     )
@@ -7009,6 +7011,10 @@ def test_async_run_log_writer_stop_discards_queued_writes(
     assert writer.stop(timeout_s=0.05) is False
     assert writer.queued_request_count == 0
     assert writer.queued_bytes == 0
+    assert writer.last_stop_discarded_session_requests == 1
+    assert writer.last_stop_discarded_session_bytes == len("queued-1\n")
+    assert len(warnings) == 1
+    assert "metadata marks the run log incomplete" in warnings[0]
     assert writer.enqueue("session", path, "after-stop\n") is False
     release.set()
     writer._thread.join(timeout=3.0)
@@ -7324,22 +7330,22 @@ def test_tma_filesystem_workers_close_bounded_and_remain_owned(
     previous_handler = QtCore.qInstallMessageHandler(
         lambda _kind, _context, message: qt_messages.append(message)
     )
-    threads: list[QtCore.QThread] = []
+    tasks: list[mini_dma_mod.DaemonFilesystemTask] = []
     try:
         window._start_fabrication_folder_load(root, composition="Ni50Fe27Ga23")
         window._start_annealing_folder_scan("kosice", root)
         assert window._start_saved_builder_project_auto_import(project)
         for event in started.values():
             assert event.wait(timeout=2.0)
-        threads = [thread for thread, _worker in window._filesystem_worker_tasks.values()]
-        assert len(threads) >= 3
+        tasks = list(window._filesystem_worker_tasks.values())
+        assert len(tasks) >= 3
 
         close_started = time.perf_counter()
         window.close()
         close_elapsed_s = time.perf_counter() - close_started
 
         assert close_elapsed_s < 0.9
-        assert all(thread.isRunning() for thread in threads)
+        assert all(task.isRunning() and task.thread.daemon for task in tasks)
         assert len(window._filesystem_worker_tasks) >= 3
         assert window._builder_project_import_thread is not None
         assert window._fabrication_thread is not None
@@ -7347,7 +7353,7 @@ def test_tma_filesystem_workers_close_bounded_and_remain_owned(
 
         release.set()
         qtbot.waitUntil(
-            lambda: all(id(thread) not in window._filesystem_worker_tasks for thread in threads),
+            lambda: all(task.done_event.is_set() for task in tasks),
             timeout=3000,
         )
         _ensure_app().processEvents()
@@ -7355,14 +7361,95 @@ def test_tma_filesystem_workers_close_bounded_and_remain_owned(
         assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
     finally:
         release.set()
-        for thread in threads:
-            try:
-                thread.wait(3000)
-            except RuntimeError:
-                pass
+        for task in tasks:
+            task.wait(3000)
         _ensure_app().processEvents()
         QtCore.qInstallMessageHandler(previous_handler)
         _close_test_window(window)
+
+
+def test_blocked_daemon_filesystem_task_does_not_retain_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_run(self: mini_dma_mod.FabricationSuggestionWorker) -> None:
+        started.set()
+        release.wait()
+        self.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.FabricationSuggestionWorker, "run", _blocked_run)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    worker = mini_dma_mod.FabricationSuggestionWorker(
+        root,
+        composition="Ni50Fe27Ga23",
+    )
+    task = mini_dma_mod.DaemonFilesystemTask(worker, kind="fabrication")
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    owner.task = task
+    owner_ref = weakref.ref(owner)
+    task.start()
+    assert started.wait(timeout=2.0)
+
+    del owner
+    gc.collect()
+
+    try:
+        assert owner_ref() is None
+        assert task.thread.daemon is True
+        assert task.isRunning()
+        assert task in mini_dma_mod._RETAINED_DAEMON_FILESYSTEM_TASKS
+    finally:
+        release.set()
+        task.thread.join(timeout=3.0)
+
+
+def test_blocked_daemon_filesystem_tasks_do_not_abort_subprocess_exit() -> None:
+    code = """
+import threading
+from pathlib import Path
+from PyQt6 import QtWidgets
+from data_logging.mini_dma_logger import mini_dma_logger as tma
+from data_logging.current_annealing_logger import current_annealing_logger as current
+
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+blocked = threading.Event()
+tma_worker = tma.FabricationSuggestionWorker(Path('synthetic-tma'), composition='sample')
+tma_worker.run = lambda: blocked.wait()
+tma_task = tma.DaemonFilesystemTask(tma_worker, kind='fabrication')
+tma_task.start()
+current_worker = current.FabricationFolderLoadWorker(Path('synthetic-current'))
+current_worker.run = lambda: blocked.wait()
+current_task = current.DaemonFabricationTask(current_worker)
+current_task.start()
+assert tma_task.thread.daemon and current_task.thread.daemon
+print('daemon-filesystem-tasks-started', flush=True)
+"""
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env.setdefault("MPLBACKEND", "Agg")
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "daemon-filesystem-tasks-started" in result.stdout
+    assert "QThread: Destroyed while thread is still running" not in result.stderr
+    assert "Aborted" not in result.stderr
 
 
 def test_superseded_fabrication_worker_is_retained_and_stale_result_ignored(
@@ -26062,9 +26149,86 @@ def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
         assert window._session_json_path is not None
         payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
         assert payload["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+        assert payload["logging"]["run_log_complete"] is True
+        assert payload["logging"]["run_log_incomplete_lines"] == 0
         assert payload["logging"]["raw_scale_max_gap_s"] == pytest.approx(0.05)
         assert "remote_debugging_observability" in payload["control_logic"]["features"]
     finally:
+        _close_test_window(window)
+
+
+def test_saturated_session_log_queue_persists_incomplete_metadata(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("saturated_session_log")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    window._async_run_log_writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=1,
+        max_bytes=16,
+    )
+
+    try:
+        window._start_session()
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_lines"] >= 1
+        assert payload["logging"]["run_log_incomplete_reason"] == "queue_saturated"
+        assert "metadata records any session-log incompleteness" in window.statusBar().currentMessage()
+    finally:
+        if window._session_active:
+            window._stop_session(reason="manual_session_stop")
+        _close_test_window(window)
+
+
+def test_blocked_session_log_close_persists_final_flush_timeout(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("blocked_session_log_close")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_append(_path: Path, _text: str) -> None:
+        started.set()
+        release.wait()
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    window._async_run_log_writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=32,
+        max_bytes=64 * 1024,
+    )
+    try:
+        window._start_session()
+        assert started.wait(timeout=2.0)
+        metadata_path = window._session_json_path
+        assert metadata_path is not None
+
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Synthetic blocked session log.")
+        stop_elapsed_s = time.perf_counter() - stop_started
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        assert stop_elapsed_s < 0.75
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_lines"] >= 1
+        assert payload["logging"]["run_log_incomplete_reason"] == "close_flush_timeout"
+        assert "run_log_complete=false" in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer._thread.join(timeout=3.0)
         _close_test_window(window)
 
 
