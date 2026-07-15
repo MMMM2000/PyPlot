@@ -7069,6 +7069,81 @@ def test_async_run_log_writer_failure_counts_failed_purged_and_coalesced_lines(
         writer.stop(timeout_s=1.0)
 
 
+def test_async_run_log_writer_reset_purges_stale_queue_and_reclaims_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[str] = []
+    warnings: list[str] = []
+
+    def _blocked_first_append(_path: Path, text: str) -> None:
+        writes.append(text)
+        if len(writes) == 1:
+            started.set()
+            assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_first_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=3,
+        max_bytes=128,
+    )
+    path = tmp_path / "reused-session.log"
+    old_generation = writer.reset_target("session", path)
+    try:
+        assert writer.enqueue(
+            "session",
+            path,
+            "old-in-flight\n",
+            generation=old_generation,
+        )
+        assert started.wait(timeout=2.0)
+        for index in range(3):
+            assert writer.enqueue(
+                "session",
+                path,
+                f"old-queued-{index}\n",
+                generation=old_generation,
+            )
+        assert writer.queued_request_count == 3
+        assert warnings == []
+        assert writer.queued_bytes > 0
+
+        replacement_generation = writer.reset_target("session", path)
+
+        assert replacement_generation > old_generation
+        assert writer.queued_request_count == 0
+        assert writer.queued_bytes == 0
+        for index in range(3):
+            assert writer.enqueue(
+                "session",
+                path,
+                f"replacement-{index}\n",
+                generation=replacement_generation,
+            )
+        assert writer.queued_request_count == 3
+
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        assert writes == [
+            "old-in-flight\n",
+            "replacement-0\n",
+            "replacement-1\n",
+            "replacement-2\n",
+        ]
+        assert not writer.target_is_disabled(
+            "session",
+            path,
+            generation=replacement_generation,
+        )
+    finally:
+        release.set()
+        writer.stop(timeout_s=1.0)
+
+
 def test_blocked_run_log_mirror_write_does_not_block_ui(
     tmp_path: Path,
     qtbot,
@@ -7089,7 +7164,10 @@ def test_blocked_run_log_mirror_write_does_not_block_ui(
         monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
         window._run_log_mirror_path = mirror_path
         window._run_log_mirror_enabled = True
-        window._async_run_log_writer.reset_target("developer", mirror_path)
+        window._run_log_mirror_generation = window._async_run_log_writer.reset_target(
+            "developer",
+            mirror_path,
+        )
 
         window._log("blocked mirror probe")
 
@@ -7121,7 +7199,10 @@ def test_run_log_mirror_failure_is_persistent_and_disables_target(
         monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _failed_append)
         window._run_log_mirror_path = mirror_path
         window._run_log_mirror_enabled = True
-        window._async_run_log_writer.reset_target("developer", mirror_path)
+        window._run_log_mirror_generation = window._async_run_log_writer.reset_target(
+            "developer",
+            mirror_path,
+        )
 
         window._log("first failure")
         window._log("queued after failure")
@@ -7135,6 +7216,66 @@ def test_run_log_mirror_failure_is_persistent_and_disables_target(
             timeout=1000,
         )
     finally:
+        _close_test_window(window)
+
+
+def test_old_developer_mirror_failure_cannot_disable_reenabled_generation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "reused_developer_mirror.log"
+    started = threading.Event()
+    release = threading.Event()
+    successful_writes: list[str] = []
+    first_append = True
+
+    def _old_blocks_then_fails(_path: Path, text: str) -> None:
+        nonlocal first_append
+        if first_append:
+            first_append = False
+            started.set()
+            assert release.wait(timeout=5.0)
+            raise OSError("stale developer mirror failure")
+        successful_writes.append(text)
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_fails)
+        window._run_log_mirror_path = mirror_path
+        window._set_run_log_mirror_enabled(True)
+        old_generation = window._run_log_mirror_generation
+        assert old_generation is not None
+        assert started.wait(timeout=2.0)
+
+        window._set_run_log_mirror_enabled(False)
+        window._set_run_log_mirror_enabled(True)
+        replacement_generation = window._run_log_mirror_generation
+        assert replacement_generation is not None
+        assert replacement_generation > old_generation
+        window._log("replacement developer mirror line")
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: any("replacement developer mirror line" in text for text in successful_writes),
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+
+        assert window._run_log_mirror_enabled is True
+        assert window._run_log_mirror_generation == replacement_generation
+        assert not window._async_run_log_writer.target_is_disabled(
+            "developer",
+            mirror_path,
+            generation=replacement_generation,
+        )
+        assert "Run-log file mirror enabled" in successful_writes[0]
+        assert "replacement developer mirror line" in successful_writes[1]
+        assert "stale developer mirror failure" not in window.statusBar().currentMessage()
+        assert "Run-log file mirror disabled because writing" not in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         _close_test_window(window)
 
 
@@ -26433,10 +26574,12 @@ def test_session_log_final_metadata_follows_sleep_guard_and_closes_enqueue_bound
         _close_test_window(window)
 
 
-def test_old_session_failure_cannot_disable_same_path_replacement_generation(
+@pytest.mark.parametrize("old_append_fails", [False, True], ids=["success", "failure"])
+def test_old_session_completion_cannot_contaminate_same_path_replacement_generation(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
+    old_append_fails: bool,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("old_generation")
@@ -26458,13 +26601,14 @@ def test_old_session_failure_cannot_disable_same_path_replacement_generation(
 
     first_append = True
 
-    def _old_blocks_then_fails(path: Path, text: str) -> None:
+    def _old_blocks_then_completes(path: Path, text: str) -> None:
         nonlocal first_append
         if first_append:
             first_append = False
             old_append_started.set()
             assert release_old_append.wait(timeout=5.0)
-            raise OSError("old generation failed after replacement started")
+            if old_append_fails:
+                raise OSError("old generation failed after replacement started")
         successful_writes.append((Path(path), text))
 
     monkeypatch.setattr(
@@ -26472,7 +26616,7 @@ def test_old_session_failure_cannot_disable_same_path_replacement_generation(
         "create_experiment_sleep_guard",
         lambda _reason: _FakeSleepGuard(),
     )
-    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_fails)
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_completes)
     writer = mini_dma_mod.AsyncRunLogWriter(
         window._handle_async_run_log_write_failure,
         window._handle_async_run_log_overload,
@@ -26517,8 +26661,18 @@ def test_old_session_failure_cannot_disable_same_path_replacement_generation(
 
         window.edit_log_name.setText("replacement_generation")
         window._start_session(record_initial_point=False)
+        window._ui_refresh_timer.stop()
         replacement_metadata_path = window._session_json_path
         assert replacement_metadata_path is not None
+        with writer._condition:
+            stale_old_texts = [
+                request.text
+                for request in writer._queue
+                if request.channel == "session"
+                and request.path == old_run_log_path
+                and request.generation == old_generation
+            ]
+        assert stale_old_texts
         replacement_generation = writer.reset_target("session", old_run_log_path)
         assert replacement_generation > old_generation
         window._session_run_log_path = old_run_log_path
@@ -26543,13 +26697,24 @@ def test_old_session_failure_cannot_disable_same_path_replacement_generation(
             old_run_log_path,
             generation=replacement_generation,
         )
-        replacement_texts = [
+        shared_path_texts = [
             text
             for path, text in successful_writes
-            if Path(path) == old_run_log_path and "replacement same-path line" in text
+            if Path(path) == old_run_log_path
+        ]
+        replacement_texts = [
+            text for text in shared_path_texts if "replacement same-path line" in text
         ]
         assert ["line 1" in text for text in replacement_texts] == [True, False]
         assert ["line 2" in text for text in replacement_texts] == [False, True]
+        if old_append_fails:
+            post_old_in_flight_texts = shared_path_texts
+        else:
+            assert shared_path_texts[0] not in stale_old_texts
+            assert "replacement same-path line" not in shared_path_texts[0]
+            post_old_in_flight_texts = shared_path_texts[1:]
+        assert post_old_in_flight_texts[:2] == replacement_texts
+        assert not any(text in stale_old_texts for text in post_old_in_flight_texts)
         assert window._session_run_log_complete is True
         assert window._session_run_log_incomplete_lines == 0
 

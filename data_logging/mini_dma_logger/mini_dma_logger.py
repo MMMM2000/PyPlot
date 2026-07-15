@@ -3771,6 +3771,22 @@ class AsyncRunLogWriter:
             base_key = self._target_base_key(channel, path)
             generation = self._target_generations.get(base_key, 0) + 1
             self._target_generations[base_key] = generation
+            retained = deque(
+                request
+                for request in self._queue
+                if not (
+                    self._target_base_key(request.channel, request.path) == base_key
+                    and request.generation < generation
+                )
+            )
+            if len(retained) != len(self._queue):
+                self._queue = retained
+                self._queued_bytes = sum(
+                    self._request_bytes(request) for request in retained
+                )
+                if not self._queue and self._in_flight_request is None:
+                    self._overload_warning_active = False
+                self._condition.notify_all()
             return generation
 
     @staticmethod
@@ -4127,6 +4143,14 @@ class AsyncRunLogWriter:
                     return
                 request = self._queue.popleft()
                 self._queued_bytes -= self._request_bytes(request)
+                if request.generation != self._target_generation_locked(
+                    request.channel,
+                    request.path,
+                ):
+                    if not self._queue:
+                        self._overload_warning_active = False
+                    self._condition.notify_all()
+                    continue
                 self._in_flight_request = request
             try:
                 append_text_with_rotation(request.path, request.text)
@@ -6811,6 +6835,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._calibrated_load_noise_g: float | None = None
         self._run_log_mirror_enabled = False
         self._run_log_mirror_path = DEFAULT_RUN_LOG_MIRROR_PATH
+        self._run_log_mirror_generation: int | None = None
         self._pending_run_log_lines: list[str] = []
         self._run_log_flush_queued = False
         self._owned_shared_broker_server: Any | None = None
@@ -7423,7 +7448,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_run_log_mirror_enabled(self, enabled: bool) -> None:
         self._run_log_mirror_enabled = bool(enabled)
         if self._run_log_mirror_enabled:
-            self._async_run_log_writer.reset_target("developer", self._run_log_mirror_path)
+            self._run_log_mirror_generation = self._async_run_log_writer.reset_target(
+                "developer",
+                self._run_log_mirror_path,
+            )
+        else:
+            self._run_log_mirror_generation = None
         if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
             self.action_mirror_run_log.blockSignals(True)
             self.action_mirror_run_log.setChecked(self._run_log_mirror_enabled)
@@ -11078,7 +11108,17 @@ class MainWindow(QtWidgets.QMainWindow):
                     persist=True,
                 )
         if self._run_log_mirror_enabled:
-            self._async_run_log_writer.enqueue("developer", self._run_log_mirror_path, line + "\n")
+            if self._run_log_mirror_generation is None:
+                self._run_log_mirror_generation = self._async_run_log_writer.reset_target(
+                    "developer",
+                    self._run_log_mirror_path,
+                )
+            self._async_run_log_writer.enqueue(
+                "developer",
+                self._run_log_mirror_path,
+                line + "\n",
+                generation=self._run_log_mirror_generation,
+            )
 
     def _queue_run_log_display_line(self, line: str) -> None:
         self._pending_run_log_lines.append(str(line))
@@ -11174,8 +11214,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             message = f"Per-run log mirror disabled because writing {path} failed ({detail})."
         else:
+            self._async_run_log_writer.take_target_failure(
+                "developer",
+                path,
+                generation=generation,
+            )
+            current_developer_target = (
+                self._run_log_mirror_enabled
+                and self._run_log_mirror_path == path
+                and self._run_log_mirror_generation == generation
+            )
+            if not current_developer_target:
+                return
             if self._run_log_mirror_path == path:
                 self._run_log_mirror_enabled = False
+                self._run_log_mirror_generation = None
                 if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
                     self.action_mirror_run_log.blockSignals(True)
                     self.action_mirror_run_log.setChecked(False)
@@ -31738,6 +31791,14 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._run_log_mirror_enabled = bool(
             self.settings.value("developer_run_log_mirror_enabled", False, type=bool)
+        )
+        self._run_log_mirror_generation = (
+            self._async_run_log_writer.reset_target(
+                "developer",
+                self._run_log_mirror_path,
+            )
+            if self._run_log_mirror_enabled
+            else None
         )
         if hasattr(self, "action_mirror_run_log") and self.action_mirror_run_log is not None:
             self.action_mirror_run_log.blockSignals(True)
