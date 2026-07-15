@@ -9057,6 +9057,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 update_identity=False,
                 quiet=True,
                 async_load=True,
+                force_reload=True,
             )
         )
         self.edit_project_path.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
@@ -11515,7 +11516,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if path_str:
             self.edit_project_path.setText(path_str)
             self._builder_project_path = Path(path_str)
-            self._auto_import_builder_project_if_possible(update_identity=False, quiet=True)
+            self._auto_import_builder_project_if_possible(
+                update_identity=False,
+                quiet=True,
+                async_load=True,
+                force_reload=True,
+            )
 
     def _fabrication_load_active(self) -> bool:
         return self._fabrication_thread is not None and self._fabrication_thread.isRunning()
@@ -12517,6 +12523,7 @@ class MainWindow(QtWidgets.QMainWindow):
         update_identity: bool = False,
         quiet: bool = True,
         async_load: bool = False,
+        force_reload: bool = False,
     ) -> bool:
         if self._builder_import_in_progress:
             if not update_identity:
@@ -12531,7 +12538,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_path = path
         request_key = self._project_import_request_key(path)
         if async_load and not update_identity:
-            if self._builder_project_last_auto_import_request_key == request_key:
+            if not force_reload and self._builder_project_last_auto_import_request_key == request_key:
                 return True
             self._builder_project_import_retry_pending = False
             return self._start_saved_builder_project_auto_import(path, quiet=quiet)

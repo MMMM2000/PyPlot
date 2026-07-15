@@ -6554,6 +6554,90 @@ def test_builder_project_startup_import_never_probes_saved_path_on_gui_thread(
         _close_test_window(window)
 
 
+def test_builder_project_explicit_reload_refreshes_replaced_file_in_background(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+
+    def write_project(diameter_um: float) -> None:
+        project_path.write_text(
+            json.dumps(
+                {
+                    "sections": {
+                        "microscope": {
+                            "rows": [
+                                {
+                                    "Composition": "Ni50Fe27Ga23",
+                                    "Microwire": "12/3",
+                                    "d (um)": diameter_um,
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_project(19.1)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        window.edit_project_path.setText(str(project_path))
+        assert window._auto_import_builder_project_if_possible(async_load=True) is True
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+
+        write_project(21.35)
+        assert window._auto_import_builder_project_if_possible(async_load=True, force_reload=True) is True
+
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.02135), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        assert "diameter 21.35 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_choose_builder_project_starts_forced_background_reload(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text("{}", encoding="utf-8")
+    window = _build_window(tmp_path, qtbot)
+    calls: list[dict[str, object]] = []
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *_args, **_kwargs: (str(project_path), "Microwire Project"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_auto_import_builder_project_if_possible",
+            lambda **kwargs: calls.append(kwargs) or True,
+        )
+
+        window._choose_builder_project()
+
+        assert window.edit_project_path.text() == str(project_path)
+        assert calls == [
+            {
+                "update_identity": False,
+                "quiet": True,
+                "async_load": True,
+                "force_reload": True,
+            }
+        ]
+    finally:
+        _close_test_window(window)
+
+
 def test_project_diameter_invalidates_immediately_then_updates_for_changed_microwire(
     tmp_path: Path,
     qtbot,
