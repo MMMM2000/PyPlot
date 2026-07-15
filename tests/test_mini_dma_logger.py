@@ -825,6 +825,49 @@ def test_tma_history_blocked_scan_close_is_nonblocking_and_qthread_free(
         _close_test_window(window)
 
 
+def test_run_summary_generation_keeps_one_active_and_latest_pending(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    started: list[Path] = []
+    releases = [threading.Event(), threading.Event()]
+
+    def _blocked_generate(run_dir: Path) -> dict[str, Path]:
+        index = len(started)
+        started.append(Path(run_dir))
+        assert releases[index].wait(timeout=5.0)
+        return {
+            "image_path": Path(run_dir) / "summary.png",
+            "detail_image_path": Path(run_dir) / "summary_detail.png",
+        }
+
+    plot_module = importlib.import_module("data_logging.mini_dma_logger.run_core_plot")
+    monkeypatch.setattr(plot_module, "generate_core_run_plot", _blocked_generate)
+    run_dirs = [tmp_path / f"run-{index}" for index in range(6)]
+    try:
+        for run_dir in run_dirs:
+            window._start_run_summary_generation(run_dir)
+
+        qtbot.waitUntil(lambda: started == [run_dirs[0]], timeout=2000)
+        assert window._run_summary_active == (run_dirs[0], False)
+        assert window._run_summary_pending == (run_dirs[-1], False)
+
+        releases[0].set()
+        qtbot.waitUntil(lambda: started == [run_dirs[0], run_dirs[-1]], timeout=3000)
+        assert window._run_summary_active == (run_dirs[-1], False)
+        assert window._run_summary_pending is None
+
+        releases[1].set()
+        qtbot.waitUntil(lambda: window._run_summary_active is None, timeout=3000)
+        assert started == [run_dirs[0], run_dirs[-1]]
+    finally:
+        for release in releases:
+            release.set()
+        _close_test_window(window)
+
+
 def test_first_overheating_history_does_not_count_annealing_only_project() -> None:
     identity = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2")
     payload = {
@@ -6874,6 +6917,105 @@ def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> Non
         _close_test_window(window)
 
 
+def test_pending_run_log_display_history_keeps_recent_lines(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        for index in range(mini_dma_mod.RUN_LOG_PENDING_MAX_LINES + 25):
+            window._queue_run_log_display_line(f"line-{index}")
+
+        assert len(window._pending_run_log_lines) == mini_dma_mod.RUN_LOG_PENDING_MAX_LINES
+        assert window._pending_run_log_lines[0] == "line-25"
+        assert window._pending_run_log_lines[-1].endswith(
+            str(mini_dma_mod.RUN_LOG_PENDING_MAX_LINES + 24)
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_async_run_log_writer_bounds_queue_and_drops_optional_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[tuple[Path, str]] = []
+    warnings: list[str] = []
+
+    def _blocked_append(path: Path, text: str) -> None:
+        writes.append((Path(path), text))
+        if len(writes) == 1:
+            started.set()
+            assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=2,
+        max_bytes=64,
+    )
+    developer_path = tmp_path / "developer.log"
+    session_path = tmp_path / "session.log"
+    try:
+        assert writer.enqueue("developer", developer_path, "in-flight\n")
+        assert started.wait(timeout=2.0)
+        assert writer.enqueue("developer", developer_path, "optional\n")
+        assert writer.enqueue("session", session_path, "session-1\n")
+        assert writer.enqueue("session", session_path, "session-2\n")
+
+        assert writer.queued_request_count <= 2
+        assert writer.queued_bytes <= 64
+        with writer._condition:
+            retained = list(writer._queue)
+        assert [request.channel for request in retained] == ["session", "session"]
+        assert [request.text for request in retained] == ["session-1\n", "session-2\n"]
+        assert len(warnings) == 1
+    finally:
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        writer.stop(timeout_s=1.0)
+
+    assert writes[1:] == [
+        (session_path, "session-1\n"),
+        (session_path, "session-2\n"),
+    ]
+
+
+def test_async_run_log_writer_stop_discards_queued_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[str] = []
+
+    def _blocked_append(_path: Path, text: str) -> None:
+        writes.append(text)
+        started.set()
+        assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        max_requests=8,
+        max_bytes=1024,
+    )
+    path = tmp_path / "session.log"
+    assert writer.enqueue("session", path, "in-flight\n")
+    assert started.wait(timeout=2.0)
+    assert writer.enqueue("session", path, "queued-1\n")
+    assert writer.enqueue("developer", tmp_path / "developer.log", "queued-2\n")
+
+    assert writer.stop(timeout_s=0.05) is False
+    assert writer.queued_request_count == 0
+    assert writer.queued_bytes == 0
+    assert writer.enqueue("session", path, "after-stop\n") is False
+    release.set()
+    writer._thread.join(timeout=3.0)
+
+    assert writes == ["in-flight\n"]
+
+
 def test_blocked_run_log_mirror_write_does_not_block_ui(
     tmp_path: Path,
     qtbot,
@@ -7143,6 +7285,137 @@ def test_loading_fabrication_folder_indexes_workbooks_without_blocking_ui(
         assert "composition suggestion" in window.label_fabrication_status.text()
     finally:
         window._cancel_fabrication_folder_load()
+        _close_test_window(window)
+
+
+def test_tma_filesystem_workers_close_bounded_and_remain_owned(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    release = threading.Event()
+    started = {
+        worker_type: threading.Event()
+        for worker_type in (
+            mini_dma_mod.FabricationSuggestionWorker,
+            mini_dma_mod.AnnealingFolderScanWorker,
+            mini_dma_mod.BuilderProjectImportWorker,
+        )
+    }
+    cancelled: list[type[object]] = []
+
+    def _blocked_run(self: object) -> None:
+        started[type(self)].set()
+        assert release.wait(timeout=5.0)
+        cancel_event = getattr(self, "_cancel_event")
+        if cancel_event.is_set():
+            cancelled.append(type(self))
+        getattr(self, "finished").emit()
+
+    for worker_type in started:
+        monkeypatch.setattr(worker_type, "run", _blocked_run)
+
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    project = tmp_path / "project.pydpj"
+    project.write_text("{}", encoding="utf-8")
+    qt_messages: list[str] = []
+    previous_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    threads: list[QtCore.QThread] = []
+    try:
+        window._start_fabrication_folder_load(root, composition="Ni50Fe27Ga23")
+        window._start_annealing_folder_scan("kosice", root)
+        assert window._start_saved_builder_project_auto_import(project)
+        for event in started.values():
+            assert event.wait(timeout=2.0)
+        threads = [thread for thread, _worker in window._filesystem_worker_tasks.values()]
+        assert len(threads) >= 3
+
+        close_started = time.perf_counter()
+        window.close()
+        close_elapsed_s = time.perf_counter() - close_started
+
+        assert close_elapsed_s < 0.9
+        assert all(thread.isRunning() for thread in threads)
+        assert len(window._filesystem_worker_tasks) >= 3
+        assert window._builder_project_import_thread is not None
+        assert window._fabrication_thread is not None
+        assert window._annealing_folder_scan_threads
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: all(id(thread) not in window._filesystem_worker_tasks for thread in threads),
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert set(cancelled) == set(started)
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release.set()
+        for thread in threads:
+            try:
+                thread.wait(3000)
+            except RuntimeError:
+                pass
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_handler)
+        _close_test_window(window)
+
+
+def test_superseded_fabrication_worker_is_retained_and_stale_result_ignored(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+    old_started = threading.Event()
+    release_old = threading.Event()
+    handled_roots: list[Path] = []
+
+    def _run(self: mini_dma_mod.FabricationSuggestionWorker) -> None:
+        if self.root == old_root:
+            old_started.set()
+            assert release_old.wait(timeout=5.0)
+        self.succeeded.emit(self.root, {}, 0, self.composition)
+        self.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.FabricationSuggestionWorker, "run", _run)
+    window._handle_fabrication_load_success = (  # type: ignore[method-assign]
+        lambda root_obj, *_args: handled_roots.append(Path(root_obj))
+    )
+    try:
+        window._start_fabrication_folder_load(old_root, composition="old")
+        old_thread = window._fabrication_thread
+        assert old_thread is not None
+        assert old_started.wait(timeout=2.0)
+
+        window._start_fabrication_folder_load(new_root, composition="new")
+        new_thread = window._fabrication_thread
+        assert new_thread is not None and new_thread is not old_thread
+        assert id(old_thread) in window._filesystem_worker_tasks
+        qtbot.waitUntil(
+            lambda: id(new_thread) not in window._filesystem_worker_tasks,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert handled_roots == [new_root]
+
+        release_old.set()
+        qtbot.waitUntil(
+            lambda: id(old_thread) not in window._filesystem_worker_tasks,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert handled_roots == [new_root]
+    finally:
+        release_old.set()
         _close_test_window(window)
 
 
@@ -8172,7 +8445,7 @@ def test_stopping_builder_project_import_clears_retry_state(tmp_path: Path, qtbo
         assert window._builder_import_in_progress is False
         assert window._builder_project_import_retry_pending is False
         assert thread.quit_called is True
-        assert thread.wait_timeout == 1500
+        assert thread.wait_timeout == 250
     finally:
         _close_test_window(window)
 

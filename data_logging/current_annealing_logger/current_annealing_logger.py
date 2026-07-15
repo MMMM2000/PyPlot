@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from importlib import import_module
+from threading import Event
 from typing import Any, Deque, Dict, List, Mapping, Optional, SupportsBytes, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
@@ -478,15 +479,15 @@ class FabricationFolderLoadWorker(QtCore.QObject):
     def __init__(self, root: Path) -> None:
         super().__init__()
         self.root = Path(root)
-        self._cancelled = False
+        self._cancel_event = Event()
 
     def cancel(self) -> None:
-        self._cancelled = True
+        self._cancel_event.set()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
         try:
-            if self._cancelled:
+            if self._cancel_event.is_set():
                 self.cancelled.emit(self.root)
                 return
             if not self.root.exists() or not self.root.is_dir():
@@ -496,7 +497,7 @@ class FabricationFolderLoadWorker(QtCore.QObject):
             self.progress_changed.emit(f"Scanning fabrication folder: {self.root}")
             files: list[Path] = []
             for path in self.root.rglob("*.xlsx"):
-                if self._cancelled:
+                if self._cancel_event.is_set():
                     self.cancelled.emit(self.root)
                     return
                 if path.is_file() and not path.name.startswith("~$"):
@@ -511,16 +512,25 @@ class FabricationFolderLoadWorker(QtCore.QObject):
             self.progress_changed.emit(f"Reading {len(files)} fabrication workbook(s)...")
             from microwire_data_builder import core as builder_core
 
-            index = builder_core.build_fabrication_index(files)
-            if self._cancelled:
+            index = builder_core.build_fabrication_index(
+                files,
+                cancel_callback=self._cancel_event.is_set,
+            )
+            if self._cancel_event.is_set():
                 self.cancelled.emit(self.root)
                 return
             records = _records_from_fabrication_index_payload(index, source=self.root.name)
             self.succeeded.emit(self.root, records, len(files))
         except Exception as exc:
-            self.failed.emit(self.root, f"Failed to load fabrication spreadsheets: {exc}")
+            if self._cancel_event.is_set():
+                self.cancelled.emit(self.root)
+            else:
+                self.failed.emit(self.root, f"Failed to load fabrication spreadsheets: {exc}")
         finally:
             self.finished.emit()
+
+
+_RETAINED_FABRICATION_TASKS: dict[int, tuple[QtCore.QThread, FabricationFolderLoadWorker]] = {}
 
 
 class MeasurementHistoryDialog(QtWidgets.QDialog):
@@ -727,6 +737,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._metadata_diameter_import_sample_key: tuple[str, str] | None = None
         self._fabrication_thread: QtCore.QThread | None = None
         self._fabrication_worker: FabricationFolderLoadWorker | None = None
+        self._fabrication_tasks: dict[int, tuple[QtCore.QThread, FabricationFolderLoadWorker]] = {}
+        self._window_closing = False
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         self.supply_profile_id = "hmp4030"
         self.min_start_current_mA = 1
@@ -1733,9 +1745,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_fabrication_folder_from_ui()
 
     def _cancel_fabrication_folder_load(self) -> None:
-        worker = self._fabrication_worker
-        if worker is not None:
+        for _thread, worker in list(self._fabrication_tasks.values()):
             worker.cancel()
+
+    def _retain_fabrication_task(
+        self,
+        thread: QtCore.QThread,
+        worker: FabricationFolderLoadWorker,
+    ) -> None:
+        task = (thread, worker)
+        self._fabrication_tasks[id(thread)] = task
+        _RETAINED_FABRICATION_TASKS[id(thread)] = task
+
+    def _release_fabrication_task(self, thread: QtCore.QThread) -> None:
+        self._fabrication_tasks.pop(id(thread), None)
+        _RETAINED_FABRICATION_TASKS.pop(id(thread), None)
+        try:
+            thread.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _wait_for_fabrication_tasks(self, timeout_ms: int = 250) -> bool:
+        tasks = list(self._fabrication_tasks.values())
+        if not tasks:
+            return True
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        all_finished = True
+        for thread, _worker in tasks:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000.0))
+            try:
+                if thread.isRunning() and remaining_ms > 0:
+                    thread.wait(remaining_ms)
+                running = thread.isRunning()
+            except RuntimeError:
+                running = False
+            if running:
+                all_finished = False
+            else:
+                self._release_fabrication_task(thread)
+        return all_finished
 
     def _finish_fabrication_thread(
         self,
@@ -1746,10 +1794,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_thread = None
             self._fabrication_worker = None
             self._set_fabrication_loading_ui(False)
-        try:
-            thread.deleteLater()
-        except Exception:
-            pass
+        self._release_fabrication_task(thread)
 
     def _handle_fabrication_load_success(self, root_obj: object, records_obj: object, file_count: int) -> None:
         root = Path(str(root_obj))
@@ -1890,8 +1935,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_fabrication_folder_from_ui(self) -> bool:
         if self._fabrication_load_active():
-            self._set_metadata_status("Fabrication folder load is already running.")
-            return False
+            self._cancel_fabrication_folder_load()
         folder_text = self.ui.lineEdit_fabrication_folder.text().strip()
         if not folder_text:
             self._set_metadata_status("Select a fabrication folder first.")
@@ -1900,19 +1944,44 @@ class MainWindow(QtWidgets.QMainWindow):
         if not root.exists() or not root.is_dir():
             self._set_metadata_status("Fabrication folder was not found.")
             return False
-        thread = QtCore.QThread(self)
+        thread = QtCore.QThread()
         worker = FabricationFolderLoadWorker(root)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.progress_changed.connect(self._set_metadata_status)
-        worker.succeeded.connect(self._handle_fabrication_load_success)
-        worker.failed.connect(self._handle_fabrication_load_failure)
-        worker.cancelled.connect(self._handle_fabrication_load_cancelled)
+        worker.progress_changed.connect(
+            lambda message, load_thread=thread: (
+                self._set_metadata_status(message)
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
+        worker.succeeded.connect(
+            lambda root_obj, records_obj, file_count, load_thread=thread: (
+                self._handle_fabrication_load_success(root_obj, records_obj, file_count)
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
+        worker.failed.connect(
+            lambda root_obj, message, load_thread=thread: (
+                self._handle_fabrication_load_failure(root_obj, message)
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
+        worker.cancelled.connect(
+            lambda root_obj, load_thread=thread: (
+                self._handle_fabrication_load_cancelled(root_obj)
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda thread=thread, worker=worker: self._finish_fabrication_thread(thread, worker))
         self._fabrication_thread = thread
         self._fabrication_worker = worker
+        self._retain_fabrication_task(thread, worker)
         self._set_fabrication_loading_ui(True)
         self._set_metadata_status(f"Scanning fabrication folder: {root}")
         thread.start()
@@ -6360,7 +6429,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.port_name = self.ui.comboBox_port.currentData()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._window_closing = True
         self._cancel_fabrication_folder_load()
+        self._wait_for_fabrication_tasks(timeout_ms=250)
         self._release_experiment_sleep_guard()
         self._stop_owned_shared_broker()
         if self.ser_mcu.isOpen():

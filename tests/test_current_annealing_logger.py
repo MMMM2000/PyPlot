@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+import threading
+import time
 import types
 
 import pytest
@@ -651,8 +653,13 @@ def test_current_annealing_fabrication_load_keeps_ui_responsive(
 
     worker_thread: list[object] = []
 
-    def _slow_build_fabrication_index(files: list[object]) -> _FabricationIndex:
+    def _slow_build_fabrication_index(
+        files: list[object],
+        *,
+        cancel_callback=None,
+    ) -> _FabricationIndex:
         assert len(files) == 40
+        assert callable(cancel_callback)
         worker_thread.append(logger_mod.QtCore.QThread.currentThread())
         logger_mod.time.sleep(0.25)
         return _FabricationIndex()
@@ -689,6 +696,174 @@ def test_current_annealing_fabrication_load_keeps_ui_responsive(
     assert "Loaded 1 microwire suggestion(s) from 40 fabrication workbook(s)." in (
         window.ui.label_microwire_metadata_status.text()
     )
+
+
+def test_current_annealing_fabrication_worker_observes_cancel_callback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+    started = threading.Event()
+    callback_seen = threading.Event()
+    cancelled: list[object] = []
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        started.set()
+        while not cancel_callback():
+            time.sleep(0.005)
+        callback_seen.set()
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    worker = logger_mod.FabricationFolderLoadWorker(root)
+    worker.cancelled.connect(
+        cancelled.append,
+        logger_mod.QtCore.Qt.ConnectionType.DirectConnection,
+    )
+    thread = threading.Thread(target=worker.run)
+    thread.start()
+    assert started.wait(timeout=2.0)
+
+    worker.cancel()
+    thread.join(timeout=3.0)
+
+    assert not thread.is_alive()
+    assert callback_seen.is_set()
+    assert cancelled == [root]
+
+
+def test_current_annealing_blocked_fabrication_close_is_bounded_and_retained(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+    callbacks: list[object] = []
+    qt_messages: list[str] = []
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        callbacks.append(cancel_callback)
+        started.set()
+        assert release.wait(timeout=5.0)
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    previous_handler = logger_mod.QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    thread = None
+    try:
+        window.ui.lineEdit_fabrication_folder.setText(str(root))
+        assert window._load_fabrication_folder_from_ui()
+        assert started.wait(timeout=2.0)
+        thread = window._fabrication_thread
+        assert thread is not None
+
+        close_started = time.perf_counter()
+        window.close()
+        elapsed_s = time.perf_counter() - close_started
+
+        assert elapsed_s < 0.5
+        assert thread.isRunning()
+        assert id(thread) in window._fabrication_tasks
+        assert callbacks and callbacks[0]() is True
+
+        release.set()
+        qtbot.waitUntil(lambda: id(thread) not in window._fabrication_tasks, timeout=3000)
+        logger_mod.QtWidgets.QApplication.processEvents()
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release.set()
+        if thread is not None:
+            try:
+                thread.wait(3000)
+            except RuntimeError:
+                pass
+        logger_mod.QtWidgets.QApplication.processEvents()
+        logger_mod.QtCore.qInstallMessageHandler(previous_handler)
+        window.close()
+
+
+def test_current_annealing_replacement_retains_old_worker_and_ignores_stale_result(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+    (old_root / "old.xlsx").write_text("placeholder", encoding="utf-8")
+    (new_root / "new.xlsx").write_text("placeholder", encoding="utf-8")
+    old_started = threading.Event()
+    release_old = threading.Event()
+    old_cancel_callbacks: list[object] = []
+    handled_roots: list[object] = []
+
+    class _Index:
+        piece_level: dict[object, object] = {}
+
+    def _build(files: list[object], *, cancel_callback) -> object:
+        root = logger_mod.Path(files[0]).parent
+        if root == old_root:
+            old_cancel_callbacks.append(cancel_callback)
+            old_started.set()
+            assert release_old.wait(timeout=5.0)
+        return _Index()
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    window._handle_fabrication_load_success = (  # type: ignore[method-assign]
+        lambda root_obj, *_args: handled_roots.append(root_obj)
+    )
+    try:
+        window.ui.lineEdit_fabrication_folder.setText(str(old_root))
+        assert window._load_fabrication_folder_from_ui()
+        old_thread = window._fabrication_thread
+        assert old_thread is not None
+        assert old_started.wait(timeout=2.0)
+
+        window.ui.lineEdit_fabrication_folder.setText(str(new_root))
+        assert window._load_fabrication_folder_from_ui()
+        new_thread = window._fabrication_thread
+        assert new_thread is not None and new_thread is not old_thread
+        assert id(old_thread) in window._fabrication_tasks
+        assert old_cancel_callbacks and old_cancel_callbacks[0]() is True
+        qtbot.waitUntil(lambda: id(new_thread) not in window._fabrication_tasks, timeout=3000)
+        logger_mod.QtWidgets.QApplication.processEvents()
+        assert handled_roots == [new_root]
+
+        release_old.set()
+        qtbot.waitUntil(lambda: id(old_thread) not in window._fabrication_tasks, timeout=3000)
+        logger_mod.QtWidgets.QApplication.processEvents()
+        assert handled_roots == [new_root]
+    finally:
+        release_old.set()
+        window.close()
 
 
 def test_current_annealing_microwire_field_displays_slashes(qtbot) -> None:

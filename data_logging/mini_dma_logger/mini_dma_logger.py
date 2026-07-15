@@ -260,6 +260,10 @@ RAW_SCALE_CSV_FIELDNAMES = [
 ]
 RUN_LOG_FLUSH_INTERVAL_MS = 100
 RUN_LOG_MAX_BATCH_LINES = 80
+RUN_LOG_DISPLAY_MAX_BLOCKS = 1000
+RUN_LOG_PENDING_MAX_LINES = 1000
+RUN_LOG_QUEUE_MAX_REQUESTS = 512
+RUN_LOG_QUEUE_MAX_BYTES = 2 * 1024 * 1024
 REMOTE_DEBUG_HEALTH_LOG_INTERVAL_S = 5.0
 GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
@@ -3571,6 +3575,10 @@ class BuilderProjectImportWorker(QtCore.QObject):
             self.finished.emit()
 
 
+_RETAINED_QT_FILESYSTEM_TASKS: dict[int, tuple[QtCore.QThread, QtCore.QObject]] = {}
+_RETAINED_TMA_HISTORY_TASKS: set["TmaHistoryScanTask"] = set()
+
+
 class TmaHistoryScanTask:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -3585,6 +3593,7 @@ class TmaHistoryScanTask:
         )
 
     def start(self) -> None:
+        _RETAINED_TMA_HISTORY_TASKS.add(self)
         self.thread.start()
 
     def cancel(self) -> None:
@@ -3604,6 +3613,7 @@ class TmaHistoryScanTask:
                 self.records = records
         finally:
             self.done_event.set()
+            _RETAINED_TMA_HISTORY_TASKS.discard(self)
 
 
 @dataclass(frozen=True)
@@ -3614,15 +3624,27 @@ class AsyncLogWriteRequest:
 
 
 class AsyncRunLogWriter:
-    """Serialize optional text-log mirrors without blocking control or Qt threads."""
+    """Serialize text logs without blocking control or Qt threads."""
 
-    def __init__(self, failure_callback: Callable[[str, Path, BaseException], None]) -> None:
+    def __init__(
+        self,
+        failure_callback: Callable[[str, Path, BaseException], None],
+        overload_callback: Callable[[str], None] | None = None,
+        *,
+        max_requests: int = RUN_LOG_QUEUE_MAX_REQUESTS,
+        max_bytes: int = RUN_LOG_QUEUE_MAX_BYTES,
+    ) -> None:
         self._failure_callback: Callable[[str, Path, BaseException], None] | None = failure_callback
+        self._overload_callback: Callable[[str], None] | None = overload_callback
         self._condition = Condition()
         self._queue: deque[AsyncLogWriteRequest] = deque()
+        self._queued_bytes = 0
+        self._max_requests = max(1, int(max_requests))
+        self._max_bytes = max(1, int(max_bytes))
         self._disabled_targets: set[tuple[str, str]] = set()
         self._running = True
         self._in_flight = False
+        self._overload_warning_active = False
         self._thread = Thread(target=self._run, name="tma-run-log-writer", daemon=True)
         self._thread.start()
 
@@ -3634,14 +3656,91 @@ class AsyncRunLogWriter:
         with self._condition:
             self._disabled_targets.discard(self._target_key(channel, path))
 
+    @staticmethod
+    def _request_bytes(request: AsyncLogWriteRequest) -> int:
+        return len(request.text.encode("utf-8"))
+
+    @property
+    def queued_request_count(self) -> int:
+        with self._condition:
+            return len(self._queue)
+
+    @property
+    def queued_bytes(self) -> int:
+        with self._condition:
+            return self._queued_bytes
+
+    def _fits_locked(self, added_requests: int, added_bytes: int) -> bool:
+        return (
+            len(self._queue) + added_requests <= self._max_requests
+            and self._queued_bytes + added_bytes <= self._max_bytes
+        )
+
+    def _drop_oldest_optional_locked(self) -> bool:
+        for index, queued in enumerate(self._queue):
+            if queued.channel == "session":
+                continue
+            requests = list(self._queue)
+            removed = requests.pop(index)
+            self._queue = deque(requests)
+            self._queued_bytes -= self._request_bytes(removed)
+            return True
+        return False
+
+    def _coalesce_with_latest_locked(self, request: AsyncLogWriteRequest) -> bool:
+        if not self._queue:
+            return False
+        latest = self._queue[-1]
+        if self._target_key(latest.channel, latest.path) != self._target_key(request.channel, request.path):
+            return False
+        merged = AsyncLogWriteRequest(latest.channel, latest.path, latest.text + request.text)
+        merged_bytes = self._request_bytes(merged)
+        latest_bytes = self._request_bytes(latest)
+        if self._queued_bytes - latest_bytes + merged_bytes > self._max_bytes:
+            return False
+        self._queue[-1] = merged
+        self._queued_bytes += merged_bytes - latest_bytes
+        return True
+
     def enqueue(self, channel: str, path: Path, text: str) -> bool:
         request = AsyncLogWriteRequest(str(channel), Path(path), str(text))
+        request_bytes = self._request_bytes(request)
+        overload_callback: Callable[[str], None] | None = None
         with self._condition:
             if not self._running or self._target_key(request.channel, request.path) in self._disabled_targets:
                 return False
-            self._queue.append(request)
-            self._condition.notify_all()
-        return True
+            accepted = False
+            overloaded = False
+            if self._fits_locked(1, request_bytes):
+                self._queue.append(request)
+                self._queued_bytes += request_bytes
+                accepted = True
+            elif request.channel != "session" and self._coalesce_with_latest_locked(request):
+                accepted = True
+                overloaded = True
+            else:
+                while not self._fits_locked(1, request_bytes) and self._drop_oldest_optional_locked():
+                    overloaded = True
+                if self._fits_locked(1, request_bytes):
+                    self._queue.append(request)
+                    self._queued_bytes += request_bytes
+                    accepted = True
+                elif self._coalesce_with_latest_locked(request):
+                    accepted = True
+                    overloaded = True
+                else:
+                    overloaded = True
+            if overloaded and not self._overload_warning_active:
+                self._overload_warning_active = True
+                overload_callback = self._overload_callback
+            if accepted:
+                self._condition.notify_all()
+        if overload_callback is not None:
+            overload_callback(
+                "TMA run-log writer is overloaded; optional mirror writes are being coalesced or dropped "
+                "before per-run session-log writes."
+            )
+        return accepted
 
     def wait_until_idle(self, timeout_s: float = 2.0) -> bool:
         deadline = time.monotonic() + max(0.0, float(timeout_s))
@@ -3656,6 +3755,9 @@ class AsyncRunLogWriter:
     def stop(self, timeout_s: float = 1.0) -> bool:
         with self._condition:
             self._running = False
+            self._queue.clear()
+            self._queued_bytes = 0
+            self._overload_callback = None
             self._condition.notify_all()
         self._thread.join(timeout=max(0.0, float(timeout_s)))
         stopped = not self._thread.is_alive()
@@ -3668,28 +3770,34 @@ class AsyncRunLogWriter:
             with self._condition:
                 while not self._queue and self._running:
                     self._condition.wait()
-                if not self._queue:
+                if not self._running:
+                    self._queue.clear()
+                    self._queued_bytes = 0
                     self._condition.notify_all()
                     return
                 request = self._queue.popleft()
+                self._queued_bytes -= self._request_bytes(request)
                 self._in_flight = True
             try:
                 append_text_with_rotation(request.path, request.text)
             except Exception as exc:
                 with self._condition:
                     self._disabled_targets.add(self._target_key(request.channel, request.path))
-                    self._queue = deque(
-                        queued
-                        for queued in self._queue
+                    retained = deque(
+                        queued for queued in self._queue
                         if self._target_key(queued.channel, queued.path)
                         != self._target_key(request.channel, request.path)
                     )
+                    self._queue = retained
+                    self._queued_bytes = sum(self._request_bytes(queued) for queued in retained)
                 callback = self._failure_callback
                 if callback is not None:
                     callback(request.channel, request.path, exc)
             finally:
                 with self._condition:
                     self._in_flight = False
+                    if not self._queue:
+                        self._overload_warning_active = False
                     self._condition.notify_all()
 @dataclass(frozen=True)
 class SerialPortDescriptor:
@@ -6132,6 +6240,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._diameter_import_sample_key: tuple[str, str, str] | None = None
         self._builder_project_import_thread: QtCore.QThread | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
+        self._filesystem_worker_tasks: dict[int, tuple[QtCore.QThread, QtCore.QObject]] = {}
         self._builder_project_import_request_key: tuple[str, str, str, str] | None = None
         self._builder_project_last_auto_import_request_key: tuple[str, str, str, str] | None = None
         self._builder_project_import_retry_pending = False
@@ -6144,6 +6253,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_root: Path | None = None
         self._tma_history_scan_task: TmaHistoryScanTask | None = None
         self._tma_history_scan_pending_root: Path | None = None
+        self._run_summary_active: tuple[Path, bool] | None = None
+        self._run_summary_pending: tuple[Path, bool] | None = None
         self._tma_history_scan_timer = QtCore.QTimer(self)
         self._tma_history_scan_timer.setSingleShot(True)
         self._tma_history_scan_timer.setInterval(750)
@@ -6380,7 +6491,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recipe_progress_update_queued = False
         self._recipe_progress_pending_complete = False
         self._window_closing = False
-        self._async_run_log_writer = AsyncRunLogWriter(self._handle_async_run_log_write_failure)
+        self._async_run_log_writer = AsyncRunLogWriter(
+            self._handle_async_run_log_write_failure,
+            self._handle_async_run_log_overload,
+        )
         self._serial_port_descriptors: tuple[SerialPortDescriptor, ...] = ()
         self._serial_port_scan_thread: Thread | None = None
         self._serial_port_scan_generation = 0
@@ -6485,6 +6599,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _is_ui_thread(self) -> bool:
         return get_ident() == self._ui_thread_id
+
+    def _retain_filesystem_worker_task(
+        self,
+        thread: QtCore.QThread,
+        worker: QtCore.QObject,
+    ) -> None:
+        task = (thread, worker)
+        self._filesystem_worker_tasks[id(thread)] = task
+        _RETAINED_QT_FILESYSTEM_TASKS[id(thread)] = task
+
+    def _release_filesystem_worker_task(
+        self,
+        thread: QtCore.QThread,
+    ) -> None:
+        self._filesystem_worker_tasks.pop(id(thread), None)
+        _RETAINED_QT_FILESYSTEM_TASKS.pop(id(thread), None)
+        try:
+            thread.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _wait_for_filesystem_workers(self, timeout_ms: int = 250) -> bool:
+        tasks = list(self._filesystem_worker_tasks.values())
+        if not tasks:
+            return True
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        all_finished = True
+        for thread, _worker in tasks:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000.0))
+            try:
+                if thread.isRunning() and remaining_ms > 0:
+                    thread.wait(remaining_ms)
+                running = thread.isRunning()
+            except RuntimeError:
+                running = False
+            if running:
+                all_finished = False
+            else:
+                self._release_filesystem_worker_task(thread)
+        return all_finished
 
     def _run_on_ui_thread(self, callback: Callable[[], None]) -> None:
         if self._window_closing:
@@ -9466,7 +9620,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_output = QtWidgets.QPlainTextEdit(log_container)
         self.log_output.setReadOnly(True)
         self.log_output.setMaximumHeight(96)
-        self.log_output.setMaximumBlockCount(1000)
+        self.log_output.setMaximumBlockCount(RUN_LOG_DISPLAY_MAX_BLOCKS)
         self.log_output.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.log_output.setPlaceholderText("TMA log output")
@@ -10427,7 +10581,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
-        self._pending_run_log_lines.append(line)
+        self._queue_run_log_display_line(line)
         batch_live_run_log = (
             self._automation_control_loop is not None
             and self._automation_control_loop.is_running()
@@ -10442,6 +10596,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self._async_run_log_writer.enqueue("session", self._session_run_log_path, line + "\n")
         if self._run_log_mirror_enabled:
             self._async_run_log_writer.enqueue("developer", self._run_log_mirror_path, line + "\n")
+
+    def _queue_run_log_display_line(self, line: str) -> None:
+        self._pending_run_log_lines.append(str(line))
+        overflow = len(self._pending_run_log_lines) - RUN_LOG_PENDING_MAX_LINES
+        if overflow > 0:
+            del self._pending_run_log_lines[:overflow]
+
+    def _handle_async_run_log_overload(self, message: str) -> None:
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(lambda message=message: self._handle_async_run_log_overload(message))
+            return
+        if self._window_closing:
+            return
+        self.statusBar().showMessage(message)
+        self._queue_run_log_display_line(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        self._schedule_run_log_flush()
 
     def _handle_async_run_log_write_failure(self, channel: str, path: Path, error: BaseException) -> None:
         if not self._is_ui_thread():
@@ -10465,7 +10635,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.action_mirror_run_log.blockSignals(False)
             message = f"Run-log file mirror disabled because writing {path} failed ({detail})."
         self.statusBar().showMessage(message)
-        self._pending_run_log_lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+        self._queue_run_log_display_line(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
         self._schedule_run_log_flush()
 
     def _schedule_run_log_flush(self) -> None:
@@ -12122,23 +12292,41 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_annealing_index = None
             source_label = "fabrication folder"
 
-        thread = QtCore.QThread(self)
+        thread = QtCore.QThread()
         worker = AnnealingFolderScanWorker(root, source_label=source_label)
         worker.moveToThread(thread)
         if source_kind == "kosice":
-            worker.progress_changed.connect(self.label_kosice_status.setText)
+            worker.progress_changed.connect(
+                lambda message, kind=source_kind, scan_thread=thread: (
+                    self.label_kosice_status.setText(message)
+                    if self._annealing_folder_scan_threads.get(kind) is scan_thread
+                    and not self._window_closing
+                    else None
+                )
+            )
         worker.succeeded.connect(
-            lambda root_obj, index_obj, kind=source_kind: self._handle_annealing_folder_scan_success(
-                kind, root_obj, index_obj
+            lambda root_obj, index_obj, kind=source_kind, scan_thread=thread: (
+                self._handle_annealing_folder_scan_success(kind, root_obj, index_obj)
+                if self._annealing_folder_scan_threads.get(kind) is scan_thread
+                and not self._window_closing
+                else None
             )
         )
         worker.failed.connect(
-            lambda root_obj, message, kind=source_kind: self._handle_annealing_folder_scan_failure(
-                kind, root_obj, message
+            lambda root_obj, message, kind=source_kind, scan_thread=thread: (
+                self._handle_annealing_folder_scan_failure(kind, root_obj, message)
+                if self._annealing_folder_scan_threads.get(kind) is scan_thread
+                and not self._window_closing
+                else None
             )
         )
         worker.cancelled.connect(
-            lambda root_obj, kind=source_kind: self._handle_annealing_folder_scan_cancelled(kind, root_obj)
+            lambda root_obj, kind=source_kind, scan_thread=thread: (
+                self._handle_annealing_folder_scan_cancelled(kind, root_obj)
+                if self._annealing_folder_scan_threads.get(kind) is scan_thread
+                and not self._window_closing
+                else None
+            )
         )
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -12150,6 +12338,7 @@ class MainWindow(QtWidgets.QMainWindow):
         thread.started.connect(worker.run)
         self._annealing_folder_scan_threads[source_kind] = thread
         self._annealing_folder_scan_workers[source_kind] = worker
+        self._retain_filesystem_worker_task(thread, worker)
         thread.start()
 
     def _cancel_annealing_folder_scan(self, source_kind: str) -> None:
@@ -12161,17 +12350,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
 
     def _stop_annealing_folder_scans(self) -> None:
-        scan_items = list(self._annealing_folder_scan_threads.items())
-        for source_kind, _thread in scan_items:
+        for source_kind in list(self._annealing_folder_scan_threads):
             self._cancel_annealing_folder_scan(source_kind)
-        for _source_kind, thread in scan_items:
-            try:
-                thread.quit()
-                thread.wait(1500)
-            except RuntimeError:
-                pass
-        self._annealing_folder_scan_threads.clear()
-        self._annealing_folder_scan_workers.clear()
 
     def _finish_annealing_folder_scan(
         self,
@@ -12185,7 +12365,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if source_kind == "kosice":
                 self.button_scan_kosice.setText("Scan")
                 self._update_kosice_match_status()
-        thread.deleteLater()
+        self._release_filesystem_worker_task(thread)
 
     def _handle_annealing_folder_scan_success(
         self,
@@ -12326,19 +12506,46 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_failed_composition_loads.clear()
             self.label_fabrication_status.setText(f"Scanning fabrication folder: {root}")
         self._set_fabrication_loading_ui(True)
-        thread = QtCore.QThread(self)
+        thread = QtCore.QThread()
         worker = FabricationSuggestionWorker(root, composition=composition)
         worker.moveToThread(thread)
-        worker.progress_changed.connect(self.label_fabrication_status.setText)
-        worker.succeeded.connect(self._handle_fabrication_load_success)
-        worker.failed.connect(self._handle_fabrication_load_failure)
-        worker.cancelled.connect(self._handle_fabrication_load_cancelled)
+        worker.progress_changed.connect(
+            lambda message, load_thread=thread: (
+                self.label_fabrication_status.setText(message)
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
+        worker.succeeded.connect(
+            lambda root_obj, records_obj, file_count, composition_obj, load_thread=thread: (
+                self._handle_fabrication_load_success(
+                    root_obj, records_obj, file_count, composition_obj
+                )
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
+        worker.failed.connect(
+            lambda root_obj, message, load_thread=thread: (
+                self._handle_fabrication_load_failure(root_obj, message)
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
+        worker.cancelled.connect(
+            lambda root_obj, load_thread=thread: (
+                self._handle_fabrication_load_cancelled(root_obj)
+                if self._fabrication_thread is load_thread and not self._window_closing
+                else None
+            )
+        )
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda thread=thread, worker=worker: self._finish_fabrication_thread(thread, worker))
         thread.started.connect(worker.run)
         self._fabrication_thread = thread
         self._fabrication_worker = worker
+        self._retain_filesystem_worker_task(thread, worker)
         thread.start()
 
     def _cancel_fabrication_folder_load(self) -> None:
@@ -12359,7 +12566,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_loading_composition = None
             self._set_fabrication_loading_ui(False)
             QtCore.QTimer.singleShot(0, lambda: self._ensure_fabrication_composition_loaded(defer=True))
-        thread.deleteLater()
+        self._release_filesystem_worker_task(thread)
 
     def _handle_fabrication_load_success(
         self,
@@ -13229,7 +13436,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         else:
             self.label_project_status.setText(f"Loading saved Builder project in the background: {path.name}")
-        thread = QtCore.QThread(self)
+        thread = QtCore.QThread()
         worker = BuilderProjectImportWorker(
             path,
             composition=request_key[1],
@@ -13238,23 +13445,50 @@ class MainWindow(QtWidgets.QMainWindow):
             request_key=request_key,
         )
         worker.moveToThread(thread)
-        worker.suggestions.connect(self._handle_builder_project_suggestions)
-        worker.succeeded.connect(
-            lambda path_obj, key_obj, match_obj, quiet=quiet: self._handle_builder_project_auto_import_success(
-                path_obj,
-                key_obj,
-                match_obj,
-                quiet=quiet,
+        worker.suggestions.connect(
+            lambda path_obj, key_obj, suggestions_obj, import_thread=thread: (
+                self._handle_builder_project_suggestions(path_obj, key_obj, suggestions_obj)
+                if self._builder_project_import_thread is import_thread
+                and not self._window_closing
+                else None
             )
         )
-        worker.failed.connect(self._handle_builder_project_auto_import_failure)
-        worker.no_match.connect(self._handle_builder_project_auto_import_no_match)
+        worker.succeeded.connect(
+            lambda path_obj, key_obj, match_obj, quiet=quiet, import_thread=thread: (
+                self._handle_builder_project_auto_import_success(
+                    path_obj,
+                    key_obj,
+                    match_obj,
+                    quiet=quiet,
+                )
+                if self._builder_project_import_thread is import_thread
+                and not self._window_closing
+                else None
+            )
+        )
+        worker.failed.connect(
+            lambda path_obj, key_obj, message, import_thread=thread: (
+                self._handle_builder_project_auto_import_failure(path_obj, key_obj, message)
+                if self._builder_project_import_thread is import_thread
+                and not self._window_closing
+                else None
+            )
+        )
+        worker.no_match.connect(
+            lambda path_obj, key_obj, import_thread=thread: (
+                self._handle_builder_project_auto_import_no_match(path_obj, key_obj)
+                if self._builder_project_import_thread is import_thread
+                and not self._window_closing
+                else None
+            )
+        )
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda thread=thread, worker=worker: self._finish_builder_project_import_thread(thread, worker))
         thread.started.connect(worker.run)
         self._builder_project_import_thread = thread
         self._builder_project_import_worker = worker
+        self._retain_filesystem_worker_task(thread, worker)
         thread.start()
         return True
 
@@ -13269,21 +13503,32 @@ class MainWindow(QtWidgets.QMainWindow):
             self._builder_project_import_request_key = None
             self._builder_import_in_progress = False
             self._run_pending_builder_project_auto_import_if_needed()
-        thread.deleteLater()
+        self._release_filesystem_worker_task(thread)
 
     def _stop_builder_project_import_thread(self) -> None:
         thread = self._builder_project_import_thread
-        self._builder_project_import_thread = None
-        self._builder_project_import_worker = None
-        self._builder_project_import_request_key = None
-        self._builder_import_in_progress = False
+        worker = self._builder_project_import_worker
         self._builder_project_import_retry_pending = False
+        if worker is not None:
+            try:
+                worker.cancel()
+            except (AttributeError, RuntimeError):
+                pass
         if thread is not None:
             try:
                 thread.quit()
-                thread.wait(1500)
+                thread.wait(250)
+                running = bool(thread.isRunning()) if hasattr(thread, "isRunning") else False
             except RuntimeError:
-                pass
+                running = False
+            if not running:
+                if worker is not None and isinstance(thread, QtCore.QThread):
+                    self._finish_builder_project_import_thread(thread, worker)
+                else:
+                    self._builder_project_import_thread = None
+                    self._builder_project_import_worker = None
+                    self._builder_project_import_request_key = None
+                    self._builder_import_in_progress = False
 
     def _builder_project_auto_import_is_current(
         self,
@@ -22797,26 +23042,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_run_log_write_failed = False
 
     def _start_run_summary_generation(self, run_dir: Path, *, offer_cleanup: bool = False) -> None:
+        request = (Path(run_dir), bool(offer_cleanup))
+        if self._run_summary_active is not None:
+            self._run_summary_pending = request
+            return
+        self._run_summary_active = request
+        self._launch_run_summary_generation(request)
+
+    def _launch_run_summary_generation(self, request: tuple[Path, bool]) -> None:
+        run_dir, offer_cleanup = request
+
         def _worker() -> None:
+            summary: Mapping[str, object] | None = None
+            error: BaseException | None = None
             try:
                 from data_logging.mini_dma_logger.run_core_plot import generate_core_run_plot
 
                 summary = generate_core_run_plot(run_dir)
-                def _finish_summary() -> None:
-                    self._log(
-                        "Generated run summary images: "
-                        f"{summary['image_path']} and {summary['detail_image_path']}"
-                    )
-                    if offer_cleanup:
-                        self._maybe_offer_run_cleanup(run_dir)
-
-                self._run_on_ui_thread(_finish_summary)
             except Exception as exc:
-                self._run_on_ui_thread(
-                    lambda exc=exc: self._log(f"TMA run summary generation failed for {run_dir}: {exc}")
+                error = exc
+            self._run_on_ui_thread(
+                lambda request=request, summary=summary, error=error: self._finish_run_summary_generation(
+                    request,
+                    summary,
+                    error,
                 )
+            )
 
         Thread(target=_worker, name="MiniDmaRunSummary", daemon=True).start()
+
+    def _finish_run_summary_generation(
+        self,
+        request: tuple[Path, bool],
+        summary: Mapping[str, object] | None,
+        error: BaseException | None,
+    ) -> None:
+        if self._run_summary_active != request:
+            return
+        run_dir, offer_cleanup = request
+        self._run_summary_active = None
+        if error is not None:
+            self._log(f"TMA run summary generation failed for {run_dir}: {error}")
+        elif summary is not None:
+            self._log(
+                "Generated run summary images: "
+                f"{summary['image_path']} and {summary['detail_image_path']}"
+            )
+            if offer_cleanup:
+                self._maybe_offer_run_cleanup(run_dir)
+        pending = self._run_summary_pending
+        self._run_summary_pending = None
+        if pending is not None and not self._window_closing:
+            self._run_summary_active = pending
+            self._launch_run_summary_generation(pending)
 
     def _acquire_experiment_sleep_guard(self) -> None:
         try:
@@ -31443,6 +31721,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
+        self._run_summary_pending = None
         self._hide_fabrication_completer_popups()
         app = QtWidgets.QApplication.instance()
         if self._app_event_filter_installed and app is not None:
@@ -31465,6 +31744,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_tma_history_scan_task()
         self._stop_annealing_folder_scans()
         self._cancel_fabrication_folder_load()
+        self._wait_for_filesystem_workers(timeout_ms=250)
         self._disconnect_scale()
         self._disconnect_ir_thermometer()
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
