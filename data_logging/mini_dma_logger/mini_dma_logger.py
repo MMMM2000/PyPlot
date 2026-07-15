@@ -4649,6 +4649,53 @@ class MiniDmaControlConfig:
     return_to_origin: bool
 
 
+@dataclass(frozen=True, slots=True)
+class TicConnectionSettings:
+    """Plain immutable Tic transport settings safe to cross thread boundaries."""
+
+    command_path: str
+    device_serial: str
+    prefer_native_usb: bool
+
+    def key(self) -> tuple[str, str, bool]:
+        return self.command_path, self.device_serial, self.prefer_native_usb
+
+
+@dataclass(frozen=True, slots=True)
+class MiniDmaRunMetadataSnapshot:
+    """Immutable GUI-thread capture consumed by recipe/control workers."""
+
+    launch_json: str
+    effective_json: str
+    recipe_mode: str
+    log_interval_ms: int
+    graph_refresh_interval_ms: int
+    supply_read_interval_ms: int
+    supply_voltage_limit_v: float
+    supply_profile_id: str
+    current_sweep_supply_channel: int | None
+    motor_supply_channel: int | None
+    continuity_monitor_enabled: bool
+    continuity_current_mA: float
+    ir_enabled: bool
+    ticcmd_path: str
+    tic_serial: str
+    tic_native_usb: bool
+
+    def launch_metadata(self) -> dict[str, Any]:
+        return json.loads(self.launch_json)
+
+    def effective_metadata(self) -> dict[str, Any]:
+        return json.loads(self.effective_json)
+
+    def tic_settings(self) -> TicConnectionSettings:
+        return TicConnectionSettings(
+            command_path=self.ticcmd_path,
+            device_serial=self.tic_serial,
+            prefer_native_usb=self.tic_native_usb,
+        )
+
+
 def _find_libusb_wheel_library(candidate: str) -> str | None:
     try:
         import libusb._platform as libusb_platform  # type: ignore[import-not-found]
@@ -6527,6 +6574,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tic_controller_key: tuple[str, str, bool] | None = None
         self._tic_command_dispatcher: TicCommandDispatcher | None = None
         self._tic_command_dispatcher_key: tuple[str, str, bool] | None = None
+        self._tic_settings_lock = RLock()
+        self._manual_tic_settings_snapshot: TicConnectionSettings | None = None
+        self._run_tic_settings_snapshot: TicConnectionSettings | None = None
+        self._automatic_tic_settings_snapshot: TicConnectionSettings | None = None
+        self._recovery_tic_settings_snapshot: TicConnectionSettings | None = None
         self._tic_status_text = ""
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
@@ -6646,6 +6698,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_session_metadata_write_s = 0.0
         self._session_metadata_dirty = False
         self._session_metadata_write_lock = RLock()
+        self._run_metadata_snapshot: MiniDmaRunMetadataSnapshot | None = None
         self._source_provenance_cache = SourceProvenanceCache()
         self._session_source_provenance_token: object | None = None
         self._session_source_provenance_metadata_path: Path | None = None
@@ -6960,6 +7013,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._scale_hint_timer.setSingleShot(True)
         self._scale_hint_timer.timeout.connect(self._warn_if_scale_is_silent)
         self._restore_settings()
+        self._publish_manual_tic_settings_snapshot()
         self._schedule_tma_history_scan()
         self._start_serial_port_enumeration()
         self._refresh_live_labels()
@@ -10155,6 +10209,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_kosice_folder.editingFinished.connect(self._load_kosice_folder_from_ui)
         self.edit_kosice_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
         self.edit_fabrication_folder.textChanged.connect(lambda *_args: self._persist_settings_if_enabled())
+        self.edit_ticcmd_path.textChanged.connect(self._publish_manual_tic_settings_snapshot)
+        self.edit_tic_serial.textChanged.connect(self._publish_manual_tic_settings_snapshot)
+        self.check_tic_native_usb.toggled.connect(self._publish_manual_tic_settings_snapshot)
+        self._publish_manual_tic_settings_snapshot()
         self.spin_diameter.valueChanged.connect(self._refresh_recipe_sample_label)
         self.spin_diameter.valueChanged.connect(self._refresh_equivalent_labels)
         self.spin_diameter.valueChanged.connect(self._refresh_diameter_import_state)
@@ -11581,34 +11639,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"status median {result['status_median_ms']:.1f} ms over {result['iterations']} trials."
             )
 
-    def _build_tic_controller(self) -> TicController:
-        key = (
-            self.edit_ticcmd_path.text().strip(),
-            self.edit_tic_serial.text().strip(),
-            bool(self.check_tic_native_usb.isChecked()),
-        )
+    def _build_tic_controller(
+        self,
+        settings: TicConnectionSettings | None = None,
+    ) -> TicController:
+        selected = settings or self._tic_settings_for_current_command()
+        key = selected.key()
         if self._tic_controller is None or self._tic_controller_key != key:
             self._tic_controller = TicController(
-                command_path=key[0],
-                device_serial=key[1],
-                prefer_native_usb=key[2],
-                allow_ticcmd_fallback=not key[2],
+                command_path=selected.command_path,
+                device_serial=selected.device_serial,
+                prefer_native_usb=selected.prefer_native_usb,
+                allow_ticcmd_fallback=not selected.prefer_native_usb,
                 transport_logger=self._log,
             )
             self._tic_controller_key = key
         return self._tic_controller
 
-    def _build_tic_dispatcher(self) -> TicCommandDispatcher:
-        key = (
-            self.edit_ticcmd_path.text().strip(),
-            self.edit_tic_serial.text().strip(),
-            bool(self.check_tic_native_usb.isChecked()),
-        )
+    def _build_tic_dispatcher(
+        self,
+        settings: TicConnectionSettings | None = None,
+    ) -> TicCommandDispatcher:
+        selected = settings or self._tic_settings_for_current_command()
+        key = selected.key()
         if self._tic_command_dispatcher is not None and self._tic_command_dispatcher_key != key:
             self._tic_command_dispatcher.stop()
             self._tic_command_dispatcher = None
         if self._tic_command_dispatcher is None:
-            self._tic_command_dispatcher = TicCommandDispatcher(self._build_tic_controller)
+            self._tic_command_dispatcher = TicCommandDispatcher(
+                lambda selected=selected: self._build_tic_controller(selected)
+            )
             self._tic_command_dispatcher_key = key
         return self._tic_command_dispatcher
 
@@ -11709,7 +11769,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _using_shared_broker_supply(self) -> bool:
-        profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            profile_id = snapshot.supply_profile_id
+        else:
+            profile_id = str(self.combo_supply_profile.currentData() or "hmp4030")
         return bool(SUPPLY_PROFILES.get(profile_id, {}).get("shared_broker", False))
 
     def _prefer_running_shared_broker_for_auto_connect(self) -> bool:
@@ -11974,14 +12038,79 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.check_motor_supply_power.isChecked()
 
     def _motor_supply_channel(self) -> int | None:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return snapshot.motor_supply_channel
         configured = int(self.combo_motor_supply_channel.currentData() or 0)
         return configured if configured > 0 else None
 
     def _current_sweep_supply_channel(self) -> int | None:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return snapshot.current_sweep_supply_channel
         configured = int(self.combo_current_sweep_supply_channel.currentData() or 0)
         if configured > 0:
             return configured
         return None
+
+    def _run_recipe_mode(self) -> str:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return snapshot.recipe_mode
+        return str(self.combo_recipe_mode.currentData() or "ramp")
+
+    def _run_supply_voltage_limit_v(self) -> float:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return float(snapshot.supply_voltage_limit_v)
+        return float(self.spin_supply_voltage_limit.value())
+
+    def _publish_manual_tic_settings_snapshot(self, *_args: object) -> TicConnectionSettings:
+        if not self._is_ui_thread():
+            raise RuntimeError("Manual Tic settings must be published from the GUI thread.")
+        snapshot = TicConnectionSettings(
+            command_path=self.edit_ticcmd_path.text().strip(),
+            device_serial=self.edit_tic_serial.text().strip(),
+            prefer_native_usb=bool(self.check_tic_native_usb.isChecked()),
+        )
+        with self._tic_settings_lock:
+            self._manual_tic_settings_snapshot = snapshot
+        return snapshot
+
+    def _manual_tic_settings(self) -> TicConnectionSettings:
+        with self._tic_settings_lock:
+            snapshot = self._manual_tic_settings_snapshot
+        if snapshot is None:
+            if not self._is_ui_thread():
+                raise RuntimeError("Manual Tic settings have not been published by the GUI thread.")
+            return self._publish_manual_tic_settings_snapshot()
+        return snapshot
+
+    def _tic_settings_for_current_command(self) -> TicConnectionSettings:
+        with self._tic_settings_lock:
+            automatic = self._automatic_tic_settings_snapshot
+        if automatic is not None:
+            return automatic
+        if self._automation_active and not self._is_ui_thread():
+            raise RuntimeError("Automatic Tic settings were not captured before a worker command.")
+        return self._manual_tic_settings()
+
+    def _activate_recovery_tic_settings(self) -> TicConnectionSettings:
+        with self._tic_settings_lock:
+            active_run = self._run_tic_settings_snapshot if self._session_active else None
+            completed_run = self._recovery_tic_settings_snapshot
+            selected = active_run or completed_run or self._manual_tic_settings_snapshot
+            if selected is None:
+                raise RuntimeError("Recovery Tic settings have not been captured on the GUI thread.")
+            self._automatic_tic_settings_snapshot = selected
+        return selected
+
+    def _clear_recovery_tic_command_context(self, *, retain_capture: bool) -> None:
+        with self._tic_settings_lock:
+            active_run = self._run_tic_settings_snapshot if self._session_active else None
+            self._automatic_tic_settings_snapshot = active_run
+            if not retain_capture:
+                self._recovery_tic_settings_snapshot = None
 
     def _select_combo_data(self, combo: QtWidgets.QComboBox, value: int) -> bool:
         index = combo.findData(int(value))
@@ -12435,9 +12564,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _continuity_monitor_enabled(self) -> bool:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return snapshot.continuity_monitor_enabled
         return hasattr(self, "check_continuity_monitor") and self.check_continuity_monitor.isChecked()
 
     def _continuity_current_mA(self) -> float:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return snapshot.continuity_current_mA
         if hasattr(self, "spin_continuity_current_mA"):
             return max(0.0, float(self.spin_continuity_current_mA.value()))
         return CONTINUITY_CURRENT_DEFAULT_MA
@@ -12486,7 +12621,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._wire_break_detected():
             self._stop_for_wire_break()
             return
-        limit_v = float(self.spin_supply_voltage_limit.value())
+        limit_v = self._run_supply_voltage_limit_v()
         measured_v = self._supply_snapshot.get("voltage_V")
         if measured_v is None or limit_v <= 0:
             self._supply_voltage_limit_logged = False
@@ -12559,7 +12694,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         measured_current_mA = self._supply_snapshot.get("current_mA")
         measured_voltage_v = self._supply_snapshot.get("voltage_V")
-        limit_v = float(self.spin_supply_voltage_limit.value())
+        limit_v = self._run_supply_voltage_limit_v()
         if measured_current_mA is None or measured_voltage_v is None or limit_v <= 0.0:
             return False
         current_threshold_mA = max(WIRE_BREAK_MAX_MEASURED_MA, self._supply_current_resolution_mA())
@@ -14406,6 +14541,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._connect_ir_thermometer()
 
     def _ir_enabled(self) -> bool:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return snapshot.ir_enabled
         checkbox = getattr(self, "check_ir_enabled", None)
         if checkbox is None:
             return True
@@ -22499,11 +22637,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _control_interval_ms(self) -> int:
+        config = self._control_config()
+        if not self._is_ui_thread() and config is not None:
+            return int(config.control_interval_ms)
         if hasattr(self, "spin_control_interval"):
             return int(self.spin_control_interval.value())
         return DEFAULT_CONTROL_INTERVAL_MS
 
     def _log_interval_ms(self) -> int:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return int(snapshot.log_interval_ms)
         if hasattr(self, "spin_log_interval"):
             return int(self.spin_log_interval.value())
         if hasattr(self, "spin_current_sweep_log_interval"):
@@ -22516,6 +22660,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return DEFAULT_UI_REFRESH_INTERVAL_MS
 
     def _graph_refresh_interval_ms(self) -> int:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return int(snapshot.graph_refresh_interval_ms)
         if hasattr(self, "spin_graph_interval"):
             return int(self.spin_graph_interval.value())
         return DEFAULT_GRAPH_REFRESH_INTERVAL_MS
@@ -22531,6 +22678,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return TIC_KEEPALIVE_INTERVAL_MS
 
     def _supply_read_interval_ms(self) -> int:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return int(snapshot.supply_read_interval_ms)
         if hasattr(self, "spin_supply_read_interval"):
             return int(self.spin_supply_read_interval.value())
         return DEFAULT_SUPPLY_READ_INTERVAL_MS
@@ -22929,7 +23079,180 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_stop_detail = detail
         self._session_stop_recorded_utc = _utc_timestamp()
 
+    def _freeze_run_metadata_snapshot(self) -> MiniDmaRunMetadataSnapshot:
+        if not self._is_ui_thread():
+            raise RuntimeError("TMA run metadata must be frozen on the GUI thread.")
+        payload = self._session_metadata_from_ui()
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        current_channel = int(self.combo_current_sweep_supply_channel.currentData() or 0)
+        motor_channel = int(self.combo_motor_supply_channel.currentData() or 0)
+        snapshot = MiniDmaRunMetadataSnapshot(
+            launch_json=encoded,
+            effective_json=encoded,
+            recipe_mode=str(payload.get("recipe_mode") or "ramp"),
+            log_interval_ms=int(payload["logging"]["log_interval_ms"]),
+            graph_refresh_interval_ms=int(payload["control"]["graph_refresh_interval_ms"]),
+            supply_read_interval_ms=int(payload["control"]["supply_read_interval_ms"]),
+            supply_voltage_limit_v=float(payload["heating"]["voltage_limit_v"]),
+            supply_profile_id=str(payload["heating"]["profile"]),
+            current_sweep_supply_channel=current_channel if current_channel > 0 else None,
+            motor_supply_channel=motor_channel if motor_channel > 0 else None,
+            continuity_monitor_enabled=bool(payload["heating"]["continuity_monitor_enabled"]),
+            continuity_current_mA=float(payload["heating"]["continuity_current_mA"]),
+            ir_enabled=bool(payload["ir_thermometer"]["enabled"]),
+            ticcmd_path=self.edit_ticcmd_path.text().strip(),
+            tic_serial=self.edit_tic_serial.text().strip(),
+            tic_native_usb=bool(self.check_tic_native_usb.isChecked()),
+        )
+        with self._session_metadata_write_lock:
+            self._run_metadata_snapshot = snapshot
+        with self._tic_settings_lock:
+            run_tic_settings = snapshot.tic_settings()
+            self._run_tic_settings_snapshot = run_tic_settings
+            self._automatic_tic_settings_snapshot = run_tic_settings
+        return snapshot
+
+    def _publish_current_sweep_metadata_effective_values(
+        self,
+        values: Mapping[str, float | bool],
+        *,
+        skip_first_overheating_current_end: bool = False,
+    ) -> None:
+        mapping = {
+            "target_start": "target_start",
+            "target_end": "target_end",
+            "target_step": "target_step",
+            "target_ramp_rate_value_s": "target_ramp_rate_value_s",
+            "return_target": "return_target",
+            "current_start_mA": "current_start_mA",
+            "current_end_mA": "current_end_mA",
+            "first_overheating_current_end_mA": "first_overheating_current_end_mA",
+            "current_ramp_rate_mA_s": "current_ramp_rate_mA_s",
+            "current_hold_enabled": "current_ramp_hold_on_error",
+            "current_hold_pause_tolerance_factor": "current_ramp_hold_pause_factor",
+            "current_hold_resume_tolerance_factor": "current_ramp_hold_resume_factor",
+            "current_hold_resume_stable_s": "current_ramp_hold_resume_stable_s",
+        }
+        with self._session_metadata_write_lock:
+            snapshot = self._run_metadata_snapshot
+            if snapshot is None:
+                return
+            payload = snapshot.effective_metadata()
+            sweep = payload.get("controlled_current_sweep")
+            if not isinstance(sweep, dict):
+                return
+            for value_key, metadata_key in mapping.items():
+                if value_key not in values:
+                    continue
+                if skip_first_overheating_current_end and value_key == "first_overheating_current_end_mA":
+                    continue
+                sweep[metadata_key] = values[value_key]
+            self._run_metadata_snapshot = replace(
+                snapshot,
+                effective_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            )
+
+    def _append_current_sweep_recipe_override(
+        self,
+        payload: dict[str, object],
+        *,
+        effective_values: Mapping[str, float | bool] | None = None,
+        skip_first_overheating_current_end: bool = False,
+    ) -> None:
+        with self._session_metadata_write_lock:
+            self._current_sweep_recipe_overrides.append(payload)
+            if effective_values is not None:
+                self._publish_current_sweep_metadata_effective_values(
+                    effective_values,
+                    skip_first_overheating_current_end=skip_first_overheating_current_end,
+                )
+
+    def _apply_session_runtime_metadata(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload["position_reference_mm"] = float(self._position_reference_mm)
+        payload["preload_reference_armed"] = self._preload_reference_armed
+        payload["preload_trigger_elapsed_s"] = self._preload_trigger_elapsed_s
+        run_zero = self._run_zero_load_scale_g
+        if run_zero is not None:
+            payload["zero_load_scale_g"] = float(run_zero)
+        payload["run_zero_load_scale_g"] = run_zero
+        payload["diagnostic_load_offset_g"] = float(self._load_offset_g)
+        zero_limit_g = abs(float(payload.get("zero_load_scale_g") or 0.0))
+        custom_limit_g = float(payload.get("custom_max_load_limit_g") or 0.0)
+        if bool(payload.get("max_load_limit_enabled")):
+            payload["max_load_limit_g"] = (
+                min(custom_limit_g, zero_limit_g) if zero_limit_g > 0.0 else custom_limit_g
+            )
+        else:
+            payload["max_load_limit_g"] = zero_limit_g if zero_limit_g > 0.0 else None
+        payload["constant_current_zero"] = {
+            "active_position_mm": self._active_constant_current_zero_position_mm,
+            "active_current_mA": self._active_constant_current_zero_current_mA,
+            "positions_by_leg": dict(self._constant_current_step_base_position_by_note),
+        }
+
+        scale = payload["scale"]
+        scale["recent_sample_rate_hz"] = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
+        ir = payload["ir_thermometer"]
+        ir["connected"] = self._ir_thread is not None
+        ir_sample = self._latest_ir_sample
+        ir["config1"] = "" if not ir["enabled"] or ir_sample is None else ir_sample.config1
+        ir["baseline_object_c_apparent"] = self._ir_baseline_object_c
+        ir["recent_sample_rate_hz"] = self._ir_temperature_buffer.sample_rate_hz(now_s=time.time())
+
+        logging_metadata = payload["logging"]
+        logging_metadata.update(
+            {
+                "run_log_complete": bool(
+                    self._session_run_log_complete and not self._session_run_log_write_failed
+                ),
+                "run_log_incomplete_lines": int(self._session_run_log_incomplete_lines),
+                "run_log_incomplete_reason": self._session_run_log_incomplete_reason,
+                "raw_scale_sample_count": int(self._session_raw_scale_count),
+                "raw_scale_session_rate_hz": self._session_raw_scale_rate_hz(),
+                "raw_scale_max_gap_s": (
+                    None
+                    if self._session_raw_scale_max_gap_s <= 0.0
+                    else self._session_raw_scale_max_gap_s
+                ),
+                "ir_temperature_sample_count": int(self._session_ir_temperature_count),
+                "ir_temperature_session_rate_hz": self._session_ir_temperature_rate_hz(),
+                "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
+            }
+        )
+        payload["recipe_summary"] = self._last_recipe_summary
+        payload["recipe_estimated_points"] = int(self._recipe_estimated_points)
+        payload["first_overheating_preflight"] = self._first_overheating_preflight_decision
+        payload["stop"] = self._session_stop_metadata()
+        payload["source_control"] = self._source_control_metadata()
+
+        calibration = payload["calibration"]
+        calibration["report"] = self._calibration_report
+        payload["copper_calibration"] = dict(calibration, legacy_name="copper_calibration")
+        sweep = payload["controlled_current_sweep"]
+        sweep.update(
+            {
+                "setup_starting_length_mm": self._setup_starting_length_mm,
+                "setup_measured_length_mm": self._setup_measured_length_mm,
+                "setup_preload_position_mm": self._setup_preload_position_mm,
+                "setup_length_reference_position_mm": self._setup_preload_position_mm,
+                "setup_preload_ramp_skipped": self._setup_preload_ramp_skipped,
+                "runtime_overrides": list(self._current_sweep_recipe_overrides),
+            }
+        )
+        return payload
+
     def _session_metadata(self) -> dict[str, Any]:
+        with self._session_metadata_write_lock:
+            snapshot = self._run_metadata_snapshot
+            if snapshot is None:
+                if not self._is_ui_thread():
+                    raise RuntimeError("TMA worker metadata requested before the GUI snapshot was frozen.")
+                return self._session_metadata_from_ui()
+            return self._apply_session_runtime_metadata(snapshot.effective_metadata())
+
+    def _session_metadata_from_ui(self) -> dict[str, Any]:
+        if not self._is_ui_thread():
+            raise RuntimeError("TMA widget metadata may only be read on the GUI thread.")
         calibration_metadata = {
             "baseline_s": float(self.spin_calibration_baseline_s.value()),
             "start_load_g": float(self.spin_calibration_start_load_g.value()),
@@ -23291,6 +23614,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_session(self, *, enable_logging: bool = True, record_initial_point: bool = True) -> None:
         if self._session_active:
             return
+        with self._session_metadata_write_lock:
+            self._run_metadata_snapshot = None
+        with self._tic_settings_lock:
+            self._run_tic_settings_snapshot = None
+            self._automatic_tic_settings_snapshot = None
+            self._recovery_tic_settings_snapshot = None
         self._persist_settings_if_enabled(immediate=True)
         self._clear_run_zero_load_scale_reference()
         created_utc = _utc_timestamp()
@@ -23463,6 +23792,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prepare_heating_for_session()
         self._apply_ui_refresh_interval()
         self._ui_refresh_timer.start()
+        self._freeze_run_metadata_snapshot()
         self._write_session_metadata()
         self._refresh_live_labels()
         if self._session_logging_enabled and record_initial_point:
@@ -23620,6 +23950,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._session_json_path is not None:
             self._write_session_metadata(finished_utc=_utc_timestamp())
             self._schedule_tma_history_scan()
+        with self._session_metadata_write_lock:
+            finished_run_snapshot = self._run_metadata_snapshot
+            self._run_metadata_snapshot = None
+        with self._tic_settings_lock:
+            finished_run_tic_settings = self._run_tic_settings_snapshot
+            if finished_run_tic_settings is None and finished_run_snapshot is not None:
+                finished_run_tic_settings = finished_run_snapshot.tic_settings()
+            self._recovery_tic_settings_snapshot = finished_run_tic_settings
+            self._run_tic_settings_snapshot = None
+            self._automatic_tic_settings_snapshot = None
         self._first_overheating_preflight_decision = None
         if self._session_base_path is not None:
             self._start_run_summary_generation(
@@ -23763,16 +24103,13 @@ class MainWindow(QtWidgets.QMainWindow):
             filtered_signal = self._seek_filtered_control_signal(basis)
         scale_age_s = self._scale_reading_age_s()
         scale_recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
-        try:
-            voltage_limit_v = float(self.spin_supply_voltage_limit.value())
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            voltage_limit_v = None
+        voltage_limit_v = self._run_supply_voltage_limit_v()
         try:
             self._session_control_trace_writer.writerow(
                 {
                     "elapsed_s": f"{elapsed_s:.6f}",
                     "timestamp_utc": _utc_timestamp(),
-                    "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
+                    "recipe_mode": self._run_recipe_mode(),
                     "task_text": self._current_task_summary() if task_text is None else task_text,
                     "automation_phase": self._automation_phase,
                     "automation_basis": "" if basis is None else basis,
@@ -24336,7 +24673,7 @@ class MainWindow(QtWidgets.QMainWindow):
             {
                 "elapsed_s": f"{point.elapsed_s:.6f}",
                 "timestamp_utc": point.timestamp_utc,
-                "recipe_mode": str(self.combo_recipe_mode.currentData() or "ramp"),
+                "recipe_mode": self._run_recipe_mode(),
                 "automation_phase": point.automation_phase,
                 "automation_basis": "" if point.automation_basis is None else point.automation_basis,
                 "automation_target_value": ""
@@ -26254,7 +26591,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "truncated": False,
                     "result": "rejected",
                 }
-                self._current_sweep_recipe_overrides.append(payload)
+                self._append_current_sweep_recipe_override(payload)
                 self._write_control_trace(
                     decision="recipe_update",
                     result="rejected",
@@ -26310,7 +26647,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "truncated": False,
                 "result": "rejected",
             }
-            self._current_sweep_recipe_overrides.append(payload)
+            self._append_current_sweep_recipe_override(payload)
             self._write_control_trace(
                 decision="recipe_update",
                 result="rejected",
@@ -26360,7 +26697,11 @@ class MainWindow(QtWidgets.QMainWindow):
         }
         if rejected_update_message:
             payload["rejected_update_message"] = rejected_update_message
-        self._current_sweep_recipe_overrides.append(payload)
+        self._append_current_sweep_recipe_override(
+            payload,
+            effective_values=values,
+            skip_first_overheating_current_end=bool(rejected_update_message),
+        )
         reason = json.dumps(payload, separators=(",", ":"), default=str)
         trace_task_text = (
             "Updated active and remaining current sweeps"
@@ -26865,6 +27206,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_on_ui_thread(_finalize_worker_error)
 
     def _start_automation_control_loop(self, interval_ms: int) -> None:
+        if not self._is_ui_thread():
+            raise RuntimeError("The TMA control worker must be started from the GUI thread.")
+        if self._session_active and self._run_metadata_snapshot is None:
+            self._freeze_run_metadata_snapshot()
+        with self._tic_settings_lock:
+            if self._automation_active and self._automatic_tic_settings_snapshot is None:
+                raise RuntimeError("Tic command settings were not captured before control-worker start.")
         self._automation_control_error = None
         if self._automation_control_loop is not None:
             self._automation_control_loop.stop()
@@ -26892,7 +27240,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_control_loop is not None:
             self._automation_control_loop.stop()
             self._automation_control_loop = None
-        self._auto_ramp_timer.stop()
+        if self._is_ui_thread():
+            self._auto_ramp_timer.stop()
+        else:
+            self._run_on_ui_thread(self._auto_ramp_timer.stop)
 
     def _current_tma_sample_identity(self) -> TmaSampleIdentity:
         return TmaSampleIdentity(
@@ -27152,6 +27503,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_duration_overheads_s = []
         self._current_sweep_recipe_overrides = []
         self._current_sweep_runtime_applied_values = None
+        with self._session_metadata_write_lock:
+            self._run_metadata_snapshot = None
+        with self._tic_settings_lock:
+            self._run_tic_settings_snapshot = None
+            self._automatic_tic_settings_snapshot = None
         self._automation_active = True
         self._automation_paused = False
         self._automation_interval_ms = interval_ms
@@ -27831,7 +28187,9 @@ class MainWindow(QtWidgets.QMainWindow):
         interval_ms = self._control_interval_ms()
         move_duration_s = self._move_duration_s(distance_mm, speed_mm_s)
         steps = [AutomationStep("move", target_mm=target_mm, duration_s=move_duration_s, note=label)]
+        self._activate_recovery_tic_settings()
         if not self._preflight_recipe_hardware(steps):
+            self._clear_recovery_tic_command_context(retain_capture=True)
             return
         self._show_recovery_plot_dialog(f"TMA Recovery: {label}")
         self._automation_steps = steps
@@ -27862,6 +28220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_recovery_position_target(self._position_reference_mm, "displacement to 0")
 
     def _start_recovery_load_zero(self) -> None:
+        self._activate_recovery_tic_settings()
         self._sync_manual_motion_base_from_current_position()
         steps = [
             AutomationStep(
@@ -27873,6 +28232,7 @@ class MainWindow(QtWidgets.QMainWindow):
             AutomationStep("record", target_value=0.0, basis=HSW_BASIS_LOAD_G, note="0"),
         ]
         if not self._preflight_recipe_hardware(steps):
+            self._clear_recovery_tic_command_context(retain_capture=True)
             return
         self._show_recovery_plot_dialog("TMA Recovery: load to zero")
         self._automation_steps = steps
@@ -27909,6 +28269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return stress_mpa_from_load_g(effective_load, float(self.spin_diameter.value()))
 
     def start_bench_stress_recovery(self, target_stress_mpa: float, *, reason: str) -> bool:
+        self._activate_recovery_tic_settings()
         self._sync_manual_motion_base_from_current_position()
         target = max(0.0, float(target_stress_mpa))
         steps = [
@@ -27926,6 +28287,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         ]
         if not self._preflight_recipe_hardware(steps):
+            self._clear_recovery_tic_command_context(retain_capture=True)
             return False
         self._show_recovery_plot_dialog("TMA Recovery: bench stress guard")
         self._automation_steps = steps
@@ -28068,6 +28430,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._close_length_setup_dialog()
         if (user_initiated or offer_recovery) and self._session_active:
             self._stop_session()
+        elif not self._session_active:
+            self._clear_recovery_tic_command_context(retain_capture=False)
         if not keep_progress:
             self._update_recipe_progress()
         self._update_recipe_buttons()
