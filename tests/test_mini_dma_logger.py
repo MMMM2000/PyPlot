@@ -52,6 +52,12 @@ def _block_real_tic_usb_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mini_dma_mod, "_load_pyusb_backend", _blocked_backend)
 
 
+@pytest.fixture(autouse=True)
+def _block_real_serial_port_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must not enumerate or claim the machine's serial devices."""
+    monkeypatch.setattr(mini_dma_mod, "list_ports", SimpleNamespace(comports=lambda: []))
+
+
 def _test_settings() -> QtCore.QSettings:
     return QtCore.QSettings(
         str(TEST_QSETTINGS_ROOT / "mini_dma_logger.ini"),
@@ -415,6 +421,10 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
     _ensure_app().processEvents()
     if isinstance(snapshot, dict):
         _restore_settings(snapshot)
+
+
+def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
+    qtbot.waitUntil(lambda: window._serial_port_scan_thread is None, timeout=3000)
 
 
 def test_current_sweep_hold_bands_are_bounded_processed_signal_multipliers() -> None:
@@ -9475,11 +9485,13 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
             lambda: [SimpleNamespace(device="COM7", description="Rohde supply")],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_supply(port_name: str):
             assert port_name == "COM7"
@@ -9501,6 +9513,92 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
         assert window.combo_supply_profile.currentData() == "hmp4040"
         assert window.combo_current_sweep_supply_channel.currentData() == 0
         assert window.combo_motor_supply_channel.currentData() == 0
+    finally:
+        _close_test_window(window)
+
+
+def test_startup_serial_port_enumeration_is_single_pass_and_nonblocking(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    scan_thread_ids: list[int] = []
+
+    def _blocking_comports() -> list[SimpleNamespace]:
+        scan_thread_ids.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=5.0)
+        return [SimpleNamespace(device="COM8", description="Synthetic serial port")]
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _blocking_comports)
+    main_thread_id = threading.get_ident()
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert started.wait(timeout=1.0)
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: heartbeat == [True], timeout=1000)
+        assert len(scan_thread_ids) == 1
+        assert scan_thread_ids[0] != main_thread_id
+        assert "background" in window.statusBar().currentMessage().lower()
+
+        release.set()
+
+        qtbot.waitUntil(lambda: window.combo_supply_port.findData("COM8") >= 0, timeout=3000)
+        assert window.combo_scale_port.findData("COM8") >= 0
+        assert window.combo_ir_port.findData("COM8") >= 0
+        assert len(scan_thread_ids) == 1
+    finally:
+        release.set()
+        _close_test_window(window)
+
+
+def test_startup_serial_port_enumeration_failure_is_persistent(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _failed_comports() -> list[SimpleNamespace]:
+        raise RuntimeError("synthetic SetupAPI failure")
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _failed_comports)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        qtbot.waitUntil(
+            lambda: "synthetic SetupAPI failure" in window.statusBar().currentMessage(),
+            timeout=3000,
+        )
+        assert window.combo_supply_port.currentText() == "Serial-port scan failed"
+        assert window.combo_scale_port.currentText() == "Serial-port scan failed"
+        assert window.combo_ir_port.currentText() == "Serial-port scan failed"
+        assert "Serial-port scan failed: synthetic SetupAPI failure" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_empty_background_serial_scan_preserves_saved_port_settings(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    settings = _test_settings()
+    settings.setValue("supply_port", "COM21")
+    settings.setValue("scale_port", "COM22")
+    settings.setValue("ir_port", "COM23")
+    settings.sync()
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        _wait_for_serial_port_scan(window, qtbot)
+        assert window.combo_supply_port.currentData() == "COM21"
+        assert window.combo_scale_port.currentData() == "COM22"
+        assert window.combo_ir_port.currentData() == "COM23"
+        assert "not detected" in window.combo_supply_port.currentText()
+        assert "not detected" in window.combo_scale_port.currentText()
+        assert "not detected" in window.combo_ir_port.currentText()
     finally:
         _close_test_window(window)
 
@@ -14137,6 +14235,7 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
         assert profile_index >= 0
         window.combo_supply_profile.setCurrentIndex(profile_index)
@@ -14772,6 +14871,7 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
             "list_ports",
             SimpleNamespace(comports=lambda: [SimpleNamespace(device="COM7", description="HMP")]),
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
         monkeypatch.setattr(
             window,
             "_probe_supply_candidate",
@@ -25334,6 +25434,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -25342,6 +25443,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
                 SimpleNamespace(device="COM3", description="USB Serial B"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_scale(port_name: str):
             if port_name == "COM6":
@@ -25377,6 +25479,7 @@ def test_fast_scale_auto_connect_prefers_ch340_scale_over_saved_prolific_port(
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -25385,6 +25488,7 @@ def test_fast_scale_auto_connect_prefers_ch340_scale_over_saved_prolific_port(
                 SimpleNamespace(device="COM5", description="USB-SERIAL CH340"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
         window.combo_scale_port.clear()
         window.combo_scale_port.addItem("COM4 - Prolific", "COM4")
         window.combo_scale_port.addItem("COM5 - CH340", "COM5")
@@ -25420,6 +25524,7 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -25428,6 +25533,7 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
                 SimpleNamespace(device="COM3", description="USB Serial B"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_supply(port_name: str):
             if port_name == "COM3":
