@@ -11567,6 +11567,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._schedule_run_log_flush)
             return
+        if self._window_closing:
+            return
         if self._run_log_flush_queued:
             return
         self._run_log_flush_queued = True
@@ -14812,7 +14814,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._scale_ui_bridge = None
             self.button_scale_connect.setText("Connect scale")
             self._scale_hint_timer.stop()
-        else:
+        elif sensor_kind == "ir":
             bridge = self._ir_ui_bridge
             self._ir_worker = None
             self._ir_thread = None
@@ -14820,6 +14822,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._ir_connection_token = None
             self._ir_ui_bridge = None
             self.button_ir_connect.setText("Connect IR")
+        else:
+            return
         if bridge is not None:
             bridge.deleteLater()
         self._refresh_live_labels()
@@ -14831,13 +14835,14 @@ class MainWindow(QtWidgets.QMainWindow):
         timestamp_s: float,
     ) -> None:
         with self._scale_state_lock:
+            self._restore_cached_zero_load_reference_for_measurement(value_g)
             self._latest_scale_value_g = value_g
             self._latest_scale_text = raw_text
             self._latest_scale_timestamp = timestamp_s
             sample = self._scale_signal_buffer.add_sample(
                 timestamp_s=timestamp_s,
                 raw_g=value_g,
-                applied_load_g=self._effective_load_from_raw_g(value_g),
+                applied_load_g=self._effective_load_from_cached_scale_state(value_g),
                 raw_text=raw_text,
             )
             self._write_raw_scale_sample(sample)
@@ -14850,9 +14855,10 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_text: str,
         timestamp_s: float,
     ) -> None:
-        if not self._sensor_callback_is_current("scale", token):
-            return
-        self._record_scale_measurement_state(value_g, raw_text, timestamp_s)
+        with self._scale_state_lock:
+            if self._window_closing or token is not self._scale_connection_token:
+                return
+            self._record_scale_measurement_state(value_g, raw_text, timestamp_s)
 
     def _handle_scale_measurement(self, value_g: float, raw_text: str, timestamp_s: float) -> None:
         self._record_scale_measurement_state(value_g, raw_text, timestamp_s)
@@ -15288,15 +15294,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self._write_ir_temperature_sample(sample)
 
     def _record_ir_sample_from_worker(self, token: object, sample: object) -> None:
-        if not self._sensor_callback_is_current("ir", token):
-            return
-        if isinstance(sample, IrTemperatureSample):
-            self._record_ir_sample_state(sample)
+        with self._ir_state_lock:
+            if self._window_closing or token is not self._ir_connection_token:
+                return
+            if isinstance(sample, IrTemperatureSample):
+                self._record_ir_sample_state(sample)
 
     def _record_ir_frame_from_worker(self, token: object, frame: object) -> None:
-        if not self._sensor_callback_is_current("ir", token):
-            return
         with self._ir_state_lock:
+            if self._window_closing or token is not self._ir_connection_token:
+                return
             self._latest_ir_frame = frame
 
 
@@ -15410,6 +15417,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_zero_load_scale_g = None
         self._refresh_scale_reference_cache()
         self._refresh_live_labels()
+
+    def _restore_cached_zero_load_reference_for_measurement(self, raw_g: float) -> bool:
+        if (
+            not self._cached_tension_decreases_scale_reading
+            or self._run_zero_load_scale_g is not None
+            or abs(self._cached_zero_load_scale_g) > 0.01
+            or float(raw_g) < DEFAULT_ZERO_LOAD_SCALE_G * 0.5
+        ):
+            return False
+        self._cached_zero_load_scale_g = DEFAULT_ZERO_LOAD_SCALE_G
+        self._load_offset_g = 0.0
+        return True
+
+    def _effective_load_from_cached_scale_state(self, raw_g: float) -> float:
+        config = self._control_config()
+        tension_decreases = (
+            config.tension_decreases_scale_reading
+            if config is not None
+            else self._cached_tension_decreases_scale_reading
+        )
+        zero_load_scale_g = (
+            self._run_zero_load_scale_g
+            if self._run_zero_load_scale_g is not None
+            else self._cached_zero_load_scale_g
+        )
+        load_sign = -1.0 if tension_decreases else 1.0
+        signed_load_g = load_sign * (float(raw_g) - float(zero_load_scale_g))
+        return max(0.0, signed_load_g + self._load_offset_g)
 
     def _restore_default_zero_load_reference_if_real_grams(self, raw_g: float) -> bool:
         if not self._is_ui_thread():
@@ -33099,13 +33134,38 @@ class MainWindow(QtWidgets.QMainWindow):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(event)
 
+    def _stop_periodic_callbacks_for_close(self) -> None:
+        timers = (
+            self._source_provenance_poll_timer,
+            self._filesystem_worker_poll_timer,
+            self._builder_project_import_timer,
+            self._run_summary_poll_timer,
+            self._tma_history_scan_timer,
+            self._tma_history_scan_poll_timer,
+            self._settings_save_timer,
+            self._fabrication_composition_load_timer,
+            self._serial_port_scan_poll_timer,
+            self._manual_jog_timer,
+            self._tic_keepalive_timer,
+            self._status_timer,
+            self._ui_refresh_timer,
+            self._ui_heartbeat_timer,
+            self._auto_ramp_timer,
+            self._run_log_flush_timer,
+            self._scale_hint_timer,
+        )
+        for timer in timers:
+            timer.stop()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
+        self._stop_periodic_callbacks_for_close()
+        try:
+            WINDOWS.remove(self)
+        except ValueError:
+            pass
         self._serial_port_scan_generation += 1
-        self._serial_port_scan_poll_timer.stop()
         self._serial_port_scan_task = None
-        self._source_provenance_poll_timer.stop()
-        self._run_summary_poll_timer.stop()
         self._run_summary_task = None
         self._run_summary_pending = None
         self._hide_fabrication_completer_popups()
@@ -33114,8 +33174,6 @@ class MainWindow(QtWidgets.QMainWindow):
             app.removeEventFilter(self)
             self._app_event_filter_installed = False
         self._close_transient_child_windows()
-        self._settings_save_timer.stop()
-        self._fabrication_composition_load_timer.stop()
         if self._persist_settings:
             self._save_settings()
         self._stop_tic_keepalive()
@@ -33125,8 +33183,6 @@ class MainWindow(QtWidgets.QMainWindow):
             stop_detail="Application window closed while automation was active.",
         )
         self._stop_tic_dispatcher()
-        self._builder_project_import_timer.stop()
-        self._filesystem_worker_poll_timer.stop()
         self._stop_builder_project_import_thread()
         self._stop_tma_history_scan_task()
         self._stop_annealing_folder_scans()
@@ -33140,6 +33196,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._disconnect_supply()
         self._stop_owned_shared_broker()
         self._async_run_log_writer.stop(timeout_s=0.5)
+        self._stop_periodic_callbacks_for_close()
         super().closeEvent(event)
 
 

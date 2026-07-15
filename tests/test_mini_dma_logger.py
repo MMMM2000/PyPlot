@@ -3994,6 +3994,163 @@ def test_scale_measurement_updates_freshness_off_ui_thread(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+@pytest.mark.parametrize("callback_kind", ["scale", "ir_sample", "ir_frame"])
+def test_sensor_disconnect_wins_for_callback_blocked_before_state_lock(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    callback_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    token = object()
+    attempting = threading.Event()
+    completed = threading.Event()
+    raw_writes: list[object] = []
+
+    initial_ir_sample = mini_dma_mod.IrTemperatureSample(
+        timestamp_s=1.0,
+        raw_text="initial",
+        sequence=1,
+        device_elapsed_ms=10,
+        read_us=20,
+        ambient_c=21.0,
+        object_c_apparent=30.0,
+        raw_ambient=100,
+        raw_object=200,
+        flags=0,
+    )
+    stale_ir_sample = dataclasses.replace(
+        initial_ir_sample,
+        timestamp_s=2.0,
+        raw_text="stale",
+        sequence=2,
+        object_c_apparent=99.0,
+    )
+    initial_frame = object()
+    stale_frame = object()
+
+    if callback_kind == "scale":
+        lock = window._scale_state_lock
+        window._scale_connection_token = token
+        monkeypatch.setattr(window, "_write_raw_scale_sample", raw_writes.append)
+
+        def _deliver() -> None:
+            attempting.set()
+            window._record_scale_measurement_from_worker(token, 17.0, "stale-scale", 2.0)
+            completed.set()
+
+        disconnect = window._disconnect_scale
+    else:
+        lock = window._ir_state_lock
+        window._ir_connection_token = token
+        if callback_kind == "ir_sample":
+            window._latest_ir_sample = initial_ir_sample
+            window._ir_temperature_buffer.add_sample(initial_ir_sample)
+            monkeypatch.setattr(window, "_write_ir_temperature_sample", raw_writes.append)
+
+            def _deliver() -> None:
+                attempting.set()
+                window._record_ir_sample_from_worker(token, stale_ir_sample)
+                completed.set()
+
+        else:
+            window._latest_ir_frame = initial_frame
+
+            def _deliver() -> None:
+                attempting.set()
+                window._record_ir_frame_from_worker(token, stale_frame)
+                completed.set()
+
+        disconnect = window._disconnect_ir_thermometer
+
+    delivery_thread = threading.Thread(target=_deliver)
+    try:
+        with lock:
+            delivery_thread.start()
+            assert attempting.wait(timeout=2.0)
+            disconnect(timeout_ms=0)
+            assert not completed.is_set()
+        delivery_thread.join(timeout=2.0)
+        assert not delivery_thread.is_alive()
+        assert completed.is_set()
+
+        if callback_kind == "scale":
+            assert window._latest_scale_timestamp is None
+            assert window._scale_signal_buffer.latest() is None
+        elif callback_kind == "ir_sample":
+            assert window._latest_ir_sample is initial_ir_sample
+            assert window._ir_temperature_buffer.latest() is initial_ir_sample
+        else:
+            assert window._latest_ir_frame is initial_frame
+        assert raw_writes == []
+    finally:
+        delivery_thread.join(timeout=2.0)
+        _close_test_window(window)
+
+
+def test_first_real_scale_signal_repairs_cached_zero_before_state_and_raw_log(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = threading.Event()
+
+    def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+        worker.measurement_received.emit(17.325, "17.325 g", 1000.1)
+        emitted.set()
+        worker.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: 1000.0)
+    window.edit_log_name.setText("first_real_scale_sample")
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.combo_scale_port.clear()
+    window.combo_scale_port.addItem("COM-first-real", "COM-first-real")
+    window._start_session(enable_logging=False, record_initial_point=False)
+    raw_scale_path = window._session_raw_scale_path
+    assert raw_scale_path is not None
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+    try:
+        assert window._connect_scale(show_errors=False)
+        assert emitted.wait(timeout=2.0)
+
+        latest = window._scale_signal_buffer.latest()
+        assert latest is not None
+        assert latest.raw_g == pytest.approx(17.325)
+        assert latest.applied_load_g == pytest.approx(3.875)
+        assert window._latest_scale_value_g == pytest.approx(17.325)
+        assert window._cached_zero_load_scale_g == pytest.approx(
+            mini_dma_mod.DEFAULT_ZERO_LOAD_SCALE_G
+        )
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(0.0)
+        raw_rows = list(csv.DictReader(raw_scale_path.open(encoding="utf-8", newline="")))
+        assert raw_rows == [
+            {
+                "elapsed_s": "0.100000",
+                "timestamp_utc": mini_dma_mod._utc_timestamp_from_epoch(1000.1),
+                "sample_index": "1",
+                "host_interval_ms": "",
+                "raw_load_g": "17.325000",
+                "applied_load_g": "3.875000",
+                "raw_text": "17.325 g",
+            }
+        ]
+
+        qtbot.waitUntil(
+            lambda: window.spin_zero_load_scale_g.value()
+            == pytest.approx(mini_dma_mod.DEFAULT_ZERO_LOAD_SCALE_G),
+            timeout=2000,
+        )
+        qtbot.waitUntil(lambda: window._scale_thread is None, timeout=3000)
+    finally:
+        if window._session_active:
+            window._stop_session()
+        _close_test_window(window)
+
+
 @pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
 def test_sensor_worker_signals_queue_ui_and_reject_stale_finished_connections(
     tmp_path: Path,
@@ -4287,6 +4444,53 @@ def test_blocked_sensor_qthread_close_is_bounded_and_does_not_retain_window(
         _ensure_app().processEvents()
         QtCore.qInstallMessageHandler(previous_handler)
         _restore_settings(settings_snapshot)
+
+
+def test_tma_close_stops_all_periodic_timers_and_releases_windows_retention(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.main(log_dir=str(tmp_path), persist_settings=False)
+    assert isinstance(window, mini_dma_mod.MainWindow)
+    qtbot.addWidget(window)
+    timer_names = (
+        "_source_provenance_poll_timer",
+        "_filesystem_worker_poll_timer",
+        "_builder_project_import_timer",
+        "_run_summary_poll_timer",
+        "_tma_history_scan_timer",
+        "_tma_history_scan_poll_timer",
+        "_settings_save_timer",
+        "_fabrication_composition_load_timer",
+        "_serial_port_scan_poll_timer",
+        "_manual_jog_timer",
+        "_tic_keepalive_timer",
+        "_status_timer",
+        "_ui_refresh_timer",
+        "_ui_heartbeat_timer",
+        "_auto_ramp_timer",
+        "_run_log_flush_timer",
+        "_scale_hint_timer",
+    )
+    timers = {name: getattr(window, name) for name in timer_names}
+    fired: list[str] = []
+    for name, timer in timers.items():
+        timer.timeout.connect(lambda name=name: fired.append(name))
+        timer.start(20)
+    assert window in mini_dma_mod.WINDOWS
+
+    try:
+        window.close()
+
+        assert window not in mini_dma_mod.WINDOWS
+        assert all(not timer.isActive() for timer in timers.values())
+        qtbot.wait(60)
+        assert fired == []
+        assert all(not timer.isActive() for timer in timers.values())
+    finally:
+        if window in mini_dma_mod.WINDOWS:
+            mini_dma_mod.WINDOWS.remove(window)
+        window.close()
 
 
 def _calibration_point(
