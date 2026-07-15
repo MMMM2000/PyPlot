@@ -203,7 +203,11 @@ def test_automation_control_loop_pause_resume_and_stop() -> None:
         loop.stop()
 
 
-def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_events(tmp_path: Path, qtbot) -> None:
+def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
     main_thread_id = threading.get_ident()
     tick_thread_ids: list[int] = []
@@ -215,6 +219,7 @@ def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_even
 
     try:
         window._run_automation_control_tick = fake_tick  # type: ignore[method-assign]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
         window._start_automation_control_loop(20)
         deadline = time.monotonic() + 0.5
         while len(tick_thread_ids) < 3 and time.monotonic() < deadline:
@@ -479,6 +484,53 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
     _ensure_app().processEvents()
     if isinstance(snapshot, dict):
         _restore_settings(snapshot)
+
+
+def _guard_widget_access_to_gui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    window: mini_dma_mod.MainWindow,
+) -> None:
+    gui_thread = window.thread()
+    guarded_methods = (
+        (QtWidgets.QDoubleSpinBox, "value"),
+        (QtWidgets.QSpinBox, "value"),
+        (QtWidgets.QCheckBox, "isChecked"),
+        (QtWidgets.QComboBox, "currentData"),
+        (QtWidgets.QComboBox, "currentText"),
+        (QtWidgets.QLineEdit, "text"),
+        (QtWidgets.QTextEdit, "toPlainText"),
+        (QtWidgets.QPlainTextEdit, "toPlainText"),
+        (QtWidgets.QDoubleSpinBox, "setValue"),
+        (QtWidgets.QSpinBox, "setValue"),
+        (QtWidgets.QCheckBox, "setChecked"),
+        (QtWidgets.QComboBox, "setCurrentIndex"),
+        (QtWidgets.QLineEdit, "setText"),
+        (QtWidgets.QTextEdit, "setPlainText"),
+        (QtWidgets.QPlainTextEdit, "setPlainText"),
+        (QtWidgets.QWidget, "isHidden"),
+        (QtWidgets.QWidget, "isVisible"),
+        (QtWidgets.QWidget, "isEnabled"),
+        (QtWidgets.QWidget, "property"),
+        (QtWidgets.QWidget, "setEnabled"),
+        (QtWidgets.QWidget, "setVisible"),
+        (QtWidgets.QWidget, "setHidden"),
+        (QtWidgets.QWidget, "setProperty"),
+        (QtCore.QObject, "thread"),
+        (QtCore.QTimer, "start"),
+        (QtCore.QTimer, "stop"),
+        (QtCore.QTimer, "setInterval"),
+        (QtCore.QTimer, "isActive"),
+    )
+    for widget_type, method_name in guarded_methods:
+        original = getattr(widget_type, method_name)
+
+        def _guarded(widget, *args, _original=original, _method_name=method_name, **kwargs):
+            assert QtCore.QThread.currentThread() is gui_thread, (
+                f"{type(widget).__name__}.{_method_name} was called outside the GUI thread"
+            )
+            return _original(widget, *args, **kwargs)
+
+        monkeypatch.setattr(widget_type, method_name, _guarded)
 
 
 def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
@@ -18102,6 +18154,7 @@ def test_control_trace_write_failure_disables_trace_without_stopping(tmp_path: P
 
 def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
@@ -18165,6 +18218,10 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
 
     try:
         window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_metadata_snapshot is not None
+        launch_sweep_metadata = window._run_metadata_snapshot.launch_metadata()[
+            "controlled_current_sweep"
+        ]
         window._automation_active = True
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
         window._automation_steps = [active_sweep, future_set_current, future_ramp, future_sweep, future_reverse]
@@ -18187,6 +18244,23 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         window.check_current_sweep_hold_on_error.setChecked(False)
 
         assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        worker_errors: list[BaseException] = []
+
+        def _write_effective_metadata() -> None:
+            try:
+                window._write_session_metadata()
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        metadata_worker = threading.Thread(
+            target=_write_effective_metadata,
+            name="test-tma-runtime-effective-metadata",
+        )
+        metadata_worker.start()
+        metadata_worker.join(timeout=5.0)
+        assert metadata_worker.is_alive() is False
+        assert worker_errors == []
 
         assert window._automation_steps[0] is not active_sweep
         assert window._automation_steps[0].current_start_mA == pytest.approx(1.0)
@@ -18224,6 +18298,16 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
         assert overrides[0]["active_step_updated"] is True
         assert overrides[0]["changed_step_count"] == 5
+        assert metadata["controlled_current_sweep"]["current_end_mA"] == pytest.approx(80.0)
+        assert metadata["controlled_current_sweep"]["current_ramp_rate_mA_s"] == pytest.approx(0.6)
+        assert metadata["controlled_current_sweep"]["current_ramp_hold_on_error"] is False
+        assert window._run_metadata_snapshot is not None
+        assert window._run_metadata_snapshot.launch_metadata()["controlled_current_sweep"] == (
+            launch_sweep_metadata
+        )
+        assert window._run_metadata_snapshot.effective_metadata()["controlled_current_sweep"][
+            "current_end_mA"
+        ] == pytest.approx(80.0)
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -26091,6 +26175,140 @@ def test_session_metadata_keeps_original_created_timestamp(
         _close_test_window(window)
 
 
+def test_worker_metadata_and_scheduled_record_use_frozen_gui_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+    window.edit_log_name.setText("worker_metadata_snapshot")
+    window.edit_sample_name.setText("launch sample")
+    window.edit_run_notes.setPlainText("launch notes")
+    window.spin_log_interval.setValue(5000)
+    window.spin_supply_voltage_limit.setValue(7.5)
+    recipe_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert recipe_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(recipe_index)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_metadata_snapshot is not None
+        launch = window._run_metadata_snapshot.launch_metadata()
+        window._active_control_config = window._freeze_control_config()
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [mini_dma_mod.AutomationStep("record", note="worker-metadata")]
+        window._automation_index = 0
+        window._session_logging_enabled = True
+        window._last_session_log_timestamp_s = time.time()
+        window._latest_scale_timestamp = time.time()
+        window._latest_scale_value_g = 0.0
+        window._length_setup_start_monotonic = time.monotonic()
+
+        window.edit_sample_name.setText("unapproved operator change")
+        window.edit_run_notes.setPlainText("unapproved notes")
+        window.spin_log_interval.setValue(250)
+        window.spin_supply_voltage_limit.setValue(2.0)
+        window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData("cycle"))
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                assert window._build_tic_dispatcher() is not None
+                window._automation_controller.execute_next_tick()
+                assert window._record_length_setup_point() is True
+                for _ in range(5):
+                    window._last_session_metadata_write_s -= (
+                        mini_dma_mod.SESSION_METADATA_WRITE_INTERVAL_S + 0.1
+                    )
+                    window._write_session_metadata(throttle=True)
+                assert window._maybe_record_scheduled_point() is True
+                window._write_control_trace(decision="snapshot_probe", result="ok")
+                window._supply_output_enabled = True
+                window._supply_last_setpoint_mA = 10.0
+                window._supply_snapshot = {
+                    "current_mA": 0.0,
+                    "voltage_V": 7.5,
+                    "resistance_ohm": None,
+                    "power_W": 0.0,
+                }
+                assert window._wire_break_detected() is True
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_worker, name="test-tma-metadata-worker")
+        worker.start()
+        worker.join(timeout=5.0)
+
+        assert worker.is_alive() is False
+        assert errors == []
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["sample_name"] == "launch sample"
+        assert payload["notes"] == "launch notes"
+        assert payload["recipe_mode"] == mini_dma_mod.CURRENT_SWEEP_STRESS
+        assert payload["logging"]["log_interval_ms"] == 5000
+        assert payload["heating"]["voltage_limit_v"] == pytest.approx(7.5)
+        assert payload["sample_name"] == launch["sample_name"]
+    finally:
+        window._automation_active = False
+        window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "manual_session_stop",
+        "recipe_control_worker_error",
+        "wire_break_or_contact_loss",
+    ],
+)
+def test_worker_stop_fault_and_wire_break_finalize_without_widget_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+    reason: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._source_provenance_cache = _ControlledSourceProvenanceCache()
+    window.edit_log_name.setText(f"worker_finalize_{reason}")
+    window._record_current_point = lambda **_kwargs: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                window._stop_session(reason=reason, detail=f"Synthetic {reason} finalization.")
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_worker, name=f"test-tma-{reason}")
+        worker.start()
+        qtbot.waitUntil(lambda: not worker.is_alive(), timeout=5000)
+        worker.join(timeout=0.1)
+
+        assert errors == []
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == reason
+        assert payload["stop"]["detail"] == f"Synthetic {reason} finalization."
+        assert window._run_metadata_snapshot is not None
+        assert payload["sample_name"] == window._run_metadata_snapshot.launch_metadata()["sample_name"]
+    finally:
+        _close_test_window(window)
+
+
 def test_session_metadata_records_source_control_snapshot(
     tmp_path: Path,
     qtbot,
@@ -26359,7 +26577,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         window._write_session_metadata()
         second_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
 
-        assert second_payload["control_logic"]["fingerprint"] != old_fingerprint
+        assert second_payload["control_logic"]["fingerprint"] == old_fingerprint
     finally:
         window._stop_session()
         _close_test_window(window)
