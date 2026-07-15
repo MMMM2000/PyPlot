@@ -26415,6 +26415,170 @@ def test_post_stop_recovery_uses_captured_run_tic_settings_without_run_metadata(
         _close_test_window(window)
 
 
+def test_active_bench_recovery_keeps_run_tic_settings_before_and_after_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tic_active_bench_recovery_a")
+    window.edit_ticcmd_path.setText("ticcmd-a")
+    window.edit_tic_serial.setText("serial-a")
+    window.check_tic_native_usb.setChecked(True)
+    window.spin_steps_per_mm.setValue(100.0)
+    settings_a = mini_dma_mod.TicConnectionSettings("ticcmd-a", "serial-a", True)
+    settings_c = mini_dma_mod.TicConnectionSettings("ticcmd-c", "serial-c", True)
+    controller_creations: list[tuple[mini_dma_mod.TicConnectionSettings, int]] = []
+    motion_commands: list[tuple[int, int | None, int]] = []
+
+    class _RecordingController:
+        def __init__(
+            self,
+            command_path: str,
+            device_serial: str,
+            *,
+            prefer_native_usb: bool = False,
+            allow_ticcmd_fallback: bool = True,
+            transport_logger: object | None = None,
+        ) -> None:
+            controller_creations.append(
+                (
+                    mini_dma_mod.TicConnectionSettings(
+                        command_path,
+                        device_serial,
+                        bool(prefer_native_usb),
+                    ),
+                    threading.get_ident(),
+                )
+            )
+
+        def halt_and_hold(self) -> None:
+            return None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            motion_commands.append((position_steps, max_speed, threading.get_ident()))
+
+    monkeypatch.setattr(mini_dma_mod, "TicController", _RecordingController)
+    window._show_recovery_plot_dialog = lambda _title: None  # type: ignore[method-assign]
+    window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    observed: dict[str, list[mini_dma_mod.TicConnectionSettings]] = {
+        "status": [],
+        "failed_preflight": [],
+        "preflight": [],
+        "motion": [],
+        "post_run": [],
+    }
+
+    def _probe_status_sync() -> bool:
+        observed["status"].append(window._tic_settings_for_current_command())
+        dispatcher = window._build_tic_dispatcher()
+        dispatcher.halt_and_hold()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        return True
+
+    def _accept_bench_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+        observed["preflight"].append(window._tic_settings_for_current_command())
+        return True
+
+    window._refresh_tic_status = _probe_status_sync  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = _accept_bench_preflight  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window.edit_ticcmd_path.setText("ticcmd-b")
+        window.edit_tic_serial.setText("serial-b")
+        window.check_tic_native_usb.setChecked(False)
+        assert window._manual_tic_settings() == mini_dma_mod.TicConnectionSettings(
+            "ticcmd-b",
+            "serial-b",
+            False,
+        )
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        gui_thread_id = threading.get_ident()
+
+        def _reject_active_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            observed["failed_preflight"].append(window._tic_settings_for_current_command())
+            return False
+
+        window._preflight_recipe_hardware = _reject_active_preflight  # type: ignore[method-assign]
+        assert window.start_bench_stress_recovery(50.0, reason="synthetic failed preflight") is False
+        assert observed["failed_preflight"] == [settings_a]
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window._preflight_recipe_hardware = _accept_bench_preflight  # type: ignore[method-assign]
+        assert window.start_bench_stress_recovery(50.0, reason="synthetic active-session guard") is True
+        assert observed["status"] == [settings_a, settings_a]
+        assert observed["preflight"] == [settings_a]
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        worker_errors: list[BaseException] = []
+
+        def _recovery_motion_worker() -> None:
+            try:
+                observed["motion"].append(window._tic_settings_for_current_command())
+                assert window._move_to_position_mm(0.5, speed_mm_s=1.0) is True
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=_recovery_motion_worker, name="test-bench-recovery-motion")
+        worker.start()
+        worker.join(timeout=5.0)
+        assert worker.is_alive() is False
+        assert window._build_tic_dispatcher().wait_until_idle(timeout_s=2.0)
+        assert worker_errors == []
+        assert observed["motion"] == [settings_a]
+        assert len(controller_creations) == 1
+        assert controller_creations[0][0] == settings_a
+        assert controller_creations[0][1] != gui_thread_id
+        assert len(motion_commands) == 1
+        assert motion_commands[0][2] != gui_thread_id
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window._automation_active = False
+        window._active_control_config = None
+        window._stop_session(reason="bench_recovery_complete")
+        assert window._run_metadata_snapshot is None
+        assert window._run_tic_settings_snapshot is None
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot == settings_a
+
+        window._current_position_mm = 1.0
+        window._position_reference_mm = 0.0
+
+        def _reject_post_run_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            observed["post_run"].append(window._tic_settings_for_current_command())
+            dispatcher = window._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            assert dispatcher.wait_until_idle(timeout_s=2.0)
+            return False
+
+        window._preflight_recipe_hardware = _reject_post_run_preflight  # type: ignore[method-assign]
+        window._start_recovery_displacement_zero()
+        assert observed["post_run"] == [settings_a]
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot == settings_a
+
+        window.edit_log_name.setText("tic_new_session_c")
+        window.edit_ticcmd_path.setText("ticcmd-c")
+        window.edit_tic_serial.setText("serial-c")
+        window.check_tic_native_usb.setChecked(True)
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_tic_settings_snapshot == settings_c
+        assert window._automatic_tic_settings_snapshot == settings_c
+        assert window._recovery_tic_settings_snapshot is None
+    finally:
+        window._automation_active = False
+        window._stop_session()
+        _close_test_window(window)
+
+
 def test_new_session_replaces_finished_run_tic_snapshots(
     tmp_path: Path,
     qtbot,

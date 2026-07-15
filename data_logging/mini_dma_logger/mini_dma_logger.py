@@ -6576,6 +6576,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tic_command_dispatcher_key: tuple[str, str, bool] | None = None
         self._tic_settings_lock = RLock()
         self._manual_tic_settings_snapshot: TicConnectionSettings | None = None
+        self._run_tic_settings_snapshot: TicConnectionSettings | None = None
         self._automatic_tic_settings_snapshot: TicConnectionSettings | None = None
         self._recovery_tic_settings_snapshot: TicConnectionSettings | None = None
         self._tic_status_text = ""
@@ -12096,8 +12097,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _activate_recovery_tic_settings(self) -> TicConnectionSettings:
         with self._tic_settings_lock:
-            recovery = self._recovery_tic_settings_snapshot
-            selected = recovery or self._manual_tic_settings_snapshot
+            active_run = self._run_tic_settings_snapshot if self._session_active else None
+            completed_run = self._recovery_tic_settings_snapshot
+            selected = active_run or completed_run or self._manual_tic_settings_snapshot
             if selected is None:
                 raise RuntimeError("Recovery Tic settings have not been captured on the GUI thread.")
             self._automatic_tic_settings_snapshot = selected
@@ -12105,7 +12107,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _clear_recovery_tic_command_context(self, *, retain_capture: bool) -> None:
         with self._tic_settings_lock:
-            self._automatic_tic_settings_snapshot = None
+            active_run = self._run_tic_settings_snapshot if self._session_active else None
+            self._automatic_tic_settings_snapshot = active_run
             if not retain_capture:
                 self._recovery_tic_settings_snapshot = None
 
@@ -23104,7 +23107,9 @@ class MainWindow(QtWidgets.QMainWindow):
         with self._session_metadata_write_lock:
             self._run_metadata_snapshot = snapshot
         with self._tic_settings_lock:
-            self._automatic_tic_settings_snapshot = snapshot.tic_settings()
+            run_tic_settings = snapshot.tic_settings()
+            self._run_tic_settings_snapshot = run_tic_settings
+            self._automatic_tic_settings_snapshot = run_tic_settings
         return snapshot
 
     def _publish_current_sweep_metadata_effective_values(
@@ -23612,6 +23617,7 @@ class MainWindow(QtWidgets.QMainWindow):
         with self._session_metadata_write_lock:
             self._run_metadata_snapshot = None
         with self._tic_settings_lock:
+            self._run_tic_settings_snapshot = None
             self._automatic_tic_settings_snapshot = None
             self._recovery_tic_settings_snapshot = None
         self._persist_settings_if_enabled(immediate=True)
@@ -23948,8 +23954,11 @@ class MainWindow(QtWidgets.QMainWindow):
             finished_run_snapshot = self._run_metadata_snapshot
             self._run_metadata_snapshot = None
         with self._tic_settings_lock:
-            if finished_run_snapshot is not None:
-                self._recovery_tic_settings_snapshot = finished_run_snapshot.tic_settings()
+            finished_run_tic_settings = self._run_tic_settings_snapshot
+            if finished_run_tic_settings is None and finished_run_snapshot is not None:
+                finished_run_tic_settings = finished_run_snapshot.tic_settings()
+            self._recovery_tic_settings_snapshot = finished_run_tic_settings
+            self._run_tic_settings_snapshot = None
             self._automatic_tic_settings_snapshot = None
         self._first_overheating_preflight_decision = None
         if self._session_base_path is not None:
@@ -27497,6 +27506,7 @@ class MainWindow(QtWidgets.QMainWindow):
         with self._session_metadata_write_lock:
             self._run_metadata_snapshot = None
         with self._tic_settings_lock:
+            self._run_tic_settings_snapshot = None
             self._automatic_tic_settings_snapshot = None
         self._automation_active = True
         self._automation_paused = False
