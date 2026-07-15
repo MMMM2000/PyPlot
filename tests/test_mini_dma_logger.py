@@ -12,6 +12,7 @@ import math
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import weakref
@@ -607,25 +608,84 @@ def test_tma_history_metadata_scan_cancels_between_files(tmp_path: Path) -> None
     assert cancellation_checks == 3
 
 
-def test_tma_history_window_cleanup_callback_uses_only_a_weak_owner_reference() -> None:
+def test_tma_history_daemon_task_does_not_retain_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def _blocked_scan(
+        _root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scan_started.set()
+        release_scan.wait(timeout=5.0)
+        return ()
+
+    monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _blocked_scan)
+
     class _Owner:
-        def _finish_tma_history_scan_thread(self, _thread: object) -> None:
-            raise AssertionError("collected owner must not be called")
+        pass
 
     owner = _Owner()
+    task = mini_dma_mod.TmaHistoryScanTask(tmp_path)
+    owner.scan_task = task
     owner_ref = weakref.ref(owner)
-    callback = mini_dma_mod._make_tma_history_scan_window_cleanup_callback(
-        owner,
-    )
+    task.start()
+    assert scan_started.wait(timeout=2.0)
 
     del owner
     gc.collect()
 
     assert owner_ref() is None
-    callback()
+    assert task.thread.daemon is True
+    assert getattr(task.thread, "_target", None).__self__ is task
+
+    task.cancel()
+    release_scan.set()
+    task.thread.join(timeout=3.0)
+    assert task.done_event.is_set()
 
 
-def test_tma_history_blocked_scan_close_retains_thread_until_finished(
+def test_tma_history_blocked_daemon_task_does_not_block_process_exit() -> None:
+    code = """
+import threading
+from pathlib import Path
+from data_logging.mini_dma_logger import mini_dma_logger as module
+
+blocked = threading.Event()
+
+def blocked_scan(_root, *, cancelled=None):
+    blocked.wait()
+    return ()
+
+module._scan_tma_history_metadata = blocked_scan
+task = module.TmaHistoryScanTask(Path("synthetic-output"))
+task.start()
+assert task.thread.daemon
+print("daemon-started", flush=True)
+"""
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env.setdefault("MPLBACKEND", "Agg")
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "daemon-started" in result.stdout
+
+
+def test_tma_history_scan_keeps_only_latest_pending_root(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -637,8 +697,80 @@ def test_tma_history_blocked_scan_close_retains_thread_until_finished(
     )
     window._tma_history_scan_timer.stop()
     window._tma_history_scan_pending_root = None
-    if window._tma_history_scan_thread is not None:
-        qtbot.waitUntil(lambda: window._tma_history_scan_thread is None, timeout=3000)
+    first_root = tmp_path / "first"
+    latest_root = tmp_path / "latest"
+    first_root.mkdir()
+    latest_root.mkdir()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    scanned_roots: list[Path] = []
+    latest_record = mini_dma_mod.TmaHistoryRecord(
+        identity=mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+        source="latest synthetic metadata",
+    )
+
+    def _scan(
+        root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scanned_roots.append(root)
+        if root == first_root:
+            first_started.set()
+            release_first.wait(timeout=5.0)
+            return ()
+        return (latest_record,)
+
+    monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _scan)
+    try:
+        window._tma_history_scan_pending_root = first_root
+        window._start_pending_tma_history_scan()
+        first_task = window._tma_history_scan_task
+        assert first_task is not None
+        window._tma_history_scan_poll_timer.stop()
+        assert first_started.wait(timeout=2.0)
+
+        with QtCore.QSignalBlocker(window.edit_log_dir):
+            window.edit_log_dir.setText(str(latest_root))
+        window._tma_history_scan_pending_root = latest_root
+        window._start_pending_tma_history_scan()
+
+        assert first_task.cancel_event.is_set()
+        assert window._tma_history_scan_pending_root == latest_root
+        release_first.set()
+        qtbot.waitUntil(first_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+        window._tma_history_scan_poll_timer.stop()
+
+        latest_task = window._tma_history_scan_task
+        assert latest_task is not None
+        assert latest_task.root == latest_root
+        qtbot.waitUntil(latest_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+
+        assert scanned_roots == [first_root, latest_root]
+        assert window._tma_history_root == latest_root
+        assert window._tma_history_records == (latest_record,)
+    finally:
+        release_first.set()
+        _close_test_window(window)
+
+
+def test_tma_history_blocked_scan_close_is_nonblocking_and_qthread_free(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
+    if window._tma_history_scan_task is not None:
+        qtbot.waitUntil(window._tma_history_scan_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
 
     scan_started = threading.Event()
     release_scan = threading.Event()
@@ -657,47 +789,37 @@ def test_tma_history_blocked_scan_close_retains_thread_until_finished(
     previous_message_handler = QtCore.qInstallMessageHandler(
         lambda _kind, _context, message: qt_messages.append(message)
     )
-    thread = None
+    task = None
     try:
         monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _blocked_scan)
         window._tma_history_scan_pending_root = tmp_path
         window._start_pending_tma_history_scan()
         assert scan_started.wait(timeout=2.0)
-        thread = window._tma_history_scan_thread
-        worker = window._tma_history_scan_worker
-        assert thread is not None
-        assert worker is not None
+        task = window._tma_history_scan_task
+        assert task is not None
+        assert task.thread.daemon is True
 
         close_started = time.perf_counter()
         window.close()
         close_elapsed_s = time.perf_counter() - close_started
 
         assert close_elapsed_s < 0.75
-        assert thread.isRunning()
-        assert window._tma_history_scan_thread is thread
-        assert window._tma_history_scan_worker is worker
-        assert mini_dma_mod._LIVE_TMA_HISTORY_SCAN_JOBS.get(thread) is worker
+        assert task.thread.is_alive()
+        assert task.cancel_event.is_set()
+        assert window._tma_history_scan_task is None
+        assert all(value is not window for value in vars(task).values())
+        assert getattr(task.thread, "_target", None).__self__ is task
 
         release_scan.set()
-        qtbot.waitUntil(
-            lambda: thread not in mini_dma_mod._LIVE_TMA_HISTORY_SCAN_JOBS,
-            timeout=3000,
-        )
-        qtbot.waitUntil(
-            lambda: window._tma_history_scan_thread is None,
-            timeout=3000,
-        )
-        assert window._tma_history_scan_worker is None
+        task.thread.join(timeout=3.0)
+        assert task.done_event.is_set()
+        assert not task.thread.is_alive()
         assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
     finally:
         release_scan.set()
-        if thread is not None:
-            try:
-                if thread.isRunning():
-                    thread.quit()
-                    thread.wait(3000)
-            except RuntimeError:
-                pass
+        if task is not None:
+            task.cancel()
+            task.thread.join(timeout=3.0)
         _ensure_app().processEvents()
         QtCore.qInstallMessageHandler(previous_message_handler)
         _close_test_window(window)

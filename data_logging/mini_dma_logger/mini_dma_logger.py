@@ -13,7 +13,6 @@ import statistics
 import subprocess
 import sys
 import time
-import weakref
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -3572,67 +3571,39 @@ class BuilderProjectImportWorker(QtCore.QObject):
             self.finished.emit()
 
 
-class TmaHistoryIndexWorker(QtCore.QObject):
-    succeeded = QtCore.pyqtSignal(object, object)
-    failed = QtCore.pyqtSignal(object, str)
-    finished = QtCore.pyqtSignal()
-
+class TmaHistoryScanTask:
     def __init__(self, root: Path) -> None:
-        super().__init__()
         self.root = root
-        self._cancel_event = Event()
+        self.cancel_event = Event()
+        self.done_event = Event()
+        self.records: tuple[TmaHistoryRecord, ...] | None = None
+        self.error: str | None = None
+        self.thread = Thread(
+            target=self._run,
+            name="tma-history-scan",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self.thread.start()
 
     def cancel(self) -> None:
-        self._cancel_event.set()
+        self.cancel_event.set()
 
-    @QtCore.pyqtSlot()
-    def run(self) -> None:
+    def _run(self) -> None:
         try:
             records = _scan_tma_history_metadata(
                 self.root,
-                cancelled=self._cancel_event.is_set,
+                cancelled=self.cancel_event.is_set,
             )
         except Exception as exc:
-            if not self._cancel_event.is_set():
-                self.failed.emit(self.root, f"TMA history index failed: {exc}")
+            if not self.cancel_event.is_set():
+                self.error = f"TMA history index failed: {exc}"
         else:
-            if not self._cancel_event.is_set():
-                self.succeeded.emit(self.root, records)
+            if not self.cancel_event.is_set():
+                self.records = records
         finally:
-            self.finished.emit()
-
-
-# A cloud-backed read can remain blocked after a window close. Keep every live
-# scan owned independently of the window until QThread.finished is delivered.
-_LIVE_TMA_HISTORY_SCAN_JOBS: dict[
-    QtCore.QThread,
-    TmaHistoryIndexWorker,
-] = {}
-
-
-def _release_tma_history_scan_job(thread: QtCore.QThread) -> None:
-    _LIVE_TMA_HISTORY_SCAN_JOBS.pop(thread, None)
-    try:
-        thread.deleteLater()
-    except RuntimeError:
-        pass
-
-
-def _make_tma_history_scan_window_cleanup_callback(
-    window: Any,
-) -> Callable[[], None]:
-    window_ref = weakref.ref(window)
-
-    def _cleanup_window_state() -> None:
-        live_window = window_ref()
-        if live_window is not None:
-            QtCore.QMetaObject.invokeMethod(
-                live_window,
-                "_finish_tma_history_scan_thread",
-                QtCore.Qt.ConnectionType.QueuedConnection,
-            )
-
-    return _cleanup_window_state
+            self.done_event.set()
 
 
 @dataclass(frozen=True)
@@ -6171,13 +6142,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_import_timer.timeout.connect(self._run_scheduled_builder_project_auto_import)
         self._tma_history_records: tuple[TmaHistoryRecord, ...] = ()
         self._tma_history_root: Path | None = None
-        self._tma_history_scan_thread: QtCore.QThread | None = None
-        self._tma_history_scan_worker: TmaHistoryIndexWorker | None = None
+        self._tma_history_scan_task: TmaHistoryScanTask | None = None
         self._tma_history_scan_pending_root: Path | None = None
         self._tma_history_scan_timer = QtCore.QTimer(self)
         self._tma_history_scan_timer.setSingleShot(True)
         self._tma_history_scan_timer.setInterval(750)
         self._tma_history_scan_timer.timeout.connect(self._start_pending_tma_history_scan)
+        self._tma_history_scan_poll_timer = QtCore.QTimer(self)
+        self._tma_history_scan_poll_timer.setInterval(50)
+        self._tma_history_scan_poll_timer.timeout.connect(self._poll_tma_history_scan_task)
         self._first_overheating_preflight_decision: dict[str, Any] | None = None
         self._settings_save_timer = QtCore.QTimer(self)
         self._settings_save_timer.setSingleShot(True)
@@ -13498,32 +13471,33 @@ class MainWindow(QtWidgets.QMainWindow):
         root = self._tma_history_scan_pending_root
         if root is None:
             return
-        if self._tma_history_scan_thread is not None:
-            if self._tma_history_scan_worker is not None:
-                self._tma_history_scan_worker.cancel()
+        active_task = self._tma_history_scan_task
+        if active_task is not None:
+            active_task.cancel()
             return
         self._tma_history_scan_pending_root = None
-        thread = QtCore.QThread()
-        worker = TmaHistoryIndexWorker(root)
-        worker.moveToThread(thread)
-        worker.succeeded.connect(self._handle_tma_history_scan_success)
-        worker.failed.connect(self._handle_tma_history_scan_failure)
-        worker.finished.connect(
-            thread.quit,
-            type=QtCore.Qt.ConnectionType.DirectConnection,
-        )
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(
-            lambda thread=thread: _release_tma_history_scan_job(thread)
-        )
-        thread.finished.connect(
-            _make_tma_history_scan_window_cleanup_callback(self)
-        )
-        thread.started.connect(worker.run)
-        self._tma_history_scan_thread = thread
-        self._tma_history_scan_worker = worker
-        _LIVE_TMA_HISTORY_SCAN_JOBS[thread] = worker
-        thread.start()
+        task = TmaHistoryScanTask(root)
+        self._tma_history_scan_task = task
+        self._tma_history_scan_poll_timer.start()
+        task.start()
+
+    def _poll_tma_history_scan_task(self) -> None:
+        task = self._tma_history_scan_task
+        if task is None:
+            self._tma_history_scan_poll_timer.stop()
+            return
+        if not task.done_event.is_set():
+            return
+        self._tma_history_scan_task = None
+        if not task.cancel_event.is_set():
+            if task.error is not None:
+                self._handle_tma_history_scan_failure(task.root, task.error)
+            elif task.records is not None:
+                self._handle_tma_history_scan_success(task.root, task.records)
+        if not self._window_closing and self._tma_history_scan_pending_root is not None:
+            self._start_pending_tma_history_scan()
+        elif self._tma_history_scan_task is None:
+            self._tma_history_scan_poll_timer.stop()
 
     def _handle_tma_history_scan_success(self, root_obj: object, records_obj: object) -> None:
         root = Path(root_obj)
@@ -13543,25 +13517,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_records = ()
         self._log(message)
 
-    @QtCore.pyqtSlot()
-    def _finish_tma_history_scan_thread(self) -> None:
-        self._tma_history_scan_thread = None
-        self._tma_history_scan_worker = None
-        if not self._window_closing and self._tma_history_scan_pending_root is not None:
-            self._tma_history_scan_timer.start()
-
-    def _stop_tma_history_scan_thread(self) -> None:
+    def _stop_tma_history_scan_task(self) -> None:
         self._tma_history_scan_timer.stop()
+        self._tma_history_scan_poll_timer.stop()
         self._tma_history_scan_pending_root = None
-        thread = self._tma_history_scan_thread
-        worker = self._tma_history_scan_worker
-        if worker is not None:
-            worker.cancel()
-        if thread is not None:
-            try:
-                thread.quit()
-            except RuntimeError:
-                pass
+        task = self._tma_history_scan_task
+        self._tma_history_scan_task = None
+        if task is not None:
+            task.cancel()
 
     def _import_builder_project(self) -> None:
         path = Path(self.edit_project_path.text().strip())
@@ -31499,7 +31462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stop_tic_dispatcher()
         self._builder_project_import_timer.stop()
         self._stop_builder_project_import_thread()
-        self._stop_tma_history_scan_thread()
+        self._stop_tma_history_scan_task()
         self._stop_annealing_folder_scans()
         self._cancel_fabrication_folder_load()
         self._disconnect_scale()
