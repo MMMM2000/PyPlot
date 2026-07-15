@@ -1,0 +1,5 @@
+2026-07-15 (UTC)
+
+- Freeze TMA session, recipe, hardware, operator, output, and timing metadata on the GUI thread before control workers start, preventing periodic metadata, scheduled logging, trace, setup, and fault paths from reading Qt widgets while preserving approved runtime-edit metadata.
+- Capture immutable Tic connection settings into dispatcher factories, refresh manual settings from GUI changes, retire finalized run metadata snapshots, and retain only the completed run's explicit Tic recovery configuration for post-stop relaxation.
+- Keep active-session bench safety recovery bound to the run's frozen Tic controller settings when different manual connection controls have been staged.

@@ -203,7 +203,11 @@ def test_automation_control_loop_pause_resume_and_stop() -> None:
         loop.stop()
 
 
-def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_events(tmp_path: Path, qtbot) -> None:
+def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
     main_thread_id = threading.get_ident()
     tick_thread_ids: list[int] = []
@@ -215,6 +219,7 @@ def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_even
 
     try:
         window._run_automation_control_tick = fake_tick  # type: ignore[method-assign]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
         window._start_automation_control_loop(20)
         deadline = time.monotonic() + 0.5
         while len(tick_thread_ids) < 3 and time.monotonic() < deadline:
@@ -479,6 +484,82 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
     _ensure_app().processEvents()
     if isinstance(snapshot, dict):
         _restore_settings(snapshot)
+
+
+def _guard_widget_access_to_gui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    window: mini_dma_mod.MainWindow,
+) -> None:
+    gui_thread = window.thread()
+    guarded_methods = (
+        (QtWidgets.QDoubleSpinBox, "value"),
+        (QtWidgets.QSpinBox, "value"),
+        (QtWidgets.QCheckBox, "isChecked"),
+        (QtWidgets.QComboBox, "currentData"),
+        (QtWidgets.QComboBox, "currentText"),
+        (QtWidgets.QLineEdit, "text"),
+        (QtWidgets.QTextEdit, "toPlainText"),
+        (QtWidgets.QPlainTextEdit, "toPlainText"),
+        (QtWidgets.QDoubleSpinBox, "setValue"),
+        (QtWidgets.QSpinBox, "setValue"),
+        (QtWidgets.QCheckBox, "setChecked"),
+        (QtWidgets.QComboBox, "setCurrentIndex"),
+        (QtWidgets.QLineEdit, "setText"),
+        (QtWidgets.QTextEdit, "setPlainText"),
+        (QtWidgets.QPlainTextEdit, "setPlainText"),
+        (QtWidgets.QWidget, "isHidden"),
+        (QtWidgets.QWidget, "isVisible"),
+        (QtWidgets.QWidget, "isEnabled"),
+        (QtWidgets.QWidget, "property"),
+        (QtWidgets.QWidget, "setEnabled"),
+        (QtWidgets.QWidget, "setVisible"),
+        (QtWidgets.QWidget, "setHidden"),
+        (QtWidgets.QWidget, "setProperty"),
+        (QtCore.QObject, "thread"),
+        (QtCore.QTimer, "start"),
+        (QtCore.QTimer, "stop"),
+        (QtCore.QTimer, "setInterval"),
+        (QtCore.QTimer, "isActive"),
+    )
+    for widget_type, method_name in guarded_methods:
+        original = getattr(widget_type, method_name)
+
+        def _guarded(widget, *args, _original=original, _method_name=method_name, **kwargs):
+            assert QtCore.QThread.currentThread() is gui_thread, (
+                f"{type(widget).__name__}.{_method_name} was called outside the GUI thread"
+            )
+            return _original(widget, *args, **kwargs)
+
+        monkeypatch.setattr(widget_type, method_name, _guarded)
+
+
+def _install_recording_tic_controller(
+    monkeypatch: pytest.MonkeyPatch,
+    created: list[tuple[str, str, bool, int]],
+) -> None:
+    class _RecordingTicController:
+        def __init__(
+            self,
+            command_path: str,
+            device_serial: str,
+            *,
+            prefer_native_usb: bool = False,
+            allow_ticcmd_fallback: bool = True,
+            transport_logger: object | None = None,
+        ) -> None:
+            created.append(
+                (
+                    command_path,
+                    device_serial,
+                    bool(prefer_native_usb),
+                    threading.get_ident(),
+                )
+            )
+
+        def halt_and_hold(self) -> None:
+            return None
+
+    monkeypatch.setattr(mini_dma_mod, "TicController", _RecordingTicController)
 
 
 def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
@@ -4231,7 +4312,7 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._current_position_mm = 1.25
     window._current_position_steps = 125
     window.spin_steps_per_mm.setValue(100.0)
@@ -4267,7 +4348,7 @@ def test_calibration_relative_moves_chain_from_commanded_targets(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._automation_active = True
     window._automation_name = mini_dma_mod.CALIBRATION
@@ -4374,7 +4455,7 @@ def test_move_command_rejects_sub_step_targets(tmp_path: Path, qtbot) -> None:
             self.called = True
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
@@ -4407,7 +4488,7 @@ def test_manual_jog_repeats_from_last_commanded_target(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
@@ -4447,7 +4528,7 @@ def test_manual_jog_press_resyncs_stale_previous_target(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._refresh_tic_status = lambda: None  # type: ignore[method-assign]
     window.spin_steps_per_mm.setValue(100.0)
@@ -4534,7 +4615,7 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
@@ -4574,7 +4655,7 @@ def test_held_manual_jog_caps_delayed_timer_tick(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.spin_steps_per_mm.setValue(100.0)
     window.spin_jog_mm.setValue(0.01)
     window.spin_motion_speed_mm_s.setValue(1.0)
@@ -4608,7 +4689,7 @@ def test_manual_jog_delayed_timer_does_not_batch_large_move(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_jog_mm.setValue(0.00625)
@@ -5179,7 +5260,7 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._automation_active = True
     window._automation_steps = [mini_dma_mod.AutomationStep("move", target_mm=5.0)]
     window._automation_index = 0
@@ -9495,7 +9576,7 @@ def test_setup_preload_slack_takeup_uses_slack_strain_speed(tmp_path: Path, qtbo
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_zero_load_scale_g.setValue(21.17)
@@ -11755,7 +11836,7 @@ def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, q
             self.halt_count += 1
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._disable_supply_output = lambda: None  # type: ignore[method-assign]
     window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
     window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
@@ -12301,7 +12382,7 @@ def test_tic_status_warns_when_motor_power_vin_is_low(tmp_path: Path, qtbot) -> 
                 ]
             )
 
-    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
 
     try:
         assert window._refresh_tic_status() is True
@@ -12346,7 +12427,7 @@ def test_tic_status_missing_vin_uses_recent_good_power_briefly(
 
     controller = _FakeController()
     monkeypatch.setattr(mini_dma_mod.time, "time", lambda: now_s)
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
 
     try:
         assert window._refresh_tic_status() is True
@@ -12396,7 +12477,7 @@ def test_tic_status_missing_vin_blocks_after_recent_good_power_expires(
 
     controller = _FakeController()
     monkeypatch.setattr(mini_dma_mod.time, "time", lambda: now_s)
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
 
     try:
         assert window._refresh_tic_status() is True
@@ -12429,7 +12510,7 @@ def test_recipe_preflight_blocks_when_tic_motor_power_is_low(
                 ]
             )
 
-    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._enable_motor_supply_output = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -12461,7 +12542,7 @@ def test_recipe_preflight_reports_tic_status_read_failure(
         def get_status(self) -> str:
             raise RuntimeError("Access denied")
 
-    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._enable_motor_supply_output = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -17624,9 +17705,10 @@ def test_tic_keepalive_resets_command_timeout_during_active_recipe(tmp_path: Pat
             self.keepalive_count += 1
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._tic_motor_power_ok = True
     window._automation_active = True
+    window._automatic_tic_settings_snapshot = window._manual_tic_settings()
     window.spin_steps_per_mm.setValue(100.0)
 
     try:
@@ -18102,6 +18184,7 @@ def test_control_trace_write_failure_disables_trace_without_stopping(tmp_path: P
 
 def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
@@ -18165,6 +18248,10 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
 
     try:
         window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_metadata_snapshot is not None
+        launch_sweep_metadata = window._run_metadata_snapshot.launch_metadata()[
+            "controlled_current_sweep"
+        ]
         window._automation_active = True
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
         window._automation_steps = [active_sweep, future_set_current, future_ramp, future_sweep, future_reverse]
@@ -18187,6 +18274,23 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         window.check_current_sweep_hold_on_error.setChecked(False)
 
         assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        worker_errors: list[BaseException] = []
+
+        def _write_effective_metadata() -> None:
+            try:
+                window._write_session_metadata()
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        metadata_worker = threading.Thread(
+            target=_write_effective_metadata,
+            name="test-tma-runtime-effective-metadata",
+        )
+        metadata_worker.start()
+        metadata_worker.join(timeout=5.0)
+        assert metadata_worker.is_alive() is False
+        assert worker_errors == []
 
         assert window._automation_steps[0] is not active_sweep
         assert window._automation_steps[0].current_start_mA == pytest.approx(1.0)
@@ -18207,6 +18311,13 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         assert window._automation_steps[4].current_start_mA == pytest.approx(80.0)
         assert window._automation_steps[4].current_end_mA == pytest.approx(2.0)
         assert window._current_sweep_recipe_overrides
+        assert window._run_metadata_snapshot is not None
+        assert window._run_metadata_snapshot.launch_metadata()["controlled_current_sweep"] == (
+            launch_sweep_metadata
+        )
+        assert window._run_metadata_snapshot.effective_metadata()["controlled_current_sweep"][
+            "current_end_mA"
+        ] == pytest.approx(80.0)
 
         window._stop_session()
         rows = list(
@@ -18224,6 +18335,10 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
         assert overrides[0]["active_step_updated"] is True
         assert overrides[0]["changed_step_count"] == 5
+        assert metadata["controlled_current_sweep"]["current_end_mA"] == pytest.approx(80.0)
+        assert metadata["controlled_current_sweep"]["current_ramp_rate_mA_s"] == pytest.approx(0.6)
+        assert metadata["controlled_current_sweep"]["current_ramp_hold_on_error"] is False
+        assert window._run_metadata_snapshot is None
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -19501,7 +19616,7 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
     window._supply_controller = supply  # type: ignore[assignment]
     window._supply_output_enabled = True
     window._supply_last_setpoint_mA = 12.5
-    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
     window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(2))
 
     try:
@@ -19567,7 +19682,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(False)
@@ -19613,7 +19728,7 @@ def test_load_seek_continues_from_commanded_target_after_fresh_feedback_without_
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_value_g = 0.0
@@ -19709,7 +19824,7 @@ def test_load_seek_accepts_near_target_crossing_without_reverse_hunt(tmp_path: P
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_steps_per_mm.setValue(100.0)
@@ -19760,7 +19875,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_timestamp = time.time()
@@ -19810,7 +19925,7 @@ def test_calibration_seek_ignores_existing_backlash_compensation(tmp_path: Path,
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._automation_active = True
@@ -19858,7 +19973,7 @@ def test_backlash_takeup_is_not_logged_as_tensile_displacement(tmp_path: Path, q
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.check_zero_on_preload.setChecked(False)
@@ -19918,7 +20033,7 @@ def test_seek_uses_calibrated_length_scaled_sensitivity_for_correction_distance(
             self.target_steps = position_steps
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_steps_per_mm.setValue(1000.0)
@@ -20141,7 +20256,7 @@ def test_setup_preload_tiny_baseline_load_uses_stiffness_capped_slack_takeup(
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_steps_per_mm.setValue(10000.0)
@@ -20575,7 +20690,7 @@ def test_current_sweep_reverse_correction_uses_fine_step_instead_of_predictive_b
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_steps_per_mm.setValue(1000.0)
@@ -24020,7 +24135,7 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_value_g = 0.0
@@ -24066,7 +24181,7 @@ def test_current_sweep_load_target_ramp_uses_target_stage_speed(tmp_path: Path, 
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_value_g = 0.0
@@ -25482,7 +25597,7 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
     supply = _FakeSupply()
     tic = _FakeTic()
     window._supply_controller = supply  # type: ignore[assignment]
-    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
     window._refresh_tic_status = lambda: setattr(window, "_tic_status_text", tic.get_status()) or True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
@@ -25560,7 +25675,7 @@ def test_restore_idle_tic_motion_limits_refreshes_after_dynamic_move(tmp_path: P
             "Errors currently stopping the motor: None",
         ]
     )
-    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
     window._refresh_tic_status = lambda: setattr(window, "_tic_status_text", tic.get_status()) or True  # type: ignore[method-assign]
 
     try:
@@ -25628,7 +25743,7 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
         window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
-        window._build_tic_controller = lambda: _BusyTic()  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: _BusyTic()  # type: ignore[method-assign]
         window._tic_status_text = "\n".join(
             [
                 "VIN voltage: 12.00 V",
@@ -25667,7 +25782,7 @@ def test_apply_tic_configured_step_mode_writes_selected_mode(tmp_path: Path, qtb
 
     tic = _FakeTic()
     try:
-        window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
         window._tic_status_text = "VIN voltage: 12.00 V\nErrors currently stopping the motor: None"
         window.spin_full_steps_per_mm.setValue(100.0)
         window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
@@ -25694,7 +25809,7 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.check_max_load.setChecked(True)
@@ -25764,7 +25879,7 @@ def test_raw_scale_display_limit_blocks_standard_moves_when_exceeded(tmp_path: P
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_raw_scale_limit_g.setValue(30.0)
     window._latest_scale_value_g = 30.05
@@ -26091,6 +26206,467 @@ def test_session_metadata_keeps_original_created_timestamp(
         _close_test_window(window)
 
 
+def test_worker_metadata_and_scheduled_record_use_frozen_gui_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+    window.edit_log_name.setText("worker_metadata_snapshot")
+    window.edit_sample_name.setText("launch sample")
+    window.edit_run_notes.setPlainText("launch notes")
+    window.spin_log_interval.setValue(5000)
+    window.spin_supply_voltage_limit.setValue(7.5)
+    recipe_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert recipe_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(recipe_index)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_metadata_snapshot is not None
+        launch = window._run_metadata_snapshot.launch_metadata()
+        window._active_control_config = window._freeze_control_config()
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [mini_dma_mod.AutomationStep("record", note="worker-metadata")]
+        window._automation_index = 0
+        window._session_logging_enabled = True
+        window._last_session_log_timestamp_s = time.time()
+        window._latest_scale_timestamp = time.time()
+        window._latest_scale_value_g = 0.0
+        window._length_setup_start_monotonic = time.monotonic()
+
+        window.edit_sample_name.setText("unapproved operator change")
+        window.edit_run_notes.setPlainText("unapproved notes")
+        window.spin_log_interval.setValue(250)
+        window.spin_supply_voltage_limit.setValue(2.0)
+        window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData("cycle"))
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                assert window._build_tic_dispatcher() is not None
+                window._automation_controller.execute_next_tick()
+                assert window._record_length_setup_point() is True
+                for _ in range(5):
+                    window._last_session_metadata_write_s -= (
+                        mini_dma_mod.SESSION_METADATA_WRITE_INTERVAL_S + 0.1
+                    )
+                    window._write_session_metadata(throttle=True)
+                assert window._maybe_record_scheduled_point() is True
+                window._write_control_trace(decision="snapshot_probe", result="ok")
+                window._supply_output_enabled = True
+                window._supply_last_setpoint_mA = 10.0
+                window._supply_snapshot = {
+                    "current_mA": 0.0,
+                    "voltage_V": 7.5,
+                    "resistance_ohm": None,
+                    "power_W": 0.0,
+                }
+                assert window._wire_break_detected() is True
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_worker, name="test-tma-metadata-worker")
+        worker.start()
+        worker.join(timeout=5.0)
+
+        assert worker.is_alive() is False
+        assert errors == []
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["sample_name"] == "launch sample"
+        assert payload["notes"] == "launch notes"
+        assert payload["recipe_mode"] == mini_dma_mod.CURRENT_SWEEP_STRESS
+        assert payload["logging"]["log_interval_ms"] == 5000
+        assert payload["heating"]["voltage_limit_v"] == pytest.approx(7.5)
+        assert payload["sample_name"] == launch["sample_name"]
+    finally:
+        window._automation_active = False
+        window._stop_session()
+        _close_test_window(window)
+
+
+def test_manual_tic_dispatcher_before_session_uses_gui_published_plain_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_ticcmd_path.setText("manual-ticcmd")
+    window.edit_tic_serial.setText("manual-serial")
+    window.check_tic_native_usb.setChecked(False)
+    gui_thread_id = threading.get_ident()
+    created: list[tuple[str, str, bool, int]] = []
+    _install_recording_tic_controller(monkeypatch, created)
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+    try:
+        assert window._session_active is False
+        assert window._run_metadata_snapshot is None
+        dispatcher = window._build_tic_dispatcher()
+        dispatcher.halt_and_hold()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+        assert [(path, serial, native) for path, serial, native, _thread in created] == [
+            ("manual-ticcmd", "manual-serial", False)
+        ]
+        assert created[0][3] != gui_thread_id
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_tic_dispatcher_after_finished_run_uses_new_gui_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tic_finished_run")
+    window.edit_ticcmd_path.setText("run-ticcmd")
+    window.edit_tic_serial.setText("run-serial")
+    window.check_tic_native_usb.setChecked(True)
+    created: list[tuple[str, str, bool, int]] = []
+    _install_recording_tic_controller(monkeypatch, created)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._stop_session()
+        assert window._run_metadata_snapshot is None
+        assert window._recovery_tic_settings_snapshot == mini_dma_mod.TicConnectionSettings(
+            command_path="run-ticcmd",
+            device_serial="run-serial",
+            prefer_native_usb=True,
+        )
+
+        window.edit_ticcmd_path.setText("manual-new-ticcmd")
+        window.edit_tic_serial.setText("manual-new-serial")
+        window.check_tic_native_usb.setChecked(False)
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        dispatcher = window._build_tic_dispatcher()
+        dispatcher.halt_and_hold()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+        assert [(path, serial, native) for path, serial, native, _thread in created] == [
+            ("manual-new-ticcmd", "manual-new-serial", False)
+        ]
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("recovery_kind", ["displacement", "load"])
+def test_post_stop_recovery_uses_captured_run_tic_settings_without_run_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+    recovery_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText(f"tic_{recovery_kind}_recovery")
+    window.edit_ticcmd_path.setText("recovery-run-ticcmd")
+    window.edit_tic_serial.setText("recovery-run-serial")
+    window.check_tic_native_usb.setChecked(True)
+    created: list[tuple[str, str, bool, int]] = []
+    _install_recording_tic_controller(monkeypatch, created)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._stop_session()
+        assert window._run_metadata_snapshot is None
+        window._current_position_mm = 1.0
+        window._position_reference_mm = 0.0
+
+        window.edit_ticcmd_path.setText("changed-manual-ticcmd")
+        window.edit_tic_serial.setText("changed-manual-serial")
+        window.check_tic_native_usb.setChecked(False)
+
+        def _probe_recovery_sync() -> None:
+            dispatcher = window._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+        window._sync_manual_motion_base_from_current_position = _probe_recovery_sync  # type: ignore[method-assign]
+
+        def _probe_recovery_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            dispatcher = window._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            assert dispatcher.wait_until_idle(timeout_s=2.0)
+            return False
+
+        window._preflight_recipe_hardware = _probe_recovery_preflight  # type: ignore[method-assign]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+        if recovery_kind == "displacement":
+            window._start_recovery_displacement_zero()
+        else:
+            window._start_recovery_load_zero()
+
+        assert [(path, serial, native) for path, serial, native, _thread in created] == [
+            ("recovery-run-ticcmd", "recovery-run-serial", True)
+        ]
+        assert window._run_metadata_snapshot is None
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot is not None
+    finally:
+        _close_test_window(window)
+
+
+def test_active_bench_recovery_keeps_run_tic_settings_before_and_after_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tic_active_bench_recovery_a")
+    window.edit_ticcmd_path.setText("ticcmd-a")
+    window.edit_tic_serial.setText("serial-a")
+    window.check_tic_native_usb.setChecked(True)
+    window.spin_steps_per_mm.setValue(100.0)
+    settings_a = mini_dma_mod.TicConnectionSettings("ticcmd-a", "serial-a", True)
+    settings_c = mini_dma_mod.TicConnectionSettings("ticcmd-c", "serial-c", True)
+    controller_creations: list[tuple[mini_dma_mod.TicConnectionSettings, int]] = []
+    motion_commands: list[tuple[int, int | None, int]] = []
+
+    class _RecordingController:
+        def __init__(
+            self,
+            command_path: str,
+            device_serial: str,
+            *,
+            prefer_native_usb: bool = False,
+            allow_ticcmd_fallback: bool = True,
+            transport_logger: object | None = None,
+        ) -> None:
+            controller_creations.append(
+                (
+                    mini_dma_mod.TicConnectionSettings(
+                        command_path,
+                        device_serial,
+                        bool(prefer_native_usb),
+                    ),
+                    threading.get_ident(),
+                )
+            )
+
+        def halt_and_hold(self) -> None:
+            return None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            motion_commands.append((position_steps, max_speed, threading.get_ident()))
+
+    monkeypatch.setattr(mini_dma_mod, "TicController", _RecordingController)
+    window._show_recovery_plot_dialog = lambda _title: None  # type: ignore[method-assign]
+    window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    observed: dict[str, list[mini_dma_mod.TicConnectionSettings]] = {
+        "status": [],
+        "failed_preflight": [],
+        "preflight": [],
+        "motion": [],
+        "post_run": [],
+    }
+
+    def _probe_status_sync() -> bool:
+        observed["status"].append(window._tic_settings_for_current_command())
+        dispatcher = window._build_tic_dispatcher()
+        dispatcher.halt_and_hold()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        return True
+
+    def _accept_bench_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+        observed["preflight"].append(window._tic_settings_for_current_command())
+        return True
+
+    window._refresh_tic_status = _probe_status_sync  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = _accept_bench_preflight  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window.edit_ticcmd_path.setText("ticcmd-b")
+        window.edit_tic_serial.setText("serial-b")
+        window.check_tic_native_usb.setChecked(False)
+        assert window._manual_tic_settings() == mini_dma_mod.TicConnectionSettings(
+            "ticcmd-b",
+            "serial-b",
+            False,
+        )
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        gui_thread_id = threading.get_ident()
+
+        def _reject_active_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            observed["failed_preflight"].append(window._tic_settings_for_current_command())
+            return False
+
+        window._preflight_recipe_hardware = _reject_active_preflight  # type: ignore[method-assign]
+        assert window.start_bench_stress_recovery(50.0, reason="synthetic failed preflight") is False
+        assert observed["failed_preflight"] == [settings_a]
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window._preflight_recipe_hardware = _accept_bench_preflight  # type: ignore[method-assign]
+        assert window.start_bench_stress_recovery(50.0, reason="synthetic active-session guard") is True
+        assert observed["status"] == [settings_a, settings_a]
+        assert observed["preflight"] == [settings_a]
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        worker_errors: list[BaseException] = []
+
+        def _recovery_motion_worker() -> None:
+            try:
+                observed["motion"].append(window._tic_settings_for_current_command())
+                assert window._move_to_position_mm(0.5, speed_mm_s=1.0) is True
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=_recovery_motion_worker, name="test-bench-recovery-motion")
+        worker.start()
+        worker.join(timeout=5.0)
+        assert worker.is_alive() is False
+        assert window._build_tic_dispatcher().wait_until_idle(timeout_s=2.0)
+        assert worker_errors == []
+        assert observed["motion"] == [settings_a]
+        assert len(controller_creations) == 1
+        assert controller_creations[0][0] == settings_a
+        assert controller_creations[0][1] != gui_thread_id
+        assert len(motion_commands) == 1
+        assert motion_commands[0][2] != gui_thread_id
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window._automation_active = False
+        window._active_control_config = None
+        window._stop_session(reason="bench_recovery_complete")
+        assert window._run_metadata_snapshot is None
+        assert window._run_tic_settings_snapshot is None
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot == settings_a
+
+        window._current_position_mm = 1.0
+        window._position_reference_mm = 0.0
+
+        def _reject_post_run_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            observed["post_run"].append(window._tic_settings_for_current_command())
+            dispatcher = window._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            assert dispatcher.wait_until_idle(timeout_s=2.0)
+            return False
+
+        window._preflight_recipe_hardware = _reject_post_run_preflight  # type: ignore[method-assign]
+        window._start_recovery_displacement_zero()
+        assert observed["post_run"] == [settings_a]
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot == settings_a
+
+        window.edit_log_name.setText("tic_new_session_c")
+        window.edit_ticcmd_path.setText("ticcmd-c")
+        window.edit_tic_serial.setText("serial-c")
+        window.check_tic_native_usb.setChecked(True)
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_tic_settings_snapshot == settings_c
+        assert window._automatic_tic_settings_snapshot == settings_c
+        assert window._recovery_tic_settings_snapshot is None
+    finally:
+        window._automation_active = False
+        window._stop_session()
+        _close_test_window(window)
+
+
+def test_new_session_replaces_finished_run_tic_snapshots(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tic_previous_session")
+    window.edit_ticcmd_path.setText("previous-ticcmd")
+    window.edit_tic_serial.setText("previous-serial")
+    window.check_tic_native_usb.setChecked(True)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        previous_snapshot = window._run_metadata_snapshot
+        assert previous_snapshot is not None
+        window._stop_session()
+
+        window.edit_log_name.setText("tic_new_session")
+        window.edit_ticcmd_path.setText("new-ticcmd")
+        window.edit_tic_serial.setText("new-serial")
+        window.check_tic_native_usb.setChecked(False)
+        window._start_session(enable_logging=False, record_initial_point=False)
+
+        current_snapshot = window._run_metadata_snapshot
+        assert current_snapshot is not None
+        assert current_snapshot is not previous_snapshot
+        assert current_snapshot.tic_settings() == mini_dma_mod.TicConnectionSettings(
+            command_path="new-ticcmd",
+            device_serial="new-serial",
+            prefer_native_usb=False,
+        )
+        assert window._automatic_tic_settings_snapshot == current_snapshot.tic_settings()
+        assert window._recovery_tic_settings_snapshot is None
+    finally:
+        window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "manual_session_stop",
+        "recipe_control_worker_error",
+        "wire_break_or_contact_loss",
+    ],
+)
+def test_worker_stop_fault_and_wire_break_finalize_without_widget_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+    reason: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._source_provenance_cache = _ControlledSourceProvenanceCache()
+    window.edit_log_name.setText(f"worker_finalize_{reason}")
+    window._record_current_point = lambda **_kwargs: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        assert window._run_metadata_snapshot is not None
+        launch_sample_name = window._run_metadata_snapshot.launch_metadata()["sample_name"]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                window._stop_session(reason=reason, detail=f"Synthetic {reason} finalization.")
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_worker, name=f"test-tma-{reason}")
+        worker.start()
+        qtbot.waitUntil(lambda: not worker.is_alive(), timeout=5000)
+        worker.join(timeout=0.1)
+
+        assert errors == []
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == reason
+        assert payload["stop"]["detail"] == f"Synthetic {reason} finalization."
+        assert window._run_metadata_snapshot is None
+        assert payload["sample_name"] == launch_sample_name
+    finally:
+        _close_test_window(window)
+
+
 def test_session_metadata_records_source_control_snapshot(
     tmp_path: Path,
     qtbot,
@@ -26359,7 +26935,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         window._write_session_metadata()
         second_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
 
-        assert second_payload["control_logic"]["fingerprint"] != old_fingerprint
+        assert second_payload["control_logic"]["fingerprint"] == old_fingerprint
     finally:
         window._stop_session()
         _close_test_window(window)
@@ -27925,7 +28501,7 @@ def test_apply_tic_step_mode_preserves_physical_mm_position(tmp_path: Path, qtbo
 
         controller = _FakeController()
         _use_immediate_tic_dispatcher(window, controller)
-        window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
         window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
         window.spin_full_steps_per_mm.setValue(100.0)
         window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
@@ -27977,7 +28553,7 @@ def test_apply_tic_step_mode_keeps_requested_mode_after_status_refresh(
 
         controller = _FakeController()
         _use_immediate_tic_dispatcher(window, controller)
-        window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
         monkeypatch.setattr(
             mini_dma_mod.QtWidgets.QMessageBox,
             "question",
@@ -28031,7 +28607,7 @@ def test_refresh_tic_status_updates_step_mode_and_tic_units(tmp_path: Path, qtbo
                     ]
                 )
 
-        window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
         window.spin_full_steps_per_mm.setValue(100.0)
         window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
         window.spin_steps_per_mm.setValue(800.0)
@@ -28274,7 +28850,7 @@ def test_motor_step_calibration_move_uses_raw_tic_steps_not_current_calibration(
             self.targets.append((position_steps, max_speed))
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window.spin_steps_per_mm.setValue(1000.0)
     window._current_position_steps = 1200
