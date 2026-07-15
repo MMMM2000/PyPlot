@@ -22,6 +22,7 @@ class _ControlledSourceProvenanceCache:
     def __init__(self) -> None:
         self.requests: list[tuple[object, str]] = []
         self.snapshots: dict[str, dict[str, object]] = {}
+        self.released: list[str] = []
 
     def request(self, repo_root: object, *, token: object | None = None) -> str:
         capture_token = str(token or f"capture-{len(self.requests) + 1}")
@@ -32,6 +33,13 @@ class _ControlledSourceProvenanceCache:
     def snapshot(self, token: object | None) -> dict[str, object] | None:
         snapshot = self.snapshots.get(str(token)) if token is not None else None
         return None if snapshot is None else dict(snapshot)
+
+    def release(self, token: object | None) -> None:
+        if token is None:
+            return
+        capture_token = str(token)
+        self.released.append(capture_token)
+        self.snapshots.pop(capture_token, None)
 
     def complete(
         self,
@@ -2026,6 +2034,7 @@ def test_current_annealing_metadata_records_source_control_snapshot(
     assert source_control["remote_url"] == "https://example.test/repo.git"
     assert source_control["dirty_state"] == "dirty"
     assert len(cache.requests) == 1
+    assert str(token) in cache.released
 
 
 def test_current_annealing_source_provenance_updates_only_current_prepared_output(
@@ -2044,6 +2053,7 @@ def test_current_annealing_source_provenance_updates_only_current_prepared_outpu
     old_token = window._source_provenance_token
     old_path = logger_mod.Path(window.f_name)
     old_metadata = window._metadata_path(str(old_path))
+    stale_snapshot = dict(cache.snapshots[str(old_token)])
 
     window.ui.lineEdit_log_file.setText("new_output")
     assert window.prepare_output_file() is True
@@ -2052,8 +2062,15 @@ def test_current_annealing_source_provenance_updates_only_current_prepared_outpu
     new_metadata = window._metadata_path(str(new_path))
     assert old_token != new_token
     assert len(cache.requests) == 2
+    assert str(old_token) in cache.released
 
-    cache.complete(old_token, branch="codex/stale", commit="stale")
+    stale_snapshot.update(
+        capture_state="complete",
+        capture_completed_utc="2026-07-15T10:00:01.000Z",
+        branch="codex/stale",
+        commit="stale",
+    )
+    cache.snapshots[str(old_token)] = stale_snapshot
     window._write_source_provenance_completion(str(old_path), old_token)
     assert logger_mod.json.loads(old_metadata.read_text(encoding="utf-8"))["source_control"][
         "capture_state"
@@ -2065,6 +2082,7 @@ def test_current_annealing_source_provenance_updates_only_current_prepared_outpu
     completed_payload = logger_mod.json.loads(new_metadata.read_text(encoding="utf-8"))
     assert completed_payload["source_control"] == expected_snapshot
     assert completed_payload["composition"] == "original composition"
+    assert str(new_token) in cache.released
 
 
 def test_blocked_source_provenance_does_not_delay_prepare_gui_heartbeat_or_close(
@@ -2092,9 +2110,8 @@ def test_blocked_source_provenance_does_not_delay_prepare_gui_heartbeat_or_close
         )
         return snapshot
 
-    window._source_provenance_cache = source_provenance_mod.SourceProvenanceCache(
-        _blocked_collector
-    )
+    provenance_cache = source_provenance_mod.SourceProvenanceCache(_blocked_collector)
+    window._source_provenance_cache = provenance_cache
     heartbeat_count = 0
 
     def _heartbeat() -> None:
@@ -2111,11 +2128,13 @@ def test_blocked_source_provenance_does_not_delay_prepare_gui_heartbeat_or_close
         assert window.prepare_output_file() is True
         assert time.monotonic() - started < 0.25
         assert entered.wait(timeout=1.0)
+        token = window._source_provenance_token
         qtbot.waitUntil(lambda: heartbeat_count > 0, timeout=500)
 
         close_started = time.monotonic()
         window.close()
         assert time.monotonic() - close_started < 1.5
+        assert provenance_cache.snapshot(token) is None
     finally:
         release.set()
 

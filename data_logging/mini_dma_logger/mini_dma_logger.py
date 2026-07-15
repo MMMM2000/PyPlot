@@ -50,6 +50,7 @@ from data_logging.shared_power_supply.protocol import (
 from data_logging.source_provenance import (
     CAPTURE_PENDING,
     SourceProvenanceCache,
+    patch_source_control_metadata,
     unavailable_source_provenance,
 )
 from data_logging.mini_dma_logger.run_cleanup import (
@@ -6647,6 +6648,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_metadata_write_lock = RLock()
         self._source_provenance_cache = SourceProvenanceCache()
         self._session_source_provenance_token: object | None = None
+        self._session_source_provenance_metadata_path: Path | None = None
         self._source_provenance_poll_timer = QtCore.QTimer(self)
         self._source_provenance_poll_timer.setInterval(50)
         self._source_provenance_poll_timer.timeout.connect(self._poll_source_provenance_capture)
@@ -22680,20 +22682,55 @@ class MainWindow(QtWidgets.QMainWindow):
         return Path(__file__).resolve().parents[2]
 
     def _request_session_source_provenance(self) -> None:
+        self._source_provenance_cache.release(self._session_source_provenance_token)
         self._session_source_provenance_token = self._source_provenance_cache.request(
             self._source_provenance_repo_root()
         )
+        self._session_source_provenance_metadata_path = self._session_json_path
         self._source_provenance_poll_timer.start()
 
     def _poll_source_provenance_capture(self) -> None:
         token = self._session_source_provenance_token
+        metadata_path = self._session_source_provenance_metadata_path
         snapshot = self._source_provenance_cache.snapshot(token)
         if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
             return
         self._source_provenance_poll_timer.stop()
-        if self._window_closing or token != self._session_source_provenance_token:
+        if (
+            self._window_closing
+            or token != self._session_source_provenance_token
+            or metadata_path != self._session_source_provenance_metadata_path
+            or metadata_path is None
+        ):
             return
-        self._write_session_metadata()
+        self._write_session_source_provenance_completion(metadata_path, token)
+
+    def _write_session_source_provenance_completion(
+        self,
+        metadata_path: Path,
+        token: object,
+    ) -> None:
+        with self._session_metadata_write_lock:
+            if (
+                token != self._session_source_provenance_token
+                or metadata_path != self._session_source_provenance_metadata_path
+            ):
+                return
+            snapshot = self._source_provenance_cache.snapshot(token)
+            if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
+                return
+            try:
+                patch_source_control_metadata(metadata_path, snapshot)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self._log(
+                    f"Source provenance metadata update failed for {metadata_path}: {exc}"
+                )
+
+    def _release_session_source_provenance(self) -> None:
+        self._source_provenance_poll_timer.stop()
+        self._source_provenance_cache.release(self._session_source_provenance_token)
+        self._session_source_provenance_token = None
+        self._session_source_provenance_metadata_path = None
 
     def _source_control_metadata(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]
@@ -32312,6 +32349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._disconnect_scale()
         self._disconnect_ir_thermometer()
         self._stop_session(reason="app_closed", detail="Application window closed while session was active.")
+        self._release_session_source_provenance()
         self._release_experiment_sleep_guard()
         self._disconnect_supply()
         self._stop_owned_shared_broker()

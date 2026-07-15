@@ -53,6 +53,7 @@ class _ControlledSourceProvenanceCache:
     def __init__(self) -> None:
         self.requests: list[tuple[Path, str]] = []
         self.snapshots: dict[str, dict[str, object]] = {}
+        self.released: list[str] = []
 
     def request(self, repo_root: Path, *, token: object | None = None) -> str:
         capture_token = str(token or f"capture-{len(self.requests) + 1}")
@@ -63,6 +64,13 @@ class _ControlledSourceProvenanceCache:
     def snapshot(self, token: object | None) -> dict[str, object] | None:
         snapshot = self.snapshots.get(str(token)) if token is not None else None
         return None if snapshot is None else dict(snapshot)
+
+    def release(self, token: object | None) -> None:
+        if token is None:
+            return
+        capture_token = str(token)
+        self.released.append(capture_token)
+        self.snapshots.pop(capture_token, None)
 
     def complete(
         self,
@@ -26140,6 +26148,7 @@ def test_session_source_provenance_stale_completion_is_ignored(
         old_token = window._session_source_provenance_token
         assert window._session_json_path is not None
         old_metadata_path = window._session_json_path
+        stale_snapshot = dict(cache.snapshots[str(old_token)])
         window._stop_session()
 
         window.edit_log_name.setText("new_output")
@@ -26148,9 +26157,16 @@ def test_session_source_provenance_stale_completion_is_ignored(
         assert window._session_json_path is not None
         new_metadata_path = window._session_json_path
         assert old_token != new_token
+        assert str(old_token) in cache.released
 
-        cache.complete(old_token, branch="codex/stale", commit="stale")
-        window._poll_source_provenance_capture()
+        stale_snapshot.update(
+            capture_state="complete",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            branch="codex/stale",
+            commit="stale",
+        )
+        cache.snapshots[str(old_token)] = stale_snapshot
+        window._write_session_source_provenance_completion(old_metadata_path, old_token)
         assert json.loads(old_metadata_path.read_text(encoding="utf-8"))["source_control"][
             "capture_state"
         ] == "pending"
@@ -26173,6 +26189,83 @@ def test_session_source_provenance_stale_completion_is_ignored(
         assert len(cache.requests) == 2
     finally:
         window._stop_session()
+        _close_test_window(window)
+
+
+def test_late_session_source_provenance_patches_only_final_source_control(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("late_metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window._start_session()
+        token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        window._session_run_log_complete = False
+        window._session_run_log_incomplete_lines = 3
+        window._session_run_log_incomplete_reason = "synthetic_incomplete_log"
+
+        window._stop_session(reason="manual_session_stop", detail="Synthetic finalization.")
+        finalized = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert finalized["finished_utc"]
+        assert finalized["stop"]["reason"] == "manual_session_stop"
+        assert finalized["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+        assert finalized["logging"]["run_log_complete"] is False
+        assert finalized["logging"]["run_log_incomplete_lines"] == 3
+        assert finalized["logging"]["run_log_incomplete_reason"] == "synthetic_incomplete_log"
+
+        expected_source = cache.complete(token, branch="codex/final", commit="final123")
+        window._poll_source_provenance_capture()
+        patched = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        finalized_without_source = dict(finalized)
+        patched_without_source = dict(patched)
+        finalized_without_source.pop("source_control")
+        patched_without_source.pop("source_control")
+        assert patched_without_source == finalized_without_source
+        assert patched["source_control"] == expected_source
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("broken_metadata", [None, "{malformed"])
+def test_late_session_source_provenance_never_recreates_missing_or_malformed_metadata(
+    tmp_path: Path,
+    qtbot,
+    broken_metadata: str | None,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("broken_late_metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window._start_session()
+        token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        window._stop_session(reason="manual_session_stop")
+        cache.complete(token)
+        if broken_metadata is None:
+            metadata_path.unlink()
+        else:
+            metadata_path.write_text(broken_metadata, encoding="utf-8")
+
+        window._poll_source_provenance_capture()
+
+        if broken_metadata is None:
+            assert not metadata_path.exists()
+        else:
+            assert metadata_path.read_text(encoding="utf-8") == broken_metadata
+        assert "Source provenance metadata update failed" in window.log_output.toPlainText()
+    finally:
         _close_test_window(window)
 
 
@@ -26200,15 +26293,15 @@ def test_blocked_source_provenance_does_not_delay_session_or_control_metadata_ti
         )
         return snapshot
 
-    window._source_provenance_cache = source_provenance_mod.SourceProvenanceCache(
-        _blocked_collector
-    )
+    provenance_cache = source_provenance_mod.SourceProvenanceCache(_blocked_collector)
+    window._source_provenance_cache = provenance_cache
 
     try:
         started = time.monotonic()
         window._start_session()
         assert time.monotonic() - started < 0.25
         assert entered.wait(timeout=1.0)
+        token = window._session_source_provenance_token
 
         tick = threading.Thread(target=window._write_session_metadata, daemon=True)
         tick.start()
@@ -26218,6 +26311,7 @@ def test_blocked_source_provenance_does_not_delay_session_or_control_metadata_ti
         close_started = time.monotonic()
         window.close()
         assert time.monotonic() - close_started < 1.5
+        assert provenance_cache.snapshot(token) is None
     finally:
         release.set()
         _ensure_app().processEvents()

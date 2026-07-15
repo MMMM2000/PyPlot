@@ -45,6 +45,7 @@ from plotting.shared.power_guard import create_experiment_sleep_guard
 from data_logging.source_provenance import (
     CAPTURE_PENDING,
     SourceProvenanceCache,
+    patch_source_control_metadata,
     unavailable_source_provenance,
 )
 
@@ -6229,6 +6230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return Path(__file__).resolve().parents[2]
 
     def _request_source_provenance(self, output_path: str) -> object:
+        self._release_source_provenance()
         token = self._source_provenance_cache.request(self._source_provenance_repo_root())
         self._source_provenance_token = token
         self._source_provenance_output_path = str(output_path)
@@ -6250,6 +6252,12 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return
         self._write_source_provenance_completion(output_path, token)
+
+    def _release_source_provenance(self) -> None:
+        self._source_provenance_poll_timer.stop()
+        self._source_provenance_cache.release(self._source_provenance_token)
+        self._source_provenance_token = None
+        self._source_provenance_output_path = None
 
     def _source_control_metadata(self, token: object | None = None) -> Dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]
@@ -6385,20 +6393,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         metadata_path = self._metadata_path(output_path)
         try:
-            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("metadata payload is not an object")
             if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
                 return
-            payload["source_control"] = snapshot
-            metadata_path.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
+            patch_source_control_metadata(metadata_path, snapshot, ensure_ascii=False)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             message = f"Source provenance metadata update failed for {metadata_path}: {exc}"
             LOGGER.error(message)
             self._show_status_message(message, timeout_ms=12000)
+        finally:
+            if token == self._source_provenance_token and output_path == self._source_provenance_output_path:
+                self._release_source_provenance()
 
     def _evacuate_existing_output_for_replacement(self, output_path: str) -> None:
         output = Path(output_path)
@@ -6475,9 +6479,7 @@ class MainWindow(QtWidgets.QMainWindow):
             source_provenance_token=source_provenance_token,
         ):
             if source_provenance_token == self._source_provenance_token:
-                self._source_provenance_token = None
-                self._source_provenance_output_path = None
-                self._source_provenance_poll_timer.stop()
+                self._release_source_provenance()
             return False
         # subsequent writes will append
         return True
@@ -6518,7 +6520,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._window_closing = True
-        self._source_provenance_poll_timer.stop()
+        self._release_source_provenance()
         self._fabrication_poll_timer.stop()
         self._cancel_fabrication_folder_load()
         self._wait_for_fabrication_tasks(timeout_ms=250)
