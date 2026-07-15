@@ -166,6 +166,16 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "TMA Logger",
         "body": dedent(
             """
+            ### Sample metadata and annealing sources
+            The **Sample -> Builder Project** area accepts three independent sources. A matching
+            Microwire Data Builder `.pydpj` is always preferred, followed by a matching Košice
+            folder entry, then fabrication-folder data. Košice and fabrication scans run in the
+            background and their paths are remembered.
+
+            **Show annealing** uses that same priority order, reports the chosen source, and opens
+            all matching curves in the existing stacked preview. Košice `.dat` and `.txt` tables
+            are supported; discovered Origin `.opju` projects are reported but not imported.
+
             ### IR thermometer wiring
             Use the NUCLEO-H753ZI ST-LINK USB connector for board power and the PC
             virtual COM port. Turn the Nucleo power off before rewiring, and connect one

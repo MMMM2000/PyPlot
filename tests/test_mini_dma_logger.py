@@ -37,6 +37,9 @@ os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
 mini_dma_mod = importlib.import_module(
     "data_logging.mini_dma_logger.mini_dma_logger"
 )
+kosice_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.kosice_import"
+)
 stiff_guard_mod = importlib.import_module(
     "data_logging.mini_dma_logger.stiff_sample_guard"
 )
@@ -7688,6 +7691,197 @@ def test_wire_diameter_is_marked_until_imported_but_manual_edits_still_work(tmp_
 
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "border" in window.spin_diameter.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
+def _write_kosice_fixture(root: Path, filename: str) -> Path:
+    annealing = root / "Current Annealing"
+    annealing.mkdir(parents=True, exist_ok=True)
+    path = annealing / filename
+    path.write_text(
+        "# Current (mA)\tVoltage (V)\tResistance (Ohm)\n"
+        "1\t0.1\t100\n"
+        "2\t0.22\t110\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_kosice_folder_path_is_restored_and_scanned_asynchronously(tmp_path: Path, qtbot) -> None:
+    root = tmp_path / "Kosice"
+    _write_kosice_fixture(root, "Ni44Fe27Ga23Cu3Co3 1_7 s2 100mA cycle2.txt")
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("kosice_folder_path", str(root))
+    settings.setValue("name_composition", "Ni44Fe27Ga23Cu3Co3")
+    settings.setValue("name_wire", "1/7")
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    qtbot.addWidget(window)
+
+    try:
+        qtbot.waitUntil(lambda: window._kosice_index is not None, timeout=3000)
+
+        assert window.edit_kosice_folder.text() == str(root)
+        assert "Košice match" in window.label_kosice_status.text()
+        assert window._kosice_sample_suggestions == {"Ni44Fe27Ga23Cu3Co3": ("1/7",)}
+    finally:
+        window.close()
+        _ensure_app().processEvents()
+        _restore_settings(snapshot)
+
+
+def test_kosice_scan_is_non_blocking_and_can_be_cancelled(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Kosice"
+    _write_kosice_fixture(root, "Ni44Fe27Ga23Cu3Co3 1_7 s2 100mA.txt")
+    original_build = mini_dma_mod.build_annealing_folder_index
+    started = threading.Event()
+
+    def _slow_build(*args, cancelled, **kwargs):
+        started.set()
+        while not cancelled():
+            time.sleep(0.01)
+        raise InterruptedError("Annealing folder scan cancelled.")
+
+    monkeypatch.setattr(mini_dma_mod, "build_annealing_folder_index", _slow_build)
+    window = _build_window(tmp_path, qtbot)
+    event_loop_tick = {"seen": False}
+
+    try:
+        window.edit_kosice_folder.setText(str(root))
+        window._load_kosice_folder_from_ui()
+        assert started.wait(timeout=1.0)
+        QtCore.QTimer.singleShot(0, lambda: event_loop_tick.__setitem__("seen", True))
+        qtbot.waitUntil(lambda: event_loop_tick["seen"], timeout=1000)
+
+        window._handle_kosice_scan_button()
+        qtbot.waitUntil(lambda: "cancelled" in window.label_kosice_status.text().lower(), timeout=3000)
+
+        assert event_loop_tick["seen"] is True
+        assert window._kosice_index is None
+    finally:
+        monkeypatch.setattr(mini_dma_mod, "build_annealing_folder_index", original_build)
+        _close_test_window(window)
+
+
+def test_kosice_scan_error_is_visible_and_does_not_keep_stale_index(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    missing = tmp_path / "missing-kosice-folder"
+
+    try:
+        window.edit_kosice_folder.setText(str(missing))
+        window._load_kosice_folder_from_ui()
+        qtbot.waitUntil(
+            lambda: "Failed to scan Košice folder" in window.label_kosice_status.text(),
+            timeout=3000,
+        )
+
+        assert "Folder was not found" in window.label_kosice_status.text()
+        assert window._kosice_index is None
+        assert window.button_scan_kosice.text() == "Scan"
+    finally:
+        _close_test_window(window)
+
+
+def test_show_annealing_uses_project_then_kosice_then_fabrication_precedence(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    composition = "Ni44Fe27Ga23Cu3Co3"
+    wire = "1/7"
+    project_curve = tmp_path / "Ni44Fe27Ga23Cu3Co3 1_7 100mA.txt"
+    project_curve.write_text("0.001\t0.1\t100\n0.002\t0.22\t110\n", encoding="utf-8")
+    project_path = tmp_path / "project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "annealing": {
+                        "rows": [
+                            {
+                                "Composition": composition,
+                                "Microwire": wire,
+                                "_sources": [str(project_curve)],
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    kosice_root = tmp_path / "Kosice"
+    _write_kosice_fixture(kosice_root, f"{composition} 1_7 s2 100mA cycle2.txt")
+    fabrication_root = tmp_path / "fabrication database"
+    _write_kosice_fixture(fabrication_root, f"{composition} 1_7 s1 80mA.txt")
+    kosice_index = kosice_mod.build_annealing_folder_index(
+        kosice_root,
+        source_label="Košice folder",
+    )
+    fabrication_index = kosice_mod.build_annealing_folder_index(
+        fabrication_root,
+        source_label="fabrication folder",
+    )
+    window = _build_window(tmp_path, qtbot)
+    opened: list[str] = []
+
+    try:
+        window.edit_name_composition.setText(composition)
+        window.edit_name_wire.setText(wire)
+        window.edit_project_path.setText(str(project_path))
+        window._kosice_index = kosice_index
+        window._fabrication_annealing_index = fabrication_index
+        window._open_annealing_preview = (  # type: ignore[method-assign]
+            lambda *, title, series, source_label: opened.append(source_label)
+        )
+
+        window.show_project_annealing_graphs()
+        assert opened[-1].startswith("Builder project (.pydpj)")
+
+        window.edit_project_path.clear()
+        window.show_project_annealing_graphs()
+        assert opened[-1].startswith("Košice folder:")
+
+        window._kosice_index = None
+        window.show_project_annealing_graphs()
+        assert opened[-1].startswith("fabrication folder:")
+    finally:
+        _close_test_window(window)
+
+
+def test_show_annealing_reports_no_matching_source(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Kosice"
+    _write_kosice_fixture(root, "Ni44Fe27Ga23Cu3Co3 1_7 s2 100mA.txt")
+    window = _build_window(tmp_path, qtbot)
+    window._kosice_index = kosice_mod.build_annealing_folder_index(
+        root,
+        source_label="Košice folder",
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args: warnings.append(str(args[-1])),
+    )
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/2")
+        window.show_project_annealing_graphs()
+
+        assert warnings
+        assert "No matching annealing preview" in warnings[-1]
+        assert "No Košice folder annealing files match" in warnings[-1]
     finally:
         _close_test_window(window)
 
