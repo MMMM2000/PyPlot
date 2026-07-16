@@ -445,6 +445,7 @@ def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path,
         assert config.scale_request_command == mini_dma_mod.KERN_KCP_SCALE_REQUEST
         assert config.scale_terminator == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
         assert config.scale_readability_g == pytest.approx(0.01)
+        assert config.force_control_profile is mini_dma_mod.ForceControlProfile.KOSICE_ADAPTIVE
         assert window._raw_scale_display_limit_g() == pytest.approx(45.0)
         assert window._motor_step_mm() == pytest.approx(1.0 / 800.0)
         assert window._setup_motion_speed_cap_mm_s() == pytest.approx(0.75)
@@ -453,6 +454,171 @@ def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path,
         assert window._current_sweep_hold_noise_sigma() == pytest.approx(4.0)
     finally:
         window._stop_automation_control_loop()
+        _close_test_window(window)
+
+
+def test_force_control_profile_is_selected_from_scale_protocol() -> None:
+    assert (
+        mini_dma_mod._force_control_profile_for_scale_settings(
+            256000,
+            mini_dma_mod.KERN_KCP_SCALE_REQUEST,
+            mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
+        )
+        is mini_dma_mod.ForceControlProfile.KOSICE_ADAPTIVE
+    )
+    assert (
+        mini_dma_mod._force_control_profile_for_scale_settings(
+            9600,
+            mini_dma_mod.GNG_SCALE_REQUEST,
+            "",
+        )
+        is mini_dma_mod.ForceControlProfile.PRAGUE_LEGACY
+    )
+
+
+def test_kosice_motion_completion_requires_target_position_and_settle_confirmation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._last_motion_command_time_s = 10.0
+        window._last_tic_status_time_s = 11.0
+        window._kosice_active_motion_target_steps = 100
+        window._current_position_steps = 80
+        window._last_motion_expected_complete_monotonic_s = 20.0
+        monotonic_s = 19.0
+        monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: monotonic_s)
+
+        assert window._kosice_motion_complete() is False
+
+        window._current_position_steps = 100
+        window._kosice_active_motion_target_steps = None
+        assert window._kosice_motion_complete() is False
+
+        monotonic_s = 21.0
+        assert window._kosice_motion_complete() is True
+    finally:
+        _close_test_window(window)
+
+
+def test_scale_freshness_uses_monotonic_arrival_when_wall_timestamp_is_future(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._latest_scale_timestamp = 50_000.0
+        window._latest_scale_arrival_monotonic_s = 10.0
+        monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 10.0 + mini_dma_mod.STALE_SCALE_AFTER_S + 1.0)
+
+        assert window._has_fresh_scale_reading() is False
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_force_profile_keeps_legacy_seek_path(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        calls: list[tuple[str, float, float]] = []
+        window._force_control_profile = lambda: mini_dma_mod.ForceControlProfile.PRAGUE_LEGACY  # type: ignore[method-assign]
+        window._seek_distribution_target_prague_legacy = (  # type: ignore[method-assign]
+            lambda basis, target, tolerance: calls.append((basis, target, tolerance)) or True
+        )
+        window._seek_distribution_target_kosice = lambda *_args: pytest.fail("Košice path used")  # type: ignore[method-assign]
+
+        assert window._seek_distribution_target(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0, 2.0)
+        assert calls == [(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0, 2.0)]
+    finally:
+        _close_test_window(window)
+
+
+def test_kosice_force_profile_routes_current_sweep_to_adaptive_path(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_step_note = "0"
+        window._force_control_profile = lambda: mini_dma_mod.ForceControlProfile.KOSICE_ADAPTIVE  # type: ignore[method-assign]
+        window._seek_distribution_target_kosice = lambda *_args: True  # type: ignore[method-assign]
+        window._seek_distribution_target_prague_legacy = lambda *_args: pytest.fail("Prague path used")  # type: ignore[method-assign]
+
+        assert window._seek_distribution_target(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0, 2.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_kosice_hold_bands_derive_from_tolerance_quantization_and_uncertainty(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=1.0,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            current_hold_enabled=True,
+            current_hold_pause_tolerance_factor=2.0,
+            current_hold_resume_tolerance_factor=1.0,
+        )
+        window._automation_tolerance_for_step = lambda _step: 0.02  # type: ignore[method-assign]
+        window._scale_quantization_band_for_basis = lambda _basis: 0.01  # type: ignore[method-assign]
+        window._current_sweep_hold_noise_sigma = lambda: 3.0  # type: ignore[method-assign]
+        window._scale_control_signal_for_basis = lambda _basis: mini_dma_mod.ScaleControlSignal(  # type: ignore[method-assign]
+            value=1.05,
+            latest_value=1.05,
+            noise=0.04,
+            slope_per_s=0.0,
+            sample_count=16,
+            timestamp_s=1.0,
+        )
+
+        state = window._kosice_current_sweep_error_bands(step)
+        assert state is not None
+        assert state[4] == pytest.approx(0.04)
+        assert state[5] == pytest.approx(0.02)
+    finally:
+        _close_test_window(window)
+
+
+def test_kosice_hold_entry_uses_sample_cadence_confirmation(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=1.0,
+            basis=mini_dma_mod.HSW_BASIS_LOAD_G,
+            current_hold_enabled=True,
+            current_hold_pause_tolerance_factor=2.0,
+            current_hold_resume_tolerance_factor=1.0,
+        )
+        window.spin_control_interval.setValue(50)
+        window.spin_scale_interval.setValue(50)
+        window._force_control_profile = lambda: mini_dma_mod.ForceControlProfile.KOSICE_ADAPTIVE  # type: ignore[method-assign]
+        timestamps = iter((1.0, 1.10, 1.20))
+        window._kosice_current_sweep_error_bands = lambda _step: (  # type: ignore[method-assign]
+            0.10,
+            0.10,
+            0.02,
+            0.01,
+            0.04,
+            0.02,
+            mini_dma_mod.ScaleControlSignal(
+                value=1.10,
+                latest_value=1.10,
+                noise=0.01,
+                slope_per_s=0.0,
+                sample_count=8,
+                timestamp_s=next(timestamps),
+            ),
+        )
+
+        assert window._update_current_sweep_ramp_hold(step, 2, now_s=10.0) == (False, False)
+        assert window._update_current_sweep_ramp_hold(step, 2, now_s=10.1) == (False, False)
+        assert window._update_current_sweep_ramp_hold(step, 2, now_s=10.2) == (True, False)
+    finally:
         _close_test_window(window)
 
 
@@ -1535,7 +1701,7 @@ def test_prague_scale_ignores_kern_earned_resume_band(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
-def test_kern_held_recovery_uses_earned_resume_band_before_exact_seek(
+def test_kosice_held_recovery_uses_new_seek_and_stable_confirmation(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -1574,8 +1740,9 @@ def test_kern_held_recovery_uses_earned_resume_band_before_exact_seek(
         )
         window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
         window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+        seeks: list[tuple[object, ...]] = []
         window._seek_distribution_target = (  # type: ignore[method-assign]
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("exact seek should not run"))
+            lambda *args, **_kwargs: seeks.append(args) or True
         )
         window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
             lambda **kwargs: resumed.append(str(kwargs["reason"]))
@@ -1587,8 +1754,15 @@ def test_kern_held_recovery_uses_earned_resume_band_before_exact_seek(
             tolerance=1.0,
         ) is False
 
-        assert resumed
-        assert "adaptive resume band" in resumed[-1]
+        assert seeks and resumed == []
+
+        monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 102.0)
+        assert window._handle_current_sweep_held_recovery(
+            step,
+            plateau_index=1,
+            tolerance=1.0,
+        ) is False
+        assert resumed and "stayed accepted" in resumed[-1]
     finally:
         _close_test_window(window)
 
@@ -1648,7 +1822,7 @@ def test_kern_earned_resume_band_ignores_noise_inflated_pause_band(
         _close_test_window(window)
 
 
-def test_kern_held_recovery_preserves_base_resume_confirmation(
+def test_kosice_hold_preserves_resume_confirmation(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -1673,18 +1847,16 @@ def test_kern_held_recovery_preserves_base_resume_confirmation(
             current_hold_resume_stable_s=0.5,
         )
         signal = mini_dma_mod.ScaleControlSignal(
-            value=50.8,
-            latest_value=50.8,
+            value=50.05,
+            latest_value=50.05,
             noise=0.05,
             slope_per_s=0.0,
             sample_count=8,
             timestamp_s=100.0,
         )
-        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
-            lambda *_args, **_kwargs: (0.8, 0.8, 0.25, 0.05)
-        )
         window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
-        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+        window._automation_tolerance_for_step = lambda _step: 0.25  # type: ignore[method-assign]
+        window._scale_quantization_band_for_basis = lambda _basis: 0.01  # type: ignore[method-assign]
         window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
             lambda **kwargs: resumed.append(str(kwargs["reason"]))
         )
@@ -22855,7 +23027,7 @@ def test_current_sweep_hold_volatile_response_keeps_waiting_while_still_rising(
         _close_test_window(window)
 
 
-def test_kern_current_sweep_hold_runaway_drift_bypasses_volatile_wait(
+def test_kosice_current_sweep_hold_runaway_uses_adaptive_correction(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -22949,14 +23121,14 @@ def test_kern_current_sweep_hold_runaway_drift_bypasses_volatile_wait(
 
         assert reached is False
         assert moves, trace_rows
-        assert "current_hold_drift_recovery" in str(trace_rows[-1]["reason"])
+        assert "kosice_recover_disturbance:landing_correction" in str(trace_rows[-1]["reason"])
         commanded_mm = abs(float(trace_rows[-1]["correction_mm"]))
         assert commanded_mm > window._motor_step_mm()
     finally:
         _close_test_window(window)
 
 
-def test_kern_current_sweep_hold_high_noise_runaway_escapes_single_step(
+def test_kosice_current_sweep_hold_high_noise_runaway_escapes_single_step(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -23052,7 +23224,7 @@ def test_kern_current_sweep_hold_high_noise_runaway_escapes_single_step(
 
         assert reached is False
         assert moves, trace_rows
-        assert "current_hold_unstable_drift_recovery" in str(trace_rows[-1]["reason"])
+        assert "kosice_recover_disturbance:landing_correction" in str(trace_rows[-1]["reason"])
         commanded_mm = abs(float(trace_rows[-1]["correction_mm"]))
         assert commanded_mm > window._motor_step_mm()
     finally:
