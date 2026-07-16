@@ -19,6 +19,7 @@ from matplotlib.figure import Figure
 import launcher as launcher_module
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder import safe_codec
+from microwire_data_builder import project_package
 from microwire_data_builder.core import (
     MeasurementMetadata,
     MeasurementRecord,
@@ -2320,8 +2321,8 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
         [],
     )
     assert second_exit_code == 0
-    assert project_path.read_text(encoding="utf-8") != output_project.read_text(encoding="utf-8")
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    assert project_path.read_bytes() != output_project.read_bytes()
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["vsm_temperature_scan"]
     assert section_payload["rows"]
     assert section_payload["payloads"]["vsm_temperature_scan_records"]["encoding"] == safe_codec.CODEC_ENCODING
@@ -2391,7 +2392,7 @@ def test_builder_automation_recipe_updates_annealing_copy(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["annealing"]
     assert section_payload["payloads"]["annealing_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
@@ -2546,7 +2547,7 @@ def test_builder_rebuild_assemble_overlays_saved_transition_reviews(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     assemble_rows = output_payload["sections"]["assemble"]["rows"]
     assert assemble_rows
     assemble_row = assemble_rows[0]
@@ -2618,7 +2619,7 @@ def test_builder_automation_recipe_updates_microscope_copy(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["microscope"]
     assert section_payload["payloads"]["microscope_index"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
@@ -2713,7 +2714,7 @@ def test_builder_automation_recipe_updates_vsm_hysteresis_copy(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["vsm_hysteresis"]
     assert section_payload["payloads"]["vsm_hysteresis_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
@@ -2793,7 +2794,7 @@ def test_builder_automation_recipe_updates_dma_iso_stress_copy(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["dma_iso_stress"]
     assert section_payload["payloads"]["dma_iso_stress_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
@@ -2885,7 +2886,7 @@ def test_builder_automation_recipe_updates_fmr_copy(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["fmr"]
     assert section_payload["payloads"]["fmr_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
@@ -2976,7 +2977,7 @@ def test_builder_automation_recipe_updates_shape_memory_copy(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["shape_memory_stress_strain"]
     assert section_payload["payloads"]["shape_memory_stress_strain_records"]["encoding"] == safe_codec.CODEC_ENCODING
     assert section_payload["rows"]
@@ -3143,7 +3144,7 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     section_payload = output_payload["sections"]["mini_dma"]
     assert section_payload["rows"]
     row = section_payload["rows"][0]
@@ -3225,7 +3226,7 @@ def test_builder_automation_recipe_updates_mini_dma_transition_currents(
     )
 
     assert exit_code == 0
-    output_payload = json.loads(output_project.read_text(encoding="utf-8"))
+    output_payload = project_package.load_project(output_project)
     row = output_payload["sections"]["mini_dma"]["rows"][0]
     assert row["TMA transition currents by stress/load"] == [
         "50 MPa / 1.46 g: As 30 mA, Af 70 mA, Ms 65 mA, Mf 25 mA"
@@ -3307,7 +3308,7 @@ def test_builder_automation_recipe_promotes_database_latest_and_archives_previou
     archived_manifest = database_dir / "archive" / "update_manifest_2026-05-26_1512.json"
     assert archived_project.exists()
     assert archived_manifest.exists()
-    latest_payload = json.loads(latest_project.read_text(encoding="utf-8"))
+    latest_payload = project_package.load_project(latest_project)
     assert latest_payload["sections"]["vsm_temperature_scan"]["rows"]
     latest_manifest_payload = json.loads(
         (database_dir / "update_manifest_latest.json").read_text(encoding="utf-8")
@@ -3434,7 +3435,7 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
     )
 
     assert exit_code == 0
-    payload = json.loads(output_project.read_text(encoding="utf-8"))
+    payload = project_package.load_project(output_project)
     rows = payload["sections"]["mini_dma"]["rows"]
     assert len(rows) == 1
     assert str(good_run) in rows[0]["_sources"]

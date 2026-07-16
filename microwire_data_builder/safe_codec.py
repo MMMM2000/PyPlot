@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 import numpy as np
 import pandas as pd
@@ -27,13 +27,18 @@ CODEC_ENCODING = "microwire-json"
 CODEC_VERSION = 2
 MAX_CODEC_DEPTH = 100
 MAX_CONTAINER_ITEMS = 2_000_000
+MAX_COLUMNAR_DATAFRAME_CELLS = 5_000_000
 MAX_NDARRAY_ITEMS = 20_000_000
 MAX_JSON_BYTES = 256 * 1024 * 1024
 MAX_BINARY_BYTES = 256 * 1024 * 1024
 MAX_STRING_CHARS = 64 * 1024 * 1024
 MAX_NDARRAY_RANK = 32
 MAX_DECODE_NODES = 5_000_000
-MAX_DECODE_ITEMS = 4_000_000
+# A project payload can legitimately contain several individually bounded
+# columnar DataFrames (VSM/TMA records). Keep an aggregate ceiling, but size it
+# above the real multi-record payloads while byte/node and per-frame limits
+# remain independently enforced.
+MAX_DECODE_ITEMS = 20_000_000
 MAX_DECODE_BYTES = 512 * 1024 * 1024
 
 
@@ -312,11 +317,33 @@ def _restore_series_dtype(series: pd.Series, dtype: object) -> pd.Series:
         raise SafeCodecError(f"Invalid pandas dtype: {text!r}") from exc
 
 
+def _resolve_external_blob(
+    descriptor: Any,
+    resolver: Callable[[str, int], bytes] | None,
+) -> bytes:
+    if (
+        not isinstance(descriptor, Mapping)
+        or set(descriptor) != {"sha256", "bytes"}
+        or not isinstance(descriptor.get("sha256"), str)
+        or isinstance(descriptor.get("bytes"), bool)
+        or not isinstance(descriptor.get("bytes"), int)
+        or descriptor["bytes"] < 0
+        or descriptor["bytes"] > MAX_BINARY_BYTES
+        or resolver is None
+    ):
+        raise SafeCodecError("External codec blob reference is invalid or unresolved")
+    raw = resolver(descriptor["sha256"], descriptor["bytes"])
+    if not isinstance(raw, bytes) or len(raw) != descriptor["bytes"]:
+        raise SafeCodecError("External codec blob resolver returned invalid data")
+    return raw
+
+
 def decode_value(
     value: Any,
     *,
     _depth: int = 0,
     _budget: _DecodeBudget | None = None,
+    _blob_resolver: Callable[[str, int], bytes] | None = None,
 ) -> Any:
     """Decode a strict tagged tree without executing payload-controlled code."""
 
@@ -342,23 +369,36 @@ def decode_value(
         "time": ("value",), "pd.NA": (), "pd.NaT": (),
         "numpy-scalar": ("dtype", "value"),
         "ndarray": ("dtype", "shape", "data"),
+        "range-index": ("start", "stop", "step", "name"),
         "list": ("items",), "tuple": ("items",), "set": ("items",),
         "frozenset": ("items",), "dict": ("items",),
         "index": ("values", "name", "dtype"),
         "multi-index": ("values", "names"),
         "series": ("index", "name", "dtype", "values"),
         "dataframe": ("index", "columns", "dtypes", "rows"),
+        "dataframe-columnar": ("index", "columns", "dtypes", "data"),
         "dataclass": ("class", "state"), "object": ("class", "state"),
     }
     if tag not in schemas:
         raise SafeCodecError(f"Unknown codec tag: {tag!r}")
-    _require_exact_fields(node, *schemas[tag])
+    has_blob = "$blob" in node
+    if tag == "bytes" and has_blob:
+        _require_exact_fields(node, "$blob")
+    elif tag == "ndarray" and has_blob:
+        _require_exact_fields(node, "dtype", "shape", "$blob")
+    else:
+        _require_exact_fields(node, *schemas[tag])
     if tag == "float":
         raw_float = str(node.get("value"))
         if raw_float not in {"nan", "inf", "-inf"}:
             raise SafeCodecError("Invalid tagged float value")
         return {"nan": math.nan, "inf": math.inf, "-inf": -math.inf}[raw_float]
     if tag == "bytes":
+        if has_blob:
+            binary = _resolve_external_blob(node["$blob"], _blob_resolver)
+            _check_size(len(binary), "bytes", MAX_BINARY_BYTES)
+            _budget.consume(bytes_=len(binary))
+            return binary
         raw = node.get("value")
         if not isinstance(raw, str):
             raise SafeCodecError("bytes value must be text")
@@ -391,7 +431,10 @@ def decode_value(
         return pd.NaT
     if tag == "numpy-scalar":
         dtype = _safe_numpy_dtype(node.get("dtype"))
-        item = decode_value(node.get("value"), _depth=_depth + 1, _budget=_budget)
+        item = decode_value(
+            node.get("value"), _depth=_depth + 1, _budget=_budget,
+            _blob_resolver=_blob_resolver,
+        )
         try:
             return dtype.type(item)
         except Exception as exc:
@@ -405,27 +448,47 @@ def decode_value(
             raise SafeCodecError("Invalid ndarray shape")
         item_count = math.prod(shape)
         _check_size(item_count, "numpy array", MAX_NDARRAY_ITEMS)
-        raw = node.get("data")
-        if not isinstance(raw, str):
-            raise SafeCodecError("ndarray data must be text")
         expected = item_count * dtype.itemsize
         _check_size(expected, "numpy array bytes", MAX_BINARY_BYTES)
-        max_encoded = ((expected + 2) // 3) * 4
-        if len(raw) > max_encoded:
-            raise SafeCodecError("Encoded ndarray data exceeds declared shape/dtype")
-        try:
-            binary = base64.b64decode(raw.encode("ascii"), validate=True)
-        except Exception as exc:
-            raise SafeCodecError("Invalid ndarray data") from exc
+        if has_blob:
+            binary = _resolve_external_blob(node["$blob"], _blob_resolver)
+        else:
+            raw = node.get("data")
+            if not isinstance(raw, str):
+                raise SafeCodecError("ndarray data must be text")
+            max_encoded = ((expected + 2) // 3) * 4
+            if len(raw) > max_encoded:
+                raise SafeCodecError("Encoded ndarray data exceeds declared shape/dtype")
+            try:
+                binary = base64.b64decode(raw.encode("ascii"), validate=True)
+            except Exception as exc:
+                raise SafeCodecError("Invalid ndarray data") from exc
         if len(binary) != expected:
             raise SafeCodecError("ndarray byte length does not match shape/dtype")
         _budget.consume(items=item_count, bytes_=len(binary))
         return np.frombuffer(binary, dtype=dtype).copy().reshape(tuple(shape))
+    if tag == "range-index":
+        start, stop, step = node.get("start"), node.get("stop"), node.get("step")
+        if not all(isinstance(item, int) and not isinstance(item, bool) for item in (start, stop, step)):
+            raise SafeCodecError("Malformed pandas RangeIndex")
+        if step == 0:
+            raise SafeCodecError("RangeIndex step cannot be zero")
+        name = decode_value(
+            node.get("name"), _depth=_depth + 1, _budget=_budget,
+            _blob_resolver=_blob_resolver,
+        )
+        result = pd.RangeIndex(start=start, stop=stop, step=step, name=name)
+        _check_size(len(result), "pandas RangeIndex")
+        _budget.consume(items=len(result))
+        return result
     if tag in {"list", "tuple", "set", "frozenset"}:
         raw_items = _require_list(node.get("items"), tag)
         _budget.consume(items=len(raw_items))
         items = [
-            decode_value(item, _depth=_depth + 1, _budget=_budget)
+            decode_value(
+                item, _depth=_depth + 1, _budget=_budget,
+                _blob_resolver=_blob_resolver,
+            )
             for item in raw_items
         ]
         try:
@@ -439,37 +502,41 @@ def decode_value(
         for pair in raw_pairs:
             if not isinstance(pair, list) or len(pair) != 2:
                 raise SafeCodecError("dict item must be a key/value pair")
-            key = decode_value(pair[0], _depth=_depth + 1, _budget=_budget)
+            key = decode_value(
+                pair[0], _depth=_depth + 1, _budget=_budget,
+                _blob_resolver=_blob_resolver,
+            )
             try:
                 result[key] = decode_value(
-                    pair[1], _depth=_depth + 1, _budget=_budget
+                    pair[1], _depth=_depth + 1, _budget=_budget,
+                    _blob_resolver=_blob_resolver,
                 )
             except TypeError as exc:
                 raise SafeCodecError("Decoded mapping key is not hashable") from exc
         return result
     if tag in {"index", "multi-index"}:
-        values = decode_value(node.get("values"), _depth=_depth + 1, _budget=_budget)
+        values = decode_value(node.get("values"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         if not isinstance(values, list):
             raise SafeCodecError("Index values must decode to a list")
         if tag == "multi-index":
-            names = decode_value(node.get("names"), _depth=_depth + 1, _budget=_budget)
+            names = decode_value(node.get("names"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
             return pd.MultiIndex.from_tuples([tuple(item) for item in values], names=names)
-        name = decode_value(node.get("name"), _depth=_depth + 1, _budget=_budget)
+        name = decode_value(node.get("name"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         try:
             return pd.Index(values, name=name, dtype=str(node.get("dtype") or None))
         except Exception as exc:
             raise SafeCodecError(f"Invalid pandas Index dtype: {node.get('dtype')!r}") from exc
     if tag == "series":
-        index = decode_value(node.get("index"), _depth=_depth + 1, _budget=_budget)
-        values = decode_value(node.get("values"), _depth=_depth + 1, _budget=_budget)
-        name = decode_value(node.get("name"), _depth=_depth + 1, _budget=_budget)
+        index = decode_value(node.get("index"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        values = decode_value(node.get("values"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        name = decode_value(node.get("name"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         if not isinstance(index, pd.Index) or not isinstance(values, list):
             raise SafeCodecError("Malformed pandas Series")
         return _restore_series_dtype(pd.Series(values, index=index, name=name), node.get("dtype"))
     if tag == "dataframe":
-        index = decode_value(node.get("index"), _depth=_depth + 1, _budget=_budget)
-        columns = decode_value(node.get("columns"), _depth=_depth + 1, _budget=_budget)
-        rows = decode_value(node.get("rows"), _depth=_depth + 1, _budget=_budget)
+        index = decode_value(node.get("index"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        columns = decode_value(node.get("columns"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        rows = decode_value(node.get("rows"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         dtypes = _require_list(node.get("dtypes"), "DataFrame dtypes")
         if not isinstance(index, pd.Index) or not isinstance(columns, pd.Index) or not isinstance(rows, list):
             raise SafeCodecError("Malformed pandas DataFrame")
@@ -486,6 +553,40 @@ def decode_value(
             restored = _restore_series_dtype(frame.iloc[:, position], dtype)
             frame.isetitem(position, restored)
         return frame
+    if tag == "dataframe-columnar":
+        index = decode_value(node.get("index"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        columns = decode_value(node.get("columns"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        data = decode_value(node.get("data"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        dtypes = decode_value(node.get("dtypes"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
+        if (
+            not isinstance(index, pd.Index)
+            or not isinstance(columns, pd.Index)
+            or not isinstance(data, list)
+            or not isinstance(dtypes, list)
+        ):
+            raise SafeCodecError("Malformed columnar pandas DataFrame")
+        if len(dtypes) != len(columns) or len(data) != len(columns):
+            raise SafeCodecError("Columnar DataFrame width does not match metadata")
+        _check_size(
+            len(index) * max(1, len(columns)),
+            "columnar pandas DataFrame",
+            MAX_COLUMNAR_DATAFRAME_CELLS,
+        )
+        series: list[pd.Series] = []
+        for position, values in enumerate(data):
+            if isinstance(values, np.ndarray):
+                if values.ndim != 1 or len(values) != len(index):
+                    raise SafeCodecError("Columnar DataFrame ndarray length is invalid")
+                column = pd.Series(values, index=index, copy=False)
+            elif isinstance(values, list) and len(values) == len(index):
+                column = pd.Series(values, index=index)
+            else:
+                raise SafeCodecError("Columnar DataFrame column is malformed")
+            series.append(_restore_series_dtype(column, dtypes[position]))
+        frame = pd.concat(series, axis=1) if series else pd.DataFrame(index=index)
+        frame.index = index
+        frame.columns = columns
+        return frame
     if tag in {"dataclass", "object"}:
         type_id = node.get("class")
         if not isinstance(type_id, str) or type_id not in _ALLOWED_TYPES:
@@ -495,7 +596,7 @@ def decode_value(
             raise SafeCodecError(f"No object adapter for {type_id}")
         if tag == "dataclass" and type_id == fabrication_type:
             raise SafeCodecError(f"No dataclass adapter for {type_id}")
-        state = decode_value(node.get("state"), _depth=_depth + 1, _budget=_budget)
+        state = decode_value(node.get("state"), _depth=_depth + 1, _budget=_budget, _blob_resolver=_blob_resolver)
         if not isinstance(state, dict) or not all(isinstance(key, str) for key in state):
             raise SafeCodecError("Object state must be a string-keyed mapping")
         module_name, class_name = _ALLOWED_TYPES[type_id]
@@ -529,13 +630,204 @@ def encode_envelope(value: Any) -> dict[str, Any]:
     }
 
 
-def decode_envelope(payload: Any) -> Any:
+BlobSink = Callable[[memoryview], tuple[str, int]]
+
+
+def _json_token(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+def _iter_encode_value_with_blobs(
+    value: Any,
+    blob_sink: BlobSink,
+    *,
+    depth: int = 0,
+) -> Iterator[str]:
+    """Stream one safe-codec value while externalizing binary buffers immediately."""
+
+    _check_depth(depth)
+    if isinstance(value, str) and len(value) > MAX_STRING_CHARS:
+        raise SafeCodecError(f"String exceeds {MAX_STRING_CHARS} characters")
+    if value is None or isinstance(value, (str, bool, int)):
+        yield _json_token(value)
+        return
+    if isinstance(value, float):
+        if math.isfinite(value):
+            yield _json_token(value)
+        else:
+            label = "nan" if math.isnan(value) else ("inf" if value > 0 else "-inf")
+            yield '{"$type":"float","value":' + _json_token(label) + "}"
+        return
+    if isinstance(value, bytes):
+        _check_size(len(value), "bytes", MAX_BINARY_BYTES)
+        digest, size = blob_sink(memoryview(value))
+        yield (
+            '{"$type":"bytes","$blob":{"sha256":'
+            + _json_token(digest)
+            + ',"bytes":'
+            + str(size)
+            + "}}"
+        )
+        return
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise SafeCodecError("Object numpy arrays are not supported")
+        _check_size(int(value.size), "numpy array", MAX_NDARRAY_ITEMS)
+        contiguous = value if value.flags.c_contiguous else np.ascontiguousarray(value)
+        buffer = memoryview(contiguous).cast("B")
+        _check_size(len(buffer), "numpy array bytes", MAX_BINARY_BYTES)
+        digest, size = blob_sink(buffer)
+        yield (
+            '{"$type":"ndarray","dtype":'
+            + _json_token(str(value.dtype))
+            + ',"shape":'
+            + _json_token(list(value.shape))
+            + ',"$blob":{"sha256":'
+            + _json_token(digest)
+            + ',"bytes":'
+            + str(size)
+            + "}}"
+        )
+        return
+    if isinstance(value, Path):
+        yield '{"$type":"path","value":' + _json_token(str(value)) + "}"
+        return
+    if value is pd.NA:
+        yield '{"$type":"pd.NA"}'
+        return
+    if value is pd.NaT:
+        yield '{"$type":"pd.NaT"}'
+        return
+    if isinstance(value, pd.Timestamp):
+        yield '{"$type":"timestamp","value":' + _json_token(value.isoformat()) + "}"
+        return
+    if isinstance(value, datetime):
+        yield '{"$type":"datetime","value":' + _json_token(value.isoformat()) + "}"
+        return
+    if isinstance(value, date):
+        yield '{"$type":"date","value":' + _json_token(value.isoformat()) + "}"
+        return
+    if isinstance(value, time):
+        yield '{"$type":"time","value":' + _json_token(value.isoformat()) + "}"
+        return
+    if isinstance(value, np.generic):
+        if str(value.dtype) == "object":
+            raise SafeCodecError("Object numpy scalars are not supported")
+        yield '{"$type":"numpy-scalar","dtype":' + _json_token(str(value.dtype)) + ',"value":'
+        yield from _iter_encode_value_with_blobs(value.item(), blob_sink, depth=depth + 1)
+        yield "}"
+        return
+
+    if isinstance(value, pd.RangeIndex):
+        parts = (
+            ("start", value.start),
+            ("stop", value.stop),
+            ("step", value.step),
+            ("name", value.name),
+        )
+        tag = "range-index"
+    elif isinstance(value, pd.MultiIndex):
+        parts = (("values", list(value.tolist())), ("names", list(value.names)))
+        tag = "multi-index"
+    elif isinstance(value, pd.Index):
+        parts = (("values", list(value.tolist())), ("name", value.name), ("dtype", str(value.dtype)))
+        tag = "index"
+    elif isinstance(value, pd.Series):
+        _check_size(len(value.index), "pandas Series")
+        parts = (("index", value.index), ("name", value.name), ("dtype", str(value.dtype)), ("values", value.tolist()))
+        tag = "series"
+    elif isinstance(value, pd.DataFrame):
+        _check_size(
+            int(value.shape[0] * max(1, value.shape[1])),
+            "columnar pandas DataFrame",
+            MAX_COLUMNAR_DATAFRAME_CELLS,
+        )
+        column_data: list[Any] = []
+        for position in range(value.shape[1]):
+            series = value.iloc[:, position]
+            array = series.to_numpy(copy=False)
+            column_data.append(series.tolist() if array.dtype.hasobject else array)
+        parts = (
+            ("index", value.index),
+            ("columns", value.columns),
+            ("dtypes", [str(dtype) for dtype in value.dtypes]),
+            ("data", column_data),
+        )
+        tag = "dataframe-columnar"
+    else:
+        parts = ()
+        tag = ""
+    if tag:
+        yield '{"$type":' + _json_token(tag)
+        for key, item in parts:
+            yield "," + _json_token(key) + ":"
+            yield from _iter_encode_value_with_blobs(item, blob_sink, depth=depth + 1)
+        yield "}"
+        return
+
+    if isinstance(value, Mapping):
+        _check_size(len(value), "mapping")
+        yield '{"$type":"dict","items":['
+        for index, (key, item) in enumerate(value.items()):
+            if index:
+                yield ","
+            yield "["
+            yield from _iter_encode_value_with_blobs(key, blob_sink, depth=depth + 1)
+            yield ","
+            yield from _iter_encode_value_with_blobs(item, blob_sink, depth=depth + 1)
+            yield "]"
+        yield "]}"
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        _check_size(len(value), type(value).__name__)
+        tag = {list: "list", tuple: "tuple", set: "set", frozenset: "frozenset"}[type(value)]
+        yield '{"$type":' + _json_token(tag) + ',"items":['
+        for index, item in enumerate(value):
+            if index:
+                yield ","
+            yield from _iter_encode_value_with_blobs(item, blob_sink, depth=depth + 1)
+        yield "]}"
+        return
+
+    type_id = _type_id(value)
+    if type_id not in _ALLOWED_TYPES:
+        raise SafeCodecError(f"Unsupported type: {type_id}")
+    if is_dataclass(value):
+        state = {field.name: getattr(value, field.name) for field in fields(value)}
+        tag = "dataclass"
+    elif type_id == "microwire_data_builder.core:FabricationIndex":
+        state = {
+            "draw_level": getattr(value, "draw_level", {}),
+            "piece_level": getattr(value, "piece_level", {}),
+        }
+        tag = "object"
+    else:
+        raise SafeCodecError(f"Allowlisted type has no codec adapter: {type_id}")
+    yield '{"$type":' + _json_token(tag) + ',"class":' + _json_token(type_id) + ',"state":'
+    yield from _iter_encode_value_with_blobs(state, blob_sink, depth=depth + 1)
+    yield "}"
+
+
+def iterencode_envelope_with_blobs(value: Any, blob_sink: BlobSink) -> Iterator[str]:
+    """Yield a strict safe-codec envelope without base64-expanding binary data."""
+
+    yield '{"encoding":' + _json_token(CODEC_ENCODING)
+    yield ',"version":' + str(CODEC_VERSION) + ',"value":'
+    yield from _iter_encode_value_with_blobs(value, blob_sink)
+    yield "}"
+
+
+def decode_envelope(
+    payload: Any,
+    *,
+    blob_resolver: Callable[[str, int], bytes] | None = None,
+) -> Any:
     node = _require_mapping(payload, "codec envelope")
     if set(node) != {"encoding", "version", "value"}:
         raise SafeCodecError("Builder codec envelope has missing or unexpected fields")
     if node.get("encoding") != CODEC_ENCODING or node.get("version") != CODEC_VERSION:
         raise SafeCodecError("Unsupported Builder codec encoding/version")
-    return decode_value(node["value"])
+    return decode_value(node["value"], _blob_resolver=blob_resolver)
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:

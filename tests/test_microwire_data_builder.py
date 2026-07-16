@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import copy
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import importlib.util
 import logging
@@ -3684,6 +3686,79 @@ def test_mini_dma_section_preview_decoration_uses_side_by_side_cached_graph_pixm
         assert pixmap.height() == section._preview_icon_height()  # noqa: SLF001
         assert pixmap.width() > builder_ui.ANNEALING_GRAPH_WIDTH
         assert pixmap.height() == builder_ui.ANNEALING_GRAPH_HEIGHT
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_section_defers_visible_preview_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        record = _sample_mini_dma_record()
+        section._record_groups = {record.sample: [record]}  # noqa: SLF001
+        row = pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "_sample": record.sample,
+                builder_ui.MINI_DMA_COLUMN: [record.label],
+            }
+        )
+        pixmap = QtGui.QPixmap(10, 10)
+        pixmap.fill(QtGui.QColor("#123456"))
+        monkeypatch.setattr(section, "_should_defer_preview_render", lambda: True)
+        render = Mock(return_value=pixmap)
+        monkeypatch.setattr(section, "_render_preview_pixmap", render)
+
+        assert section._preview_decoration(row, builder_ui.MINI_DMA_COLUMN) is None  # noqa: SLF001
+        assert len(section._preview_render_queue) == 1  # noqa: SLF001
+
+        section._preview_render_timer.stop()  # noqa: SLF001
+        section._render_next_preview()  # noqa: SLF001
+
+        assert render.call_count == 1
+        assert next(iter(section._pixmap_cache.values())) is pixmap  # noqa: SLF001
+    finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_mini_dma_lazy_project_preview_uses_placeholder_without_loading_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    try:
+        record = _sample_mini_dma_record()
+        section._record_groups = {record.sample: [record]}  # noqa: SLF001
+        section._project_previews_deferred = True  # noqa: SLF001
+        monkeypatch.setattr(
+            builder_ui,
+            "_mini_dma_preview_items",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("lazy preview must not load a TMA source")
+            ),
+        )
+        row = pd.Series(
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "_sample": record.sample,
+                builder_ui.MINI_DMA_COLUMN: [record.label],
+            }
+        )
+
+        preview = section._preview_decoration(row, builder_ui.MINI_DMA_COLUMN)  # noqa: SLF001
+
+        assert isinstance(preview, QtGui.QPixmap)
+        assert not preview.isNull()
+        assert preview.width() == builder_ui.ANNEALING_GRAPH_WIDTH
+        assert preview.height() == builder_ui.ANNEALING_GRAPH_HEIGHT
     finally:
         section.close()
         section.deleteLater()
@@ -8648,6 +8723,50 @@ def test_builder_transitions_workspace_hosts_peer_views() -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_transition_workspace_loads_only_selected_peer_dependencies_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    window._auto_open_last = False
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        window,
+        "_load_deferred_project_section_async",
+        lambda key, *, decode_payloads=False: calls.append((key, decode_payloads)),
+    )
+    try:
+        window.tab_widget.setCurrentWidget(window.transitions_section)
+        window._deferred_project_section_keys = {
+            "annealing",
+            "current_density",
+            "vsm_temperature_scan",
+            "transition_temps",
+            "mini_dma",
+        }
+
+        window.transitions_section.tab_widget.setCurrentIndex(2)
+        calls.clear()
+        window._load_current_deferred_project_sections()
+        assert calls == [("mini_dma", False)]
+
+        window.transitions_section.tab_widget.setCurrentIndex(1)
+        calls.clear()
+        window._load_current_deferred_project_sections()
+        assert calls == [
+            ("transition_temps", False),
+            ("vsm_temperature_scan", True),
+        ]
+
+        window.transitions_section.tab_widget.setCurrentIndex(0)
+        calls.clear()
+        window._load_current_deferred_project_sections()
+        assert calls == [("annealing", True), ("current_density", False)]
+    finally:
+        window._dirty = False
+        window.close()
+
+
 def test_project_load_refreshes_visible_transition_workspace_reviews() -> None:
     _ensure_qapp()
     window = BuilderWindow()
@@ -10852,6 +10971,51 @@ def test_tma_transition_dialog_reports_active_load_threads() -> None:
         worker.deleteLater()
         dialog.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_tma_transition_dialog_does_not_auto_load_first_run(tmp_path: Path) -> None:
+    _ensure_qapp()
+    record = MiniDmaRecord(
+        path=tmp_path / "slow-run",
+        sample="Ni44Fe27Ga23 1/1",
+        data=pd.DataFrame(),
+        label="slow-run",
+    )
+    dialog = builder_ui._MiniDmaTransitionReviewDialog(
+        [record], logging.getLogger("test")
+    )
+    try:
+        QtWidgets.QApplication.processEvents()
+        assert not dialog.has_active_loaders()
+        assert dialog._entries_by_run == {}
+        assert "Select a TMA run" in dialog.empty_label.text()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_tma_review_ids_do_not_resolve_absolute_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "network-like-run"
+    record = MiniDmaRecord(
+        path=path,
+        sample="Ni44Fe27Ga23 1/1",
+        data=pd.DataFrame(),
+    )
+
+    def unexpected_resolve(*_args, **_kwargs):
+        raise AssertionError("absolute TMA review paths must not hit the filesystem")
+
+    monkeypatch.setattr(Path, "resolve", unexpected_resolve)
+    expected_prefix = os.path.normpath(str(path))
+    assert builder_ui._mini_dma_review_record_id(record, "100 MPa") == (
+        f"{expected_prefix}::100 MPa"
+    )
+    assert builder_ui._mini_dma_review_record_id(record, "200 MPa") == (
+        f"{expected_prefix}::200 MPa"
+    )
 
 
 def test_embedded_tma_busy_refresh_returns_promptly_and_retains_dialog() -> None:

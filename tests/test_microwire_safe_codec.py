@@ -16,6 +16,7 @@ from PyQt6 import QtWidgets
 
 import launcher
 from microwire_data_builder import safe_codec
+from microwire_data_builder import project_package
 from microwire_data_builder import storage as builder_storage
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.core import MiniDmaRecord, VsmTemperatureScanRecord
@@ -55,6 +56,8 @@ def _reset_store_state() -> None:
     builder_storage.MiniDatabaseStore._discard_writes_depth = 0
     builder_storage.MiniDatabaseStore._blocked_sections = set()
     builder_storage.MiniDatabaseStore._blocked_payloads = set()
+    builder_storage.MiniDatabaseStore._payload_loaders = {}
+    builder_storage.MiniDatabaseStore._payload_tombstones = set()
 
 
 def test_ordinary_project_launcher_and_store_reads_never_execute_legacy_pickle(
@@ -292,7 +295,10 @@ def test_project_export_exception_preserves_existing_target(
     )
     fake = SimpleNamespace(
         _project_degraded_safe_mode=False,
-        _build_project_payload=lambda: (_ for _ in ()).throw(RuntimeError("export failed")),
+        _build_project_payload=lambda _staging_root=None: (
+            _ for _ in ()
+        ).throw(RuntimeError("export failed")),
+        logger=SimpleNamespace(exception=lambda *_args, **_kwargs: None),
     )
 
     builder_ui.BuilderWindow._write_project_file(fake, target)  # noqa: SLF001
@@ -350,8 +356,8 @@ def test_trusted_project_migration_requires_distinct_new_output(tmp_path: Path) 
 
     assert result["legacy_payloads_migrated"] == 1
     assert source.read_text(encoding="utf-8").find("pickle-base64") >= 0
-    migrated = json.loads(output.read_text(encoding="utf-8"))
-    assert migrated["version"] == 2
+    migrated = project_package.load_project(output)
+    assert migrated["version"] == 3
     assert safe_codec.decode_envelope(
         migrated["sections"]["annealing"]["payloads"]["annealing_records"]
     ) == [{"status": "no_transition"}]
@@ -377,15 +383,17 @@ def test_trusted_project_migration_never_overwrites_concurrent_output(
         ),
         encoding="utf-8",
     )
-    original_link = os.link
+    original_inspect = project_package.inspect_project_package
 
-    def _race_link(source_path: str | os.PathLike[str], target_path: str | os.PathLike[str]) -> None:
-        Path(target_path).write_bytes(b"concurrent-owner")
-        original_link(source_path, target_path)
+    def _race_after_verification(path: Path, **kwargs):
+        result = original_inspect(path, **kwargs)
+        if Path(path) != output and not output.exists():
+            output.write_bytes(b"concurrent-owner")
+        return result
 
-    monkeypatch.setattr(os, "link", _race_link)
+    monkeypatch.setattr(project_package, "inspect_project_package", _race_after_verification)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(safe_codec.SafeCodecError, match="target changed"):
         migrate_legacy_project_trusted(source, output)
     assert output.read_bytes() == b"concurrent-owner"
 

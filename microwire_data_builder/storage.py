@@ -7,7 +7,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import pandas as pd
 from PyQt6 import QtCore
@@ -94,6 +94,8 @@ class MiniDatabaseStore:
     _discard_writes_depth: int = 0
     _blocked_sections: set[str] = set()
     _blocked_payloads: set[tuple[str, str]] = set()
+    _payload_loaders: Dict[tuple[str, str], Callable[[], Any]] = {}
+    _payload_tombstones: set[tuple[str, str]] = set()
 
     def __init__(self, section: str) -> None:
         self.section = section
@@ -366,6 +368,11 @@ class MiniDatabaseStore:
         if self._discard_writes_depth:
             return path
         cache_key = (self.section, name)
+        if self._memory_transactions:
+            self._memory_transactions[-1].clear_payload_loader(cache_key)
+        else:
+            self._payload_loaders.pop(cache_key, None)
+            self._payload_tombstones.discard(cache_key)
         if cache_key in self._blocked_payloads:
             raise SafeCodecError(
                 f"Builder payload {path} is blocked after a decode failure; "
@@ -396,6 +403,26 @@ class MiniDatabaseStore:
                 return cached
         if cache_key in self._memory_payloads:
             return self._memory_payloads[cache_key]
+        loader: Any = _TRANSACTION_MISSING
+        if self._memory_transactions:
+            loader = self._memory_transactions[-1].lookup_payload_loader(cache_key)
+        if loader is _TRANSACTION_MISSING:
+            loader = self._payload_loaders.get(cache_key, _TRANSACTION_MISSING)
+        if callable(loader):
+            try:
+                payload = loader()
+            except Exception as exc:
+                raise SafeCodecError(
+                    f"Failed to lazily load packaged Builder payload {self.section}.{name}: {exc}"
+                ) from exc
+            if self._memory_transactions:
+                transaction = self._memory_transactions[-1]
+                transaction.clear_payload_loader(cache_key)
+                transaction.save_payload(cache_key, payload)
+            elif not self._discard_writes_depth:
+                self._payload_loaders.pop(cache_key, None)
+                self._memory_payloads[cache_key] = payload
+            return payload
         path = self.payload_path(name)
         if path.exists():
             try:
@@ -418,12 +445,15 @@ class MiniDatabaseStore:
             return
         if self._memory_transactions:
             self._memory_transactions[-1].clear_payload((self.section, name))
+            self._memory_transactions[-1].clear_payload_loader((self.section, name))
             return
         if (self.section, name) in self._blocked_payloads:
             raise SafeCodecError(
                 "Blocked safe payload must be quarantined or repaired explicitly"
             )
         self._memory_payloads.pop((self.section, name), None)
+        self._payload_loaders.pop((self.section, name), None)
+        self._payload_tombstones.add((self.section, name))
         self._pending_payloads.discard((self.section, name))
         self._pending_payload_values.pop((self.section, name), None)
         path = self.payload_path(name)
@@ -431,6 +461,41 @@ class MiniDatabaseStore:
             path.unlink()
         except FileNotFoundError:
             pass
+
+    def register_payload_loader(self, name: str, loader: Callable[[], Any]) -> None:
+        """Register a data-only package resolver without materializing its payload."""
+
+        self.payload_path(name)  # validate the identifier without touching disk
+        if not callable(loader):
+            raise TypeError("Builder payload loader must be callable")
+        key = (self.section, name)
+        if self._memory_transactions:
+            self._memory_transactions[-1].register_payload_loader(key, loader)
+        else:
+            self._memory_payloads.pop(key, None)
+            self._payload_loaders[key] = loader
+            self._payload_tombstones.discard(key)
+
+    def payload_tombstones(self) -> set[str]:
+        """Return payload ids explicitly cleared from the current project."""
+
+        return {
+            name for section, name in self._payload_tombstones if section == self.section
+        }
+
+    def acknowledge_payload_tombstones(self, names: Iterable[str]) -> None:
+        for name in names:
+            self._payload_tombstones.discard((self.section, str(name)))
+
+    def has_payload_loader(self, name: str) -> bool:
+        key = (self.section, name)
+        if self._memory_transactions:
+            loader = self._memory_transactions[-1].lookup_payload_loader(key)
+            if callable(loader):
+                return True
+            if loader is not _TRANSACTION_MISSING:
+                return False
+        return callable(self._payload_loaders.get(key))
 
     def quarantine_corrupt_store(self, destination: Path) -> Path:
         """Explicitly move a blocked safe store aside so a clean save may proceed."""
@@ -474,6 +539,8 @@ class _MiniDatabaseMemoryTransaction:
         self._data_updates: Dict[str, MiniDatabaseData] = {}
         self._payload_updates: Dict[tuple[str, str], Any] = {}
         self._payload_deletes: set[tuple[str, str]] = set()
+        self._payload_loader_updates: Dict[tuple[str, str], Callable[[], Any]] = {}
+        self._payload_loader_deletes: set[tuple[str, str]] = set()
         self._payload_hidden_sections: set[str] = set()
         self._finished = False
         store_cls._memory_transactions.append(self)
@@ -506,11 +573,33 @@ class _MiniDatabaseMemoryTransaction:
 
     def save_payload(self, key: tuple[str, str], payload: Any) -> None:
         self._payload_deletes.discard(key)
+        self.clear_payload_loader(key)
         self._payload_updates[key] = payload
 
     def clear_payload(self, key: tuple[str, str]) -> None:
         self._payload_updates.pop(key, None)
         self._payload_deletes.add(key)
+
+    def lookup_payload_loader(self, key: tuple[str, str]) -> Any:
+        if key in self._payload_loader_deletes or key in self._payload_deletes:
+            return None
+        if key in self._payload_loader_updates:
+            return self._payload_loader_updates[key]
+        if key[0] in self._payload_hidden_sections:
+            return None
+        parent = self._parent()
+        return parent.lookup_payload_loader(key) if parent is not None else _TRANSACTION_MISSING
+
+    def register_payload_loader(
+        self, key: tuple[str, str], loader: Callable[[], Any]
+    ) -> None:
+        self._payload_deletes.discard(key)
+        self._payload_loader_deletes.discard(key)
+        self._payload_loader_updates[key] = loader
+
+    def clear_payload_loader(self, key: tuple[str, str]) -> None:
+        self._payload_loader_updates.pop(key, None)
+        self._payload_loader_deletes.add(key)
 
     def clear_section_payloads(self, section: str) -> None:
         self._payload_hidden_sections.add(section)
@@ -519,6 +608,9 @@ class _MiniDatabaseMemoryTransaction:
                 self._payload_updates.pop(key, None)
         self._payload_deletes.update(
             key for key in self._store_cls._memory_payloads if key[0] == section
+        )
+        self._payload_loader_deletes.update(
+            key for key in self._store_cls._payload_loaders if key[0] == section
         )
 
     def _finish(self) -> None:
@@ -546,6 +638,10 @@ class _MiniDatabaseMemoryTransaction:
                 parent.clear_payload(key)
             for key, payload in self._payload_updates.items():
                 parent.save_payload(key, payload)
+            for key in self._payload_loader_deletes:
+                parent.clear_payload_loader(key)
+            for key, loader in self._payload_loader_updates.items():
+                parent.register_payload_loader(key, loader)
         else:
             cls._memory_data.update(self._data_updates)
             if self._payload_hidden_sections:
@@ -554,7 +650,15 @@ class _MiniDatabaseMemoryTransaction:
                         cls._memory_payloads.pop(key, None)
             for key in self._payload_deletes:
                 cls._memory_payloads.pop(key, None)
+                cls._payload_tombstones.add(key)
             cls._memory_payloads.update(self._payload_updates)
+            for key in self._payload_updates:
+                cls._payload_tombstones.discard(key)
+            for key in self._payload_loader_deletes:
+                cls._payload_loaders.pop(key, None)
+            cls._payload_loaders.update(self._payload_loader_updates)
+            for key in self._payload_loader_updates:
+                cls._payload_tombstones.discard(key)
         self._finish()
 
     @property

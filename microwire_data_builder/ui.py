@@ -83,6 +83,16 @@ from .safe_codec import (
     decode_envelope,
     encode_envelope,
 )
+from .project_package import (
+    DELETED_PAYLOADS_KEY,
+    PACKAGE_VERSION as PACKAGED_PROJECT_VERSION,
+    ProjectIndex,
+    ProjectPayloadResolver,
+    inspect_project_package,
+    is_project_package,
+    stage_payload_value,
+    write_project_package,
+)
 
 from .core import (
     LOGGER_NAME,
@@ -1049,6 +1059,15 @@ LEGACY_PROJECT_PAYLOAD_MESSAGE = (
 
 
 PROJECT_DECODED_PAYLOADS_KEY = "__decoded_payloads"
+PROJECT_LAZY_PAYLOAD_LOADERS_KEY = "__lazy_payload_loaders"
+_ACTIVE_PROJECT_PAYLOAD_STAGER: Callable[[Any], Any] | None = None
+
+
+def _has_lazy_project_payloads(payload: object) -> bool:
+    return bool(
+        isinstance(payload, Mapping)
+        and isinstance(payload.get(PROJECT_LAZY_PAYLOAD_LOADERS_KEY), Mapping)
+    )
 
 
 @dataclass
@@ -1061,6 +1080,49 @@ class _PreparedProjectLoad:
     json_ms: float
     decode_ms: float
     diagnostics: Tuple[str, ...] = ()
+    package_index: ProjectIndex | None = None
+    payload_resolver: ProjectPayloadResolver | None = None
+
+
+def _prepare_project_section_payload(
+    section_key: str,
+    section_payload: object,
+    *,
+    strict: bool,
+) -> tuple[Dict[str, Any], int, Tuple[str, ...]]:
+    prepared_section = dict(section_payload) if isinstance(section_payload, Mapping) else {}
+    encoded_payloads = prepared_section.get("payloads")
+    decoded_payloads: Dict[str, Any] = {}
+    decoded_payload_count = 0
+    diagnostics: List[str] = []
+    if isinstance(encoded_payloads, Mapping):
+        for name, encoded in encoded_payloads.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if (
+                isinstance(encoded, Mapping)
+                and encoded.get("encoding") == "pickle-base64"
+            ):
+                diagnostics.append(
+                    f"{section_key}.{name}: {LEGACY_PROJECT_PAYLOAD_MESSAGE}"
+                )
+                continue
+            try:
+                decoded = decode_envelope(encoded)
+            except SafeCodecError as exc:
+                if strict:
+                    raise SafeCodecError(
+                        f"Invalid safe Builder payload {section_key}.{name}: {exc}"
+                    ) from exc
+                diagnostics.append(
+                    f"{section_key}.{name}: unsupported legacy payload was blocked"
+                )
+                continue
+            decoded_payloads[name.strip()] = decoded
+            decoded_payload_count += 1
+    if decoded_payloads:
+        prepared_section[PROJECT_DECODED_PAYLOADS_KEY] = decoded_payloads
+    return prepared_section, decoded_payload_count, tuple(diagnostics)
 
 
 def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
@@ -1068,6 +1130,21 @@ def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
 
     read_started_s = time.perf_counter()
     file_size = target.stat().st_size
+    if is_project_package(target):
+        package_index = inspect_project_package(target)
+        payload_resolver = ProjectPayloadResolver(package_index)
+        read_ms = (time.perf_counter() - read_started_s) * 1000.0
+        return _PreparedProjectLoad(
+            target=target,
+            payload=package_index.project_header(),
+            byte_count=file_size,
+            decoded_payload_count=0,
+            read_ms=read_ms,
+            json_ms=0.0,
+            decode_ms=0.0,
+            package_index=package_index,
+            payload_resolver=payload_resolver,
+        )
     if file_size > MAX_JSON_BYTES:
         raise SafeCodecError(
             f"Builder project exceeds the safe JSON limit of {MAX_JSON_BYTES} bytes"
@@ -1087,7 +1164,8 @@ def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
     sections_payload = payload.get("sections")
     decoded_payload_count = 0
     diagnostics: List[str] = []
-    if payload.get("version") != 2:
+    safe_json_versions = {2, PACKAGED_PROJECT_VERSION}
+    if payload.get("version") not in safe_json_versions:
         diagnostics.append(
             "Legacy Builder project opened in degraded safe mode. JSON-safe table and "
             "review fields remain available, but executable legacy payloads are blocked. "
@@ -1099,36 +1177,15 @@ def _prepare_project_payload_for_gui(target: Path) -> _PreparedProjectLoad:
             if not isinstance(section_payload, Mapping):
                 prepared_sections[str(section_key)] = section_payload
                 continue
-            prepared_section = dict(section_payload)
-            encoded_payloads = prepared_section.get("payloads")
-            decoded_payloads: Dict[str, Any] = {}
-            if isinstance(encoded_payloads, Mapping):
-                for name, encoded in encoded_payloads.items():
-                    if not isinstance(name, str) or not name.strip():
-                        continue
-                    if (
-                        isinstance(encoded, Mapping)
-                        and encoded.get("encoding") == "pickle-base64"
-                    ):
-                        diagnostics.append(
-                            f"{section_key}.{name}: {LEGACY_PROJECT_PAYLOAD_MESSAGE}"
-                        )
-                        continue
-                    try:
-                        decoded = decode_envelope(encoded)
-                    except SafeCodecError as exc:
-                        if payload.get("version") == 2:
-                            raise SafeCodecError(
-                                f"Invalid safe Builder payload {section_key}.{name}: {exc}"
-                            ) from exc
-                        diagnostics.append(
-                            f"{section_key}.{name}: unsupported legacy payload was blocked"
-                        )
-                        continue
-                    decoded_payloads[name.strip()] = decoded
-                    decoded_payload_count += 1
-            if decoded_payloads:
-                prepared_section[PROJECT_DECODED_PAYLOADS_KEY] = decoded_payloads
+            prepared_section, section_count, section_diagnostics = (
+                _prepare_project_section_payload(
+                    str(section_key),
+                    section_payload,
+                    strict=payload.get("version") in safe_json_versions,
+                )
+            )
+            decoded_payload_count += section_count
+            diagnostics.extend(section_diagnostics)
             prepared_sections[str(section_key)] = prepared_section
         payload["sections"] = prepared_sections
     decode_ms = (time.perf_counter() - decode_started_s) * 1000.0
@@ -1157,6 +1214,61 @@ class _ProjectLoadWorker(QtCore.QObject):
     def run(self) -> None:
         try:
             self.finished.emit(_prepare_project_payload_for_gui(self._target))
+        except Exception as exc:
+            self.failed.emit(exc)
+
+
+class _ProjectSectionLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self,
+        package_index: ProjectIndex,
+        payload_resolver: ProjectPayloadResolver,
+        section_key: str,
+        *,
+        decode_payloads: bool = False,
+    ) -> None:
+        super().__init__()
+        self._package_index = package_index
+        self._payload_resolver = payload_resolver
+        self._section_key = str(section_key)
+        self._decode_payloads = bool(decode_payloads)
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            raw = self._package_index.read_section(
+                self._section_key,
+                load_payloads=self._decode_payloads,
+                budget=self._payload_resolver.budget,
+            )
+            descriptor = self._package_index.sections.get(self._section_key, {})
+            payload_paths = descriptor.get("payloads", {})
+            if (
+                not self._decode_payloads
+                and isinstance(payload_paths, Mapping)
+                and payload_paths
+            ):
+                raw[PROJECT_LAZY_PAYLOAD_LOADERS_KEY] = {
+                    payload_id: partial(
+                        self._payload_resolver.load,
+                        self._section_key,
+                        payload_id,
+                    )
+                    for payload_id in payload_paths
+                }
+            prepared, _count, diagnostics = _prepare_project_section_payload(
+                self._section_key,
+                raw,
+                strict=True,
+            )
+            if diagnostics:
+                raise SafeCodecError(
+                    f"Unexpected diagnostics in packaged section {self._section_key}"
+                )
+            self.finished.emit(prepared)
         except Exception as exc:
             self.failed.emit(exc)
 
@@ -4974,6 +5086,32 @@ def _combine_pixmaps_side_by_side(
     return target
 
 
+def _deferred_graph_preview_pixmap(
+    label: str,
+    *,
+    width_px: int = ANNEALING_GRAPH_WIDTH,
+    height_px: int = ANNEALING_GRAPH_HEIGHT,
+) -> QtGui.QPixmap:
+    """Return a cheap, explicit placeholder for a lazy packaged-project graph."""
+
+    pixmap = QtGui.QPixmap(max(int(width_px), 1), max(int(height_px), 1))
+    pixmap.fill(QtGui.QColor("#24282e"))
+    painter = QtGui.QPainter(pixmap)
+    try:
+        painter.setPen(QtGui.QPen(QtGui.QColor("#56606c"), 1))
+        painter.drawRect(pixmap.rect().adjusted(0, 0, -1, -1))
+        painter.setPen(QtGui.QColor("#c7d0da"))
+        painter.drawText(
+            pixmap.rect().adjusted(18, 18, -18, -18),
+            QtCore.Qt.AlignmentFlag.AlignCenter
+            | QtCore.Qt.TextFlag.TextWordWrap,
+            label,
+        )
+    finally:
+        painter.end()
+    return pixmap
+
+
 def _combine_pixmaps_vertical(
     pixmaps: Sequence[QtGui.QPixmap],
     *,
@@ -7986,15 +8124,35 @@ def _move_transition_review_to_orphan(
     return True
 
 
-def _mini_dma_review_record_id(record: MiniDmaRecord, target_label: str) -> str:
+def _mini_dma_review_record_path(record: MiniDmaRecord) -> str:
+    cached = getattr(record, "_builder_review_path", None)
+    if isinstance(cached, str) and cached:
+        return cached
     path = getattr(record, "path", None)
     if isinstance(path, Path):
-        try:
-            path_text = str(path.resolve())
-        except Exception:
-            path_text = str(path)
+        # Saved TMA paths are normally absolute already.  Resolving an absolute
+        # path asks Windows for the final filesystem name and can take
+        # milliseconds on synced/network drives; review reconciliation calls
+        # this thousands of times.  Preserve the same absolute identity without
+        # touching the filesystem, resolving only genuinely relative paths.
+        if path.is_absolute():
+            path_text = os.path.normpath(str(path))
+        else:
+            try:
+                path_text = str(path.resolve())
+            except Exception:
+                path_text = os.path.abspath(os.path.normpath(str(path)))
     else:
         path_text = repr(record)
+    try:
+        setattr(record, "_builder_review_path", path_text)
+    except Exception:
+        pass
+    return path_text
+
+
+def _mini_dma_review_record_id(record: MiniDmaRecord, target_label: str) -> str:
+    path_text = _mini_dma_review_record_path(record)
     return f"{path_text}::{target_label}"
 
 
@@ -8348,10 +8506,7 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _run_key(record: MiniDmaRecord) -> str:
-        path = getattr(record, "path", None)
-        if isinstance(path, Path):
-            return str(path.resolve()) if path.exists() else str(path)
-        return repr(record)
+        return _mini_dma_review_record_path(record)
 
     @classmethod
     def _run_nodes(
@@ -8656,9 +8811,11 @@ class _MiniDmaTransitionReviewDialog(QtWidgets.QDialog):
         if not self._runs:
             self._show_empty("No TMA transition review targets are available.")
             return
-        item = self._run_items.get(self._runs[0].key)
-        if item is not None:
-            self.tree.setCurrentItem(item)
+        # Opening the workspace must remain instantaneous.  Loading and
+        # analysing a raw TMA run can take several seconds and is therefore an
+        # explicit selection action rather than an automatic side effect of
+        # navigating to the Transitions tab.
+        self._show_empty("Select a TMA run to load its transition fits.")
 
     def _handle_tree_selection(
         self,
@@ -10956,6 +11113,57 @@ def _mini_dma_records_to_frame(records: Sequence[MiniDmaRecord]) -> pd.DataFrame
     return frame
 
 
+def _mini_dma_records_from_project_table(frame: pd.DataFrame | None) -> List[MiniDmaRecord]:
+    """Build lightweight TMA run records without decoding the raw project payload.
+
+    The compact project table already carries the source run paths used by the
+    transition-review and preview code.  Keeping these records data-free lets a
+    packaged project populate its TMA queue immediately; the full monolithic
+    payload remains lazy until an export or another data-heavy operation asks
+    for it explicitly.
+    """
+
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    records: List[MiniDmaRecord] = []
+    seen_paths: Set[str] = set()
+    for _index, row in frame.iterrows():
+        raw_sources = row.get("_sources")
+        if isinstance(raw_sources, (str, Path)):
+            sources = [raw_sources]
+        elif isinstance(raw_sources, (list, tuple)):
+            sources = list(raw_sources)
+        else:
+            sources = []
+        raw_labels = row.get(MINI_DMA_COLUMN)
+        if isinstance(raw_labels, str):
+            labels = [raw_labels]
+        elif isinstance(raw_labels, (list, tuple)):
+            labels = [str(value) for value in raw_labels]
+        else:
+            labels = []
+        sample = _row_sample_value(row) or "TMA"
+        raw_key = str(row.get("_group_key") or "").strip()
+        parsed_key = _microwire_key_from_string(raw_key) if raw_key else None
+        for position, raw_source in enumerate(sources):
+            source_text = str(raw_source or "").strip()
+            if not source_text or source_text in seen_paths:
+                continue
+            seen_paths.add(source_text)
+            path = Path(source_text)
+            label = labels[position] if position < len(labels) else path.name
+            records.append(
+                MiniDmaRecord(
+                    path=path,
+                    sample=sample,
+                    data=pd.DataFrame(),
+                    key=parsed_key,  # type: ignore[arg-type]
+                    label=label or path.name,
+                )
+            )
+    return records
+
+
 _TMA_LEGACY_COLUMN_ALIASES = {
     LEGACY_MINI_DMA_COLUMN: MINI_DMA_COLUMN,
     LEGACY_MINI_DMA_ORIGIN_COLUMN: MINI_DMA_ORIGIN_COLUMN,
@@ -12472,6 +12680,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                     if isinstance(key, str) and isinstance(value, str) and value.strip()
                 }
         for name in sorted(set(payload_refs.values())):
+            if self.store.has_payload_loader(name):
+                # An untouched v3 payload remains represented by its source package
+                # entry and is streamed into the next save without materialization.
+                continue
             try:
                 stored_payload = self.store.load_payload(name)
             except SafeCodecError:
@@ -12480,7 +12692,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 stored_payload = None
             if stored_payload is None:
                 continue
-            project_payloads[name] = _encode_project_payload(stored_payload)
+            if _ACTIVE_PROJECT_PAYLOAD_STAGER is not None:
+                project_payloads[name] = _ACTIVE_PROJECT_PAYLOAD_STAGER(stored_payload)
+            else:
+                project_payloads[name] = _encode_project_payload(stored_payload)
         return {
             "section": self.section_key,
             "title": self.section_title,
@@ -12491,6 +12706,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             "sources": list(self.data.sources),
             "processed": dict(self.data.processed),
             "payloads": project_payloads,
+            DELETED_PAYLOADS_KEY: sorted(self.store.payload_tombstones()),
         }
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
@@ -12567,6 +12783,19 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             rows=len(frame.index) if isinstance(frame, pd.DataFrame) else 0,
         )
         decoded_project_payloads = payload.get(PROJECT_DECODED_PAYLOADS_KEY)
+        lazy_payload_loaders = payload.get(PROJECT_LAZY_PAYLOAD_LOADERS_KEY)
+        if isinstance(lazy_payload_loaders, Mapping):
+            for name, loader in lazy_payload_loaders.items():
+                if not isinstance(name, str) or not name.strip() or not callable(loader):
+                    continue
+                try:
+                    self.store.register_payload_loader(name.strip(), loader)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to register packaged project payload %s for section %s",
+                        name,
+                        self.section_key,
+                    )
         if isinstance(decoded_project_payloads, Mapping):
             for name, decoded in decoded_project_payloads.items():
                 if not isinstance(name, str) or not name.strip() or decoded is None:
@@ -12590,7 +12819,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                         self.section_key,
                     )
         project_payloads = payload.get("payloads")
-        if not isinstance(decoded_project_payloads, Mapping) and isinstance(project_payloads, Mapping):
+        if (
+            not isinstance(decoded_project_payloads, Mapping)
+            and not isinstance(lazy_payload_loaders, Mapping)
+            and isinstance(project_payloads, Mapping)
+        ):
             for name, encoded in project_payloads.items():
                 if not isinstance(name, str) or not name.strip():
                     continue
@@ -14310,6 +14543,7 @@ class AnnealingSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._project_previews_deferred = _has_lazy_project_payloads(payload)
         self._phase_points = {}
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, Mapping):
@@ -14322,9 +14556,10 @@ class AnnealingSection(MiniDatabaseSection):
         self._load_hidden_paths()
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
-        self._refresh_record_groups()
-        self._prune_transition_reviews()
-        self._prune_phase_points()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
+            self._prune_transition_reviews()
+            self._prune_phase_points()
         self._update_export_enabled()
 
     def _update_export_enabled(self) -> None:
@@ -14876,6 +15111,7 @@ class AnnealingSection(MiniDatabaseSection):
         self._update_export_enabled()
 
     def _refresh_record_groups(self) -> None:
+        self._project_previews_deferred = False
         grouped: Dict[str, List[MeasurementRecord]] = {}
         try:
             payload = self.store.load_payload("annealing_records")
@@ -15076,6 +15312,16 @@ class AnnealingSection(MiniDatabaseSection):
             return self._pixmap_cache[cache_key]
         records = self._record_groups.get(key)
         if not records:
+            if bool(getattr(self, "_project_previews_deferred", False)):
+                preview = getattr(self, "_deferred_preview_pixmap", None)
+                if not isinstance(preview, QtGui.QPixmap):
+                    preview = _deferred_graph_preview_pixmap(
+                        "Preview kept lazy for a responsive project load.\n"
+                        "Select this row, then use Open in PyPlot."
+                    )
+                    self._deferred_preview_pixmap = preview
+                self._pixmap_cache[cache_key] = preview
+                return preview
             loaded_records: List[MeasurementRecord] = []
             for source in self._row_sources(row):
                 try:
@@ -23547,7 +23793,8 @@ class VsmHysteresisSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -24120,7 +24367,8 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -24605,7 +24853,8 @@ class DmaIsoStressSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -24897,7 +25146,12 @@ class MiniDmaSection(MiniDatabaseSection):
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._preview_group_count = 1
         self._preview_spacing = 6
+        self._preview_render_queue: List[Tuple[str, List[MiniDmaRecord]]] = []
+        self._preview_render_pending: Set[str] = set()
         super().__init__(logger, log_callback, parent)
+        self._preview_render_timer = QtCore.QTimer(self)
+        self._preview_render_timer.setSingleShot(True)
+        self._preview_render_timer.timeout.connect(self._render_next_preview)
         self._transition_review_store_timer = QtCore.QTimer(self)
         self._transition_review_store_timer.setSingleShot(True)
         self._transition_review_store_timer.setInterval(250)
@@ -25126,10 +25380,16 @@ class MiniDmaSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._project_previews_deferred = _has_lazy_project_payloads(payload)
         self.model.set_frame(_normalise_tma_display_columns(self.model.frame()))
         _drop_visible_sample_column(self)
         self._load_transition_reviews()
-        self._refresh_record_groups()
+        if _has_lazy_project_payloads(payload):
+            self._set_record_groups(
+                _mini_dma_records_from_project_table(self.model.frame())
+            )
+        else:
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -25140,12 +25400,17 @@ class MiniDmaSection(MiniDatabaseSection):
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _refresh_record_groups(self) -> None:
-        grouped: Dict[str, List[MiniDmaRecord]] = {}
+        self._project_previews_deferred = False
         try:
             payload = self.store.load_payload("mini_dma_records")
         except Exception:
             payload = None
         records = list(payload) if isinstance(payload, list) else []
+        self._set_record_groups(records)
+
+    def _set_record_groups(self, records: Sequence[MiniDmaRecord]) -> None:
+        grouped: Dict[str, List[MiniDmaRecord]] = {}
+        records = list(records)
         self._all_mini_dma_records = records
         current_records_by_id = {id(record): record for record in records}
         self._review_content_identity_cache = {
@@ -25170,6 +25435,8 @@ class MiniDmaSection(MiniDatabaseSection):
                 max_groups = len(records_for_sample)
         self._preview_group_count = max_groups
         self._update_preview_icon_size()
+        self._preview_render_queue.clear()
+        self._preview_render_pending.clear()
         self._pixmap_cache.clear()
         if isinstance(self.model, DataFrameModel):
             try:
@@ -25221,25 +25488,80 @@ class MiniDmaSection(MiniDatabaseSection):
         records = self._record_groups.get(sample, [])
         if not records and row_key:
             records = self._record_groups_by_key.get(row_key, [])
+        if bool(getattr(self, "_project_previews_deferred", False)):
+            preview = getattr(self, "_deferred_preview_pixmap", None)
+            if not isinstance(preview, QtGui.QPixmap):
+                preview = _deferred_graph_preview_pixmap(
+                    "Preview kept lazy for a responsive project load.\n"
+                    "Select this row, then use Open in PyPlot."
+                )
+                self._deferred_preview_pixmap = preview
+            self._pixmap_cache[cache_key] = preview
+            return preview
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
-            items = _mini_dma_preview_items(
-                records,
-                self.logger,
-                width_px=ANNEALING_GRAPH_WIDTH,
-                height_px=ANNEALING_GRAPH_HEIGHT,
-            )
-            pixmaps = [item.pixmap for item in items if item.pixmap is not None]
-            if pixmaps:
-                pixmap = _combine_pixmaps_side_by_side(
-                    pixmaps,
-                    width_px=self._preview_icon_width(),
-                    height_px=self._preview_icon_height(),
-                    spacing=self._preview_spacing,
-                    scale_to_fit=True,
-                )
+            if self._should_defer_preview_render():
+                self._queue_preview_render(cache_key, records)
+                return None
+            pixmap = self._render_preview_pixmap(records)
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
+
+    def _should_defer_preview_render(self) -> bool:
+        table = self.table_view
+        return bool(
+            isinstance(table, QtWidgets.QTableView)
+            and self._data_page_is_active()
+            and table.isVisible()
+            and self.isVisible()
+        )
+
+    def _queue_preview_render(
+        self,
+        cache_key: str,
+        records: Sequence[MiniDmaRecord],
+    ) -> None:
+        if cache_key in self._preview_render_pending:
+            return
+        self._preview_render_pending.add(cache_key)
+        self._preview_render_queue.append((cache_key, list(records)))
+        if not self._preview_render_timer.isActive():
+            self._preview_render_timer.start(0)
+
+    def _render_next_preview(self) -> None:
+        if not self._preview_render_queue:
+            return
+        cache_key, records = self._preview_render_queue.pop(0)
+        try:
+            self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
+        finally:
+            self._preview_render_pending.discard(cache_key)
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+        if self._preview_render_queue:
+            self._preview_render_timer.start(1)
+
+    def _render_preview_pixmap(
+        self,
+        records: Sequence[MiniDmaRecord],
+    ) -> Optional[QtGui.QPixmap]:
+        items = _mini_dma_preview_items(
+            records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        pixmaps = [item.pixmap for item in items if item.pixmap is not None]
+        return _combine_pixmaps_side_by_side(
+            pixmaps,
+            width_px=self._preview_icon_width(),
+            height_px=self._preview_icon_height(),
+            spacing=self._preview_spacing,
+            scale_to_fit=True,
+        )
 
     def _selected_records(self) -> List[MiniDmaRecord]:
         rows = self._selected_rows()
@@ -26208,10 +26530,23 @@ class TransitionsSection(QtWidgets.QWidget):
         if self._active:
             self.refresh_current_workspace()
 
-    def set_active(self, active: bool) -> None:
+    def set_active(self, active: bool, *, refresh: bool = True) -> None:
         self._active = bool(active)
-        if self._active:
+        if self._active and refresh:
             self.refresh_current_workspace()
+
+    def show_loading(self, message: str) -> None:
+        """Show an honest placeholder while transition dependencies load."""
+
+        widget = self.tab_widget.currentWidget()
+        empty = getattr(widget, "_show_empty", None)
+        if callable(empty):
+            empty(message)
+            return
+        preview = getattr(widget, "preview_panel", None)
+        update = getattr(preview, "update_selection", None)
+        if callable(update):
+            update(message, [], {})
 
     def mark_workspaces_dirty(self, view: str | None = None) -> None:
         if view is None:
@@ -26243,7 +26578,7 @@ class TransitionsSection(QtWidgets.QWidget):
             except Exception:
                 pass
             self.tab_widget.setCurrentIndex(index)
-            if previous == index:
+            if previous == index and self._active:
                 self.refresh_current_workspace()
 
     def set_view_visible(self, view: str, visible: bool) -> None:
@@ -26617,7 +26952,8 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         self._normalise_value_columns()
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._expand_rows_per_graph()
         self._hide_shape_memory_columns()
         self._apply_graph_column_visibility()
@@ -28021,7 +28357,8 @@ class FmrSection(MiniDatabaseSection):
         super().import_project_payload(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
-        self._refresh_record_groups()
+        if not _has_lazy_project_payloads(payload):
+            self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
@@ -37154,7 +37491,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
     """New workbench for preparing and assembling microwire databases."""
 
     PROJECT_EXTENSION = ".pydpj"
-    PROJECT_VERSION = 2
+    PROJECT_VERSION = PACKAGED_PROJECT_VERSION
     PROJECT_KIND = "MicrowireDataBuilder"
 
     def __init__(self) -> None:
@@ -37171,6 +37508,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         self._project_path: Optional[Path] = None
         self._project_degraded_safe_mode = False
+        self._project_package_index: ProjectIndex | None = None
+        self._project_payload_resolver: ProjectPayloadResolver | None = None
+        self._migration_process: QtCore.QProcess | None = None
+        self._migration_progress_dialog: QtWidgets.QProgressDialog | None = None
+        self._migration_cancel_file: Path | None = None
+        self._migration_error_lines: List[str] = []
         self._save_project_action: QtGui.QAction | None = None
         self._save_project_as_action: QtGui.QAction | None = None
         downloads_dir = Path.home() / "Downloads"
@@ -37236,6 +37579,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._dirty = False
         self._suppress_dirty = False
         self._project_load_in_progress = False
+        self._project_package_generation = 0
+        self._deferred_project_section_pending: Set[str] = set()
+        self._deferred_project_section_threads: List[Tuple[QtCore.QThread, QtCore.QObject]] = []
         self._auto_open_in_progress = False
         self._project_load_thread: QtCore.QThread | None = None
         self._project_load_worker: _ProjectLoadWorker | None = None
@@ -37606,9 +37952,184 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.tab_widget.setCurrentIndex(index)
 
     def _handle_builder_tab_changed(self, _index: int) -> None:
+        self._load_current_deferred_project_sections()
         transitions = getattr(self, "transitions_section", None)
         if isinstance(transitions, TransitionsSection):
-            transitions.set_active(self.tab_widget.currentWidget() is transitions)
+            active = self.tab_widget.currentWidget() is transitions
+            dependencies = {
+                "annealing", "current_density", "vsm_temperature_scan",
+                "transition_temps", "mini_dma",
+            }
+            pending = getattr(self, "_deferred_project_section_pending", set())
+            deferred = getattr(self, "_deferred_project_section_keys", set())
+            waiting = active and bool(
+                dependencies
+                & (
+                    (pending if isinstance(pending, set) else set())
+                    | (deferred if isinstance(deferred, set) else set())
+                )
+            )
+            transitions.set_active(active, refresh=not waiting)
+            if waiting:
+                transitions.show_loading("Loading transition review data...")
+
+    def _invalidate_deferred_project_loads(self) -> int:
+        """Invalidate results/loaders tied to the previously active package."""
+
+        self._project_package_generation = int(
+            getattr(self, "_project_package_generation", 0)
+        ) + 1
+        # Old workers retain their captured set and drain normally; a fresh set
+        # ensures they cannot clear or block work for the new project.
+        self._deferred_project_section_pending = set()
+        self._update_project_actions()
+        return self._project_package_generation
+
+    def _load_current_deferred_project_sections(self) -> None:
+        deferred = getattr(self, "_deferred_project_section_keys", set())
+        if not isinstance(deferred, set) or not deferred:
+            return
+        current = self.tab_widget.currentWidget()
+        keys = {
+            key for key, section in self.sections.items() if section is current
+        }
+        if current is getattr(self, "annealing_section", None):
+            keys.add("current_density")
+        if current is getattr(self, "vsm_temperature_section", None):
+            keys.add("transition_temps")
+        if current is getattr(self, "assembly_section", None):
+            keys.add("assemble")
+        if current is getattr(self, "transitions_section", None):
+            keys.update(self._active_transition_project_section_keys())
+        transitions_active = current is getattr(self, "transitions_section", None)
+        for key in sorted(keys & deferred):
+            self._load_deferred_project_section_async(
+                key,
+                decode_payloads=(
+                    transitions_active
+                    and key in {"annealing", "vsm_temperature_scan"}
+                ),
+            )
+
+    def _active_transition_project_section_keys(self) -> Set[str]:
+        transitions = getattr(self, "transitions_section", None)
+        if not isinstance(transitions, TransitionsSection):
+            return set()
+        try:
+            index = int(transitions.tab_widget.currentIndex())
+        except Exception:
+            index = 0
+        if index == 1:
+            return {"vsm_temperature_scan", "transition_temps"}
+        if index == 2:
+            return {"mini_dma"}
+        return {"annealing", "current_density"}
+
+    def _load_deferred_project_section_async(
+        self, section_key: str, *, decode_payloads: bool = False
+    ) -> None:
+        pending = getattr(self, "_deferred_project_section_pending", set())
+        if not isinstance(pending, set):
+            pending = set()
+            self._deferred_project_section_pending = pending
+        if section_key in pending:
+            return
+        package_index = getattr(self, "_project_package_index", None)
+        resolver = getattr(self, "_project_payload_resolver", None)
+        if not isinstance(package_index, ProjectIndex) or not isinstance(
+            resolver, ProjectPayloadResolver
+        ):
+            return
+        pending.add(section_key)
+        self._update_project_actions()
+        generation = int(getattr(self, "_project_package_generation", 0))
+        thread = QtCore.QThread(self)
+        worker = _ProjectSectionLoadWorker(
+            package_index,
+            resolver,
+            section_key,
+            decode_payloads=decode_payloads,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _import(payload: object) -> None:
+            transaction = None
+            try:
+                if (
+                    generation != getattr(self, "_project_package_generation", -1)
+                    or getattr(self, "_project_package_index", None) is not package_index
+                    or getattr(self, "_project_payload_resolver", None) is not resolver
+                ):
+                    self.logger.info(
+                        "Ignored stale deferred project section %s", section_key
+                    )
+                    return
+                transaction = MiniDatabaseStore.begin_memory_transaction()
+                MiniDatabaseSection._project_load_batch_mode = True
+                if section_key == "assemble":
+                    section = getattr(self, "assembly_section", None)
+                else:
+                    section = self.sections.get(section_key)
+                importer = getattr(section, "import_project_payload", None)
+                if callable(importer):
+                    importer(payload if isinstance(payload, Mapping) else {})
+                transaction.commit_memory_only()
+                self._deferred_project_section_keys.discard(section_key)
+                self.logger.info("Loaded deferred project section %s", section_key)
+            except Exception:
+                if transaction is not None and not transaction.finished:
+                    transaction.rollback()
+                self.logger.exception("Failed to load deferred project section %s", section_key)
+            finally:
+                MiniDatabaseSection._project_load_batch_mode = False
+                pending.discard(section_key)
+                self._update_project_actions()
+                transitions = getattr(self, "transitions_section", None)
+                transition_dependencies = self._active_transition_project_section_keys()
+                still_deferred = getattr(self, "_deferred_project_section_keys", set())
+                if (
+                    isinstance(transitions, TransitionsSection)
+                    and self.tab_widget.currentWidget() is transitions
+                    and not (transition_dependencies & pending)
+                    and not (
+                        transition_dependencies
+                        & (still_deferred if isinstance(still_deferred, set) else set())
+                    )
+                ):
+                    transitions.mark_workspaces_dirty()
+                    transitions.refresh_current_workspace(force=True)
+
+        worker.finished.connect(_import)
+        def _failed(exc: object) -> None:
+            if (
+                generation == getattr(self, "_project_package_generation", -1)
+                and getattr(self, "_project_package_index", None) is package_index
+            ):
+                self.logger.error(
+                    "Failed to read deferred project section %s: %s", section_key, exc
+                )
+
+        worker.failed.connect(_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        def _thread_finished() -> None:
+            pending.discard(section_key)
+            self._update_project_actions()
+
+        thread.finished.connect(_thread_finished)
+        refs = getattr(self, "_deferred_project_section_threads", None)
+        if not isinstance(refs, list):
+            refs = []
+            self._deferred_project_section_threads = refs
+        refs.append((thread, worker))
+        thread.finished.connect(
+            lambda: refs.__setitem__(slice(None), [item for item in refs if item[0] is not thread])
+        )
+        thread.start()
 
     def schedule_startup_auto_open(self, delay_ms: int = 150) -> None:
         if getattr(self, "_startup_auto_open_scheduled", False):
@@ -37993,6 +38514,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
             ),
             "project_path": self._project_path,
             "project_degraded_safe_mode": self._project_degraded_safe_mode,
+            "project_package_index": self._project_package_index,
+            "project_payload_resolver": self._project_payload_resolver,
             "dirty": self._dirty,
             "paused_timers": paused_timers,
         }
@@ -38121,6 +38644,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._project_degraded_safe_mode = bool(
             snapshot.get("project_degraded_safe_mode", False)
         )
+        package_index = snapshot.get("project_package_index")
+        self._project_package_index = (
+            package_index if isinstance(package_index, ProjectIndex) else None
+        )
+        payload_resolver = snapshot.get("project_payload_resolver")
+        self._project_payload_resolver = (
+            payload_resolver
+            if isinstance(payload_resolver, ProjectPayloadResolver)
+            else None
+        )
         self._dirty = bool(snapshot.get("dirty", False))
         self._update_project_title()
         self._update_project_actions()
@@ -38132,6 +38665,32 @@ class BuilderWindow(QtWidgets.QMainWindow):
             callback()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        migration = self._migration_process
+        if isinstance(migration, QtCore.QProcess) and migration.state() != QtCore.QProcess.ProcessState.NotRunning:
+            if not _builder_dialogs_suppressed():
+                box = QtWidgets.QMessageBox(self)
+                box.setWindowTitle("Migration still running")
+                box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+                box.setText("A packaged project copy is still being created.")
+                box.setInformativeText(
+                    "Keep this window open, or request cancellation. Cancellation takes "
+                    "effect at the next safe payload boundary; no partial output is published."
+                )
+                cancel_migration = box.addButton(
+                    "Cancel migration", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+                )
+                keep_open = box.addButton("Keep window open", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+                box.setDefaultButton(keep_open)
+                box.exec()
+                if box.clickedButton() is cancel_migration and isinstance(
+                    self._migration_cancel_file, Path
+                ):
+                    try:
+                        self._migration_cancel_file.write_text("cancel", encoding="ascii")
+                    except OSError:
+                        pass
+            event.ignore()
+            return
         if self._project_restore_state is not None:
             self._abort_project_restore(RuntimeError("Project load cancelled"), report=False)
         thread = self._project_load_thread
@@ -38432,10 +38991,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _update_project_actions(self, *_: object) -> None:
         has_data = self._has_project_data_to_save()
+        save_busy = bool(getattr(self, "_project_load_in_progress", False)) or bool(
+            getattr(self, "_deferred_project_section_pending", set())
+        )
         if self._save_project_action is not None:
-            self._save_project_action.setEnabled(has_data)
+            self._save_project_action.setEnabled(has_data and not save_busy)
         if self._save_project_as_action is not None:
-            self._save_project_as_action.setEnabled(has_data)
+            self._save_project_as_action.setEnabled(has_data and not save_busy)
 
     def _update_project_title(self) -> None:
         title = self._base_title
@@ -38758,22 +39320,45 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _default_project_filename(self) -> str:
         return f"microwire_project{self.PROJECT_EXTENSION}"
 
-    def _build_project_payload(self) -> Dict[str, Any]:
+    def _build_project_payload(
+        self, payload_staging_root: Path | None = None
+    ) -> Dict[str, Any]:
+        global _ACTIVE_PROJECT_PAYLOAD_STAGER
         sections_payload: Dict[str, Any] = {}
-        for key, section in self.sections.items():
-            exporter = getattr(section, "export_project_payload", None)
-            if not callable(exporter):
-                continue
-            sections_payload[key] = exporter()
-        assembly = getattr(self, "assembly_section", None)
-        if assembly is not None:
-            exporter = getattr(assembly, "export_project_payload", None)
-            if callable(exporter):
-                sections_payload["assemble"] = exporter()
+        deferred = getattr(self, "_deferred_project_section_keys", set())
+        deferred_keys = set(deferred) if isinstance(deferred, set) else set()
+        previous_stager = _ACTIVE_PROJECT_PAYLOAD_STAGER
+        staged_count = 0
+
+        def _stage(value: Any) -> Any:
+            nonlocal staged_count
+            if payload_staging_root is None:
+                return _encode_project_payload(value)
+            staged_count += 1
+            return stage_payload_value(
+                value, payload_staging_root / f"payload-{staged_count:04d}"
+            )
+
+        _ACTIVE_PROJECT_PAYLOAD_STAGER = _stage if payload_staging_root is not None else None
+        try:
+            for key, section in self.sections.items():
+                if key in deferred_keys:
+                    continue
+                exporter = getattr(section, "export_project_payload", None)
+                if not callable(exporter):
+                    continue
+                sections_payload[key] = exporter()
+            assembly = getattr(self, "assembly_section", None)
+            if assembly is not None and "assemble" not in deferred_keys:
+                exporter = getattr(assembly, "export_project_payload", None)
+                if callable(exporter):
+                    sections_payload["assemble"] = exporter()
+        finally:
+            _ACTIVE_PROJECT_PAYLOAD_STAGER = previous_stager
         return {
             "version": self.PROJECT_VERSION,
             "kind": self.PROJECT_KIND,
-            "saved_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            "saved_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M"),
             "sections": sections_payload,
         }
 
@@ -38815,6 +39400,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._write_project_file(target)
 
     def _write_project_file(self, target: Path) -> None:
+        pending = getattr(self, "_deferred_project_section_pending", set())
+        if isinstance(pending, set) and pending:
+            message = (
+                "Project Save is temporarily unavailable while the selected "
+                "section finishes loading. Try again in a moment."
+            )
+            self.logger.warning(message)
+            if not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.information(self, "Section still loading", message)
+            return
         if self._project_degraded_safe_mode:
             message = (
                 "This legacy project is open read-only in degraded safe mode because "
@@ -38827,34 +39422,72 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "Trusted migration required", message)
             return
         try:
-            payload = self._build_project_payload()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging_parent = Path(
+                os.environ.get("MICROWIRE_BUILDER_STORAGE_ROOT")
+                or os.environ.get("TEMP")
+                or os.environ.get("TMP")
+                or gettempdir()
+            )
+            staging_parent.mkdir(parents=True, exist_ok=True)
+            with TemporaryDirectory(
+                prefix="microwire-builder-save-payloads-", dir=staging_parent
+            ) as staging_name:
+                payload = self._build_project_payload(Path(staging_name))
+                sections = payload.get("sections", {})
+                if not sections:
+                    if not _builder_dialogs_suppressed():
+                        QtWidgets.QMessageBox.information(
+                            self,
+                            "Save Project",
+                            "No processed sections are available to save.",
+                        )
+                    return
+                source_index = self._project_package_index
+                package_index = write_project_package(
+                    target,
+                    payload,
+                    source_index=source_index,
+                    loaded_sections=set(payload.get("sections", {})),
+                )
         except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Save Project",
-                "Project save was blocked because a section could not be exported "
-                f"safely. The existing file was not changed:\n{exc}",
-            )
-            return
-        sections = payload.get("sections", {})
-        if not sections:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Save Project",
-                "No processed sections are available to save.",
-            )
-            return
-        try:
-            atomic_write_json(target, payload)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Save Project",
-                f"Failed to write project file:\\n{exc}",
-            )
+            self.logger.exception("Failed to save Builder project to %s", target)
+            if not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Save Project",
+                    "Project save was blocked or failed safely; the existing file was "
+                    f"not changed:\n{exc}",
+                )
             return
         self._project_path = target
         self._project_degraded_safe_mode = False
+        self._invalidate_deferred_project_loads()
+        self._project_package_index = package_index
+        self._project_payload_resolver = ProjectPayloadResolver(package_index)
+        for section_key, section in self.sections.items():
+            store = getattr(section, "store", None)
+            deleted_payloads = payload.get("sections", {}).get(section_key, {}).get(
+                DELETED_PAYLOADS_KEY, ()
+            )
+            if isinstance(store, MiniDatabaseStore) and isinstance(
+                deleted_payloads, (list, tuple, set)
+            ):
+                store.acknowledge_payload_tombstones(deleted_payloads)
+            descriptor = package_index.sections.get(section_key, {})
+            payload_paths = descriptor.get("payloads", {}) if isinstance(descriptor, Mapping) else {}
+            if not isinstance(store, MiniDatabaseStore) or not isinstance(payload_paths, Mapping):
+                continue
+            for payload_id in payload_paths:
+                if store.has_payload_loader(payload_id):
+                    store.register_payload_loader(
+                        payload_id,
+                        partial(
+                            self._project_payload_resolver.load,
+                            section_key,
+                            payload_id,
+                        ),
+                    )
         self._remember_project_directory(target.parent)
         self._remember_recent_project(target)
         try:
@@ -38865,11 +39498,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._update_project_actions()
         self._dirty = False
         self.logger.info("Project saved to %s", target)
-        QtWidgets.QMessageBox.information(
-            self,
-            "Save Project",
-            f"Project saved to {target}",
-        )
+        if not _builder_dialogs_suppressed():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Project",
+                f"Project saved to {target}",
+            )
 
     def _load_recent_projects_setting(self) -> None:
         raw = self.settings.value(self._project_settings_key("recent"), "[]")
@@ -39058,11 +39692,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self._save_project()
                 if getattr(self, "_dirty", False):
                     return
+        self._invalidate_deferred_project_loads()
+        self._deferred_project_section_keys = set()
         self._suppress_dirty = True
         for section in self.sections.values():
             if isinstance(section, MiniDatabaseSection):
                 section.reset_to_blank()
         self._project_path = None
+        self._project_package_index = None
+        self._project_payload_resolver = None
         self._dirty = False
         self._suppress_dirty = False
         self._update_project_title()
@@ -39135,14 +39773,68 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.logger.warning("Project load already in progress; ignoring request for %s", target)
             return
         load_started_s = time.perf_counter()
+        self._invalidate_deferred_project_loads()
         self._project_load_cancelled = False
         self._project_load_in_progress = True
+        try:
+            self.statusBar().showMessage(f"Inspecting project…  {target.name}")
+        except Exception:
+            pass
         auto_open_load = bool(getattr(self, "_auto_open_in_progress", False))
         self._begin_project_load_prepare_worker(
             target,
             load_started_s,
             auto_open_load=auto_open_load,
         )
+
+    def load_project_synchronously_for_automation(self, target: Path) -> None:
+        """Restore a project completely before a noninteractive caller consumes it."""
+
+        target = Path(target)
+        self._invalidate_deferred_project_loads()
+        started = time.perf_counter()
+        prepared = _prepare_project_payload_for_gui(target)
+        if isinstance(prepared.package_index, ProjectIndex) and isinstance(
+            prepared.payload_resolver, ProjectPayloadResolver
+        ):
+            sections: Dict[str, Any] = {}
+            for section_key, descriptor in prepared.package_index.sections.items():
+                raw = prepared.package_index.read_section(
+                    section_key,
+                    load_payloads=False,
+                    budget=prepared.payload_resolver.budget,
+                )
+                payload_paths = descriptor.get("payloads", {})
+                if isinstance(payload_paths, Mapping) and payload_paths:
+                    raw[PROJECT_LAZY_PAYLOAD_LOADERS_KEY] = {
+                        payload_id: partial(
+                            prepared.payload_resolver.load, section_key, payload_id
+                        )
+                        for payload_id in payload_paths
+                    }
+                sections[section_key], _count, diagnostics = (
+                    _prepare_project_section_payload(section_key, raw, strict=True)
+                )
+                if diagnostics:
+                    raise SafeCodecError(
+                        f"Unexpected diagnostics in packaged section {section_key}"
+                    )
+            prepared.payload["sections"] = sections
+        self._project_load_in_progress = True
+        try:
+            self.statusBar().showMessage(f"Inspecting project…  {target.name}")
+        except Exception:
+            pass
+        self._apply_prepared_project_load(
+            prepared,
+            load_started_s=started,
+            auto_open_load=False,
+            staged=False,
+        )
+        if self._project_load_in_progress:
+            raise RuntimeError("Synchronous Builder project restore did not finish")
+        self._project_package_index = prepared.package_index
+        self._project_payload_resolver = prepared.payload_resolver
 
     def _begin_project_load_prepare_worker(
         self,
@@ -39236,16 +39928,189 @@ class BuilderWindow(QtWidgets.QMainWindow):
     ) -> None:
         self.logger.exception("Failed to load project %s", target, exc_info=exc)
         if not self._project_load_auto_open and not _builder_dialogs_suppressed():
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Open Project",
-                f"Failed to load project file:\n{exc}",
-            )
+            if isinstance(exc, SafeCodecError) and "safe JSON limit" in str(exc):
+                self._offer_trusted_legacy_project_migration(target, exc)
+            else:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Open Project",
+                    f"Failed to load project file:\n{exc}",
+                )
         _log_builder_timing(self.logger, "project_load_total", load_started_s, path=target)
         self._project_load_in_progress = False
         self._project_load_auto_open = False
         MiniDatabaseSection._project_load_batch_mode = False
         self._suppress_dirty = False
+
+    def _offer_trusted_legacy_project_migration(
+        self, source: Path, error: Exception
+    ) -> None:
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Legacy project needs migration")
+        box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        box.setText(
+            f"Create a safe packaged copy of {source.name}?"
+        )
+        size = source.stat().st_size
+        friendly_size = (
+            f"{size / (1024 ** 3):.2f} GiB" if size >= 1024 ** 3
+            else f"{size / (1024 ** 2):.1f} MiB"
+        )
+        box.setInformativeText(
+            f"Source: {source}\nSize: {friendly_size} ({size:,} bytes)\n\n"
+            "Only continue if you trust who created this legacy project. Its old pickle "
+            "payloads can execute arbitrary code during conversion. Process isolation "
+            "limits UI disruption but is not a security sandbox.\n\n"
+            "Builder first makes and verifies a disposable input copy, then creates a "
+            "distinct packaged .pydpj output. The selected source is verified unchanged.\n\n"
+            f"Technical detail: {error}"
+        )
+        migrate_button = box.addButton(
+            "Create safe packaged copy…", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel_button = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        if box.clickedButton() is not migrate_button:
+            return
+        suggested = source.with_name(f"{source.stem}.packaged{source.suffix}")
+        output_text, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save packaged project copy",
+            str(suggested),
+            f"Microwire Project (*{self.PROJECT_EXTENSION});;All files (*)",
+        )
+        if not output_text:
+            return
+        output = Path(output_text)
+        if output.suffix.lower() != self.PROJECT_EXTENSION:
+            output = output.with_suffix(self.PROJECT_EXTENSION)
+        try:
+            same_output = output.resolve() == source.resolve()
+        except OSError:
+            same_output = str(output) == str(source)
+        if same_output:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Choose a distinct output",
+                "Migration must create a distinct packaged copy; the legacy source is never overwritten.",
+            )
+            return
+        if output.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Migration output exists",
+                "Choose a new output path. Trusted migration never overwrites an existing file.",
+            )
+            return
+        self._start_trusted_legacy_project_migration(source, output)
+
+    def _start_trusted_legacy_project_migration(
+        self, source: Path, output: Path
+    ) -> None:
+        if isinstance(self._migration_process, QtCore.QProcess):
+            return
+        cancel_file = Path(gettempdir()) / f"pyplot-builder-migration-{os.getpid()}-{time.time_ns()}.cancel"
+        process = QtCore.QProcess(self)
+        environment = QtCore.QProcessEnvironment.systemEnvironment()
+        environment.insert("MICROWIRE_BUILDER_MIGRATION_CANCEL_FILE", str(cancel_file))
+        process.setProcessEnvironment(environment)
+        process.setProgram(sys.executable)
+        process.setArguments(
+            [
+                str(Path(__file__).resolve().parents[1] / "launcher.py"),
+                "--microwire-builder-trusted-migrate",
+                str(source),
+                "--microwire-builder-migration-output",
+                str(output),
+            ]
+        )
+        progress_dialog = QtWidgets.QProgressDialog(
+            f"Inspecting {source.name}…\nDestination: {output}", "Cancel", 0, 0, self
+        )
+        progress_dialog.setWindowTitle("Migrate legacy project")
+        progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.show()
+        self._migration_cancel_file = cancel_file
+        self._migration_error_lines = []
+        migration_started = time.monotonic()
+
+        def _cancel() -> None:
+            try:
+                cancel_file.write_text("cancel", encoding="ascii")
+            except OSError:
+                pass
+            progress_dialog.setLabelText(
+                "Cancel requested — waiting for the next safe payload boundary…"
+            )
+            cancel_button = progress_dialog.findChild(QtWidgets.QPushButton)
+            if isinstance(cancel_button, QtWidgets.QPushButton):
+                cancel_button.setText("Cancel requested")
+                cancel_button.setEnabled(False)
+
+        def _read_progress() -> None:
+            raw = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
+            for line in raw.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    if line.strip():
+                        self._migration_error_lines.append(line.strip())
+                        self._migration_error_lines = self._migration_error_lines[-12:]
+                    continue
+                if not isinstance(event, Mapping):
+                    continue
+                current = str(event.get("current") or "project data")
+                current = current.replace("_", " ").replace(".", " › ")
+                phase = str(event.get("phase") or "migrate").replace("_", " ").title()
+                done = event.get("bytes_done")
+                total = event.get("bytes_total")
+                elapsed = event.get("elapsed_seconds")
+                if isinstance(done, int) and isinstance(total, int) and total > 0:
+                    progress_dialog.setRange(0, 1000)
+                    progress_dialog.setValue(min(1000, int(done * 1000 / total)))
+                    byte_text = f"{done / (1024 ** 2):.1f} / {total / (1024 ** 2):.1f} MiB"
+                else:
+                    byte_text = "Working…"
+                elapsed_text = (
+                    f"{float(elapsed):.1f} s"
+                    if isinstance(elapsed, (int, float))
+                    else f"{time.monotonic() - migration_started:.1f} s"
+                )
+                progress_dialog.setLabelText(
+                    f"{phase}: {current}\n{byte_text} • elapsed {elapsed_text}\n"
+                    f"Source: {source.name}\nDestination: {output}"
+                )
+
+        def _finished(exit_code: int, _status: QtCore.QProcess.ExitStatus) -> None:
+            progress_dialog.close()
+            try:
+                cancel_file.unlink()
+            except FileNotFoundError:
+                pass
+            self._migration_process = None
+            self._migration_progress_dialog = None
+            self._migration_cancel_file = None
+            process.deleteLater()
+            if exit_code == 0 and output.exists():
+                self._load_project_from_path(output)
+            elif not _builder_dialogs_suppressed():
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Project migration failed",
+                    "The packaged copy was not created.\n\n"
+                    f"Source (left unchanged): {source}\nDestination: {output}\n\n"
+                    "Cause:\n"
+                    + ("\n".join(self._migration_error_lines[-6:]) or f"Worker exit code {exit_code}"),
+                )
+
+        progress_dialog.canceled.connect(_cancel)
+        process.readyReadStandardError.connect(_read_progress)
+        process.finished.connect(_finished)
+        self._migration_process = process
+        self._migration_progress_dialog = progress_dialog
+        process.start()
 
     def _apply_prepared_project_load(
         self,
@@ -39333,6 +40198,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     auto_open_load=auto_open_load,
                     pump_events=_pump_events,
                     degraded_safe_mode=bool(prepared.diagnostics),
+                    package_index=prepared.package_index,
+                    payload_resolver=prepared.payload_resolver,
                 )
                 return
 
@@ -39404,6 +40271,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._update_project_actions()
             self._dirty = False
             self.logger.info("Project loaded from %s", target)
+            self.statusBar().clearMessage()
             _pump_events(total_steps, "Finishing…")
             MiniDatabaseSection._project_load_batch_mode = False
             if not auto_open_load and not _builder_dialogs_suppressed():
@@ -39478,6 +40346,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.logger.exception("Failed to report project load failure")
         else:
             self._project_load_auto_open = False
+        self._update_project_actions()
 
     def _restore_project_sections_staged(
         self,
@@ -39490,8 +40359,32 @@ class BuilderWindow(QtWidgets.QMainWindow):
         auto_open_load: bool,
         pump_events: Callable[[int | None, str | None], None],
         degraded_safe_mode: bool,
+        package_index: ProjectIndex | None,
+        payload_resolver: ProjectPayloadResolver | None,
     ) -> None:
-        items = list(self.sections.items())
+        all_items = list(self.sections.items())
+        current_widget = self.tab_widget.currentWidget()
+        if not isinstance(package_index, ProjectIndex):
+            # Legacy JSON has already been read and decoded by the preparation
+            # worker. Preserve its historical complete-restore behavior; only
+            # packaged projects have independently readable deferred sections.
+            items = all_items
+            eager_assembly = True
+        else:
+            eager_keys = {
+                key for key, section in all_items if section is current_widget
+            }
+            if current_widget is getattr(self, "annealing_section", None):
+                eager_keys.add("current_density")
+            if current_widget is getattr(self, "vsm_temperature_section", None):
+                eager_keys.add("transition_temps")
+            if current_widget is getattr(self, "transitions_section", None):
+                eager_keys.update({
+                    "annealing", "current_density", "vsm_temperature_scan",
+                    "transition_temps", "mini_dma",
+                })
+            items = [(key, section) for key, section in all_items if key in eager_keys]
+            eager_assembly = current_widget is getattr(self, "assembly_section", None)
         try:
             snapshot = self._capture_project_load_state()
             transaction = MiniDatabaseStore.begin_memory_transaction()
@@ -39509,12 +40402,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
             "progress_dialog": progress_dialog,
             "next_callback": None,
             "degraded_safe_mode": bool(degraded_safe_mode),
+            "package_index": package_index,
+            "payload_resolver": payload_resolver,
+            "section_thread": None,
+            "section_worker": None,
         }
         # Hide every old section cache before the first importer runs. Some
         # importers consult peer stores, and must never observe a later section
         # from the previous project merely because its own staged turn has not
         # run yet.
-        for key, section in items:
+        for key, section in all_items:
             store = getattr(section, "store", None)
             if isinstance(store, MiniDatabaseStore):
                 section_key = str(getattr(section, "section_key", key))
@@ -39549,6 +40446,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         fabrication.set_import_separation(separate)
                 self._project_path = target
                 self._project_degraded_safe_mode = bool(state["degraded_safe_mode"])
+                self._project_package_index = state["package_index"]
+                self._project_payload_resolver = state["payload_resolver"]
+                if isinstance(package_index, ProjectIndex):
+                    loaded_keys = {key for key, _section in items}
+                    if eager_assembly:
+                        loaded_keys.add("assemble")
+                    self._deferred_project_section_keys = (
+                        set(package_index.sections) - loaded_keys
+                    )
                 self._update_project_title()
                 refresh_started_s = time.perf_counter()
                 self._refresh_sections_after_project_load()
@@ -39574,6 +40480,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 except Exception:
                     self.logger.exception("Failed to update project history after load")
                 self.logger.info("Project loaded from %s", target)
+                self.statusBar().clearMessage()
                 if not auto_open_load and not _builder_dialogs_suppressed():
                     try:
                         QtWidgets.QMessageBox.information(
@@ -39612,14 +40519,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     key, section = items[index]
                     label = getattr(section, "section_title", key)
                     pump_events(index, f"Loading {label}...")
-                    importer = getattr(section, "import_project_payload", None)
-                    if callable(importer):
-                        section_payload = sections_payload.get(key)
+                    def _import_section(section_payload: object) -> None:
+                        if self._project_restore_state is not state:
+                            return
                         section_started_s = time.perf_counter()
                         try:
-                            importer(section_payload or {})
+                            importer = getattr(section, "import_project_payload", None)
+                            if callable(importer):
+                                importer(section_payload if isinstance(section_payload, Mapping) else {})
                         except Exception as exc:
-                            raise RuntimeError(f"Failed to load section {key}: {exc}") from exc
+                            self._abort_project_restore(
+                                RuntimeError(f"Failed to load section {key}: {exc}")
+                            )
+                            return
                         _log_builder_timing(
                             self.logger,
                             "project_load_section",
@@ -39627,22 +40539,40 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             section=key,
                             staged=True,
                         )
-                    state["index"] = index + 1
-                    pump_events(index + 1, f"Loaded {label}")
-                    _schedule(_step)
+                        state["index"] = index + 1
+                        pump_events(index + 1, f"Loaded {label}")
+                        _schedule(_step)
+
+                    if isinstance(package_index, ProjectIndex) and key in package_index.sections:
+                        self._read_packaged_project_section_async(
+                            state=state,
+                            section_key=key,
+                            callback=_import_section,
+                        )
+                    else:
+                        _import_section(sections_payload.get(key))
                     return
 
-                if not state["assembly_done"]:
+                if not state["assembly_done"] and eager_assembly:
                     state["assembly_done"] = True
-                    assembly_payload = sections_payload.get("assemble")
-                    assembly = getattr(self, "assembly_section", None)
-                    importer = getattr(assembly, "import_project_payload", None)
-                    if callable(importer):
+                    def _import_assembly(assembly_payload: object) -> None:
+                        if self._project_restore_state is not state:
+                            return
                         assembly_started_s = time.perf_counter()
                         try:
-                            importer(assembly_payload or {})
+                            assembly = getattr(self, "assembly_section", None)
+                            importer = getattr(assembly, "import_project_payload", None)
+                            if callable(importer):
+                                importer(
+                                    assembly_payload
+                                    if isinstance(assembly_payload, Mapping)
+                                    else {}
+                                )
                         except Exception as exc:
-                            raise RuntimeError(f"Failed to load section assemble: {exc}") from exc
+                            self._abort_project_restore(
+                                RuntimeError(f"Failed to load section assemble: {exc}")
+                            )
+                            return
                         _log_builder_timing(
                             self.logger,
                             "project_load_section",
@@ -39650,13 +40580,84 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             section="assemble",
                             staged=True,
                         )
-                    pump_events(total_steps, "Finishing...")
-                    _schedule(_finish)
+                        pump_events(total_steps, "Finishing...")
+                        _schedule(_finish)
+
+                    if (
+                        isinstance(package_index, ProjectIndex)
+                        and "assemble" in package_index.sections
+                    ):
+                        self._read_packaged_project_section_async(
+                            state=state,
+                            section_key="assemble",
+                            callback=_import_assembly,
+                        )
+                    else:
+                        _import_assembly(sections_payload.get("assemble"))
                     return
+                _schedule(_finish)
+                return
             except Exception as exc:
                 self._abort_project_restore(exc)
 
         _schedule(_step)
+
+    def _read_packaged_project_section_async(
+        self,
+        *,
+        state: Dict[str, Any],
+        section_key: str,
+        callback: Callable[[object], None],
+    ) -> None:
+        """Read and decode one v3 section off the GUI thread."""
+
+        package_index = state.get("package_index")
+        payload_resolver = state.get("payload_resolver")
+        if not isinstance(package_index, ProjectIndex) or not isinstance(
+            payload_resolver, ProjectPayloadResolver
+        ):
+            callback({})
+            return
+        thread = QtCore.QThread(self)
+        worker = _ProjectSectionLoadWorker(package_index, payload_resolver, section_key)
+        worker.moveToThread(thread)
+        state["section_thread"] = thread
+        state["section_worker"] = worker
+        state["section_result"] = None
+        state["section_error"] = None
+
+        def _store_result(result: object) -> None:
+            state["section_result"] = result
+
+        def _store_error(error: object) -> None:
+            state["section_error"] = (
+                error if isinstance(error, Exception) else RuntimeError(str(error))
+            )
+
+        def _complete() -> None:
+            if self._project_restore_state is not state:
+                return
+            state["section_thread"] = None
+            state["section_worker"] = None
+            error = state.pop("section_error", None)
+            result = state.pop("section_result", None)
+            if isinstance(error, Exception):
+                self._abort_project_restore(
+                    RuntimeError(f"Failed to read packaged section {section_key}: {error}")
+                )
+                return
+            callback(result)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(_store_result)
+        worker.failed.connect(_store_error)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(_complete)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
     def _refresh_sections_after_project_load(self) -> None:
         self._sync_microscope_dependent_sections()

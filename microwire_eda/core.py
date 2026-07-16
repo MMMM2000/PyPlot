@@ -23,6 +23,11 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from microwire_data_builder.project_package import (
+    inspect_project_package,
+    is_project_package,
+    load_project,
+)
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import ListedColormap
 from pandas.plotting import parallel_coordinates, scatter_matrix
@@ -576,7 +581,11 @@ def _project_section_to_frame(section: Mapping[str, Any]) -> pd.DataFrame:
 
 
 def _load_project_frame(path: Path) -> pd.DataFrame:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = (
+        {"sections": {"assemble": inspect_project_package(path).read_section("assemble")}}
+        if is_project_package(path)
+        else load_project(path)
+    )
     sections = payload.get("sections", {})
     if not isinstance(sections, Mapping):
         raise ValueError("Project file does not contain sections.")
@@ -590,7 +599,11 @@ def _load_project_frame(path: Path) -> pd.DataFrame:
 
 
 def _load_project_frame_if_available(path: Path) -> pd.DataFrame:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = (
+        {"sections": {"assemble": inspect_project_package(path).read_section("assemble")}}
+        if is_project_package(path)
+        else load_project(path)
+    )
     sections = payload.get("sections", {})
     if not isinstance(sections, Mapping):
         return pd.DataFrame()
@@ -622,7 +635,7 @@ def _rebuild_project_frame_via_builder(
 
         window = BuilderWindow()
         try:
-            window._load_project_from_path(path)
+            window.load_project_synchronously_for_automation(path)
             assembly = getattr(window, "assembly_section", None)
             if assembly is None:
                 raise ValueError("Builder project did not load an Assemble section.")
