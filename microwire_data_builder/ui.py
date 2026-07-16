@@ -39433,6 +39433,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self._project_load_in_progress = False
                 MiniDatabaseSection._project_load_batch_mode = False
                 self._suppress_dirty = False
+                self._update_project_actions()
                 if progress_dialog is not None:
                     try:
                         progress_dialog.close()
@@ -39592,6 +39593,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     self._suppress_dirty = False
                     MiniDatabaseSection._project_load_batch_mode = False
                     self._resume_project_load_timers(snapshot)
+                    self._update_project_actions()
                 if progress_dialog is not None:
                     try:
                         progress_dialog.close()
