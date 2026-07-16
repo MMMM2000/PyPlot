@@ -45,6 +45,28 @@ def test_loads_legacy_four_column_dat_using_real_current_and_resistance(tmp_path
     assert frame["R_Ohm"].tolist() == pytest.approx([120.0, 130.0])
 
 
+def test_converts_legacy_four_column_amp_values_despite_misleading_ma_header(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Ni46Fe27Ga23Cu2Co2-2_1-No1.dat"
+    path.write_text(
+        "ID\n"
+        "Iset(mA) Ireal (mA) Ureal (mA) R(ohm)\n"
+        "0.001 0.0013 0.413 317.692307692308\n"
+        "0.002 0.0022 0.772 350.909090909091\n",
+        encoding="utf-8",
+    )
+
+    frame = load_annealing_curve(path)
+
+    assert frame["I_mA"].tolist() == pytest.approx([1.3, 2.2])
+    assert frame["I_A"].tolist() == pytest.approx([0.0013, 0.0022])
+    assert frame["V_V"].tolist() == pytest.approx([0.413, 0.772])
+    assert frame["R_Ohm"].tolist() == pytest.approx(
+        [317.692307692308, 350.909090909091]
+    )
+
+
 def test_loads_current_six_column_dat_schema(tmp_path: Path) -> None:
     path = tmp_path / "Ni44Fe27Ga23Cu3Co3_1-1_noload-cyc3-4.dat"
     path.write_text(
