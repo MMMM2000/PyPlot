@@ -9,6 +9,7 @@ import traceback
 import json
 import csv
 import math
+import hashlib
 import re
 import shutil
 import base64
@@ -24,13 +25,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Mapping, Tuple, Sequence, cast, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Dict, Iterable, Mapping, Tuple, Sequence, cast, Protocol
 
 import pandas as pd
 from PyQt6 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
 from microwire_data_builder.safe_codec import SafeCodecError, decode_envelope, read_json_file
+from microwire_data_builder.project_package import (
+    PACKAGE_VERSION as BUILDER_PACKAGE_VERSION,
+    inspect_project_package,
+    is_project_package,
+    load_project as load_builder_project,
+    write_project_package,
+)
 
 from plotting.shared.experiment_processes import (
     ExperimentProcessSpec,
@@ -417,6 +425,50 @@ def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
     return payload
 
 
+def _load_builder_project_object(
+    path: Path,
+    *,
+    label: str,
+    section_keys: Collection[str] | None = None,
+    load_payloads: bool = True,
+) -> dict[str, Any]:
+    if not path.exists():
+        raise _AutomationRecipeError(f"{label} file not found: {path}")
+    try:
+        if is_project_package(path):
+            index = inspect_project_package(path)
+            selected = (
+                set(index.sections)
+                if section_keys is None
+                else {str(key) for key in section_keys} & set(index.sections)
+            )
+            payload = index.project_header()
+            with index.open_reader() as reader:
+                payload["sections"] = {
+                    key: reader.read_section(key, load_payloads=load_payloads)
+                    for key in selected
+                }
+        else:
+            payload = load_builder_project(path)
+    except Exception as exc:
+        raise _AutomationRecipeError(f"Failed to read {label} file {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise _AutomationRecipeError(f"{label} file must contain a project object.")
+    return payload
+
+
+def _write_builder_project_object(path: Path, payload: Mapping[str, Any]) -> None:
+    source_index = inspect_project_package(path) if path.exists() and is_project_package(path) else None
+    write_project_package(
+        path,
+        payload,
+        source_index=source_index,
+        loaded_sections=set(payload.get("sections", {}))
+        if isinstance(payload.get("sections"), Mapping)
+        else set(),
+    )
+
+
 _BUILDER_LEGACY_PICKLE_WARNING_EMITTED = False
 
 
@@ -545,7 +597,7 @@ def _validate_builder_project_payload(payload: dict[str, Any], *, path: Path) ->
         raise _AutomationRecipeError(
             f"Project '{path}' is not a Microwire Data Builder project."
         )
-    if payload.get("version") not in {1, 2}:
+    if payload.get("version") not in {1, 2, BUILDER_PACKAGE_VERSION}:
         raise _AutomationRecipeError(
             f"Project '{path}' uses unsupported Microwire Data Builder project version {payload.get('version')!r}."
         )
@@ -2823,7 +2875,22 @@ def _prepare_assemble_export_project_payload(
     project_path = source_project.expanduser()
     if not project_path.exists():
         raise _AutomationRecipeError(f"Assemble export project does not exist: {project_path}")
-    source_payload = _load_json_object(project_path, label="Microwire Data Builder project")
+    export_sections = {
+        "assemble", "annealing", "vsm_temperature_scan", "mini_dma"
+    }
+    selected_sections: Collection[str] | None = export_sections
+    include_payloads = False
+    if force_rebuild:
+        selected_sections = (
+            set(rebuild_sections) | {"assemble"} if rebuild_sections else None
+        )
+        include_payloads = True
+    source_payload = _load_builder_project_object(
+        project_path,
+        label="Microwire Data Builder project",
+        section_keys=selected_sections,
+        load_payloads=include_payloads,
+    )
     _validate_builder_project_payload(source_payload, path=project_path)
 
     copied_project: Path | None = None
@@ -2833,7 +2900,12 @@ def _prepare_assemble_export_project_payload(
         copy_dir.mkdir(parents=True, exist_ok=True)
         copied_project = _next_available_path(copy_dir / f"{project_path.stem}.assemble-export{project_path.suffix}")
         shutil.copy2(project_path, copied_project)
-        payload = _load_json_object(copied_project, label="Microwire Data Builder project copy")
+        payload = _load_builder_project_object(
+            copied_project,
+            label="Microwire Data Builder project copy",
+            section_keys=selected_sections,
+            load_payloads=include_payloads,
+        )
         _validate_builder_project_payload(payload, path=copied_project)
 
     sections = payload.get("sections")
@@ -3009,7 +3081,16 @@ def _run_builder_export_assemble_command(
         column_order=column_order,
     )
     manifest_target = manifest_path or output_path.with_suffix(".manifest.json")
-    payload = _load_json_object(output_project, label="Microwire Data Builder project copy") if output_project.exists() else {}
+    payload = (
+        _load_builder_project_object(
+            output_project,
+            label="Microwire Data Builder project copy",
+            section_keys={"assemble"},
+            load_payloads=False,
+        )
+        if output_project.exists()
+        else {}
+    )
     export_time = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     manifest = {
         "kind": "builder_assemble_export",
@@ -3165,7 +3246,12 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         if project_path is None or not project_path.exists():
             raise _AutomationRecipeError("Builder automation field 'project' must point to an existing .pydpj file.")
 
-        source_payload = _load_json_object(project_path, label="Microwire Data Builder project")
+        source_payload = _load_builder_project_object(
+            project_path,
+            label="Microwire Data Builder project",
+            section_keys=set(),
+            load_payloads=False,
+        )
         _validate_builder_project_payload(source_payload, path=project_path)
 
         working_copy_dir = _resolve_recipe_path_value(
@@ -3206,16 +3292,38 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         if not same_project:
             shutil.copy2(project_path, output_project)
 
-        project_payload = _load_json_object(output_project, label="Microwire Data Builder project copy")
+        commands = recipe.get("commands")
+        if not isinstance(commands, list) or not commands:
+            raise _AutomationRecipeError("Builder automation field 'commands' must be a non-empty array.")
+        required_sections: set[str] = {"assemble"}
+        load_all_sections = False
+        for command in commands:
+            if not isinstance(command, Mapping):
+                continue
+            action = str(command.get("action") or "").strip()
+            if action == "update_section":
+                required_sections.add(str(command.get("section") or "").strip())
+            elif action == "rebuild_assemble":
+                scoped = command.get("sections")
+                if isinstance(scoped, list) and scoped:
+                    required_sections.update(str(item) for item in scoped)
+                else:
+                    load_all_sections = True
+            elif action == "export_assemble":
+                required_sections.update({
+                    "annealing", "vsm_temperature_scan", "mini_dma"
+                })
+        project_payload = _load_builder_project_object(
+            output_project,
+            label="Microwire Data Builder project copy",
+            section_keys=None if load_all_sections else required_sections,
+            load_payloads=True,
+        )
         _validate_builder_project_payload(project_payload, path=output_project)
         sections = project_payload.get("sections")
         if not isinstance(sections, dict):
             sections = {}
             project_payload["sections"] = sections
-
-        commands = recipe.get("commands")
-        if not isinstance(commands, list) or not commands:
-            raise _AutomationRecipeError("Builder automation field 'commands' must be a non-empty array.")
 
         manifest_path = _resolve_recipe_path_value(
             recipe.get("manifest_path"),
@@ -3303,7 +3411,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
 
         project_payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        _write_json(output_project, project_payload)
+        _write_builder_project_object(output_project, project_payload)
         manifest = {
             "kind": "builder",
             "version": 1,
@@ -3937,10 +4045,153 @@ def _run_builder_trusted_migration_cli(args: argparse.Namespace) -> int:
             "--microwire-builder-migration-output is required for trusted migration"
         )
     output = Path(str(raw_output)).expanduser()
+    if (
+        source.is_file()
+        and os.environ.get("MICROWIRE_BUILDER_MIGRATION_WORKER") != "1"
+    ):
+        if not source.exists():
+            raise _AutomationRecipeError(f"Trusted Builder migration source not found: {source}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        source_stat_before = source.stat()
+
+        def _sha256(path: Path) -> str:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+            return digest.hexdigest()
+
+        source_sha256 = _sha256(source)
+        disposable_fd, disposable_name = tempfile.mkstemp(
+            prefix=f".{source.stem}.migration-input.",
+            suffix=source.suffix,
+        )
+        os.close(disposable_fd)
+        disposable = Path(disposable_name)
+        print(
+            "WARNING: trusted legacy Builder migration can execute arbitrary code "
+            "contained in pickle payloads. Process isolation is not a security sandbox.",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            shutil.copyfile(source, disposable)
+            _fsync_file(disposable)
+            disposable_sha256 = _sha256(disposable)
+            if (
+                disposable_sha256 != source_sha256
+                or disposable.stat().st_size != source_stat_before.st_size
+            ):
+                raise _AutomationRecipeError(
+                    "Disposable Builder migration input failed hash/size verification"
+                )
+            disposable_stat = disposable.stat()
+            disposable_fingerprint = (
+                disposable_stat.st_dev,
+                disposable_stat.st_ino,
+                disposable_stat.st_size,
+                disposable_stat.st_mtime_ns,
+            )
+            print(
+                json.dumps({
+                    "kind": "builder_migration_progress",
+                    "phase": "verified_disposable_copy",
+                    "current": disposable.name,
+                    "bytes_done": disposable.stat().st_size,
+                    "bytes_total": source_stat_before.st_size,
+                    "source": str(source),
+                    "destination": str(output),
+                }),
+                file=sys.stderr,
+                flush=True,
+            )
+            worker_env = dict(os.environ)
+            worker_env["MICROWIRE_BUILDER_MIGRATION_WORKER"] = "1"
+            worker_env["MICROWIRE_BUILDER_MIGRATION_ORIGINAL_NAME"] = source.name
+            worker_env["MICROWIRE_BUILDER_MIGRATION_SOURCE_SHA256"] = source_sha256
+            worker_env["MICROWIRE_BUILDER_MIGRATION_SOURCE_BYTES"] = str(
+                source_stat_before.st_size
+            )
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--microwire-builder-trusted-migrate",
+                str(disposable),
+                "--microwire-builder-migration-output",
+                str(output),
+            ]
+            completed = subprocess.run(command, env=worker_env, check=False)
+            source_stat_after = source.stat()
+            source_sha256_after = _sha256(source)
+            if (
+                source_sha256_after != source_sha256
+                or source_stat_after.st_size != source_stat_before.st_size
+                or source_stat_after.st_mtime_ns != source_stat_before.st_mtime_ns
+                or source_stat_after.st_dev != source_stat_before.st_dev
+                or source_stat_after.st_ino != source_stat_before.st_ino
+            ):
+                raise _AutomationRecipeError(
+                    "Legacy Builder source changed during migration. The new output was "
+                    "left in place for quarantine/review and must not be treated as verified."
+                )
+            if completed.returncode:
+                raise _AutomationRecipeError(
+                    f"Trusted Builder migration worker failed with exit code {completed.returncode}"
+                )
+            print(
+                json.dumps({
+                    "kind": "builder_migration_source_verified",
+                    "source": str(source),
+                    "sha256": source_sha256_after,
+                    "bytes": source_stat_after.st_size,
+                    "unchanged": True,
+                }),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 0
+        finally:
+            try:
+                current_stat = disposable.stat()
+                current_fingerprint = (
+                    current_stat.st_dev,
+                    current_stat.st_ino,
+                    current_stat.st_size,
+                    current_stat.st_mtime_ns,
+                )
+                if current_fingerprint == disposable_fingerprint:
+                    disposable.unlink()
+                else:
+                    print(
+                        "WARNING: disposable migration input path changed; the replacement "
+                        f"was left untouched: {disposable}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except (FileNotFoundError, UnboundLocalError):
+                pass
     result = (
         migrate_legacy_store_trusted(source, output)
         if source.is_dir()
-        else migrate_legacy_project_trusted(source, output)
+        else migrate_legacy_project_trusted(
+            source,
+            output,
+            progress=lambda value: print(
+                json.dumps(
+                    {"kind": "builder_migration_progress", **value}
+                    if isinstance(value, Mapping)
+                    else {"kind": "builder_migration_progress", "current": value}
+                ),
+                file=sys.stderr,
+                flush=True,
+            ),
+            cancelled=lambda: bool(
+                os.environ.get("MICROWIRE_BUILDER_MIGRATION_CANCEL_FILE")
+                and Path(
+                    os.environ["MICROWIRE_BUILDER_MIGRATION_CANCEL_FILE"]
+                ).exists()
+            ),
+        )
     )
     print(json.dumps(result, ensure_ascii=False))
     return 0
@@ -4768,7 +5019,16 @@ def _load_project_word_report_frame(
     from microwire_data_builder import ui as builder_ui
     from plotting.plugins.r_vs_t.core import load_file
 
-    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    payload = _load_builder_project_object(
+        source_path,
+        label="Microwire Data Builder Word-report project",
+        section_keys={
+            "assemble", "annealing", "fabrication", "microscope",
+            "current_density", "vsm_hysteresis", "vsm_temperature_scan",
+            "dma_iso_stress", "mini_dma", "shape_memory_stress_strain", "fmr",
+        },
+        load_payloads=True,
+    )
     sections = payload.get("sections") if isinstance(payload, dict) else {}
     if not isinstance(sections, dict):
         raise ValueError("Project file does not contain Builder sections.")
@@ -5275,9 +5535,11 @@ def _load_microwire_word_report_frame(source_path: Path, args: argparse.Namespac
         copied_source = copy_dir / f"{source_path.stem}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}{source_path.suffix}"
         shutil.copy2(source_path, copied_source)
         setattr(args, "_microwire_word_copied_project", str(copied_source))
-        project_payload = _load_json_object(
+        project_payload = _load_builder_project_object(
             copied_source,
             label="Microwire Data Builder project copy",
+            section_keys={"assemble"},
+            load_payloads=False,
         )
         sections = project_payload.get("sections")
         if isinstance(sections, Mapping):

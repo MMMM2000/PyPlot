@@ -7,24 +7,39 @@ call this module.
 
 from __future__ import annotations
 
-import base64
+import argparse
+import gc
+import hashlib
 import json
 import os
 import pickle
 import shutil
+import subprocess
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import pandas as pd
 
 from .safe_codec import (
     SafeCodecError,
     atomic_write_json,
+    decode_envelope,
     encode_envelope,
+    iterencode_envelope_with_blobs,
     read_json_file,
 )
+from .project_package import (
+    StagedEncodedPayload,
+    StagedProjectSection,
+    write_project_package_streaming,
+)
+from .legacy_json_spool import SpoolLimits, spool_legacy_project
+
+
+MAX_LEGACY_PICKLE_BYTES = 384 * 1024 * 1024
 
 
 def _distinct_paths(source: Path, output: Path) -> tuple[Path, Path]:
@@ -35,77 +50,286 @@ def _distinct_paths(source: Path, output: Path) -> tuple[Path, Path]:
     return source_resolved, output_resolved
 
 
-def _trusted_decode_pickle_envelope(payload: Any) -> Any:
-    if not isinstance(payload, Mapping) or payload.get("encoding") != "pickle-base64":
-        raise SafeCodecError("Legacy project payload is not pickle-base64")
-    raw = payload.get("value")
-    if not isinstance(raw, str) or not raw:
-        raise SafeCodecError("Legacy project payload is missing pickle data")
-    return pickle.loads(base64.b64decode(raw.encode("ascii"), validate=True))
+def _write_streaming_payload_value(
+    value: Any,
+    payload_json_path: Path,
+    blob_dir: Path,
+    result_path: Path,
+) -> None:
+    """Child-only streaming package encoding for one already decoded value."""
+
+    blob_dir.mkdir(parents=True, exist_ok=True)
+    referenced: dict[str, int] = {}
+
+    def _blob_sink(buffer: memoryview) -> tuple[str, int]:
+        size = len(buffer)
+        if size > MAX_LEGACY_PICKLE_BYTES:
+            raise SafeCodecError("Migrated Builder blob exceeds its safe size limit")
+        digest = hashlib.sha256(buffer).hexdigest()
+        target = blob_dir / digest
+        if not target.exists():
+            with target.open("xb") as handle:
+                for offset in range(0, size, 1024 * 1024):
+                    handle.write(buffer[offset : offset + 1024 * 1024])
+                handle.flush()
+                os.fsync(handle.fileno())
+        referenced[digest] = size
+        return digest, size
+
+    digest = hashlib.sha256()
+    encoded_bytes = 0
+    with Path(payload_json_path).open("xb") as output:
+        for piece in iterencode_envelope_with_blobs(value, _blob_sink):
+            raw = piece.encode("utf-8")
+            encoded_bytes += len(raw)
+            if encoded_bytes > 64 * 1024 * 1024:
+                raise SafeCodecError("Migrated Builder payload JSON exceeds 64 MiB")
+            digest.update(raw)
+            output.write(raw)
+        output.flush()
+        os.fsync(output.fileno())
+    del value
+    gc.collect()
+    with Path(result_path).open("x", encoding="utf-8") as result_handle:
+        json.dump(
+            {
+                "payload_bytes": encoded_bytes,
+                "payload_sha256": digest.hexdigest(),
+                "blobs": referenced,
+            },
+            result_handle,
+            separators=(",", ":"),
+        )
+        result_handle.flush()
+        os.fsync(result_handle.fileno())
 
 
-def migrate_legacy_project_trusted(source: Path, output: Path) -> dict[str, Any]:
-    """Migrate one explicitly trusted legacy `.pydpj` to a new v2 output."""
+def _write_streaming_pickle_payload(
+    pickle_path: Path,
+    payload_json_path: Path,
+    blob_dir: Path,
+    result_path: Path,
+) -> None:
+    """Child-only trusted pickle execution and streaming package encoding."""
+
+    with Path(pickle_path).open("rb") as handle:
+        value = pickle.load(handle)
+    _write_streaming_payload_value(value, payload_json_path, blob_dir, result_path)
+
+
+def _write_streaming_safe_payload(
+    envelope_path: Path,
+    payload_json_path: Path,
+    blob_dir: Path,
+    result_path: Path,
+) -> None:
+    """Child-only safe-envelope decode and binary-externalizing re-encode."""
+
+    source = Path(envelope_path)
+    size = source.stat().st_size
+    if size > SpoolLimits().payload_bytes:
+        raise SafeCodecError("Legacy safe Builder payload exceeds its migration size limit")
+    with source.open("r", encoding="utf-8") as handle:
+        envelope = json.load(handle)
+    value = decode_envelope(envelope)
+    del envelope
+    gc.collect()
+    _write_streaming_payload_value(value, payload_json_path, blob_dir, result_path)
+
+
+def _convert_payload_in_child(
+    source_path: Path,
+    payload_json_path: Path,
+    blob_dir: Path,
+    *,
+    trusted_pickle: bool,
+) -> StagedEncodedPayload:
+    result_path = payload_json_path.with_suffix(".result.json")
+    command = [
+        sys.executable,
+        "-m",
+        "microwire_data_builder.legacy_migration",
+        "--encode-trusted-pickle" if trusted_pickle else "--reencode-safe-envelope",
+        str(source_path),
+        str(payload_json_path),
+        str(blob_dir),
+        str(result_path),
+    ]
+    completed = subprocess.run(command, check=False)
+    if completed.returncode != 0:
+        raise SafeCodecError(
+            f"Trusted Builder payload conversion child failed with exit code {completed.returncode}"
+        )
+    result = read_json_file(result_path)
+    if not isinstance(result, dict) or not isinstance(result.get("blobs"), dict):
+        raise SafeCodecError("Trusted Builder payload conversion result is malformed")
+    blob_paths: dict[str, Path] = {}
+    for digest, size in result["blobs"].items():
+        path = blob_dir / str(digest)
+        if (
+            not isinstance(digest, str)
+            or not isinstance(size, int)
+            or not path.is_file()
+            or path.stat().st_size != size
+        ):
+            raise SafeCodecError("Trusted Builder payload blob result is invalid")
+        blob_paths[digest] = path
+    return StagedEncodedPayload(payload_json_path, blob_paths)
+
+
+def migrate_legacy_project_trusted(
+    source: Path,
+    output: Path,
+    *,
+    progress: Any = None,
+    cancelled: Any = None,
+) -> dict[str, Any]:
+    """Stream one explicitly trusted legacy `.pydpj` into a distinct v3 package."""
 
     source_path, output_path = _distinct_paths(source, output)
     if not source_path.is_file():
         raise FileNotFoundError(source_path)
     if output_path.exists():
         raise FileExistsError(output_path)
-    payload = read_json_file(source_path)
-    if not isinstance(payload, dict):
-        raise SafeCodecError("Builder project root must be an object")
-    sections = payload.get("sections")
     migrated_count = 0
-    if isinstance(sections, Mapping):
-        migrated_sections: dict[str, Any] = {}
-        for section_name, raw_section in sections.items():
-            if not isinstance(raw_section, Mapping):
-                migrated_sections[str(section_name)] = raw_section
-                continue
-            section = dict(raw_section)
-            raw_payloads = section.get("payloads")
-            if isinstance(raw_payloads, Mapping):
-                safe_payloads: dict[str, Any] = {}
-                for name, encoded in raw_payloads.items():
-                    if isinstance(encoded, Mapping) and encoded.get("encoding") == "pickle-base64":
-                        safe_payloads[str(name)] = encode_envelope(
-                            _trusted_decode_pickle_envelope(encoded)
-                        )
-                        migrated_count += 1
-                    else:
-                        safe_payloads[str(name)] = encoded
-                section["payloads"] = safe_payloads
-            migrated_sections[str(section_name)] = section
-        payload["sections"] = migrated_sections
-    payload["version"] = 2
-    payload["trusted_migration"] = {
-        "source": str(source_path),
-        "migrated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "legacy_payloads_migrated": migrated_count,
-    }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_fd, temp_name = tempfile.mkstemp(
-        prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
-    )
-    os.close(temp_fd)
-    temp_path = Path(temp_name)
-    try:
-        atomic_write_json(temp_path, payload)
-        # Hard-link publication is create-if-absent: unlike os.replace, it cannot
-        # overwrite a target created concurrently after the initial validation.
-        os.link(temp_path, output_path)
-    finally:
+    started = datetime.now(UTC)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output_path.name}.migration.", dir=output_path.parent
+    ) as temp_name:
+        staging = Path(temp_name)
+
+        def _spool_progress(stage: str, done: int, total: int) -> None:
+            if callable(progress):
+                progress({
+                    "phase": stage,
+                    "current": source_path.name,
+                    "bytes_done": done,
+                    "bytes_total": total,
+                    "elapsed_seconds": (datetime.now(UTC) - started).total_seconds(),
+                    "source": str(source_path),
+                    "destination": str(output_path),
+                })
+
+        spooled = spool_legacy_project(
+            source_path,
+            staging / "legacy-spool",
+            progress=_spool_progress,
+            cancelled=cancelled,
+        )
+        blob_dir = staging / "encoded-blobs"
+        blob_dir.mkdir()
+        staged_sections: list[tuple[str, StagedProjectSection]] = []
+        payload_total = sum(len(section.payloads) for section in spooled.sections)
+        original_name = os.environ.get(
+            "MICROWIRE_BUILDER_MIGRATION_ORIGINAL_NAME", source_path.name
+        )
+        expected_source_sha256 = os.environ.get(
+            "MICROWIRE_BUILDER_MIGRATION_SOURCE_SHA256", spooled.source_sha256
+        )
+        expected_source_bytes_text = os.environ.get(
+            "MICROWIRE_BUILDER_MIGRATION_SOURCE_BYTES", str(spooled.source_bytes)
+        )
         try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
-    return {
-        "kind": "builder_trusted_migration",
-        "source": str(source_path),
-        "output": str(output_path),
-        "legacy_payloads_migrated": migrated_count,
-    }
+            expected_source_bytes = int(expected_source_bytes_text)
+        except ValueError as exc:
+            raise SafeCodecError("Trusted migration source byte provenance is invalid") from exc
+        if (
+            expected_source_sha256 != spooled.source_sha256
+            or expected_source_bytes != spooled.source_bytes
+        ):
+            raise SafeCodecError(
+                "Disposable Builder migration source does not match its verified original"
+            )
+        legacy_version = spooled.metadata.get("version", 1)
+        if isinstance(legacy_version, bool) or not isinstance(legacy_version, int):
+            raise SafeCodecError("Legacy Builder project version is invalid")
+        payload_done = 0
+        for section in spooled.sections:
+            staged_payloads: dict[str, StagedEncodedPayload] = {}
+            for payload_name, payload in section.payloads.items():
+                if callable(cancelled) and cancelled():
+                    raise SafeCodecError(
+                        "Trusted Builder migration cancelled before the next payload"
+                    )
+                if callable(progress):
+                    progress({
+                        "phase": "convert_payload",
+                        "current": f"{section.name}.{payload_name}",
+                        "bytes_done": payload_done,
+                        "bytes_total": payload_total,
+                        "elapsed_seconds": (datetime.now(UTC) - started).total_seconds(),
+                        "source": str(source_path),
+                        "destination": str(output_path),
+                    })
+                if payload.encoding == "pickle-base64":
+                    if payload.pickle_path is None:
+                        raise SafeCodecError("Spooled legacy pickle payload is missing its decoded file")
+                    encoded_path = payload.envelope_path.with_name(
+                        f"{payload.envelope_path.stem}.safe.json"
+                    )
+                    staged_payloads[payload_name] = _convert_payload_in_child(
+                        payload.pickle_path, encoded_path, blob_dir, trusted_pickle=True
+                    )
+                    migrated_count += 1
+                else:
+                    encoded_path = payload.envelope_path.with_name(
+                        f"{payload.envelope_path.stem}.externalized.json"
+                    )
+                    staged_payloads[payload_name] = _convert_payload_in_child(
+                        payload.envelope_path,
+                        encoded_path,
+                        blob_dir,
+                        trusted_pickle=False,
+                    )
+                payload_done += 1
+            staged_sections.append((
+                section.name,
+                StagedProjectSection(
+                    section.state_path, section.table_path, staged_payloads
+                ),
+            ))
+        index = write_project_package_streaming(
+            output_path,
+            staged_sections,
+            source_saved_at=str(spooled.metadata.get("saved_at") or ""),
+            replace_existing=False,
+            migration_provenance={
+                "source_name": original_name,
+                "source_sha256": spooled.source_sha256,
+                "source_bytes": spooled.source_bytes,
+                "legacy_version": legacy_version,
+                "section_count": len(spooled.sections),
+                "payload_count": payload_total,
+                "pickle_payload_count": migrated_count,
+                "migrated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+            progress=(
+                (lambda label: progress({
+                    "phase": "package",
+                    "current": label,
+                    "bytes_done": payload_done,
+                    "bytes_total": max(payload_total, 1),
+                    "elapsed_seconds": (datetime.now(UTC) - started).total_seconds(),
+                    "source": str(source_path),
+                    "destination": str(output_path),
+                }))
+                if callable(progress)
+                else None
+            ),
+        )
+        return {
+            "kind": "builder_trusted_migration",
+            "source": str(source_path),
+            "source_sha256": spooled.source_sha256,
+            "source_bytes": spooled.source_bytes,
+            "max_spool_buffer": spooled.max_internal_buffer,
+            "output": str(output_path),
+            "version": index.manifest["version"],
+            "project_id": index.manifest["project_id"],
+            "sections": len(spooled.sections),
+            "payloads": payload_total,
+            "legacy_payloads_migrated": migrated_count,
+        }
 
 
 def _trusted_read_pickle(path: Path) -> Any:
@@ -234,4 +458,37 @@ def migrate_legacy_store_trusted(source_root: Path, output_root: Path) -> dict[s
         _release_migration_lock(lock_handle)
 
 
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--encode-trusted-pickle", action="store_true")
+    parser.add_argument("--reencode-safe-envelope", action="store_true")
+    parser.add_argument("source_path", nargs="?")
+    parser.add_argument("payload_json_path", nargs="?")
+    parser.add_argument("blob_dir", nargs="?")
+    parser.add_argument("result_path", nargs="?")
+    args = parser.parse_args(argv)
+    if args.encode_trusted_pickle == args.reencode_safe_envelope or not all(
+        (args.source_path, args.payload_json_path, args.blob_dir, args.result_path)
+    ):
+        return 2
+    try:
+        writer = (
+            _write_streaming_pickle_payload
+            if args.encode_trusted_pickle
+            else _write_streaming_safe_payload
+        )
+        writer(
+            Path(args.source_path), Path(args.payload_json_path),
+            Path(args.blob_dir), Path(args.result_path),
+        )
+        return 0
+    except Exception as exc:
+        print(f"trusted payload conversion failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+
 __all__ = ["migrate_legacy_project_trusted", "migrate_legacy_store_trusted"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
