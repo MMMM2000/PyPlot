@@ -10563,6 +10563,35 @@ def _write_kosice_fixture(root: Path, filename: str) -> Path:
     return path
 
 
+def test_kosice_folder_preview_uses_milliamps_for_legacy_amp_values(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    root = tmp_path / "Kosice"
+    path = root / "Current Annealing" / "Ni46Fe27Ga23Cu2Co2-2_1-No1.dat"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "ID\n"
+        "Iset(mA) Ireal (mA) Ureal (mA) R(ohm)\n"
+        "0.001 0.0013 0.413 317.692307692308\n"
+        "0.002 0.0022 0.772 350.909090909091\n",
+        encoding="utf-8",
+    )
+    record = kosice_mod.parse_annealing_filename(path)
+    assert record is not None
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        series, failed_sources = window._load_folder_annealing_preview_series([record])
+
+        assert failed_sources == []
+        assert len(series) == 1
+        assert list(series[0]["currents"]) == pytest.approx([1.3, 2.2])
+        assert series[0]["frame"]["I_A"].tolist() == pytest.approx([0.0013, 0.0022])
+    finally:
+        _close_test_window(window)
+
+
 def test_kosice_folder_path_is_restored_and_scanned_asynchronously(tmp_path: Path, qtbot) -> None:
     root = tmp_path / "Kosice"
     _write_kosice_fixture(root, "Ni44Fe27Ga23Cu3Co3 1_7 s2 100mA cycle2.txt")

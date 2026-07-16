@@ -222,6 +222,39 @@ def _iter_numeric_rows(lines: Iterable[str]) -> list[list[float]]:
     return [values for line in lines if (values := _numeric_tokens(line)) is not None]
 
 
+def _legacy_four_column_current_scale_to_mA(
+    samples: Iterable[tuple[float, float, float]],
+) -> float:
+    """Resolve misleading legacy current headers from electrical consistency.
+
+    Some Košice ``Iset/Ireal/Ureal/R`` files label the current columns as mA
+    even though their numeric values are amperes.  Comparing ``U / I`` with the
+    stored resistance distinguishes those files from genuinely-mA tables.
+    Preserve the declared mA interpretation when the evidence is insufficient.
+    """
+
+    errors_if_a: list[float] = []
+    errors_if_ma: list[float] = []
+    for raw_current, voltage_v, resistance_ohm in samples:
+        if raw_current == 0.0 or resistance_ohm <= 0.0:
+            continue
+        denominator = max(abs(resistance_ohm), 1e-12)
+        errors_if_a.append(abs((voltage_v / raw_current) - resistance_ohm) / denominator)
+        errors_if_ma.append(
+            abs((voltage_v / (raw_current / 1000.0)) - resistance_ohm) / denominator
+        )
+    if not errors_if_a or not errors_if_ma:
+        return 1.0
+    errors_if_a.sort()
+    errors_if_ma.sort()
+    median_index = len(errors_if_a) // 2
+    amp_error = errors_if_a[median_index]
+    milliamp_error = errors_if_ma[median_index]
+    if amp_error <= 0.25 and amp_error * 10.0 < milliamp_error:
+        return 1000.0
+    return 1.0
+
+
 def load_annealing_curve(path: Path) -> pd.DataFrame:
     """Load Košice tabular schemas into the preview's canonical columns.
 
@@ -239,10 +272,12 @@ def load_annealing_curve(path: Path) -> pd.DataFrame:
     header_text = " ".join(line.lower() for line in lines[:4])
     has_cycle_column = "cycle" in header_text
 
+    legacy_four_column = False
     if width >= 5 and (has_cycle_column or path.suffix.lower() == ".dat"):
         current_index, voltage_index, resistance_index = 2, 3, 4
     elif width >= 4 and path.suffix.lower() == ".dat":
         current_index, voltage_index, resistance_index = 1, 2, 3
+        legacy_four_column = True
     elif width >= 3:
         current_index, voltage_index, resistance_index = 0, 1, 2
     else:
@@ -263,7 +298,13 @@ def load_annealing_curve(path: Path) -> pd.DataFrame:
         parsed.append((current_mA, voltage_v, resistance_ohm))
     if not parsed:
         raise ValueError(f"{path.name}: no usable current/resistance samples found")
+    current_scale_to_mA = (
+        _legacy_four_column_current_scale_to_mA(parsed)
+        if legacy_four_column
+        else 1.0
+    )
     frame = pd.DataFrame(parsed, columns=["I_mA", "V_V", "R_Ohm"])
+    frame["I_mA"] *= current_scale_to_mA
     frame["I_A"] = frame["I_mA"] / 1000.0
     return frame[["I_A", "I_mA", "V_V", "R_Ohm"]]
 
