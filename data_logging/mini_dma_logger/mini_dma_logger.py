@@ -22815,7 +22815,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._last_tic_status_time_s = time.time()
                 if (
                     self._kosice_active_motion_target_steps is not None
-                    and current_position == self._kosice_active_motion_target_steps
+                    # The Tic can settle one reported microstep beside the commanded
+                    # target.  Requiring exact equality permanently marked a finished
+                    # move as active and blocked every later Košice correction.
+                    and abs(current_position - self._kosice_active_motion_target_steps) <= 1
                 ):
                     self._kosice_active_motion_target_steps = None
                 if previous_commanded_steps is not None and current_position == previous_commanded_steps:

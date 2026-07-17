@@ -14154,6 +14154,34 @@ def test_tic_status_warns_when_motor_power_vin_is_low(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
+def test_tic_status_accepts_one_step_short_kosice_landing(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Current position: 969",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
+
+    try:
+        window._kosice_active_motion_target_steps = 970
+
+        assert window._refresh_tic_status() is True
+
+        assert window._current_position_steps == 969
+        assert window._kosice_active_motion_target_steps is None
+        assert window._kosice_motion_complete() is True
+    finally:
+        _close_test_window(window)
+
+
 def test_tic_status_missing_vin_uses_recent_good_power_briefly(
     tmp_path: Path,
     qtbot,
