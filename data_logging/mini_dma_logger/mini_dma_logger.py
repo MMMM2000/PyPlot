@@ -17763,6 +17763,49 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         return self._current_sweep_hold_instability_level(seek_key) >= SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL
 
+    def _current_sweep_hold_monotonic_disturbance_active(
+        self,
+        basis: str,
+        error_value: float,
+        tolerance: float,
+        filtered_signal: ScaleControlSignal | None,
+        *,
+        seek_key: tuple[str, int, float] | None,
+    ) -> bool:
+        """Return whether a worsening hold error is coherent transformation drift.
+
+        A low-residual, same-direction trend away from the target is useful
+        disturbance information, not controller oscillation.  It may therefore
+        extend an in-flight relaxation move.  Reversals, sparse feedback, or an
+        already unstable response remain one-move-at-a-time.
+        """
+        if (
+            self._automation_phase != "current_hold"
+            or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            or seek_key is None
+            or filtered_signal is None
+            or filtered_signal.sample_count < 3
+            or self._current_sweep_hold_unstable_response_active(seek_key)
+        ):
+            return False
+        previous_error = self._seek_last_error_by_key.get(seek_key)
+        if previous_error is None or float(previous_error) * float(error_value) <= 0.0:
+            return False
+        slope = float(filtered_signal.slope_per_s)
+        noise = abs(float(filtered_signal.noise))
+        if not math.isfinite(slope) or not math.isfinite(noise):
+            return False
+        if float(error_value) * slope >= 0.0:
+            return False
+        if abs(slope) < self._current_sweep_hold_min_slope_for_basis(basis):
+            return False
+        residual_noise_ceiling = max(
+            abs(float(tolerance)),
+            self._scale_quantization_band_for_basis(basis),
+            1e-9,
+        ) * self._current_sweep_hold_noise_sigma()
+        return noise <= residual_noise_ceiling
+
     def _current_sweep_hold_volatile_response_active(
         self,
         basis: str,
@@ -17877,6 +17920,14 @@ class MainWindow(QtWidgets.QMainWindow):
             seek_key=seek_key,
         ):
             return False
+        if self._current_sweep_hold_monotonic_disturbance_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
+            return False
         if self._current_sweep_hold_kern_runaway_drift_recovery_active(
             basis,
             error_value,
@@ -17908,6 +17959,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._automation_phase != "current_hold" or basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
         if seek_key is None:
+            return False
+        if self._current_sweep_hold_monotonic_disturbance_active(
+            basis,
+            error_value,
+            tolerance,
+            filtered_signal,
+            seek_key=seek_key,
+        ):
             return False
         if self._current_sweep_hold_kern_runaway_drift_recovery_active(
             basis,
@@ -20258,7 +20317,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if (
             self._is_current_sweep_mode(self._automation_name)
-            and self._automation_phase != "current"
+            and self._automation_phase not in {"current", "current_hold"}
         ):
             return False
         if self._is_calibration_mode(self._automation_name) and self._automation_step_note != "setup_preload":
@@ -20274,6 +20333,7 @@ class MainWindow(QtWidgets.QMainWindow):
         speed_mm_s: float,
         seek_key: tuple[str, int, float],
         previous_error: float | None,
+        filtered_signal: ScaleControlSignal | None = None,
         setup_preload_relaxation: bool = False,
     ) -> bool:
         if self._automation_step_note == "setup_preload":
@@ -20286,7 +20346,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if float(previous_error) * float(error_value) < 0.0:
                 return False
             if abs(float(error_value)) > abs(float(previous_error)) + max(abs(float(tolerance)) * 0.2, 1e-9):
-                return False
+                if not self._current_sweep_hold_monotonic_disturbance_active(
+                    basis,
+                    error_value,
+                    tolerance,
+                    filtered_signal,
+                    seek_key=seek_key,
+                ):
+                    return False
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
             return False
@@ -20330,6 +20397,11 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_phase == "current_hold"
+        ):
+            return True
         return not self._seek_supports_cruise_feedback(basis)
 
     def _seek_required_post_move_samples(
@@ -20342,7 +20414,10 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> int:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return 0
-        if self._seek_supports_cruise_feedback(basis):
+        if (
+            self._seek_supports_cruise_feedback(basis)
+            and self._automation_phase != "current_hold"
+        ):
             return 0
         sensitivity = self._basis_sensitivity_per_mm(basis, seek_key=seek_key)
         if sensitivity is None or not math.isfinite(float(sensitivity)) or abs(float(sensitivity)) <= 0.0:
@@ -21043,6 +21118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if (
             require_after_last_move
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and self._automation_phase != "current_hold"
             and not self._has_fresh_scale_reading(after_s=self._motion_feedback_ready_after_s())
         ):
             self._log_waiting_for_feedback("Waiting for post-move scale feedback before the next load/stress correction.")
@@ -21407,6 +21483,7 @@ class MainWindow(QtWidgets.QMainWindow):
             speed_mm_s=preliminary_speed_mm_s,
             seek_key=seek_key,
             previous_error=previous_error,
+            filtered_signal=filtered_signal,
             setup_preload_relaxation=setup_preload_relaxation,
         )
         if (

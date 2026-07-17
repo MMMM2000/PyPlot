@@ -523,6 +523,7 @@ class _FullRunState:
         self.max_observed_adaptive_correction_scale = 1.0
         self.previous_adaptive_error_mpa: float | None = None
         self.pending_response_command: dict[str, float] | None = None
+        self.last_correction_cruise_allowed = False
         self.last_response_command_elapsed_s: float | None = None
         self.learned_response_time_s = config.response_initial_wait_s
         self.learned_stiffness_mpa_per_mm: float | None = None
@@ -840,6 +841,7 @@ class _FullRunState:
         decision = decide_robust_center(feedback, controller)
         signal = processed_control_signal(feedback, controller)
         feedback_age_s = self.feedback_age_s(feedback)
+        cruise_allowed = self.last_correction_cruise_allowed and abs(correction_mm) > 0.0
         event = FullRunEvent(
             elapsed_s=self.elapsed_s,
             phase=phase,
@@ -867,8 +869,9 @@ class _FullRunState:
             ),
             learned_stiffness_mpa_per_mm=self.learned_stiffness_mpa_per_mm,
             response_damping=self.response_damping if self.config.response_synchronized else None,
-            cruise_allowed=False,
+            cruise_allowed=cruise_allowed,
         )
+        self.last_correction_cruise_allowed = False
         self.events.append(event)
         recovery_band = max(controller.tolerance_mpa, controller.min_recovery_mpa)
         if abs(event.error_mpa) > recovery_band and decision.decision != "safety_stop":
@@ -876,13 +879,41 @@ class _FullRunState:
         self.update_adaptive_correction_scale(event)
         return event
 
-    def correct_toward_target(self, *, controller: RobustControllerConfig | None = None) -> float:
+    def correct_toward_target(
+        self,
+        *,
+        controller: RobustControllerConfig | None = None,
+        allow_hold_chain: bool = False,
+    ) -> float:
+        self.last_correction_cruise_allowed = False
         controller = controller or self.controller_for_decision()
         feedback = self.control_feedback_samples(controller)
         if not feedback or self.feedback_age_s(feedback) > self.config.controller.stale_feedback_s:
             return 0.0
-        if self.config.response_synchronized and self.pending_response_command is not None:
-            return 0.0
+        pending = self.pending_response_command
+        if self.config.response_synchronized and pending is not None:
+            signal = processed_control_signal(feedback, controller)
+            current_error = signal.center_mpa - controller.target_stress_mpa
+            previous_error = pending["error_mpa"]
+            same_direction = previous_error * current_error > 0.0
+            not_materially_worsening = abs(current_error) <= abs(previous_error) + max(
+                controller.tolerance_mpa * 0.2,
+                1e-9,
+            )
+            coherent_worsening = (
+                current_error * signal.slope_mpa_s > 0.0
+                and abs(signal.slope_mpa_s) >= max(controller.tolerance_mpa, 1e-9)
+            )
+            coherent_hold_disturbance = (
+                allow_hold_chain
+                and same_direction
+                and (not_materially_worsening or coherent_worsening)
+                and signal.noise_mpa
+                <= max(controller.tolerance_mpa, 1e-9) * controller.noise_sigma
+            )
+            if not coherent_hold_disturbance:
+                return 0.0
+            self.last_correction_cruise_allowed = True
         decision = decide_robust_center(feedback, controller)
         correction = decision.motor_step_mm
         if decision.decision in {"no_move", "wait_reversal", "safety_stop"}:
@@ -904,13 +935,16 @@ class _FullRunState:
         self.total_travel_mm += abs(correction)
         if self.config.response_synchronized:
             signal = processed_control_signal(feedback, controller)
-            self.last_response_command_elapsed_s = self.elapsed_s
-            self.pending_response_command = {
-                "elapsed_s": self.elapsed_s,
-                "center_mpa": signal.center_mpa,
-                "error_mpa": signal.center_mpa - controller.target_stress_mpa,
-                "correction_mm": correction,
-            }
+            if pending is None:
+                self.last_response_command_elapsed_s = self.elapsed_s
+                self.pending_response_command = {
+                    "elapsed_s": self.elapsed_s,
+                    "center_mpa": signal.center_mpa,
+                    "error_mpa": signal.center_mpa - controller.target_stress_mpa,
+                    "correction_mm": correction,
+                }
+            else:
+                pending["correction_mm"] += correction
         return correction
 
 
@@ -1258,7 +1292,13 @@ def run_full_mini_dma_simulation(config: FullRunConfig) -> FullRunTrace:
                 crossing_required_after_hold = True
             move_controller = state.controller_for_decision(min_recovery_mpa=config.controller.tolerance_mpa)
             move_controller = state.controller_for_correction_phase(phase, move_controller)
-            correction = 0.0 if recovered else state.correct_toward_target(controller=move_controller)
+            correction = 0.0 if recovered else state.correct_toward_target(
+                controller=move_controller,
+                allow_hold_chain=(
+                    phase == "current_hold"
+                    and config.scale_feedback.name == "prague_gng"
+                ),
+            )
             state.record_event(phase, correction, reason, controller=move_controller)
             stop = _stop_for_safety(state)
             if stop is not None:
@@ -1345,7 +1385,19 @@ def check_full_run_invariants(trace: FullRunTrace) -> dict[str, bool]:
         and abs(event.current_ma - trace.config.sweep.end_ma) <= 1e-9
     ]
     return {
-        "no_load_stress_cruise": all(not event.cruise_allowed for event in events),
+        "no_unsafe_load_stress_cruise": all(
+            not event.cruise_allowed
+            or (
+                event.phase == "current_hold"
+                and trace.config.scale_feedback.name == "prague_gng"
+                and event.command_in_flight
+                and event.processed_noise_mpa
+                <= max(trace.config.controller.tolerance_mpa, 1e-9)
+                * trace.config.controller.noise_sigma
+                and event.error_mpa * event.correction_mm < 0.0
+            )
+            for event in events
+        ),
         "corrections_bounded": all(
             abs(event.correction_mm) <= _max_allowed_correction_mm(trace.config) + 1e-12
             for event in events
@@ -1443,9 +1495,10 @@ def full_run_scenario_by_name(name: str) -> FullRunConfig:
             base,
             name="bad_co6_first_overheating",
             description=(
-                "Bad Ni47Fe24Ga23Co6 2/1-style 50 MPa software-only stress case. "
-                "It represents the stiff-validation run that broke/contact-lost around 10.6 mA "
-                "after a very early transformation stress surge, long current holds, and low usable strain."
+                "Bad Ni47Fe24Ga23Co6 2/1-style 50 MPa software-only stress case based on the "
+                "historical run that broke/contact-lost around 10.6 mA. It applies the same very "
+                "early transformation stress surge to verify that disturbance-aware recovery can "
+                "stay below the physical break rail without a controller-generated recipe stop."
             ),
             wire=replace(
                 base.wire,

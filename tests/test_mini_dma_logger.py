@@ -2046,7 +2046,7 @@ def test_prague_scale_waits_for_filter_window_when_filtered_signal_lags(
         _close_test_window(window)
 
 
-def test_current_sweep_cruise_feedback_is_limited_to_active_current_ramp(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_cruise_feedback_supports_current_and_hold_recovery(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
@@ -2057,6 +2057,9 @@ def test_current_sweep_cruise_feedback_is_limited_to_active_current_ramp(tmp_pat
         assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_LOAD_G) is True
 
         window._automation_phase = "current_hold"
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is True
+
+        window._automation_phase = "target_ramp"
         assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
     finally:
         _close_test_window(window)
@@ -23071,17 +23074,23 @@ def test_current_sweep_hold_volatile_response_waits_before_compounding_move(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_volatile_response_keeps_waiting_while_still_rising(
+def test_current_sweep_hold_monotonic_transformation_extends_relaxation_move(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    moves: list[tuple[float, float | None]] = []
+    moves: list[tuple[float, float | None, bool]] = []
     trace_rows: list[dict[str, object]] = []
     now_s = time.time()
 
     def _capture_move(target_mm: float, **kwargs: object) -> bool:
-        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        moves.append(  # type: ignore[arg-type]
+            (
+                target_mm,
+                kwargs.get("effective_position_mm"),
+                bool(kwargs.get("chain_from_last_target")),
+            )
+        )
         return True
 
     def _capture_trace(**kwargs: object) -> None:
@@ -23095,6 +23104,7 @@ def test_current_sweep_hold_volatile_response_keeps_waiting_while_still_rising(
     window.spin_diameter.setValue(0.0151)
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(0.01)
     window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
         300.0,
         window.spin_diameter.value(),
@@ -23158,8 +23168,10 @@ def test_current_sweep_hold_volatile_response_keeps_waiting_while_still_rising(
         )
 
         assert reached is False
-        assert not moves
-        assert trace_rows[-1]["reason"] == "volatile_response_unsettled"
+        assert moves
+        assert moves[-1][2] is True
+        assert trace_rows[-1]["decision"] == "correction"
+        assert str(trace_rows[-1]["reason"]).startswith("cruise")
     finally:
         _close_test_window(window)
 
@@ -23880,12 +23892,12 @@ def test_current_sweep_reversal_does_not_preadd_backlash_to_near_target_correcti
         _close_test_window(window)
 
 
-def test_current_sweep_hold_uses_gated_small_stress_correction(
+def test_current_sweep_hold_can_cruise_with_bounded_stress_correction(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    moves: list[tuple[float, float | None, float | None]] = []
+    moves: list[tuple[float, float | None, float | None, bool]] = []
 
     def _capture_move(target_mm: float, **kwargs: object) -> bool:
         moves.append(
@@ -23893,6 +23905,7 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
                 target_mm,
                 kwargs.get("effective_position_mm"),  # type: ignore[arg-type]
                 kwargs.get("speed_mm_s"),  # type: ignore[arg-type]
+                bool(kwargs.get("chain_from_last_target")),
             )
         )
         window._last_move_target_mm = target_mm
@@ -23950,7 +23963,7 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
         window._latest_scale_value_g = load_g
 
     try:
-        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is True
 
         reached = window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
@@ -23960,8 +23973,9 @@ def test_current_sweep_hold_uses_gated_small_stress_correction(
 
         assert reached is False
         assert moves
-        _target_mm, effective_mm, _speed_mm_s = moves[-1]
+        _target_mm, effective_mm, _speed_mm_s, chained = moves[-1]
         assert effective_mm is not None
+        assert chained is True
         correction_mm = abs(effective_mm - 6.7)
         assert correction_mm <= (5.0 / 224.502066) + 1e-9
     finally:
