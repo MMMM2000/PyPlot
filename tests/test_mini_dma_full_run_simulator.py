@@ -16,11 +16,13 @@ from data_logging.mini_dma_logger.full_run_simulator import (
     run_control_policy_matrix,
     run_free_strain_stress_matrix,
     run_full_mini_dma_simulation,
+    run_kosice_offline_optimization,
     run_parameter_sweep,
     run_stress_ladder_combined_policy_grid,
     run_stress_ladder_candidate_policy_comparison,
     run_stress_ladder_matrix,
     write_full_run_outputs,
+    write_kosice_offline_optimization_outputs,
     write_sweep_outputs,
 )
 
@@ -552,6 +554,50 @@ def test_control_validation_suite_ranks_policy_tradeoffs(tmp_path: Path) -> None
     ranked = {item["policy"]: item for item in rank}
     assert ranked["moderate_response"]["quality_score_sum"] <= ranked["baseline"]["quality_score_sum"]
     assert ranked["crossing_moderate"]["hold_time_sum_s"] >= ranked["moderate_response"]["hold_time_sum_s"]
+
+
+def test_kosice_offline_policy_uses_cross_sample_response_families(tmp_path: Path) -> None:
+    traces = run_kosice_offline_optimization()
+    summaries = [trace.summary() for trace in traces]
+    synchronized = [item for item in summaries if item["response_synchronized"]]
+    baseline = [item for item in summaries if not item["response_synchronized"]]
+
+    paths = write_kosice_offline_optimization_outputs(traces, tmp_path)
+
+    assert len(traces) == 16
+    assert len({item["length_mm"] for item in summaries}) == 4
+    assert len({item["diameter_mm"] for item in summaries}) == 4
+    assert len({item["elastic_stiffness_mpa_per_mm"] for item in summaries}) == 4
+    assert len({trace.config.wire.noise_mpa for trace in traces}) == 4
+    assert len({tuple(item["target_stress_sequence_mpa"]) for item in summaries}) == 4
+    assert all(item["stop_reason"] == "completed" for item in synchronized)
+    assert any(item["stop_reason"] != "completed" for item in baseline)
+    assert all(item["learned_response_time_s"] is not None for item in synchronized)
+    assert all(item["learned_stiffness_mpa_per_mm"] > 0.0 for item in synchronized)
+    assert all(item["minimum_command_interval_s"] >= 0.25 for item in synchronized)
+    assert all(trace.invariants["corrections_bounded"] for trace in traces)
+    assert paths["kosice_ranking"].exists()
+    assert paths["kosice_report"].exists()
+    assert paths["kosice_plot"].exists()
+    ranking = json.loads(paths["kosice_ranking"].read_text(encoding="utf-8"))
+    assert ranking["calibration_evidence"]["processed_window_s"] == 1.8
+    assert len(ranking["leave_one_family_out"]) == 4
+    assert all(fold["held_out_stop_reason"] == "completed" for fold in ranking["leave_one_family_out"])
+    assert ranking["overall"][0]["policy"].startswith("response_sync_")
+    assert ranking["production_integration_ready"] is False
+
+
+def test_response_synchronized_commands_wait_for_fresh_post_move_feedback() -> None:
+    traces = run_kosice_offline_optimization(policies=("response_sync_d050",))
+
+    for trace in traces:
+        summary = trace.summary()
+        correction_events = [event for event in trace.events if abs(event.correction_mm) > 0.0]
+        assert correction_events
+        assert summary["minimum_command_interval_s"] >= trace.config.response_initial_wait_s - 1e-12
+        assert all(event.command_in_flight for event in correction_events)
+        assert summary["learned_response_time_s"] >= trace.config.response_initial_wait_s
+        assert summary["learned_stiffness_mpa_per_mm"] > 0.0
 
 
 def test_full_run_cli_runs_named_scenario(tmp_path: Path) -> None:

@@ -69,6 +69,14 @@ from data_logging.mini_dma_logger.kosice_import import (
     build_annealing_folder_index,
     load_annealing_curve,
 )
+from data_logging.mini_dma_logger.force_control import (
+    ForceControlAction,
+    ForceControlConfig,
+    ForceControlInput,
+    ForceControlIntent,
+    ForceControlPolicy,
+    ForceControlProfile,
+)
 
 try:
     import serial
@@ -117,8 +125,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-03.4"
-CONTROL_LOGIC_PROFILE = "processed-center-response-gated-hold"
+CONTROL_LOGIC_VERSION = "2026-07-17.3"
+CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -185,6 +193,19 @@ CONTROL_LOGIC_FEATURES = [
     "automation_controller_boundary",
     "current_sweep_accumulated_correction_travel_no_abort",
     "remote_debugging_observability",
+    "immutable_force_control_profile",
+    "prague_legacy_force_control_isolated",
+    "kosice_adaptive_force_control_state_machine",
+    "kosice_observable_probe_escalation",
+    "kosice_cumulative_load_position_gain_learning",
+    "kosice_trend_aware_fast_force_estimator",
+    "kosice_post_move_response_window",
+    "kosice_non_escalating_unobservable_retry",
+    "kosice_target_relative_command_cap",
+    "kosice_held_current_gain_learning",
+    "scale_readability_aware_auto_tolerance_floor",
+    "kosice_joint_scale_motor_resolution_deadband",
+    "kosice_correlated_noise_hold_band",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -210,6 +231,16 @@ CONTROL_TRACE_FIELDNAMES = [
     "ui_handler_duration_ms",
     "ui_heartbeat_interval_ms",
     "sensitivity_per_mm",
+    "force_control_profile",
+    "force_control_state",
+    "force_control_action",
+    "effective_deadband_g",
+    "minimum_informative_motion_mm",
+    "gain_uncertainty_g_per_mm",
+    "gain_confidence",
+    "gain_observable_windows",
+    "gain_excluded_windows",
+    "pending_response",
     "motor_step_mm",
     "correction_mm",
     "backlash_mm",
@@ -394,6 +425,7 @@ KERN_KCP_SCALE_REQUEST = "SI"
 KERN_KCP_SCALE_TERMINATOR = "\\r\\n"
 KERN_KCP_SCALE_INTERVAL_MS = 50
 KERN_KCP_SCALE_READABILITY_G = 0.01
+KERN_FORCE_CONTROL_ESTIMATOR_SAMPLES = 9
 SCALE_QUANTIZATION_CHANGE_FACTOR = 0.75
 SCALE_QUANTIZATION_WORSENING_FACTOR = 1.5
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
@@ -1342,6 +1374,22 @@ def _scale_readability_g_for_settings(
     if request == GNG_SCALE_REQUEST:
         return GNG_SCALE_READABILITY_G
     return None
+
+
+def _force_control_profile_for_scale_settings(
+    baudrate: int,
+    request_command: str,
+    terminator: str,
+) -> ForceControlProfile:
+    request = str(request_command or "").strip().upper()
+    ending = str(terminator or "")
+    if (
+        int(baudrate or 0) in KERN_KCP_SUPPORTED_BAUDS
+        and ending == KERN_KCP_SCALE_TERMINATOR
+        and request in {KERN_KCP_SCALE_REQUEST, "S"}
+    ):
+        return ForceControlProfile.KOSICE_ADAPTIVE
+    return ForceControlProfile.PRAGUE_LEGACY
 
 
 def strain_percent(
@@ -5107,6 +5155,7 @@ class MiniDmaControlConfig:
     scale_request_command: str
     scale_terminator: str
     scale_readability_g: float | None
+    force_control_profile: ForceControlProfile
     control_interval_ms: int
     log_interval_ms: int
     soft_limits_enabled: bool
@@ -7098,12 +7147,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
         self._latest_scale_timestamp: float | None = None
+        self._latest_scale_arrival_monotonic_s: float | None = None
         self._scale_state_lock = RLock()
         self._cached_tension_decreases_scale_reading = True
         self._cached_zero_load_scale_g = DEFAULT_ZERO_LOAD_SCALE_G
         self._scale_connected_at_s: float | None = None
         self._scale_no_data_hint_emitted = False
         self._scale_signal_buffer = ScaleSignalBuffer()
+        self._kosice_force_control: ForceControlPolicy | None = None
         self._ir_state_lock = RLock()
         self._latest_ir_sample: IrTemperatureSample | None = None
         self._latest_ir_frame: object | None = None
@@ -7465,6 +7516,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_motion_command_time_s: float | None = None
         self._last_motion_expected_complete_time_s: float | None = None
+        self._last_motion_command_monotonic_s: float | None = None
+        self._last_motion_expected_complete_monotonic_s: float | None = None
+        self._kosice_active_motion_target_steps: int | None = None
         self._last_commanded_speed_mm_s = 0.0
         self._last_tic_status_time_s: float | None = None
         self._last_feedback_wait_log_s = 0.0
@@ -7789,6 +7843,11 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_request_command,
             scale_terminator,
         )
+        force_control_profile = _force_control_profile_for_scale_settings(
+            scale_baudrate,
+            scale_request_command,
+            scale_terminator,
+        )
         if self._supply_controller is not None:
             supply_resolution = self._supply_controller.current_resolution_mA()
         else:
@@ -7808,6 +7867,7 @@ class MainWindow(QtWidgets.QMainWindow):
             scale_request_command=scale_request_command,
             scale_terminator=scale_terminator,
             scale_readability_g=scale_readability_g,
+            force_control_profile=force_control_profile,
             control_interval_ms=self._control_interval_ms(),
             log_interval_ms=self._log_interval_ms(),
             soft_limits_enabled=self.check_soft_limits.isChecked(),
@@ -15144,6 +15204,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._latest_scale_value_g = value_g
             self._latest_scale_text = raw_text
             self._latest_scale_timestamp = timestamp_s
+            self._latest_scale_arrival_monotonic_s = time.monotonic()
             sample = self._scale_signal_buffer.add_sample(
                 timestamp_s=timestamp_s,
                 raw_g=value_g,
@@ -15872,6 +15933,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._latest_scale_value_g = value_g
         self._latest_scale_text = raw_text or "tare command sent"
         self._latest_scale_timestamp = time.time()
+        self._latest_scale_arrival_monotonic_s = time.monotonic()
         self._refresh_live_labels()
         self._log(
             "Diagnostic hardware tare command sent to the scale; zero-load reference was left unchanged."
@@ -18651,6 +18713,17 @@ class MainWindow(QtWidgets.QMainWindow):
             ready_after_s = max(ready_after_s, float(self._last_motion_expected_complete_time_s))
         return ready_after_s
 
+    def _motion_feedback_ready_after_monotonic_s(self) -> float | None:
+        if self._last_motion_command_monotonic_s is None:
+            return None
+        ready_after_s = float(self._last_motion_command_monotonic_s)
+        if self._last_motion_expected_complete_monotonic_s is not None:
+            ready_after_s = max(
+                ready_after_s,
+                float(self._last_motion_expected_complete_monotonic_s),
+            )
+        return ready_after_s
+
     def _servo_landing_factor(self, error_value: float, tolerance: float) -> float:
         error_ratio = abs(float(error_value)) / max(abs(float(tolerance)), 1e-12)
         if error_ratio <= 1.0:
@@ -18750,31 +18823,37 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _auto_requested_tolerance_for_basis(self, basis: str | None) -> float:
+        readability_g = self._scale_readability_g()
+        load_tolerance_g = max(
+            SERVO_AUTO_TOLERANCE_LOAD_G,
+            0.0 if readability_g is None else abs(float(readability_g)),
+        )
         if basis == HSW_BASIS_LOAD_G:
-            return SERVO_AUTO_TOLERANCE_LOAD_G
+            return load_tolerance_g
         if basis == HSW_BASIS_STRESS_MPA:
             stress_tolerance = stress_mpa_from_load_g(
-                SERVO_AUTO_TOLERANCE_LOAD_G,
+                load_tolerance_g,
                 self._control_config().diameter_mm if self._control_config() is not None else float(self.spin_diameter.value()),
             )
             return 0.0 if stress_tolerance is None else abs(float(stress_tolerance))
         if basis == HSW_BASIS_STRAIN_PCT:
             return 0.0
-        return SERVO_AUTO_TOLERANCE_LOAD_G
+        return load_tolerance_g
 
     def _auto_tolerance_summary_text(self, basis: str | None) -> str:
         tolerance = self._auto_requested_tolerance_for_basis(basis)
+        load_tolerance_g = self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)
         suffix, decimals = self._distribution_units(basis)
         if basis == HSW_BASIS_LOAD_G:
             return f"{_format_compact_number(tolerance)} g minimum"
         if basis == HSW_BASIS_STRESS_MPA:
             return (
                 f"{_format_compact_number(tolerance, decimals=decimals)}{suffix} "
-                f"from {_format_compact_number(SERVO_AUTO_TOLERANCE_LOAD_G)} g minimum"
+                f"from {_format_compact_number(load_tolerance_g)} g scale/readability minimum"
             )
         if basis == HSW_BASIS_STRAIN_PCT:
             return "motor-step/noise floor"
-        return f"{_format_compact_number(SERVO_AUTO_TOLERANCE_LOAD_G)} g minimum"
+        return f"{_format_compact_number(load_tolerance_g)} g minimum"
 
     def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
         current_value = self._current_distribution_value(basis)
@@ -19821,7 +19900,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return timestamp_s - float(since_s) >= SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S
 
-    def _scale_control_signal_for_basis(self, basis: str, *, window_s: float | None = None) -> ScaleControlSignal | None:
+    def _scale_control_signal_for_basis(
+        self,
+        basis: str,
+        *,
+        window_s: float | None = None,
+        trend_aware: bool = False,
+    ) -> ScaleControlSignal | None:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return None
         latest = self._scale_signal_buffer.latest()
@@ -19839,10 +19924,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(samples) < 3:
             return None
         loads = [float(sample.applied_load_g) for sample in samples]
-        median_load = statistics.median(loads)
-        deviations = [abs(value - median_load) for value in loads]
-        mad_load = statistics.median(deviations) if deviations else 0.0
-        robust_noise_load = 1.4826 * mad_load
         mean_time = sum(sample.timestamp_s for sample in samples) / len(samples)
         mean_load = sum(loads) / len(loads)
         denominator = sum((sample.timestamp_s - mean_time) ** 2 for sample in samples)
@@ -19852,9 +19933,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 (sample.timestamp_s - mean_time) * (load - mean_load)
                 for sample, load in zip(samples, loads, strict=False)
             ) / denominator
+        if trend_aware:
+            latest_time = float(samples[-1].timestamp_s)
+            endpoint_candidates = [
+                load - slope_load_s * (sample.timestamp_s - latest_time)
+                for sample, load in zip(samples, loads, strict=False)
+            ]
+            filtered_load = statistics.median(endpoint_candidates)
+            residuals = [
+                load - (filtered_load + slope_load_s * (sample.timestamp_s - latest_time))
+                for sample, load in zip(samples, loads, strict=False)
+            ]
+            residual_center = statistics.median(residuals)
+            deviations = [abs(value - residual_center) for value in residuals]
+        else:
+            filtered_load = statistics.median(loads)
+            deviations = [abs(value - filtered_load) for value in loads]
+        mad_load = statistics.median(deviations) if deviations else 0.0
+        robust_noise_load = 1.4826 * mad_load
         if basis == HSW_BASIS_LOAD_G:
             return ScaleControlSignal(
-                value=float(median_load),
+                value=float(filtered_load),
                 latest_value=float(loads[-1]),
                 noise=max(0.0, float(robust_noise_load)),
                 slope_per_s=float(slope_load_s),
@@ -19863,7 +19962,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         config = self._control_config()
         diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
-        median_stress = stress_mpa_from_load_g(float(median_load), diameter_mm)
+        median_stress = stress_mpa_from_load_g(float(filtered_load), diameter_mm)
         latest_stress = stress_mpa_from_load_g(float(loads[-1]), diameter_mm)
         noise_stress = stress_mpa_from_load_g(max(0.0, float(robust_noise_load)), diameter_mm)
         slope_stress = stress_mpa_from_load_g(float(slope_load_s), diameter_mm)
@@ -20682,6 +20781,269 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def _seek_distribution_target(self, basis: str, target_value: float, tolerance: float) -> bool:
+        if (
+            self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE
+            and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and self._is_current_sweep_mode(self._automation_name)
+            and self._automation_step_note not in {"setup_preload", "setup_return_zero"}
+        ):
+            return self._seek_distribution_target_kosice(basis, target_value, tolerance)
+        return self._seek_distribution_target_prague_legacy(basis, target_value, tolerance)
+
+    def _kosice_force_control_context_key(self, basis: str, target_value: float) -> str:
+        stable_target = target_value
+        if self._automation_phase == "target_ramp" and self._active_target_ramp_end_value is not None:
+            stable_target = float(self._active_target_ramp_end_value)
+        return (
+            f"{self._automation_name}:{basis}:{stable_target:.12g}"
+        )
+
+    def _kosice_force_control_intent(self) -> ForceControlIntent:
+        if self._automation_phase == "target_ramp":
+            return ForceControlIntent.TRACK_TRAJECTORY
+        if self._automation_phase == "current_hold":
+            return ForceControlIntent.RECOVER_DISTURBANCE
+        if self._automation_phase in {"current", "current_limit_unwind"}:
+            return ForceControlIntent.TRACK_TRAJECTORY
+        if self._automation_phase == "settle":
+            return ForceControlIntent.ACQUIRE_TARGET
+        return ForceControlIntent.HOLD_TARGET
+
+    def _kosice_force_control_current_changing(self) -> bool:
+        return self._automation_phase in {"current", "current_limit_unwind"}
+
+    def _kosice_force_control_policy(self) -> ForceControlPolicy:
+        if self._kosice_force_control is None:
+            initial_gain = self._basis_sensitivity_per_mm(HSW_BASIS_LOAD_G)
+            self._kosice_force_control = ForceControlPolicy(
+                ForceControlConfig(
+                    profile=ForceControlProfile.KOSICE_ADAPTIVE,
+                    initial_load_per_mm_g=initial_gain,
+                )
+            )
+        return self._kosice_force_control
+
+    def _kosice_force_control_estimator_window_s(self) -> float:
+        config = self._control_config()
+        interval_ms = (
+            config.scale_interval_ms
+            if config is not None
+            else int(self.spin_scale_interval.value())
+        )
+        return max(0.001, float(interval_ms) / 1000.0) * KERN_FORCE_CONTROL_ESTIMATOR_SAMPLES
+
+    def _kosice_response_observation_complete(self) -> bool:
+        ready_after_s = self._motion_feedback_ready_after_monotonic_s()
+        if ready_after_s is None:
+            return True
+        with self._scale_state_lock:
+            latest_arrival_s = self._latest_scale_arrival_monotonic_s
+        if latest_arrival_s is None:
+            return False
+        return latest_arrival_s >= ready_after_s + self._kosice_force_control_estimator_window_s()
+
+    def _kosice_force_control_max_command_mm(self, speed_mm_s: float) -> float:
+        config = self._control_config()
+        filter_window_s = self._current_sweep_hold_filter_window_s()
+        command_window_s = max(
+            filter_window_s,
+            (config.control_interval_ms if config is not None else self._control_interval_ms()) / 1000.0,
+        )
+        return max(
+            self._motor_step_mm(),
+            min(self._seek_max_travel_mm(), abs(float(speed_mm_s)) * command_window_s),
+        )
+
+    def _seek_distribution_target_kosice(
+        self,
+        basis: str,
+        target_value: float,
+        tolerance: float,
+    ) -> bool:
+        if not self._has_fresh_scale_reading():
+            age_s = self._scale_reading_age_s()
+            if age_s is None or age_s > CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S:
+                raise RuntimeError(
+                    "Scale feedback is stale; fix the scale connection before Košice force control "
+                    f"({self._scale_feedback_diagnostic_text()})."
+                )
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="kosice_stale_scale_grace",
+            )
+            return False
+
+        signal = self._scale_control_signal_for_basis(
+            HSW_BASIS_LOAD_G,
+            window_s=self._kosice_force_control_estimator_window_s(),
+            trend_aware=True,
+        )
+        target_load_g = self._basis_value_as_load_g(basis, target_value)
+        tolerance_load_g = self._basis_value_as_load_g(basis, tolerance)
+        if signal is None or target_load_g is None or tolerance_load_g is None:
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="kosice_processed_load_unavailable",
+            )
+            return False
+
+        config = self._control_config()
+        diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
+        current_basis_value = (
+            float(signal.value)
+            if basis == HSW_BASIS_LOAD_G
+            else stress_mpa_from_load_g(float(signal.value), diameter_mm)
+        )
+        if current_basis_value is None:
+            return False
+
+        intent = self._kosice_force_control_intent()
+        post_move_ready_after_s = self._motion_feedback_ready_after_monotonic_s()
+        response_observation_complete = self._kosice_response_observation_complete()
+        response_ready_after_s = (
+            None
+            if post_move_ready_after_s is None
+            else post_move_ready_after_s + self._kosice_force_control_estimator_window_s()
+        )
+        feedback_fresh = self._has_fresh_scale_reading(
+            after_monotonic_s=(
+                None
+                if intent is ForceControlIntent.TRACK_TRAJECTORY
+                else response_ready_after_s
+            )
+        )
+        speed_mm_s = self._motion_speed_for_current_context(manual_jog=False)
+        ramp_rate_basis_s = self._target_ramp_rate_value_s_for_context(
+            basis,
+            current_value=float(current_basis_value),
+            target_value=target_value,
+        )
+        target_ramp_g_s = 0.0
+        if ramp_rate_basis_s is not None:
+            if basis == HSW_BASIS_LOAD_G:
+                target_ramp_g_s = abs(float(ramp_rate_basis_s))
+            else:
+                converted = self._basis_value_as_load_g(basis, float(ramp_rate_basis_s))
+                target_ramp_g_s = 0.0 if converted is None else abs(float(converted))
+            target_ramp_g_s = math.copysign(
+                target_ramp_g_s,
+                float(target_load_g) - float(signal.value),
+            )
+
+        readability_g = self._scale_readability_g() or 0.0
+        if self._session_active:
+            self._maybe_record_scheduled_point(
+                quiet=True,
+                advance_heating=False,
+                require_fresh_after_move=False,
+            )
+        decision = self._kosice_force_control_policy().decide(
+            ForceControlInput(
+                intent=intent,
+                target_load_g=float(target_load_g),
+                current_load_g=float(signal.latest_value),
+                filtered_load_g=float(signal.value),
+                tolerance_g=abs(float(tolerance_load_g)),
+                robust_noise_g=max(0.0, float(signal.noise)),
+                quantization_g=max(0.0, float(readability_g)),
+                readability_g=max(0.0, float(readability_g)),
+                position_mm=self._current_effective_tensile_position_mm(),
+                motor_resolution_mm=self._motor_step_mm(),
+                max_safe_correction_mm=self._kosice_force_control_max_command_mm(speed_mm_s),
+                speed_mm_s=max(0.0, float(speed_mm_s)),
+                target_ramp_g_s=target_ramp_g_s,
+                ramp_active=self._automation_phase == "target_ramp",
+                current_mA=float(self._active_current_sweep_last_setpoint_mA or 0.0),
+                current_changing=self._kosice_force_control_current_changing(),
+                feedback_fresh=feedback_fresh,
+                motor_complete=self._kosice_motion_complete(),
+                timestamp_s=float(
+                    self._latest_scale_arrival_monotonic_s
+                    if self._latest_scale_arrival_monotonic_s is not None
+                    else signal.timestamp_s
+                ),
+                context_key=self._kosice_force_control_context_key(basis, target_value),
+                response_observation_complete=response_observation_complete,
+            )
+        )
+        error_value = target_value - float(current_basis_value)
+        trace_kwargs = {
+            "basis": basis,
+            "target_value": target_value,
+            "current_value": float(current_basis_value),
+            "error_value": error_value,
+            "tolerance": tolerance,
+            "sensitivity_per_mm": decision.gain.load_per_mm_g,
+            "force_control_state": decision.state.value,
+            "force_control_action": decision.action.value,
+            "effective_deadband_g": decision.effective_deadband_g,
+            "minimum_informative_motion_mm": decision.minimum_informative_motion_mm,
+            "gain_uncertainty_g_per_mm": decision.gain.uncertainty_g_per_mm,
+            "gain_confidence": decision.gain.confidence,
+            "gain_observable_windows": decision.gain.observable_windows,
+            "gain_excluded_windows": decision.gain.excluded_windows,
+            "pending_response": decision.pending_response,
+            "correction_mm": abs(float(decision.correction_mm)),
+            "result": decision.action.value,
+            "reason": f"kosice_{decision.state.value}:{decision.reason}",
+        }
+        if decision.action is ForceControlAction.NONE:
+            self._write_control_trace(decision="accept", **trace_kwargs)
+            return True
+        if decision.action in {
+            ForceControlAction.WAIT_FOR_SAMPLE,
+            ForceControlAction.WAIT_FOR_MOTOR,
+        }:
+            self._write_control_trace(decision="wait", **trace_kwargs)
+            return False
+        if decision.action is ForceControlAction.FAULT:
+            self._write_control_trace(decision="fault", **trace_kwargs)
+            raise RuntimeError(f"Košice force controller fault: {decision.reason}.")
+
+        correction_tensile_mm = float(decision.correction_mm)
+        physical_correction_mm = correction_tensile_mm * self._tension_motion_sign()
+        base_position_mm = self._commanded_motion_base_mm()
+        effective_base_position_mm = self._measurement_effective_position_mm()
+        target_mm = base_position_mm + physical_correction_mm
+        effective_target_mm = effective_base_position_mm + physical_correction_mm
+        moved = self._move_to_position_mm(
+            target_mm,
+            chain_from_last_target=False,
+            effective_position_mm=effective_target_mm,
+            speed_mm_s=max(self._motor_step_mm(), float(speed_mm_s)),
+        )
+        if not moved:
+            self._kosice_force_control_policy().cancel_pending()
+        self._write_control_trace(
+            decision=(
+                "probe"
+                if decision.action is ForceControlAction.PROBE_RELATIVE
+                else "correction"
+            ),
+            target_mm=target_mm,
+            effective_target_mm=effective_target_mm,
+            command_speed_mm_s=max(self._motor_step_mm(), float(speed_mm_s)),
+            **{
+                **trace_kwargs,
+                "result": "move_sent" if moved else "move_blocked",
+            },
+        )
+        return False
+
+    def _seek_distribution_target_prague_legacy(
+        self,
+        basis: str,
+        target_value: float,
+        tolerance: float,
+    ) -> bool:
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
             age_s = self._scale_reading_age_s()
             if age_s is None or age_s > CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S:
@@ -22440,6 +22802,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_position_steps = current_position
                 self._current_position_mm = current_position / float(self.spin_steps_per_mm.value())
                 self._last_tic_status_time_s = time.time()
+                if (
+                    self._kosice_active_motion_target_steps is not None
+                    and current_position == self._kosice_active_motion_target_steps
+                ):
+                    self._kosice_active_motion_target_steps = None
                 if previous_commanded_steps is not None and current_position == previous_commanded_steps:
                     self._effective_position_mm = self._last_effective_move_target_mm
                 elif not self._has_unconfirmed_motion_command():
@@ -22793,6 +23160,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
 
+    def _kosice_motion_complete(self) -> bool:
+        if self._kosice_active_motion_target_steps is not None:
+            return False
+        if (
+            self._last_motion_expected_complete_monotonic_s is not None
+            and time.monotonic() < self._last_motion_expected_complete_monotonic_s
+        ):
+            return False
+        return not self._has_unconfirmed_motion_command()
+
     def _commanded_motion_base_mm(self) -> float:
         if self._has_unconfirmed_motion_command():
             return self._last_move_target_mm
@@ -22867,6 +23244,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_move_direction = 0.0
         self._last_motion_command_time_s = None
         self._last_motion_expected_complete_time_s = None
+        self._last_motion_command_monotonic_s = None
+        self._last_motion_expected_complete_monotonic_s = None
+        self._kosice_active_motion_target_steps = None
         self._last_commanded_speed_mm_s = 0.0
         self._last_commanded_position_steps = self._current_position_steps
         self._last_move_target_mm = self._current_position_mm
@@ -23094,10 +23474,16 @@ class MainWindow(QtWidgets.QMainWindow):
             f"({delta_steps:+d} steps) at {selected_speed_steps_per_s:.3f} steps/s."
         )
         command_time_s = time.time()
+        command_monotonic_s = time.monotonic()
         self._last_motion_command_time_s = command_time_s
+        self._last_motion_command_monotonic_s = command_monotonic_s
         self._last_motion_expected_complete_time_s = (
             command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
         )
+        self._last_motion_expected_complete_monotonic_s = (
+            command_monotonic_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        )
+        self._kosice_active_motion_target_steps = target_steps
         self._last_commanded_speed_mm_s = selected_speed_mm_s
         self._last_commanded_position_steps = target_steps
         self._last_effective_move_target_mm = target_mm
@@ -23201,10 +23587,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         command_time_s = time.time()
+        command_monotonic_s = time.monotonic()
         self._last_motion_command_time_s = command_time_s
+        self._last_motion_command_monotonic_s = command_monotonic_s
         self._last_motion_expected_complete_time_s = (
             command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
         )
+        self._last_motion_expected_complete_monotonic_s = (
+            command_monotonic_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        )
+        self._kosice_active_motion_target_steps = target_steps
         self._last_commanded_speed_mm_s = selected_speed_mm_s
         self._last_commanded_position_steps = target_steps
         self._start_tic_keepalive()
@@ -24162,6 +24554,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "ui_telemetry_sample_count": int(self._session_ui_telemetry_count),
             },
             "control": {
+                "logic_name": CONTROL_LOGIC_NAME,
+                "logic_version": CONTROL_LOGIC_VERSION,
+                "logic_profile": CONTROL_LOGIC_PROFILE,
+                "force_control_profile": self._force_control_profile().value,
                 "control_interval_ms": self._control_interval_ms(),
                 "live_label_interval_ms": self._ui_refresh_interval_ms(),
                 "ui_refresh_interval_ms": self._ui_refresh_interval_ms(),
@@ -24966,6 +25362,15 @@ class MainWindow(QtWidgets.QMainWindow):
         error_value: float | None = None,
         tolerance: float | None = None,
         sensitivity_per_mm: float | None = None,
+        force_control_state: str = "",
+        force_control_action: str = "",
+        effective_deadband_g: float | None = None,
+        minimum_informative_motion_mm: float | None = None,
+        gain_uncertainty_g_per_mm: float | None = None,
+        gain_confidence: float | None = None,
+        gain_observable_windows: int | None = None,
+        gain_excluded_windows: int | None = None,
+        pending_response: bool | None = None,
         correction_mm: float | None = None,
         backlash_mm: float | None = None,
         command_speed_mm_s: float | None = None,
@@ -25043,6 +25448,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     "ui_handler_duration_ms": _number(self._last_ui_handler_duration_ms),
                     "ui_heartbeat_interval_ms": _number(self._ui_heartbeat_interval_ms),
                     "sensitivity_per_mm": _number(sensitivity_per_mm),
+                    "force_control_profile": self._force_control_profile().value,
+                    "force_control_state": force_control_state,
+                    "force_control_action": force_control_action,
+                    "effective_deadband_g": _number(effective_deadband_g),
+                    "minimum_informative_motion_mm": _number(minimum_informative_motion_mm),
+                    "gain_uncertainty_g_per_mm": _number(gain_uncertainty_g_per_mm),
+                    "gain_confidence": _number(gain_confidence),
+                    "gain_observable_windows": (
+                        "" if gain_observable_windows is None else int(gain_observable_windows)
+                    ),
+                    "gain_excluded_windows": (
+                        "" if gain_excluded_windows is None else int(gain_excluded_windows)
+                    ),
+                    "pending_response": "" if pending_response is None else int(pending_response),
                     "motor_step_mm": _number(self._motor_step_mm()),
                     "correction_mm": _number(correction_mm),
                     "backlash_mm": _number(backlash_mm),
@@ -25189,11 +25608,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _scale_reading_age_s(self) -> float | None:
         with self._scale_state_lock:
             timestamp_s = self._latest_scale_timestamp
+            arrival_monotonic_s = self._latest_scale_arrival_monotonic_s
         if timestamp_s is None:
             return None
+        if arrival_monotonic_s is not None:
+            return max(0.0, time.monotonic() - arrival_monotonic_s)
         return max(0.0, time.time() - timestamp_s)
 
-    def _has_fresh_scale_reading(self, *, after_s: float | None = None) -> bool:
+    def _has_fresh_scale_reading(
+        self,
+        *,
+        after_s: float | None = None,
+        after_monotonic_s: float | None = None,
+    ) -> bool:
         age_s = self._scale_reading_age_s()
         if age_s is None or age_s > STALE_SCALE_AFTER_S:
             return False
@@ -25201,6 +25628,11 @@ class MainWindow(QtWidgets.QMainWindow):
             with self._scale_state_lock:
                 timestamp_s = self._latest_scale_timestamp
             if timestamp_s is None or timestamp_s < after_s:
+                return False
+        if after_monotonic_s is not None:
+            with self._scale_state_lock:
+                arrival_monotonic_s = self._latest_scale_arrival_monotonic_s
+            if arrival_monotonic_s is None or arrival_monotonic_s < after_monotonic_s:
                 return False
         return True
 
@@ -29304,6 +29736,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_active = False
         self._automation_paused = False
         self._active_control_config = None
+        self._kosice_force_control = None
         self._automation_steps = []
         self._automation_index = 0
         if not keep_progress:
@@ -30432,13 +30865,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _current_sweep_hold_resume_factor(self, step: AutomationStep) -> float:
         config = self._control_config()
-        pause_factor = self._current_sweep_hold_setting(
-            step.current_hold_pause_tolerance_factor,
-            config.current_sweep_hold_pause_factor
-            if config is not None
-            else float(self.spin_current_sweep_hold_pause_factor.value()),
-            CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
-        )
+        pause_factor = self._current_sweep_hold_pause_factor(step)
         resume_factor = self._current_sweep_hold_setting(
             step.current_hold_resume_tolerance_factor,
             config.current_sweep_hold_resume_factor
@@ -30447,6 +30874,16 @@ class MainWindow(QtWidgets.QMainWindow):
             CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR,
         )
         return max(0.0, min(pause_factor, resume_factor))
+
+    def _current_sweep_hold_pause_factor(self, step: AutomationStep) -> float:
+        config = self._control_config()
+        return max(0.0, self._current_sweep_hold_setting(
+            step.current_hold_pause_tolerance_factor,
+            config.current_sweep_hold_pause_factor
+            if config is not None
+            else float(self.spin_current_sweep_hold_pause_factor.value()),
+            CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR,
+        ))
 
     def _current_sweep_hold_resume_stable_s(self, step: AutomationStep) -> float:
         config = self._control_config()
@@ -30488,20 +30925,25 @@ class MainWindow(QtWidgets.QMainWindow):
     def _using_kern_kcp_scale(self) -> bool:
         config = self._control_config()
         if config is not None:
-            baudrate = config.scale_baudrate
-            request = config.scale_request_command
-            terminator = config.scale_terminator
-        else:
-            try:
-                baudrate = int(self.combo_scale_baud.currentText())
-            except Exception:
-                baudrate = 0
-            request = self.edit_scale_request.text()
-            terminator = self.edit_scale_terminator.text()
+            return config.force_control_profile is ForceControlProfile.KOSICE_ADAPTIVE
+        try:
+            baudrate = int(self.combo_scale_baud.currentText())
+        except Exception:
+            baudrate = 0
+        return _force_control_profile_for_scale_settings(
+            baudrate,
+            self.edit_scale_request.text(),
+            self.edit_scale_terminator.text(),
+        ) is ForceControlProfile.KOSICE_ADAPTIVE
+
+    def _force_control_profile(self) -> ForceControlProfile:
+        config = self._control_config()
+        if config is not None:
+            return config.force_control_profile
         return (
-            int(baudrate or 0) in KERN_KCP_SUPPORTED_BAUDS
-            and str(terminator or "") == KERN_KCP_SCALE_TERMINATOR
-            and str(request or "") in {KERN_KCP_SCALE_REQUEST, "S"}
+            ForceControlProfile.KOSICE_ADAPTIVE
+            if self._using_kern_kcp_scale()
+            else ForceControlProfile.PRAGUE_LEGACY
         )
 
     def _setup_preload_uses_locked_settle(self) -> bool:
@@ -30722,6 +31164,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _current_sweep_endpoint_recovered(self, step: AutomationStep) -> bool:
         if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return True
+        if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE:
+            state = self._kosice_current_sweep_error_bands(step)
+            return state is not None and state[1] <= state[5]
         error_state = self._current_sweep_target_error_and_tolerance(step, filtered=True)
         if error_state is None:
             return False
@@ -30836,6 +31281,129 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return timestamp_s - float(since_s) >= SERVO_CURRENT_SWEEP_HOLD_ENTRY_CONFIRM_S
 
+    def _kosice_current_sweep_error_bands(
+        self,
+        step: AutomationStep,
+    ) -> tuple[float, float, float, float, float, float, ScaleControlSignal] | None:
+        if step.target_value is None or step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
+            return None
+        signal = self._scale_control_signal_for_basis(step.basis, trend_aware=True)
+        if signal is None:
+            return None
+        signed_error = float(signal.value) - float(step.target_value)
+        tolerance = max(1e-12, abs(float(self._automation_tolerance_for_step(step))))
+        quantization = self._scale_quantization_band_for_basis(step.basis)
+        # Fast KERN samples are correlated and quantized, so dividing their
+        # observed fluctuation by sqrt(N) makes the control band unrealistically
+        # narrow.  The trend-aware residual MAD is the relevant disturbance
+        # amplitude for deciding whether the motor should intervene.
+        disturbance_band = max(0.0, float(signal.noise))
+        pause_band = max(
+            tolerance * self._current_sweep_hold_pause_factor(step),
+            quantization,
+            disturbance_band * self._current_sweep_hold_noise_sigma(),
+        )
+        resume_band = min(
+            pause_band,
+            max(
+                tolerance * self._current_sweep_hold_resume_factor(step),
+                quantization,
+                disturbance_band,
+            ),
+        )
+        return (
+            signed_error,
+            abs(signed_error),
+            tolerance,
+            quantization,
+            pause_band,
+            resume_band,
+            signal,
+        )
+
+    def _update_kosice_current_sweep_ramp_hold(
+        self,
+        step: AutomationStep,
+        step_index: int,
+        *,
+        now_s: float,
+    ) -> tuple[bool, bool]:
+        state = self._kosice_current_sweep_error_bands(step)
+        if state is None:
+            return self._current_sweep_ramp_hold_step_index == step_index, False
+        signed_error, error_value, _tolerance, _quantization, pause_band, resume_band, signal = state
+        sample_clock_s = float(
+            self._latest_scale_arrival_monotonic_s
+            if self._latest_scale_arrival_monotonic_s is not None
+            else signal.timestamp_s
+        )
+        holding = self._current_sweep_ramp_hold_step_index == step_index
+        if not holding:
+            if error_value <= pause_band:
+                self._reset_current_sweep_ramp_hold_candidate()
+                return False, False
+            sign = math.copysign(1.0, signed_error)
+            if (
+                self._current_sweep_ramp_hold_candidate_step_index != step_index
+                or self._current_sweep_ramp_hold_candidate_sign != sign
+            ):
+                self._current_sweep_ramp_hold_candidate_step_index = step_index
+                self._current_sweep_ramp_hold_candidate_sign = sign
+                self._current_sweep_ramp_hold_candidate_since_s = sample_clock_s
+                return False, False
+            candidate_since_s = self._current_sweep_ramp_hold_candidate_since_s
+            confirm_s = max(
+                self._control_interval_ms() / 1000.0,
+                3.0
+                * max(
+                    0.001,
+                    (
+                        self._control_config().scale_interval_ms
+                        if self._control_config() is not None
+                        else int(self.spin_scale_interval.value())
+                    )
+                    / 1000.0,
+                ),
+            )
+            if (
+                candidate_since_s is None
+                or sample_clock_s - float(candidate_since_s) < confirm_s
+            ):
+                return False, False
+            self._current_sweep_ramp_hold_step_index = step_index
+            self._current_sweep_ramp_hold_started_s = now_s
+            self._current_sweep_ramp_hold_in_band_since_s = None
+            self._current_sweep_ramp_hold_entry_abs_error = error_value
+            self._current_sweep_ramp_hold_entry_signed_error = signed_error
+            self._current_sweep_ramp_hold_entry_pause_band = pause_band
+            self._reset_current_sweep_ramp_hold_candidate()
+            setpoint = self._active_current_sweep_last_setpoint_mA
+            self._log(
+                "Košice adaptive controller is holding the current ramp"
+                f"{'' if setpoint is None else f' at {setpoint:.3f} mA'}; "
+                f"filtered error {_format_compact_number(error_value)} exceeds the "
+                f"noise/quantization-aware band {_format_compact_number(pause_band)}."
+            )
+            return True, False
+
+        if error_value <= resume_band:
+            if self._current_sweep_ramp_hold_in_band_since_s is None:
+                self._current_sweep_ramp_hold_in_band_since_s = now_s
+            stable_s = self._current_sweep_hold_resume_stable_s(step)
+            if now_s - self._current_sweep_ramp_hold_in_band_since_s >= stable_s:
+                self._resume_current_sweep_ramp_from_hold(
+                    now_s=now_s,
+                    reason=(
+                        "Košice filtered target error "
+                        f"{_format_compact_number(error_value)} is inside adaptive resume band "
+                        f"{_format_compact_number(resume_band)}"
+                    ),
+                )
+                return False, False
+        else:
+            self._current_sweep_ramp_hold_in_band_since_s = None
+        return True, False
+
     def _update_current_sweep_ramp_hold(
         self,
         step: AutomationStep,
@@ -30847,6 +31415,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._current_sweep_ramp_hold_step_index == step_index:
                 self._clear_current_sweep_ramp_hold()
             return False, False
+        if (
+            self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE
+            and step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            return self._update_kosice_current_sweep_ramp_hold(
+                step,
+                step_index,
+                now_s=now_s,
+            )
         error_state = self._current_sweep_target_error_and_tolerance(step, filtered=True)
         if error_state is None:
             return self._current_sweep_ramp_hold_step_index == step_index, False
@@ -30949,6 +31526,8 @@ class MainWindow(QtWidgets.QMainWindow):
         *,
         now_s: float,
     ) -> bool:
+        if self._force_control_profile() is ForceControlProfile.KOSICE_ADAPTIVE:
+            return False
         if step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
         error_state = self._current_sweep_target_error_and_tolerance(step, filtered=True)
