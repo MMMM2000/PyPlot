@@ -332,6 +332,20 @@ mm/s, g/s, MPa/s, %/s
 
 The g/s and MPa/s values use the frozen setup/calibration stiffness prior during current-sweep control. TMA does not update this stiffness from current-driven load/stress fluctuations, so phase/current transients cannot inflate backlash cost or rewrite the mechanical sensitivity while the sweep is in progress. The %/s value uses the current `l0`.
 
+### Physical invariant: transformation is an active disturbance
+
+An iso-load or iso-stress current sweep is not a passive position-control experiment. Heating drives a phase transformation that changes the wire's free length. During the contracting transformation, the tensile stress can rise even while the motor is moving in the correct relaxing direction. Holding the current setpoint pauses the electrical ramp, but it does not stop thermal lag or transformation kinetics already in progress.
+
+The measured stress change between two feedback samples therefore contains at least two simultaneous contributions:
+
+```text
+net stress change = motor-induced stress change + transformation/thermal stress change + noise
+```
+
+Consequently, a net stress increase after a correctly directed relaxation command is **not** evidence that the motor command increased tension or had the wrong sign. It may mean only that transformation-driven contraction raised stress faster than that command relaxed it. Controller response learning and instability classification must not attribute the whole net change to the motor. Direction must come from the target error and known motor geometry; command effectiveness must be estimated with disturbance-aware evidence such as motor position, sustained same-current history, or a model/replay that separates transformation drift from mechanical response.
+
+For the important above-target case, persistent same-sign stress growth during a correctly directed relaxation sequence calls for bounded stronger relaxation under the configured displacement, strain, speed, and load safety rails. It must not, by itself, collapse recovery to one motor unit. Target crossing, an unexpected motor-position response, a real direction mismatch, or other independent safety evidence can still justify damping or reversal protection.
+
 ![Iso-stress/current-sweep dynamic balance speed](assets/mini_dma_current_sweep_servo_speed.svg)
 
 ## Recipe Ramp Rates In g/s, MPa/s, And %/s

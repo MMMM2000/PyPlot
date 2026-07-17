@@ -21264,6 +21264,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 effective_tolerance,
                 filtered_signal,
             )
+            # Physical invariant for heated current sweeps: the observed load/stress
+            # delta is the sum of the motor response and transformation/thermal drift.
+            # In particular, stress may keep rising during a correctly directed relax
+            # move because the transforming wire is contracting faster than the stage
+            # relieves it. Do not interpret this net-error comparison as proof that the
+            # command had the wrong sign. Any policy using `error_worsened` must remain
+            # disturbance-aware; see docs/mini_dma_speed_control.md.
             error_worsened = abs(delta_value) > abs(previous_error) + worsening_floor
             if error_worsened:
                 drift_recovery_step_mm = self._current_sweep_hold_drift_recovery_step_mm(
