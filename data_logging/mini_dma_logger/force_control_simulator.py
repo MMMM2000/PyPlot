@@ -45,8 +45,11 @@ class ForceControlPlantFamily:
     response_delay_steps: int = 1
     response_observation_steps: int = 4
     disturbance_normalized: float = 0.0
+    disturbance_direction: float = -1.0
     disturbance_start_step: int = 45
     disturbance_ramp_steps: int = 6
+    fluctuation_normalized: float = 0.0
+    fluctuation_cycles: float = 4.0
     motor_resolution_fraction: float = 0.002
     max_command_normalized: float = 0.28
     sample_period_s: float = 0.1
@@ -70,11 +73,16 @@ class ForceControlPlantFamily:
             self.noise_normalized,
             self.quantization_normalized,
             self.disturbance_normalized,
+            self.fluctuation_normalized,
         )
         if any(not math.isfinite(value) or value < 0.0 for value in non_negative):
             raise ValueError("initial load, feedback limits, and disturbance must be non-negative")
         if self.initial_gain_ratio <= 0.0 or not math.isfinite(self.initial_gain_ratio):
             raise ValueError("initial_gain_ratio must be positive")
+        if self.disturbance_direction not in {-1.0, 1.0}:
+            raise ValueError("disturbance_direction must be -1 or 1")
+        if self.fluctuation_cycles <= 0.0 or not math.isfinite(self.fluctuation_cycles):
+            raise ValueError("fluctuation_cycles must be positive")
         if self.response_delay_steps < 1 or self.disturbance_ramp_steps < 1:
             raise ValueError("response delays must be positive")
         if self.response_observation_steps < 0:
@@ -121,6 +129,8 @@ class ForceControlSimulationMetrics:
     max_commands_in_flight: int
     recovered: bool
     recovery_steps: int | None
+    fault_count: int
+    command_reversal_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +179,25 @@ def scaled_plant_families() -> tuple[ForceControlPlantFamily, ...]:
             disturbance_ramp_steps=8,
             max_steps=300,
         ),
+        ForceControlPlantFamily(
+            name="transforming_against_relaxation",
+            load_scale_g=1.326,
+            load_per_mm_g=1.56,
+            initial_gain_ratio=0.75,
+            initial_load_normalized=0.96,
+            tolerance_normalized=0.008,
+            noise_normalized=0.0075,
+            quantization_normalized=0.0075,
+            response_delay_steps=1,
+            response_observation_steps=9,
+            disturbance_normalized=0.14,
+            disturbance_direction=1.0,
+            disturbance_start_step=35,
+            disturbance_ramp_steps=80,
+            fluctuation_normalized=0.012,
+            fluctuation_cycles=9.0,
+            max_steps=650,
+        ),
     )
 
 
@@ -215,6 +244,10 @@ def simulate_force_control_family(
     settled = 0
     completion_step: int | None = None
     recovery_steps: int | None = None
+    fault_count = 0
+    command_reversal_count = 0
+    previous_command_direction = 0.0
+    previous_measured_normalized: float | None = None
     samples: list[ForceControlSimulationSample] = []
 
     disturbance_end = family.disturbance_start_step + family.disturbance_ramp_steps
@@ -239,8 +272,13 @@ def simulate_force_control_family(
         else:
             disturbance = 0.0
 
+        fluctuation = family.fluctuation_normalized * math.sin(
+            2.0 * math.pi * family.fluctuation_cycles * step / max(1, family.max_steps)
+        )
         true_normalized_load = (
-            family.load_per_mm_g * position_mm / family.load_scale_g - disturbance
+            family.load_per_mm_g * position_mm / family.load_scale_g
+            + family.disturbance_direction * disturbance
+            + fluctuation
         )
         measured_normalized = _quantize(
             true_normalized_load + _deterministic_noise(step, family.noise_normalized),
@@ -278,17 +316,33 @@ def simulate_force_control_family(
                 timestamp_s=(step + 1) * family.sample_period_s,
                 context_key=family.name,
                 response_observation_complete=observation_steps_remaining == 0,
+                filtered_slope_g_s=(
+                    0.0
+                    if previous_measured_normalized is None
+                    else (
+                        measured_normalized - previous_measured_normalized
+                    )
+                    * family.load_scale_g
+                    / family.sample_period_s
+                ),
             )
         )
+        previous_measured_normalized = measured_normalized
 
         command_mm = decision.correction_mm if decision.action in _COMMAND_ACTIONS else 0.0
         if decision.action in _COMMAND_ACTIONS:
             command_count += 1
+            direction = math.copysign(1.0, command_mm)
+            if previous_command_direction not in {0.0, direction}:
+                command_reversal_count += 1
+            previous_command_direction = direction
             if command_in_flight:
                 overlap_count += 1
             else:
                 pending_command_mm = command_mm
                 pending_steps = family.response_delay_steps
+        if decision.action is ForceControlAction.FAULT:
+            fault_count += 1
         commands_in_flight = int(pending_steps > 0)
         max_commands_in_flight = max(max_commands_in_flight, commands_in_flight)
 
@@ -332,7 +386,7 @@ def simulate_force_control_family(
         (abs(sample.command_normalized) for sample in samples),
         default=0.0,
     )
-    completed = completion_step is not None
+    completed = completion_step is not None and fault_count == 0
     metrics = ForceControlSimulationMetrics(
         family=family.name,
         completed=completed,
@@ -345,6 +399,8 @@ def simulate_force_control_family(
         max_commands_in_flight=max_commands_in_flight,
         recovered=completed if requires_recovery else True,
         recovery_steps=recovery_steps,
+        fault_count=fault_count,
+        command_reversal_count=command_reversal_count,
     )
     return ForceControlSimulationResult(family=family, metrics=metrics, samples=tuple(samples))
 

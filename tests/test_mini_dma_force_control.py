@@ -129,8 +129,8 @@ def test_pending_command_waits_for_complete_response_observation_window() -> Non
     assert response.pending_response is True
 
 
-def test_no_response_retries_are_bounded_and_never_grow_geometrically() -> None:
-    policy = _adaptive(gain=1.0, max_probe_attempts=4)
+def test_sub_resolution_response_never_faults_or_grows_geometrically() -> None:
+    policy = _adaptive(gain=1.0)
     policy.decide(_input(target_load_g=0.95, max_safe_correction_mm=0.05))
     retry_one = policy.decide(
         _input(target_load_g=0.95, position_mm=0.02, timestamp_s=2.0, max_safe_correction_mm=0.05)
@@ -142,14 +142,62 @@ def test_no_response_retries_are_bounded_and_never_grow_geometrically() -> None:
         _input(target_load_g=0.95, position_mm=0.06, timestamp_s=4.0, max_safe_correction_mm=0.05)
     )
 
-    retries = (retry_one, retry_two, retry_three)
-    assert all(item.action is ForceControlAction.MOVE_RELATIVE for item in retries)
-    assert all(item.reason == "response_unobservable_bounded_retry" for item in retries)
-    assert [abs(item.correction_mm) for item in retries] == pytest.approx([0.02, 0.02, 0.02])
+    corrections = (retry_one, retry_two, retry_three)
+    assert all(item.action is ForceControlAction.MOVE_RELATIVE for item in corrections)
+    assert all(item.state is not ForceControlState.FAULT for item in corrections)
+    assert all(
+        item.reason == "sub_resolution_response_bounded_correction"
+        for item in corrections
+    )
+    assert [abs(item.correction_mm) for item in corrections] == pytest.approx([0.02, 0.02, 0.02])
 
 
-def test_unobservable_response_inside_achievable_deadband_does_not_fault() -> None:
-    policy = _adaptive(gain=0.9, max_probe_attempts=1)
+def test_run03_like_repeated_sub_resolution_responses_never_stop_control() -> None:
+    policy = _adaptive(gain=1.55984728)
+    target_load_g = 1.326
+    current_load_g = target_load_g + 2.77351894 * target_load_g / 50.0
+    position_mm = 9.84
+    timestamp_s = 1.0
+    decisions = []
+
+    for _ in range(30):
+        decision = policy.decide(
+            _input(
+                intent=ForceControlIntent.RECOVER_DISTURBANCE,
+                target_load_g=target_load_g,
+                current_load_g=current_load_g,
+                filtered_load_g=current_load_g,
+                tolerance_g=0.01,
+                robust_noise_g=0.0,
+                quantization_g=0.01,
+                readability_g=0.01,
+                position_mm=position_mm,
+                motor_resolution_mm=0.01,
+                timestamp_s=timestamp_s,
+                context_key="kosice-run03-50mpa",
+            )
+        )
+        decisions.append(decision)
+        assert decision.action is not ForceControlAction.FAULT
+        if decision.action is ForceControlAction.NONE:
+            break
+        if decision.action in {
+            ForceControlAction.MOVE_RELATIVE,
+            ForceControlAction.PROBE_RELATIVE,
+        }:
+            position_mm += decision.correction_mm
+            current_load_g -= 0.003
+        timestamp_s += 1.0
+
+    assert decisions[-1].action is ForceControlAction.NONE
+    assert any(
+        item.reason == "sub_resolution_response_bounded_correction"
+        for item in decisions
+    )
+
+
+def test_sub_resolution_response_inside_achievable_deadband_settles() -> None:
+    policy = _adaptive(gain=0.9)
     first = policy.decide(
         _input(
             target_load_g=0.925,
@@ -177,6 +225,68 @@ def test_unobservable_response_inside_achievable_deadband_does_not_fault() -> No
     assert settled.action is ForceControlAction.NONE
     assert settled.reason == "response_inside_achievable_deadband"
     assert settled.effective_deadband_g == pytest.approx(0.018)
+
+
+def test_transformation_trend_increases_same_direction_recovery() -> None:
+    baseline = _adaptive(gain=1.0).decide(
+        _input(
+            intent=ForceControlIntent.RECOVER_DISTURBANCE,
+            target_load_g=0.8,
+            filtered_load_g=0.9,
+            current_load_g=0.9,
+        )
+    )
+    rising = _adaptive(gain=1.0).decide(
+        _input(
+            intent=ForceControlIntent.RECOVER_DISTURBANCE,
+            target_load_g=0.8,
+            filtered_load_g=0.9,
+            current_load_g=0.9,
+            filtered_slope_g_s=0.4,
+        )
+    )
+
+    assert rising.correction_mm < baseline.correction_mm < 0.0
+    assert abs(rising.correction_mm) > abs(baseline.correction_mm)
+
+
+def test_direction_reversal_requires_persistent_error() -> None:
+    policy = _adaptive(gain=1.0, reversal_confirmation_s=0.3)
+    first = policy.decide(_input(target_load_g=0.8))
+    assert first.correction_mm < 0.0
+
+    crossing = policy.decide(
+        _input(
+            target_load_g=1.0,
+            filtered_load_g=0.8,
+            current_load_g=0.8,
+            position_mm=first.correction_mm,
+            timestamp_s=2.0,
+        )
+    )
+    waiting = policy.decide(
+        _input(
+            target_load_g=1.0,
+            filtered_load_g=0.8,
+            current_load_g=0.8,
+            position_mm=first.correction_mm,
+            timestamp_s=2.2,
+        )
+    )
+    confirmed = policy.decide(
+        _input(
+            target_load_g=1.0,
+            filtered_load_g=0.8,
+            current_load_g=0.8,
+            position_mm=first.correction_mm,
+            timestamp_s=2.31,
+        )
+    )
+
+    assert crossing.reason == "direction_reversal_confirmation"
+    assert waiting.reason == "direction_reversal_confirmation"
+    assert confirmed.action is ForceControlAction.MOVE_RELATIVE
+    assert confirmed.correction_mm > 0.0
 
 
 def test_command_is_capped_relative_to_target_and_retry_does_not_escalate() -> None:

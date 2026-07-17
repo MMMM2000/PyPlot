@@ -171,6 +171,7 @@ Full-run scenarios currently cover:
 - `low_strain_noisy_first_overheating`: low-strain 50 MPa wire where the hidden free transformation strain is small and stress noise/fluctuation is comparatively large; this guards against controller policies that manufacture a large measured strain-current loop from a weak material response.
 - `noisy_centered_first_overheating`: high raw noise centered near target, expected to complete without unnecessary chasing.
 - `transformation_recovery`: current rise contraction forces current-hold recovery before endpoint completion.
+- `transforming_against_relaxation`: a Košice-scale, quantized plant continues transforming in the direction opposing the motor correction while adding inherent stress fluctuation; recovery must complete without a response-identification fault or overlapping commands.
 - `reverse_unwind_recovery`: reverse/current unwind must recover the processed center before completing.
 - `slack_after_unwind_takeup`: near-zero-load slack recovery keeps taking up tension until the processed center recovers.
 - `thin_wire_delayed_feedback`: 8.3 um wire and low sample cadence remain bounded.

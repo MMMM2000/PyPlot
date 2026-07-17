@@ -447,11 +447,19 @@ backlash_mm * sensitivity
 
 If a correction crosses the target but the remaining error is inside this band, TMA accepts the target as reached instead of reversing immediately. This prevents backlash-driven hunting.
 
+## Transformation-disturbance recovery
+
+During an iso-stress current sweep, observed stress change is the sum of the motor response and transformation/thermal drift. A correctly directed relaxation move can therefore coincide with rising stress when the transforming wire contracts faster than the stage relieves it. Current-hold control must continue bounded recovery in that direction; the net stress change alone is not evidence of a failed motor response.
+
+Prague current sweeps reject isolated readability-scale outliers, use a median pairwise trend and projected endpoint, and calculate fluctuation from detrended residuals. During the active current ramp, far same-sign error may chain fresh-feedback corrections; current-hold remains response-gated so volatile recovery cannot compound an in-flight move. Košice uses its separate quantization-aware force policy, projects same-direction measured drift over a short response horizon, and confirms a persistent error before reversing motor direction. A sub-resolution motor response lowers identification confidence but never stops the recipe.
+
+Heating resumes only inside the configured processed-stress tolerance after stable confirmation. Measured fluctuation may lengthen confirmation but does not enlarge that scientific resume tolerance. Raw stress, processed stress, trend, residual fluctuation, and motor decisions remain logged separately.
+
+There is no cumulative millimetre limit on current-sweep recovery. Cumulative stage displacement is part of the measured transformation strain. Individual commands remain bounded by motor resolution, target-relative response, configured strain per correction, strain rate, stage speed, and physical hardware protections.
+
 ## Current Limitations
 
-The current controller is now hybrid feedback-based: far from target it can keep the motor moving between scale replies, and near target it returns to conservative post-move feedback gating. It compensates for large error and moving-away trends, but it still does not have full current feed-forward.
-
-A possible future layer is current-ramp feed-forward:
+The controller still does not have current feed-forward learned from an earlier thermal cycle. A possible future layer is:
 
 ```text
 predicted_error =

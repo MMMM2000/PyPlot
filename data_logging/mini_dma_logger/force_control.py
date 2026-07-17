@@ -79,6 +79,7 @@ class ForceControlInput:
     timestamp_s: float
     context_key: str = "default"
     response_observation_complete: bool = True
+    filtered_slope_g_s: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +117,8 @@ class ForceControlConfig:
     correction_fraction: float = 0.25
     max_target_fraction_per_command: float = 0.10
     trajectory_feedforward_horizon_s: float = 0.20
-    max_probe_attempts: int = 3
-    probe_growth: float = 2.0
+    disturbance_prediction_horizon_s: float = 0.35
+    reversal_confirmation_s: float = 0.30
     stationary_position_steps: float = 0.5
     minimum_gain_windows: int = 2
     minimum_gain_confidence: float = 0.45
@@ -140,7 +141,6 @@ class _PendingCommand:
     intent: ForceControlIntent
     start: _Observation
     correction_mm: float
-    probe_attempt: int
 
 
 def _median_absolute_deviation(values: list[float], center: float) -> float:
@@ -157,8 +157,6 @@ class ForceControlPolicy:
     def __init__(self, config: ForceControlConfig) -> None:
         if config.initial_load_per_mm_g is not None and config.initial_load_per_mm_g <= 0.0:
             raise ValueError("initial_load_per_mm_g must be positive")
-        if config.max_probe_attempts < 1:
-            raise ValueError("max_probe_attempts must be positive")
         if not 0.0 < config.correction_fraction <= 1.0:
             raise ValueError("correction_fraction must be in (0, 1]")
         if not 0.0 < config.max_target_fraction_per_command <= 1.0:
@@ -176,6 +174,9 @@ class ForceControlPolicy:
         self._gain_candidates: list[float] = []
         self._excluded_windows = 0
         self._drift_candidates_g_s: list[float] = []
+        self._last_command_direction = 0.0
+        self._reversal_candidate_direction = 0.0
+        self._reversal_candidate_since_s: float | None = None
 
     def cancel_pending(self) -> None:
         """Forget an offered command that the transport did not accept."""
@@ -273,7 +274,7 @@ class ForceControlPolicy:
             self._pending = None
             return self._track_trajectory(inputs, observation)
         if inputs.intent is ForceControlIntent.PROBE_REQUIRED:
-            return self._request_probe(inputs, observation, probe_attempt=1, reason="probe_requested")
+            return self._request_probe(inputs, observation, reason="probe_requested")
         if inputs.intent not in _LANDING_INTENTS:
             return self._decision(inputs, ForceControlState.FAULT, ForceControlAction.FAULT, "unsupported_intent")
         return self._land_or_hold(inputs, observation)
@@ -294,6 +295,7 @@ class ForceControlPolicy:
             inputs.target_ramp_g_s,
             inputs.current_mA,
             inputs.timestamp_s,
+            inputs.filtered_slope_g_s,
         )
         if not _finite(numeric):
             return "non_finite_input"
@@ -461,7 +463,7 @@ class ForceControlPolicy:
         )
         correction = self._correction_for_error(inputs, error_g + ramp_feedforward_g)
         if correction is None:
-            return self._request_probe(inputs, observation, 1, "trajectory_gain_untrusted")
+            return self._request_probe(inputs, observation, "trajectory_gain_untrusted")
         if abs(error_g) <= deadband_g and abs(ramp_feedforward_g) <= deadband_g:
             return self._decision(
                 inputs,
@@ -541,56 +543,97 @@ class ForceControlPolicy:
                             ForceControlAction.NONE,
                             "response_inside_achievable_deadband",
                         )
-                    next_attempt = pending.probe_attempt + 1
-                    if next_attempt > self.config.max_probe_attempts:
-                        return self._decision(
-                            inputs,
-                            ForceControlState.FAULT,
-                            ForceControlAction.FAULT,
-                            "response_unobservable",
-                        )
-                    correction = self._correction_for_error(inputs, error_g)
+                    correction = self._correction_for_error(
+                        inputs,
+                        self._disturbance_aware_error(inputs, error_g),
+                    )
                     if correction is not None:
-                        self._pending = _PendingCommand(
-                            inputs.intent,
-                            observation,
-                            correction,
-                            next_attempt,
-                        )
-                        return self._decision(
+                        return self._issue_landing_correction(
                             inputs,
+                            observation,
                             state,
-                            ForceControlAction.MOVE_RELATIVE,
-                            "response_unobservable_bounded_retry",
-                            correction_mm=correction,
+                            correction,
+                            "sub_resolution_response_bounded_correction",
                         )
                     return self._request_probe(
                         inputs,
                         observation,
-                        next_attempt,
-                        "response_unobservable_probe",
+                        "sub_resolution_response_probe",
                         direction=1.0 if pending.correction_mm >= 0.0 else -1.0,
-                        previous_motion_mm=abs(pending.correction_mm),
                     )
 
         error_g = inputs.target_load_g - inputs.filtered_load_g
         if abs(error_g) <= self._deadband_g(inputs):
             return self._decision(inputs, state, ForceControlAction.NONE, "inside_deadband")
-        correction = self._correction_for_error(inputs, error_g)
+        correction = self._correction_for_error(
+            inputs,
+            self._disturbance_aware_error(inputs, error_g),
+        )
         if correction is None:
             return self._request_probe(
                 inputs,
                 observation,
-                1,
                 "gain_untrusted",
                 direction=1.0 if error_g >= 0.0 else -1.0,
             )
-        self._pending = _PendingCommand(inputs.intent, observation, correction, 0)
+        return self._issue_landing_correction(
+            inputs,
+            observation,
+            state,
+            correction,
+            "landing_correction",
+        )
+
+    def _disturbance_aware_error(self, inputs: ForceControlInput, error_g: float) -> float:
+        """Project same-direction material drift without chasing a predicted crossing."""
+        if inputs.intent is not ForceControlIntent.RECOVER_DISTURBANCE:
+            return error_g
+        projected = error_g - (
+            inputs.filtered_slope_g_s * self.config.disturbance_prediction_horizon_s
+        )
+        if error_g == 0.0 or error_g * projected <= 0.0:
+            return error_g
+        return projected if abs(projected) > abs(error_g) else error_g
+
+    def _issue_landing_correction(
+        self,
+        inputs: ForceControlInput,
+        observation: _Observation,
+        state: ForceControlState,
+        correction: float,
+        reason: str,
+    ) -> ForceControlDecision:
+        direction = math.copysign(1.0, correction)
+        if self._last_command_direction not in {0.0, direction}:
+            if self._reversal_candidate_direction != direction:
+                self._reversal_candidate_direction = direction
+                self._reversal_candidate_since_s = inputs.timestamp_s
+                return self._decision(
+                    inputs,
+                    state,
+                    ForceControlAction.WAIT_FOR_SAMPLE,
+                    "direction_reversal_confirmation",
+                )
+            since_s = self._reversal_candidate_since_s
+            if (
+                since_s is None
+                or inputs.timestamp_s - since_s < self.config.reversal_confirmation_s
+            ):
+                return self._decision(
+                    inputs,
+                    state,
+                    ForceControlAction.WAIT_FOR_SAMPLE,
+                    "direction_reversal_confirmation",
+                )
+        self._reversal_candidate_direction = 0.0
+        self._reversal_candidate_since_s = None
+        self._last_command_direction = direction
+        self._pending = _PendingCommand(inputs.intent, observation, correction)
         return self._decision(
             inputs,
             state,
             ForceControlAction.MOVE_RELATIVE,
-            "landing_correction",
+            reason,
             correction_mm=correction,
         )
 
@@ -616,10 +659,8 @@ class ForceControlPolicy:
         self,
         inputs: ForceControlInput,
         observation: _Observation,
-        probe_attempt: int,
         reason: str,
         direction: float = 1.0,
-        previous_motion_mm: float = 0.0,
     ) -> ForceControlDecision:
         gain = self.gain_estimate
         minimum = self._minimum_informative_motion(
@@ -628,11 +669,7 @@ class ForceControlPolicy:
             gain,
         )
         base = minimum if minimum is not None else inputs.motor_resolution_mm * 2.0
-        requested = max(
-            base * (self.config.probe_growth ** max(0, probe_attempt - 1)),
-            previous_motion_mm * self.config.probe_growth,
-        )
-        correction = self._bounded_motion(math.copysign(requested, direction), inputs)
+        correction = self._bounded_motion(math.copysign(base, direction), inputs)
         if abs(correction) < inputs.motor_resolution_mm:
             return self._decision(
                 inputs,
@@ -641,7 +678,7 @@ class ForceControlPolicy:
                 "probe_below_motor_resolution",
             )
         if inputs.intent in _LANDING_INTENTS:
-            self._pending = _PendingCommand(inputs.intent, observation, correction, probe_attempt)
+            self._pending = _PendingCommand(inputs.intent, observation, correction)
         return self._decision(
             inputs,
             ForceControlState.PROBE_REQUIRED,

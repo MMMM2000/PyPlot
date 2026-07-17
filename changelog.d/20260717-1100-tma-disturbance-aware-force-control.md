@@ -1,0 +1,3 @@
+- Made Prague and Košice iso-stress recovery treat transformation and thermal contraction as an active disturbance instead of evidence that a correctly directed motor correction failed.
+- Removed the Košice sub-resolution-response recipe stop, the hidden 3 mm current-sweep travel setting, and the obsolete bench millimetre override. Recovery now remains bounded by per-command strain, strain-rate, target-relative, motor, and physical stage safeguards.
+- Added trend-projected Košice recovery, confirmed motor direction reversals, readability-aware outlier rejection with a robust detrended Prague endpoint estimate, strict noise-independent heating-resume tolerances, far-error Prague ramp cruise, and a fluctuating transformation simulator family.

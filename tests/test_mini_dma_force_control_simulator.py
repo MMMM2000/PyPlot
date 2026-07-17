@@ -20,6 +20,7 @@ def test_adaptive_policy_completes_scaled_families_without_command_overlap() -> 
     assert all(result.metrics.overlap_count == 0 for result in results)
     assert all(result.metrics.max_commands_in_flight <= 1 for result in results)
     assert all(result.metrics.command_count > 0 for result in results)
+    assert all(result.metrics.fault_count == 0 for result in results)
     assert all(
         result.metrics.max_command_normalized <= result.family.max_command_normalized
         for result in results
@@ -114,3 +115,19 @@ def test_transformation_family_reports_recovery_after_disturbance() -> None:
     assert result.metrics.recovery_steps is not None
     assert result.metrics.recovery_steps > 0
     assert result.metrics.overlap_count == 0
+
+
+def test_continuing_transformation_and_fluctuation_do_not_create_a_fault() -> None:
+    family = next(
+        family
+        for family in scaled_plant_families()
+        if family.name == "transforming_against_relaxation"
+    )
+
+    result = simulate_force_control_family(family)
+
+    assert result.metrics.completed
+    assert result.metrics.recovered
+    assert result.metrics.fault_count == 0
+    assert result.metrics.overlap_count == 0
+    assert result.metrics.command_reversal_count < result.metrics.command_count // 2

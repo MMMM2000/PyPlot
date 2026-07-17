@@ -196,11 +196,13 @@ CONTROL_LOGIC_FEATURES = [
     "immutable_force_control_profile",
     "prague_legacy_force_control_isolated",
     "kosice_adaptive_force_control_state_machine",
-    "kosice_observable_probe_escalation",
+    "kosice_bounded_sub_resolution_probe",
     "kosice_cumulative_load_position_gain_learning",
     "kosice_trend_aware_fast_force_estimator",
     "kosice_post_move_response_window",
-    "kosice_non_escalating_unobservable_retry",
+    "kosice_sub_resolution_response_continues_bounded_control",
+    "kosice_transformation_trend_prediction",
+    "kosice_confirmed_direction_reversal",
     "kosice_target_relative_command_cap",
     "kosice_held_current_gain_learning",
     "scale_readability_aware_auto_tolerance_floor",
@@ -4221,6 +4223,9 @@ class AsyncRunLogWriter:
     ) -> None:
         self._failure_callback: Callable[[str, Path, int, BaseException], None] | None = failure_callback
         self._overload_callback: Callable[[str], None] | None = overload_callback
+        # Keep writer deadlines independent from control-loop clock fakes and
+        # from any later module-level clock substitution.
+        self._monotonic = time.monotonic
         self._condition = Condition()
         self._queue: deque[AsyncLogWriteRequest] = deque()
         self._queued_bytes = 0
@@ -4401,10 +4406,10 @@ class AsyncRunLogWriter:
         return accepted
 
     def wait_until_idle(self, timeout_s: float = 2.0) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        deadline = self._monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             while self._queue or self._in_flight_request is not None:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._monotonic()
                 if remaining <= 0.0:
                     return False
                 self._condition.wait(timeout=remaining)
@@ -4418,7 +4423,7 @@ class AsyncRunLogWriter:
         *,
         generation: int | None = None,
     ) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        deadline = self._monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             target_generation = (
                 self._target_generation_locked(channel, path)
@@ -4447,7 +4452,7 @@ class AsyncRunLogWriter:
                 )
                 if not queued and not in_flight:
                     return True
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._monotonic()
                 if remaining <= 0.0:
                     return False
                 self._condition.wait(timeout=remaining)
@@ -4460,7 +4465,7 @@ class AsyncRunLogWriter:
         *,
         generation: int | None = None,
     ) -> AsyncLogTargetFlushResult:
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        deadline = self._monotonic() + max(0.0, float(timeout_s))
         with self._condition:
             target_generation = (
                 self._target_generation_locked(channel, path)
@@ -4491,7 +4496,7 @@ class AsyncRunLogWriter:
                     pending.append(self._in_flight_request)
                 if not pending:
                     break
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._monotonic()
                 if remaining <= 0.0:
                     break
                 self._condition.wait(timeout=remaining)
@@ -4578,7 +4583,7 @@ class AsyncRunLogWriter:
             )
 
     def stop(self, timeout_s: float = 1.0) -> bool:
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        deadline = self._monotonic() + max(0.0, float(timeout_s))
         overload_callback: Callable[[str], None] | None = None
         with self._condition:
             self._accepting = False
@@ -4587,7 +4592,7 @@ class AsyncRunLogWriter:
             self._queued_bytes = sum(self._request_bytes(request) for request in retained)
             self._condition.notify_all()
             while any(request.channel == "session" for request in self._queue):
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._monotonic()
                 if remaining <= 0.0:
                     break
                 self._condition.wait(timeout=remaining)
@@ -4611,7 +4616,7 @@ class AsyncRunLogWriter:
             overload_callback(
                 "TMA per-run log closed with queued session entries not written; metadata marks the run log incomplete."
             )
-        self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        self._thread.join(timeout=max(0.0, deadline - self._monotonic()))
         stopped = not self._thread.is_alive()
         return stopped
 
@@ -5200,7 +5205,6 @@ class MiniDmaControlConfig:
     current_sweep_tolerance: float
     current_sweep_nudge_mm: float
     current_sweep_balance_speed_mm_s: float
-    current_sweep_max_seek_mm: float
     supply_profile_id: str
     supply_current_resolution_mA: float
     motor_supply_enabled: bool
@@ -7527,9 +7531,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_control_loop: AutomationControlLoop | None = None
         self._automation_control_error: str | None = None
         self._active_control_config: MiniDmaControlConfig | None = None
-        self._bench_allow_mechanical_slack_takeup = False
-        self._bench_mechanical_slack_max_seek_mm: float | None = None
-        self._bench_mechanical_slack_takeup_logged_keys: set[tuple[str, int | None, float]] = set()
         self._recovery_plot_dialog: QtWidgets.QDialog | None = None
         self._recovery_plot: PyqtGraphPlotBundle | None = None
         self._recovery_plot_widget: Any | None = None
@@ -7912,7 +7913,6 @@ class MainWindow(QtWidgets.QMainWindow):
             current_sweep_tolerance=float(self.spin_current_sweep_tolerance.value()),
             current_sweep_nudge_mm=float(self.spin_current_sweep_nudge_mm.value()),
             current_sweep_balance_speed_mm_s=float(self.spin_current_sweep_balance_speed_mm_s.value()),
-            current_sweep_max_seek_mm=self._current_sweep_config_max_seek_mm(),
             supply_profile_id=str(self.combo_supply_profile.currentData() or "hmp4030"),
             supply_current_resolution_mA=supply_resolution,
             motor_supply_enabled=self.check_motor_supply_power.isChecked(),
@@ -7921,26 +7921,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _control_config(self) -> MiniDmaControlConfig | None:
         return self._active_control_config
-
-    def _current_sweep_config_max_seek_mm(self) -> float:
-        value = float(self.spin_current_sweep_max_seek_mm.value())
-        override = getattr(self, "_bench_mechanical_slack_max_seek_mm", None)
-        if bool(getattr(self, "_bench_allow_mechanical_slack_takeup", False)) and override is not None:
-            value = max(value, float(override))
-        return value
-
-    def set_bench_mechanical_slack_takeup(
-        self,
-        *,
-        allow: bool,
-        max_seek_mm: float | None = None,
-    ) -> None:
-        self._bench_allow_mechanical_slack_takeup = bool(allow)
-        self._bench_mechanical_slack_max_seek_mm = None if max_seek_mm is None else max(
-            self._motor_step_mm(),
-            float(max_seek_mm),
-        )
-        self._bench_mechanical_slack_takeup_logged_keys.clear()
 
     def _show_timing_settings_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -10155,18 +10135,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_balance_speed_mm_s.setVisible(False)
         if current_balance_label is not None:
             current_balance_label.setVisible(False)
-        self.spin_current_sweep_max_seek_mm = CompactDoubleSpinBox(automation_box)
-        self.spin_current_sweep_max_seek_mm.setDecimals(3)
-        self.spin_current_sweep_max_seek_mm.setRange(0.01, 100.0)
-        self.spin_current_sweep_max_seek_mm.setValue(3.0)
-        self.spin_current_sweep_max_seek_mm.setSuffix(" mm")
-        self.spin_current_sweep_max_seek_mm.setToolTip(
-            "Maximum tensile-stage travel allowed while seeking one target before stopping as no-response."
-        )
-        self.spin_current_sweep_max_seek_mm.setVisible(False)
-        current_max_seek_label = current_sweep_form.labelForField(self.spin_current_sweep_max_seek_mm)
-        if current_max_seek_label is not None:
-            current_max_seek_label.setVisible(False)
         self.spin_current_sweep_interval = QtWidgets.QSpinBox(automation_box)
         self.spin_current_sweep_interval.setRange(50, 60000)
         self.spin_current_sweep_interval.setValue(250)
@@ -10878,7 +10846,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_tolerance,
             self.spin_current_sweep_nudge_mm,
             self.spin_current_sweep_balance_speed_mm_s,
-            self.spin_current_sweep_max_seek_mm,
             self.spin_current_sweep_first_overheating_target_mpa,
             self.spin_current_sweep_first_overheating_end_mA,
             self.spin_current_sweep_interval,
@@ -18916,14 +18883,6 @@ class MainWindow(QtWidgets.QMainWindow):
         return speed * interval_s
 
     def _seek_max_travel_mm(self) -> float:
-        config = self._control_config()
-        if self._is_current_sweep_mode(self._automation_name):
-            max_seek_mm = (
-                config.current_sweep_max_seek_mm
-                if config is not None
-                else float(self.spin_current_sweep_max_seek_mm.value())
-            )
-            return max(self._motor_step_mm(), max_seek_mm)
         if self._is_calibration_mode(self._automation_name):
             return max(self._motor_step_mm(), self._seek_nudge_mm() * 100.0)
         return max(self._motor_step_mm(), self._seek_nudge_mm() * 30.0)
@@ -19010,6 +18969,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if (
             self._is_current_sweep_mode(self._automation_name)
             and basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+            and self._automation_phase != "target_ramp"
         ):
             stiffness = max(valid_stiffness)
         else:
@@ -19304,11 +19264,11 @@ class MainWindow(QtWidgets.QMainWindow):
         target_value = float(seek_key[2])
         previous_error = float(previous_value) - target_value
         current_error = float(current_value) - target_value
-        if previous_error * current_error <= 0.0:
+        if previous_error * current_error <= 0.0 and self._automation_phase != "target_ramp":
             return
         improvement = abs(previous_error) - abs(current_error)
         improvement_floor = max(abs(previous_error) * 0.02, 1e-9)
-        if improvement <= improvement_floor:
+        if improvement <= improvement_floor and self._automation_phase != "target_ramp":
             return
         load_stiffness = self._load_stiffness_from_basis_sensitivity(basis, delta_value / delta_position)
         if load_stiffness is None:
@@ -19656,14 +19616,6 @@ class MainWindow(QtWidgets.QMainWindow):
             or filtered_signal is None
         ):
             return None
-        if self._current_sweep_hold_volatile_containment_active(
-            basis,
-            error_value,
-            tolerance,
-            filtered_signal,
-            seek_key=seek_key,
-        ):
-            return None
         if float(previous_error) * float(error_value) <= 0.0:
             return None
         slope = float(filtered_signal.slope_per_s)
@@ -19748,42 +19700,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if hard_cap_mm <= minimum_escape_mm:
             return None
         return max(self._motor_step_mm(), hard_cap_mm)
-
-    def _current_sweep_travel_limit_exceeded(
-        self,
-        seek_key: tuple[str, int, float],
-        next_travel_mm: float,
-    ) -> bool:
-        return False
-
-    def _stop_for_current_sweep_travel_limit(
-        self,
-        seek_key: tuple[str, int, float],
-        next_travel_mm: float,
-    ) -> None:
-        limit_mm = self._seek_max_travel_mm()
-        current_travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
-        total_travel_mm = current_travel_mm + abs(float(next_travel_mm))
-        detail = (
-            "Closed-loop load/stress correction exceeded the correction travel limit "
-            f"for {seek_key[0]} target {seek_key[2]:.6g}"
-            f"{'' if seek_key[1] is None else f' plateau {seek_key[1]}'}: "
-            f"{_format_compact_unit(total_travel_mm, 'mm')} > "
-            f"{_format_compact_unit(limit_mm, 'mm')} "
-            f"(previous {_format_compact_unit(current_travel_mm, 'mm')}, "
-            f"next {_format_compact_unit(abs(float(next_travel_mm)), 'mm')})."
-        )
-        self._log(
-            "Recipe stopped because closed-loop load/stress correction exceeded the "
-            f"correction travel limit ({_format_compact_unit(total_travel_mm, 'mm')} "
-            f"> {_format_compact_unit(limit_mm, 'mm')})."
-        )
-        self._stop_auto_ramp(
-            log_completion=False,
-            offer_recovery=True,
-            stop_reason="correction_travel_limit",
-            stop_detail=detail,
-        )
 
     def _clear_seek_state(self, seek_key: tuple[str, int, float]) -> None:
         self._seek_last_error_by_key.pop(seek_key, None)
@@ -19924,25 +19840,44 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(samples) < 3:
             return None
         loads = [float(sample.applied_load_g) for sample in samples]
-        mean_time = sum(sample.timestamp_s for sample in samples) / len(samples)
-        mean_load = sum(loads) / len(loads)
-        denominator = sum((sample.timestamp_s - mean_time) ** 2 for sample in samples)
-        slope_load_s = 0.0
-        if denominator > 0.0:
-            slope_load_s = sum(
-                (sample.timestamp_s - mean_time) * (load - mean_load)
-                for sample, load in zip(samples, loads, strict=False)
-            ) / denominator
+        raw_center = statistics.median(loads)
+        raw_mad = statistics.median(abs(load - raw_center) for load in loads)
+        readability_g = self._scale_readability_g() or 0.0
+        outlier_limit_g = max(6.0 * raw_mad, 3.0 * readability_g)
+        inlier_indices = [
+            index
+            for index, load in enumerate(loads)
+            if abs(load - raw_center) <= outlier_limit_g
+        ]
+        if len(inlier_indices) >= 3:
+            trend_samples = [samples[index] for index in inlier_indices]
+            trend_loads = [loads[index] for index in inlier_indices]
+        else:
+            trend_samples = samples
+            trend_loads = loads
+        # Median pairwise slope is insensitive to an isolated scale spike while
+        # retaining the zero-lag endpoint estimate needed during transformation.
+        pairwise_slopes = [
+            (trend_loads[j] - trend_loads[i])
+            / (
+                float(trend_samples[j].timestamp_s)
+                - float(trend_samples[i].timestamp_s)
+            )
+            for i in range(len(trend_samples) - 1)
+            for j in range(i + 1, len(trend_samples))
+            if float(trend_samples[j].timestamp_s) > float(trend_samples[i].timestamp_s)
+        ]
+        slope_load_s = statistics.median(pairwise_slopes) if pairwise_slopes else 0.0
         if trend_aware:
             latest_time = float(samples[-1].timestamp_s)
             endpoint_candidates = [
                 load - slope_load_s * (sample.timestamp_s - latest_time)
-                for sample, load in zip(samples, loads, strict=False)
+                for sample, load in zip(trend_samples, trend_loads, strict=False)
             ]
             filtered_load = statistics.median(endpoint_candidates)
             residuals = [
                 load - (filtered_load + slope_load_s * (sample.timestamp_s - latest_time))
-                for sample, load in zip(samples, loads, strict=False)
+                for sample, load in zip(trend_samples, trend_loads, strict=False)
             ]
             residual_center = statistics.median(residuals)
             deviations = [abs(value - residual_center) for value in residuals]
@@ -19985,7 +19920,10 @@ class MainWindow(QtWidgets.QMainWindow):
             allowed_phases |= {"target_ramp", "settle"}
         if self._automation_phase not in allowed_phases:
             return None
-        return self._scale_control_signal_for_basis(basis)
+        return self._scale_control_signal_for_basis(
+            basis,
+            trend_aware=self._is_current_sweep_mode(self._automation_name),
+        )
 
     def _current_sweep_filtered_window_spans_target(
         self,
@@ -20312,15 +20250,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _seek_supports_cruise_feedback(self, basis: str) -> bool:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return False
-        if self._is_current_sweep_mode(self._automation_name):
-            return False
         if self._automation_step_note == "setup_preload":
             return False
         if self._automation_step_note == "setup_return_zero" or self._is_recovery_mode():
             return False
         if self._end_zero_fallback_armed:
             return False
-        if self._is_current_sweep_mode(self._automation_name) and self._automation_phase != "current":
+        if (
+            self._is_current_sweep_mode(self._automation_name)
+            and self._automation_phase != "current"
+        ):
             return False
         if self._is_calibration_mode(self._automation_name) and self._automation_step_note != "setup_preload":
             return False
@@ -20851,7 +20790,10 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return max(
             self._motor_step_mm(),
-            min(self._seek_max_travel_mm(), abs(float(speed_mm_s)) * command_window_s),
+            min(
+                self._current_sweep_max_correction_mm(),
+                abs(float(speed_mm_s)) * command_window_s,
+            ),
         )
 
     def _seek_distribution_target_kosice(
@@ -20972,6 +20914,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ),
                 context_key=self._kosice_force_control_context_key(basis, target_value),
                 response_observation_complete=response_observation_complete,
+                filtered_slope_g_s=float(signal.slope_per_s),
             )
         )
         error_value = target_value - float(current_basis_value)
@@ -21518,7 +21461,7 @@ class MainWindow(QtWidgets.QMainWindow):
             previous_error,
             delta_value,
             effective_tolerance,
-        )
+        ) and self._automation_phase != "current_hold"
         if overshot_target:
             if self._automation_phase == "current_hold":
                 self._note_current_sweep_hold_instability(seek_key)
@@ -21653,32 +21596,28 @@ class MainWindow(QtWidgets.QMainWindow):
                         "using a bounded dynamic recovery correction."
                     )
                 else:
-                    count = self._seek_no_response_count_by_key.get(seek_key, 0) + 1
-                    self._seek_no_response_count_by_key[seek_key] = count
                     if self._automation_phase == "current_hold":
-                        self._note_current_sweep_hold_instability(seek_key)
-                        if count >= 2:
-                            self._note_current_sweep_hold_instability(seek_key)
-                        current_hold_correction_reason = "current_hold_worsened_single_step"
-                    travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
-                    self._log(
-                        f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
-                        f"from target ({count}; correction travel {_format_compact_unit(travel_mm, 'mm')})."
-                    )
+                        self._seek_no_response_count_by_key[seek_key] = 0
+                        current_hold_correction_reason = "current_hold_disturbance_tracking"
+                        self._log(
+                            "Current-hold error continued away from target after a correctly "
+                            "directed correction; treating the net change as transformation/thermal "
+                            "disturbance and continuing bounded recovery."
+                        )
+                    else:
+                        count = self._seek_no_response_count_by_key.get(seek_key, 0) + 1
+                        self._seek_no_response_count_by_key[seek_key] = count
+                        travel_mm = self._seek_travel_by_key.get(seek_key, 0.0)
+                        self._log(
+                            f"Closed-loop feedback warning: {HSW_BASIS_LABELS.get(basis, basis)} moved away "
+                            f"from target ({count}; correction travel {_format_compact_unit(travel_mm, 'mm')})."
+                        )
             else:
                 self._seek_no_response_count_by_key[seek_key] = 0
                 self._note_current_sweep_hold_stable_response(seek_key)
         protective_current_hold_single_step = False
-        if (
-            current_hold_correction_reason
-            in {"current_hold_reversal_single_step", "current_hold_worsened_single_step"}
-        ):
+        if current_hold_correction_reason == "current_hold_reversal_single_step":
             nudge_mm = min(nudge_mm, self._motor_step_mm())
-            if current_hold_correction_reason == "current_hold_worsened_single_step":
-                self._log(
-                    "Closed-loop response worsened after the previous correction; "
-                    "using a protective single-step correction."
-                )
         elif (
             protective_single_step
             and not self._current_sweep_hold_fast_recovery_needed(basis, delta_value)
@@ -21731,11 +21670,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Current-hold response is still flagged unstable, but the last correction "
                     "reduced a persistent same-sign error; cautiously widening the next correction."
                 )
-            elif current_hold_correction_reason == "current_hold_drift_recovery":
+            elif (
+                current_hold_correction_reason == "current_hold_drift_recovery"
+                and current_hold_moving_away_fast
+            ):
                 current_hold_correction_reason = "current_hold_unstable_drift_recovery"
                 self._log(
                     "Current-hold response is still flagged unstable, but stress/load is drifting "
                     "away from target; keeping the bounded dynamic recovery correction."
+                )
+            elif (
+                current_hold_correction_reason == "current_hold_disturbance_tracking"
+                and current_hold_moving_away_fast
+            ):
+                self._log(
+                    "Current-hold response contains unresolved material disturbance; keeping the "
+                    "same correction direction without declaring motor instability."
                 )
             else:
                 nudge_mm = min(nudge_mm, self._motor_step_mm())
@@ -21764,22 +21714,6 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         ):
             backlash_takeup_mm = 0.0
-        if self._current_sweep_travel_limit_exceeded(seek_key, nudge_mm + backlash_takeup_mm):
-            self._stop_for_current_sweep_travel_limit(seek_key, nudge_mm + backlash_takeup_mm)
-            self._write_control_trace(
-                decision="wait",
-                basis=basis,
-                target_value=target_value,
-                current_value=current_value,
-                error_value=delta_value,
-                tolerance=effective_tolerance,
-                sensitivity_per_mm=self._basis_sensitivity_per_mm(basis, seek_key=seek_key),
-                correction_mm=nudge_mm,
-                backlash_mm=backlash_takeup_mm,
-                result="stopped",
-                reason="correction_travel_limit",
-            )
-            return False
         if not zero_return_needs_more_motion and not self._reverse_correction_is_worthwhile(
             basis,
             delta_value,
@@ -24180,7 +24114,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
                 "current_hold_min_resume_stress_mpa": self._current_sweep_hold_min_resume_stress_mpa(),
-                "max_correction_travel_mm": float(self.spin_current_sweep_max_seek_mm.value()),
             },
         }
 
@@ -24673,7 +24606,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "dynamic_balance_rate_gain": SERVO_CURRENT_SWEEP_RATE_GAIN,
                 "legacy_balancing_nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "legacy_balancing_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
-                "max_correction_travel_mm": float(self.spin_current_sweep_max_seek_mm.value()),
                 "legacy_interval_ms": int(self.spin_current_sweep_interval.value()),
                 "control_interval_ms": self._control_interval_ms(),
                 "log_interval_ms": self._log_interval_ms(),
@@ -26626,7 +26558,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tolerance": float(self.spin_current_sweep_tolerance.value()),
                 "nudge_mm": float(self.spin_current_sweep_nudge_mm.value()),
                 "balance_speed_mm_s": float(self.spin_current_sweep_balance_speed_mm_s.value()),
-                "max_seek_mm": float(self.spin_current_sweep_max_seek_mm.value()),
             }
         if self._is_constant_current_strain_sweep_mode(mode):
             payload["recipe"]["constant_current_stress_strain"] = {
@@ -26816,7 +26747,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_tolerance.setValue(float(current_sweep.get("tolerance", self.spin_current_sweep_tolerance.value())))
             self.spin_current_sweep_nudge_mm.setValue(float(current_sweep.get("nudge_mm", self.spin_current_sweep_nudge_mm.value())))
             self.spin_current_sweep_balance_speed_mm_s.setValue(float(current_sweep.get("balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())))
-            self.spin_current_sweep_max_seek_mm.setValue(float(current_sweep.get("max_seek_mm", self.spin_current_sweep_max_seek_mm.value())))
         constant_current = recipe.get("constant_current_stress_strain")
         if isinstance(constant_current, Mapping):
             basis = str(constant_current.get("start_basis", self._constant_current_start_basis()))
@@ -28408,7 +28338,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_current_sweep_tolerance,
             self.spin_current_sweep_nudge_mm,
             self.spin_current_sweep_balance_speed_mm_s,
-            self.spin_current_sweep_max_seek_mm,
             self.spin_current_sweep_interval,
             self.spin_current_sweep_log_interval,
         )
@@ -31125,7 +31054,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return float(current_value), 0.0
-        signal = self._scale_control_signal_for_basis(basis)
+        signal = self._scale_control_signal_for_basis(basis, trend_aware=True)
         if signal is None:
             return float(current_value), 0.0
         return signal.value, signal.noise
@@ -31430,7 +31359,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         signed_error, error_value, tolerance, noise_value = error_state
         filtered_signal = (
-            self._scale_control_signal_for_basis(step.basis)
+            self._scale_control_signal_for_basis(step.basis, trend_aware=True)
             if step.basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
             else None
         )
@@ -31439,15 +31368,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._current_sweep_hold_noise_independent_pause_band(step, tolerance),
             self._current_sweep_bounded_noise_band(step.basis, noise_value, tolerance),
         )
-        resume_window_spans_target = self._current_sweep_filtered_window_spans_target(
-            step.basis,
-            float(step.target_value),
-            tolerance,
-        )
-        if resume_window_spans_target:
-            resume_noise_band = max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
-        else:
-            resume_noise_band = 0.0
+        # Noise may lengthen confirmation, but it must not silently broaden the
+        # scientific stress criterion used to resume heating.
+        resume_noise_band = 0.0
         resume_band = max(
             tolerance * resume_factor,
             resume_noise_band,
@@ -31534,19 +31457,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if error_state is None:
             self._current_sweep_ramp_hold_in_band_since_s = None
             return False
-        signed_error, resume_error, tolerance, noise_value = error_state
-        filtered_signal = self._scale_control_signal_for_basis(step.basis)
+        signed_error, resume_error, tolerance, _noise_value = error_state
+        filtered_signal = self._scale_control_signal_for_basis(step.basis, trend_aware=True)
         resume_factor = self._current_sweep_hold_resume_factor(step)
-        resume_window_spans_target = self._current_sweep_filtered_window_spans_target(
-            step.basis,
-            float(step.target_value),
-            tolerance,
-        )
-        resume_noise_band = (
-            max(0.0, float(noise_value)) * self._current_sweep_hold_noise_sigma()
-            if resume_window_spans_target
-            else 0.0
-        )
+        resume_noise_band = 0.0
         resume_band = max(
             tolerance * resume_factor,
             resume_noise_band,
@@ -33362,7 +33276,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("current_sweep_tolerance", self.spin_current_sweep_tolerance.value())
         self.settings.setValue("current_sweep_nudge_mm", self.spin_current_sweep_nudge_mm.value())
         self.settings.setValue("current_sweep_balance_speed_mm_s", self.spin_current_sweep_balance_speed_mm_s.value())
-        self.settings.setValue("current_sweep_max_seek_mm", self.spin_current_sweep_max_seek_mm.value())
         self.settings.setValue("current_sweep_interval_ms", self._control_interval_ms())
         self.settings.setValue("current_sweep_log_interval_ms", self._log_interval_ms())
         self.settings.setValue("constant_current_start_basis", self._constant_current_start_basis())
@@ -34131,9 +34044,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_current_sweep_nudge_mm.setValue(float(self.settings.value("current_sweep_nudge_mm", 0.1)))
         self.spin_current_sweep_balance_speed_mm_s.setValue(
             max(0.001, float(self.settings.value("current_sweep_balance_speed_mm_s", 0.05)))
-        )
-        self.spin_current_sweep_max_seek_mm.setValue(
-            max(0.01, float(self.settings.value("current_sweep_max_seek_mm", 3.0)))
         )
         self.spin_current_sweep_interval.setValue(int(self.settings.value("current_sweep_interval_ms", 250)))
         self.spin_current_sweep_log_interval.setValue(int(self.settings.value("current_sweep_log_interval_ms", 500)))

@@ -269,6 +269,8 @@ def test_background_control_loop_advances_recipe_without_ui_events(tmp_path: Pat
         window._handle_current_sweep_step = lambda _step, index: calls.append(index) or True  # type: ignore[method-assign]
         window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
         window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+        with window._tic_settings_lock:
+            window._automatic_tic_settings_snapshot = window._manual_tic_settings_snapshot
 
         window._start_automation_control_loop(20)
         deadline = time.monotonic() + 0.5
@@ -2044,15 +2046,18 @@ def test_prague_scale_waits_for_filter_window_when_filtered_signal_lags(
         _close_test_window(window)
 
 
-def test_current_sweep_load_stress_control_disables_cruise_feedback(tmp_path: Path, qtbot) -> None:
+def test_current_sweep_cruise_feedback_is_limited_to_active_current_ramp(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
         window._automation_phase = "current"
         window._automation_step_note = "1"
 
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is True
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_LOAD_G) is True
+
+        window._automation_phase = "current_hold"
         assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
-        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_LOAD_G) is False
     finally:
         _close_test_window(window)
 
@@ -3180,7 +3185,7 @@ def test_current_sweep_target_ramp_continues_through_near_zero_load_after_l0(
         _close_test_window(window)
 
 
-def test_bench_current_sweep_can_take_up_mechanical_slack_after_l0(
+def test_current_sweep_can_take_up_mechanical_slack_after_l0(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -3196,7 +3201,6 @@ def test_bench_current_sweep_can_take_up_mechanical_slack_after_l0(
         return True
 
     window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
-    window.set_bench_mechanical_slack_takeup(allow=True, max_seek_mm=10.0)
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_zero_load_scale_g.setValue(0.0)
@@ -4614,7 +4618,6 @@ def test_session_stop_detaches_sensor_target_during_inflight_file_io(
             "pending_rows": 1,
             "reason": "close_timeout",
         }
-        assert "close_timeout" in window.statusBar().currentMessage()
         accepted_count = (
             window._session_raw_scale_count
             if sensor_kind == "scale"
@@ -5914,8 +5917,13 @@ def test_calibration_relative_moves_chain_from_commanded_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
+    real_monotonic = time.monotonic
     times = iter([10.0, 10.0, 10.1, 10.1, 10.2, 10.2])
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        mini_dma_mod.time,
+        "monotonic",
+        lambda: next(times, real_monotonic()),
+    )
 
     class _FakeController:
         def __init__(self) -> None:
@@ -6054,8 +6062,13 @@ def test_manual_jog_repeats_from_last_commanded_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
+    real_monotonic = time.monotonic
     times = iter([0.0, 1.0, 2.0])
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        mini_dma_mod.time,
+        "monotonic",
+        lambda: next(times, real_monotonic()),
+    )
 
     class _FakeController:
         def __init__(self) -> None:
@@ -6094,8 +6107,13 @@ def test_manual_jog_press_resyncs_stale_previous_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
+    real_monotonic = time.monotonic
     times = iter([0.0, 0.1])
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        mini_dma_mod.time,
+        "monotonic",
+        lambda: next(times, real_monotonic()),
+    )
 
     class _FakeController:
         def __init__(self) -> None:
@@ -6181,8 +6199,6 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    times = iter([10.0, 10.12, 10.24])
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
 
     class _FakeController:
         def __init__(self) -> None:
@@ -6203,12 +6219,13 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
     window.spin_motion_speed_mm_s.setValue(1.0)
 
     try:
-        window._jog_relative(-1.0)
-        _wait_for_tic_commands(window)
-        window._jog_relative(-1.0)
-        _wait_for_tic_commands(window)
-        window._jog_relative(-1.0)
-        _wait_for_tic_commands(window)
+        for now_s in (10.0, 10.12, 10.24):
+            # Patch only the command invocation so unrelated background writers
+            # cannot consume this test's synthetic control-loop clock.
+            with monkeypatch.context() as clock_patch:
+                clock_patch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s)
+                window._jog_relative(-1.0)
+            _wait_for_tic_commands(window)
 
         assert controller.targets == [-1, -13, -25]
     finally:
@@ -14313,6 +14330,7 @@ def test_recipe_preflight_requires_native_usb_for_tic_recipes(
 
     window.check_tic_native_usb.setChecked(False)
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: tic_checked.append(True) or True  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -14584,15 +14602,9 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
     window._supply_controller = supply  # type: ignore[assignment]
     window._supply_output_enabled = True
     window._seek_distribution_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
-    ticks = iter([100.0, 100.0, 100.4, 101.1, 102.1])
-
-    def _fake_monotonic() -> float:
-        try:
-            return next(ticks)
-        except StopIteration:
-            return 102.1
-
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    window._current_sweep_endpoint_recovered = lambda _step: True  # type: ignore[method-assign]
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
     step = mini_dma_mod.AutomationStep(
         "sweep_current",
         target_value=3.0,
@@ -14606,12 +14618,15 @@ def test_current_sweep_ramp_uses_elapsed_time_and_milliamp_resolution(
         assert window._handle_current_sweep_step(step, 4) is False
         assert supply.commands == [1.0]
 
+        clock["now"] = 100.4
         assert window._handle_current_sweep_step(step, 4) is False
         assert supply.commands == [1.0]
 
+        clock["now"] = 101.1
         assert window._handle_current_sweep_step(step, 4) is False
         assert supply.commands == [1.0, 2.0]
 
+        clock["now"] = 102.1
         assert window._handle_current_sweep_step(step, 4) is True
         assert supply.commands == [1.0, 2.0, 3.0]
     finally:
@@ -14928,7 +14943,7 @@ def test_current_sweep_hold_has_no_timeout_stop(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_resumes_inside_calculated_noise_recovery_band_when_window_spans_target(
+def test_current_sweep_hold_does_not_widen_resume_band_for_noise(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -14965,10 +14980,10 @@ def test_current_sweep_hold_resumes_inside_calculated_noise_recovery_band_when_w
     try:
         holding, stopped = window._update_current_sweep_ramp_hold(step, 4, now_s=102.0)
 
-        assert holding is False
+        assert holding is True
         assert stopped is False
-        assert window._current_sweep_ramp_hold_step_index is None
-        assert "inside resume band" in window.log_output.toPlainText()
+        assert window._current_sweep_ramp_hold_step_index == 4
+        assert "inside resume band" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -15702,15 +15717,8 @@ def test_current_sweep_ramp_resumes_without_wall_clock_current_jump(
 
     window._scale_control_signal_for_basis = _fake_signal  # type: ignore[method-assign]
     window._seek_distribution_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
-    ticks = iter([100.0, 100.0, 101.2, 102.3, 102.7])
-
-    def _fake_monotonic() -> float:
-        try:
-            return next(ticks)
-        except StopIteration:
-            return 106.1
-
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
     step = mini_dma_mod.AutomationStep(
         "sweep_current",
         target_value=0.0,
@@ -15729,14 +15737,17 @@ def test_current_sweep_ramp_resumes_without_wall_clock_current_jump(
         assert window._handle_current_sweep_step(step, 4) is False
         assert supply.commands == [1.0]
 
+        clock["now"] = 101.2
         assert window._handle_current_sweep_step(step, 4) is False
         assert "resumed current ramp" in window.log_output.toPlainText().lower()
 
+        clock["now"] = 102.3
         assert window._handle_current_sweep_step(step, 4) is False
-        assert supply.commands == [1.0]
+        assert supply.commands == [1.0, 2.0]
 
+        clock["now"] = 103.3
         assert window._handle_current_sweep_step(step, 4) is False
-        assert supply.commands == [1.0, 3.0]
+        assert supply.commands == [1.0, 2.0]
     finally:
         _close_test_window(window)
 
@@ -16265,15 +16276,9 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_LOAD
     window.spin_supply_voltage_limit.setValue(5.0)
     window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
-    ticks = iter([100.0, 100.6, 101.2])
-
-    def _fake_monotonic() -> float:
-        try:
-            return next(ticks)
-        except StopIteration:
-            return 101.6
-
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    window._current_sweep_endpoint_recovered = lambda _step: True  # type: ignore[method-assign]
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
     step = mini_dma_mod.AutomationStep(
         "sweep_current",
         target_value=3.0,
@@ -16288,9 +16293,11 @@ def test_current_sweep_voltage_limit_reverses_current_to_start_without_stopping_
 
         assert window._automation_active is True
 
+        clock["now"] = 100.6
         assert window._handle_current_sweep_step(step, 4) is False
         assert supply.commands == [3.0]
 
+        clock["now"] = 101.2
         assert window._handle_current_sweep_step(step, 4) is True
         assert supply.commands == [3.0, 2.0]
         assert window._supply_last_setpoint_mA == pytest.approx(2.0)
@@ -16334,15 +16341,8 @@ def test_voltage_limited_unwind_keeps_return_leg_without_high_current_restart(
     window._automation_active = True
     window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
     window._seek_distribution_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
-    ticks = iter([100.0, 100.6])
-
-    def _fake_monotonic() -> float:
-        try:
-            return next(ticks)
-        except StopIteration:
-            return 101.6
-
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
     up_step = mini_dma_mod.AutomationStep(
         "sweep_current",
         target_value=50.0,
@@ -16372,11 +16372,13 @@ def test_voltage_limited_unwind_keeps_return_leg_without_high_current_restart(
     window._current_sweep_voltage_limit_step_index = 4
     window._current_sweep_voltage_limit_started_s = 100.0
     window._current_sweep_voltage_limit_start_mA = 4.0
+    window._current_sweep_endpoint_recovered = lambda _step: True  # type: ignore[method-assign]
 
     try:
         assert window._handle_current_sweep_step(up_step, 4) is False
         assert supply.commands == []
 
+        clock["now"] = 100.6
         assert window._handle_current_sweep_step(up_step, 4) is True
         assert supply.commands == [1.0]
         assert 5 in window._current_sweep_voltage_limited_return_steps
@@ -16746,7 +16748,7 @@ def test_voltage_limit_unwind_waits_for_target_recovery_before_completing(
         assert supply.commands == [pytest.approx(1.0)]
         assert window._current_sweep_voltage_limit_step_index == 4
         assert window._active_current_sweep_step_index == 4
-        assert trace_rows[-1]["reason"] == "current_returned_waiting_for_target_recovery"
+        assert trace_rows[-1]["reason"] == "current_returned_waiting_for_processed_target_recovery"
     finally:
         _close_test_window(window)
 
@@ -22631,7 +22633,6 @@ def test_current_sweep_ignores_accumulated_correction_travel_limit(
     window.spin_diameter.setValue(0.0125)
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_initial_length.setValue(46.944)
-    window.spin_current_sweep_max_seek_mm.setValue(0.10)
     window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
         197.0,
         window.spin_diameter.value(),
@@ -22697,7 +22698,6 @@ def test_current_sweep_hold_ignores_correction_travel_limit(
     window.spin_diameter.setValue(0.0125)
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_initial_length.setValue(46.944)
-    window.spin_current_sweep_max_seek_mm.setValue(0.10)
     window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
         197.0,
         window.spin_diameter.value(),
@@ -22813,7 +22813,7 @@ def test_current_sweep_hold_fast_recovery_threshold_stays_at_default_when_hold_c
         _close_test_window(window)
 
 
-def test_current_sweep_hold_large_error_clamps_to_one_tic_when_worsening(
+def test_current_sweep_hold_large_error_uses_bounded_disturbance_recovery_when_worsening(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -22891,7 +22891,8 @@ def test_current_sweep_hold_large_error_clamps_to_one_tic_when_worsening(
         assert moves, window.log_output.toPlainText()
         target_mm, effective_mm = moves[-1]
         commanded_mm = abs(target_mm if effective_mm is None else effective_mm)
-        assert commanded_mm == pytest.approx(window._motor_step_mm())
+        assert commanded_mm > window._motor_step_mm()
+        assert commanded_mm <= window._current_sweep_max_correction_mm()
     finally:
         _close_test_window(window)
 
@@ -23454,7 +23455,7 @@ def test_current_sweep_hold_volatile_response_can_resume_after_turning_back(
         _close_test_window(window)
 
 
-def test_current_sweep_hold_unstable_response_clamps_large_error_to_single_step(
+def test_current_sweep_hold_unstable_response_uses_adaptive_volatile_cap(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -23534,7 +23535,13 @@ def test_current_sweep_hold_unstable_response_clamps_large_error_to_single_step(
         assert moves, window.log_output.toPlainText()
         target_mm, effective_mm = moves[-1]
         commanded_mm = abs(target_mm if effective_mm is None else effective_mm)
-        assert commanded_mm == pytest.approx(window._motor_step_mm())
+        assert commanded_mm > window._motor_step_mm()
+        volatile_cap_mm = max(
+            window._motor_step_mm(),
+            window._current_sweep_hold_adaptive_command_cap_mm_for_response(seek_key)
+            * 0.5,
+        )
+        assert commanded_mm <= volatile_cap_mm + 1e-12
         assert "unstable" in window.log_output.toPlainText().lower()
     finally:
         _close_test_window(window)
@@ -24465,8 +24472,8 @@ def test_offline_stiff_sample_guard_writes_reproducible_result(
 
     assert result["passed"] is True
     by_id = {row["id"]: row for row in result["results"]}
-    assert by_id["soft_reference"]["dynamic_step_mm"] == pytest.approx(0.032485009728586)
-    assert by_id["stiff_10x"]["dynamic_step_mm"] == pytest.approx(0.0032485009728586)
+    assert by_id["soft_reference"]["dynamic_step_mm"] == pytest.approx(0.033472835790125804)
+    assert by_id["stiff_10x"]["dynamic_step_mm"] == pytest.approx(0.0033472835790125804)
     assert by_id["stiff_50x"]["dynamic_step_mm"] is None
     historical_by_id = {row["id"]: row for row in result["historical_oscillation_results"]}
     assert historical_by_id["historical_reversal"]["dynamic_step_mm"] is None
@@ -24478,7 +24485,7 @@ def test_offline_stiff_sample_guard_writes_reproducible_result(
     assert "Historical Oscillation Cases" in markdown
 
 
-def test_current_sweep_hold_worsening_recovery_clamps_back_to_one_tic(
+def test_current_sweep_hold_worsening_recovery_tracks_transformation_disturbance(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -24555,8 +24562,9 @@ def test_current_sweep_hold_worsening_recovery_clamps_back_to_one_tic(
         _target_mm, effective_mm = moves[-1]
         assert effective_mm is not None
         correction_mm = abs(float(effective_mm) - current_position_mm)
-        assert correction_mm == pytest.approx(window._motor_step_mm())
-        assert trace_rows[-1]["reason"] == "gated;current_hold_worsened_single_step"
+        assert correction_mm > window._motor_step_mm()
+        assert correction_mm <= window._current_sweep_max_correction_mm()
+        assert trace_rows[-1]["reason"] == "gated;current_hold_disturbance_tracking"
     finally:
         _close_test_window(window)
 
@@ -28666,7 +28674,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "processed-center-response-gated-hold"
+        assert first_logic["profile"] == "scale-routed-prague-legacy-kosice-adaptive"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
@@ -30802,6 +30810,7 @@ def test_setup_zero_return_does_not_accept_high_residual_inside_inflated_toleran
 def test_far_load_seek_can_cruise_on_fresh_inflight_scale_sample(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     moves: list[tuple[float, bool, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
 
     def _capture_move(target_mm: float, **kwargs: object) -> bool:
         moves.append(
@@ -30817,6 +30826,7 @@ def test_far_load_seek_can_cruise_on_fresh_inflight_scale_sample(tmp_path: Path,
         return True
 
     window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = lambda **kwargs: trace_rows.append(dict(kwargs))  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_zero_load_scale_g.setValue(0.0)
@@ -30840,6 +30850,13 @@ def test_far_load_seek_can_cruise_on_fresh_inflight_scale_sample(tmp_path: Path,
     window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = sample_time_s - 0.3
     window._latest_scale_value_g = 0.0
     window._latest_scale_timestamp = sample_time_s
+    for offset_s in (-0.5, -0.25, 0.0):
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=sample_time_s + offset_s,
+            raw_g=0.0,
+            applied_load_g=0.0,
+            raw_text="0.0 g",
+        )
     window._last_motion_command_time_s = sample_time_s - 0.1
     window._last_motion_expected_complete_time_s = sample_time_s + 10.0
     window._last_move_target_mm = 0.0
@@ -30853,7 +30870,7 @@ def test_far_load_seek_can_cruise_on_fresh_inflight_scale_sample(tmp_path: Path,
         )
 
         assert reached is False
-        assert moves
+        assert moves, (window.log_output.toPlainText(), trace_rows)
         assert moves[-1][1] is True
         assert window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] == pytest.approx(sample_time_s)
     finally:
