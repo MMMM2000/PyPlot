@@ -1558,6 +1558,56 @@ def test_kern_scale_quantization_sets_worsening_evidence_floor(tmp_path: Path, q
         _close_test_window(window)
 
 
+def test_automatic_tolerance_respects_scale_readability_without_changing_prague(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.spin_diameter.setValue(0.0182)
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText(mini_dma_mod.GNG_SCALE_REQUEST)
+        window.edit_scale_terminator.setText("")
+        assert window._auto_requested_tolerance_for_basis(
+            mini_dma_mod.HSW_BASIS_LOAD_G
+        ) == pytest.approx(mini_dma_mod.SERVO_AUTO_TOLERANCE_LOAD_G)
+
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        assert window._auto_requested_tolerance_for_basis(
+            mini_dma_mod.HSW_BASIS_LOAD_G
+        ) == pytest.approx(mini_dma_mod.KERN_KCP_SCALE_READABILITY_G)
+        assert window._auto_requested_tolerance_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA
+        ) == pytest.approx(
+            window._scale_quantization_band_for_basis(
+                mini_dma_mod.HSW_BASIS_STRESS_MPA
+            )
+        )
+        assert "0.01 g scale/readability minimum" in window._auto_tolerance_summary_text(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_kosice_gain_learning_is_enabled_while_current_is_held(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        for phase in ("current", "current_limit_unwind"):
+            window._automation_phase = phase
+            assert window._kosice_force_control_current_changing() is True
+        for phase in ("current_hold", "target_ramp", "settle"):
+            window._automation_phase = phase
+            assert window._kosice_force_control_current_changing() is False
+    finally:
+        _close_test_window(window)
+
+
 def test_kern_scale_uses_conservative_fast_feedback_hold_caps(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:

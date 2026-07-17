@@ -54,6 +54,32 @@ def test_scaled_equivalent_plants_have_equivalent_dimensionless_metrics() -> Non
     )
 
 
+def test_held_current_recovery_learns_from_a_severely_low_initial_gain() -> None:
+    family = ForceControlPlantFamily(
+        name="held_current_gain_recovery",
+        load_scale_g=1.326,
+        load_per_mm_g=2.55,
+        initial_gain_ratio=0.18,
+        initial_load_normalized=0.82,
+        tolerance_normalized=0.008,
+        noise_normalized=0.008,
+        quantization_normalized=0.008,
+        response_delay_steps=2,
+        response_observation_steps=9,
+        disturbance_normalized=0.08,
+        disturbance_start_step=70,
+        disturbance_ramp_steps=8,
+        max_steps=500,
+    )
+
+    result = simulate_force_control_family(family)
+
+    assert result.metrics.completed is True
+    assert result.metrics.recovered is True
+    assert result.metrics.overlap_count == 0
+    assert result.metrics.command_count <= 10
+
+
 def test_delayed_transport_keeps_policy_commands_serialized() -> None:
     family = ForceControlPlantFamily(
         name="long-delay",

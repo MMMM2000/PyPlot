@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-17.1"
+CONTROL_LOGIC_VERSION = "2026-07-17.2"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -202,6 +202,8 @@ CONTROL_LOGIC_FEATURES = [
     "kosice_post_move_response_window",
     "kosice_non_escalating_unobservable_retry",
     "kosice_target_relative_command_cap",
+    "kosice_held_current_gain_learning",
+    "scale_readability_aware_auto_tolerance_floor",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -18819,31 +18821,37 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _auto_requested_tolerance_for_basis(self, basis: str | None) -> float:
+        readability_g = self._scale_readability_g()
+        load_tolerance_g = max(
+            SERVO_AUTO_TOLERANCE_LOAD_G,
+            0.0 if readability_g is None else abs(float(readability_g)),
+        )
         if basis == HSW_BASIS_LOAD_G:
-            return SERVO_AUTO_TOLERANCE_LOAD_G
+            return load_tolerance_g
         if basis == HSW_BASIS_STRESS_MPA:
             stress_tolerance = stress_mpa_from_load_g(
-                SERVO_AUTO_TOLERANCE_LOAD_G,
+                load_tolerance_g,
                 self._control_config().diameter_mm if self._control_config() is not None else float(self.spin_diameter.value()),
             )
             return 0.0 if stress_tolerance is None else abs(float(stress_tolerance))
         if basis == HSW_BASIS_STRAIN_PCT:
             return 0.0
-        return SERVO_AUTO_TOLERANCE_LOAD_G
+        return load_tolerance_g
 
     def _auto_tolerance_summary_text(self, basis: str | None) -> str:
         tolerance = self._auto_requested_tolerance_for_basis(basis)
+        load_tolerance_g = self._auto_requested_tolerance_for_basis(HSW_BASIS_LOAD_G)
         suffix, decimals = self._distribution_units(basis)
         if basis == HSW_BASIS_LOAD_G:
             return f"{_format_compact_number(tolerance)} g minimum"
         if basis == HSW_BASIS_STRESS_MPA:
             return (
                 f"{_format_compact_number(tolerance, decimals=decimals)}{suffix} "
-                f"from {_format_compact_number(SERVO_AUTO_TOLERANCE_LOAD_G)} g minimum"
+                f"from {_format_compact_number(load_tolerance_g)} g scale/readability minimum"
             )
         if basis == HSW_BASIS_STRAIN_PCT:
             return "motor-step/noise floor"
-        return f"{_format_compact_number(SERVO_AUTO_TOLERANCE_LOAD_G)} g minimum"
+        return f"{_format_compact_number(load_tolerance_g)} g minimum"
 
     def _distribution_target_reached(self, basis: str, target_value: float, tolerance: float) -> bool:
         current_value = self._current_distribution_value(basis)
@@ -20799,6 +20807,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return ForceControlIntent.ACQUIRE_TARGET
         return ForceControlIntent.HOLD_TARGET
 
+    def _kosice_force_control_current_changing(self) -> bool:
+        return self._automation_phase in {"current", "current_limit_unwind"}
+
     def _kosice_force_control_policy(self) -> ForceControlPolicy:
         if self._kosice_force_control is None:
             initial_gain = self._basis_sensitivity_per_mm(HSW_BASIS_LOAD_G)
@@ -20949,11 +20960,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_ramp_g_s=target_ramp_g_s,
                 ramp_active=self._automation_phase == "target_ramp",
                 current_mA=float(self._active_current_sweep_last_setpoint_mA or 0.0),
-                current_changing=self._automation_phase in {
-                    "current",
-                    "current_limit_unwind",
-                    "current_hold",
-                },
+                current_changing=self._kosice_force_control_current_changing(),
                 feedback_fresh=feedback_fresh,
                 motor_complete=self._kosice_motion_complete(),
                 timestamp_s=float(
