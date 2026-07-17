@@ -78,6 +78,7 @@ class ForceControlInput:
     motor_complete: bool
     timestamp_s: float
     context_key: str = "default"
+    response_observation_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +113,8 @@ class ForceControlConfig:
     initial_gain_relative_uncertainty: float = 0.25
     noise_sigma: float = 3.0
     response_sigma: float = 2.0
-    correction_fraction: float = 0.75
+    correction_fraction: float = 0.25
+    max_target_fraction_per_command: float = 0.10
     trajectory_feedforward_horizon_s: float = 0.20
     max_probe_attempts: int = 3
     probe_growth: float = 2.0
@@ -157,6 +159,10 @@ class ForceControlPolicy:
             raise ValueError("initial_load_per_mm_g must be positive")
         if config.max_probe_attempts < 1:
             raise ValueError("max_probe_attempts must be positive")
+        if not 0.0 < config.correction_fraction <= 1.0:
+            raise ValueError("correction_fraction must be in (0, 1]")
+        if not 0.0 < config.max_target_fraction_per_command <= 1.0:
+            raise ValueError("max_target_fraction_per_command must be in (0, 1]")
         self.config = config
         self.reset()
 
@@ -425,6 +431,13 @@ class ForceControlPolicy:
                 ForceControlAction.WAIT_FOR_MOTOR,
                 "trajectory_motor_active",
             )
+        if not inputs.response_observation_complete:
+            return self._decision(
+                inputs,
+                ForceControlState.TRACK_TRAJECTORY,
+                ForceControlAction.WAIT_FOR_SAMPLE,
+                "trajectory_response_window_pending",
+            )
         error_g = inputs.target_load_g - inputs.filtered_load_g
         deadband_g = self._deadband_g(inputs)
         ramp_feedforward_g = (
@@ -457,11 +470,46 @@ class ForceControlPolicy:
     ) -> ForceControlDecision:
         state = self._state_for_intent(inputs.intent)
         pending = self._pending
+        if pending is None and not inputs.motor_complete:
+            return self._decision(
+                inputs,
+                state,
+                ForceControlAction.WAIT_FOR_MOTOR,
+                "motor_active_before_landing",
+            )
+        if pending is None and not inputs.response_observation_complete:
+            return self._decision(
+                inputs,
+                state,
+                ForceControlAction.WAIT_FOR_SAMPLE,
+                "response_window_pending_before_landing",
+            )
         if pending is not None:
             if pending.intent is not inputs.intent:
                 self._pending = None
+                if not inputs.motor_complete:
+                    return self._decision(
+                        inputs,
+                        state,
+                        ForceControlAction.WAIT_FOR_MOTOR,
+                        "intent_changed_while_motor_active",
+                    )
+                if not inputs.response_observation_complete:
+                    return self._decision(
+                        inputs,
+                        state,
+                        ForceControlAction.WAIT_FOR_SAMPLE,
+                        "intent_changed_during_response_window",
+                    )
             elif not inputs.motor_complete:
                 return self._decision(inputs, state, ForceControlAction.WAIT_FOR_MOTOR, "pending_motor")
+            elif not inputs.response_observation_complete:
+                return self._decision(
+                    inputs,
+                    state,
+                    ForceControlAction.WAIT_FOR_SAMPLE,
+                    "response_window_pending",
+                )
             else:
                 response_g = observation.load_g - pending.start.load_g
                 moved_mm = observation.position_mm - pending.start.position_mm
@@ -478,6 +526,29 @@ class ForceControlPolicy:
                             ForceControlState.FAULT,
                             ForceControlAction.FAULT,
                             "response_unobservable",
+                        )
+                    error_g = inputs.target_load_g - inputs.filtered_load_g
+                    if abs(error_g) <= self._deadband_g(inputs):
+                        return self._decision(
+                            inputs,
+                            state,
+                            ForceControlAction.NONE,
+                            "response_arrived_inside_deadband",
+                        )
+                    correction = self._correction_for_error(inputs, error_g)
+                    if correction is not None:
+                        self._pending = _PendingCommand(
+                            inputs.intent,
+                            observation,
+                            correction,
+                            next_attempt,
+                        )
+                        return self._decision(
+                            inputs,
+                            state,
+                            ForceControlAction.MOVE_RELATIVE,
+                            "response_unobservable_bounded_retry",
+                            correction_mm=correction,
                         )
                     return self._request_probe(
                         inputs,
@@ -558,14 +629,25 @@ class ForceControlPolicy:
     def _state_for_intent(intent: ForceControlIntent) -> ForceControlState:
         return ForceControlState(intent.value)
 
-    @staticmethod
-    def _bounded_motion(value: float, inputs: ForceControlInput) -> float:
-        limited = max(-inputs.max_safe_correction_mm, min(inputs.max_safe_correction_mm, value))
+    def _bounded_motion(self, value: float, inputs: ForceControlInput) -> float:
+        command_limit = inputs.max_safe_correction_mm
+        gain = self.gain_estimate
+        if gain.load_per_mm_g is not None and gain.trusted:
+            target_relative_limit = (
+                abs(inputs.target_load_g)
+                / max(gain.load_per_mm_g, 1e-12)
+                * self.config.max_target_fraction_per_command
+            )
+            command_limit = min(
+                command_limit,
+                max(inputs.motor_resolution_mm, target_relative_limit),
+            )
+        limited = max(-command_limit, min(command_limit, value))
         if limited == 0.0:
             return 0.0
         steps = max(1, round(abs(limited) / inputs.motor_resolution_mm))
         quantized = math.copysign(steps * inputs.motor_resolution_mm, limited)
-        return max(-inputs.max_safe_correction_mm, min(inputs.max_safe_correction_mm, quantized))
+        return max(-command_limit, min(command_limit, quantized))
 
     def _decision(
         self,

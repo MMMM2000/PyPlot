@@ -81,7 +81,7 @@ def test_quantization_sets_deadband_and_minimum_informative_motion() -> None:
     assert decision.minimum_informative_motion_mm == pytest.approx(0.03)
 
 
-def test_unobservable_ten_micron_command_requests_informative_probe() -> None:
+def test_pending_command_waits_for_complete_response_observation_window() -> None:
     policy = _adaptive(gain=1.0)
     first = policy.decide(_input(target_load_g=0.913, filtered_load_g=0.9, current_load_g=0.9))
     assert first.action is ForceControlAction.MOVE_RELATIVE
@@ -95,44 +95,46 @@ def test_unobservable_ten_micron_command_requests_informative_probe() -> None:
             current_load_g=0.9,
             position_mm=0.01,
             timestamp_s=2.0,
+            response_observation_complete=False,
         )
     )
 
-    assert response.state is ForceControlState.PROBE_REQUIRED
-    assert response.action is ForceControlAction.PROBE_RELATIVE
-    assert response.reason == "response_unobservable_probe"
-    assert response.correction_mm == pytest.approx(0.02)
+    assert response.state is ForceControlState.ACQUIRE_TARGET
+    assert response.action is ForceControlAction.WAIT_FOR_SAMPLE
+    assert response.reason == "response_window_pending"
+    assert response.pending_response is True
 
 
-def test_no_response_grows_probe_but_never_exceeds_safe_bound() -> None:
+def test_no_response_retries_are_bounded_and_never_grow_geometrically() -> None:
     policy = _adaptive(gain=1.0, max_probe_attempts=4)
     policy.decide(_input(target_load_g=0.913, max_safe_correction_mm=0.05))
-    probe_one = policy.decide(
+    retry_one = policy.decide(
         _input(target_load_g=0.913, position_mm=0.01, timestamp_s=2.0, max_safe_correction_mm=0.05)
     )
-    probe_two = policy.decide(
-        _input(target_load_g=0.913, position_mm=0.03, timestamp_s=3.0, max_safe_correction_mm=0.05)
+    retry_two = policy.decide(
+        _input(target_load_g=0.913, position_mm=0.02, timestamp_s=3.0, max_safe_correction_mm=0.05)
     )
-    probe_three = policy.decide(
-        _input(target_load_g=0.913, position_mm=0.07, timestamp_s=4.0, max_safe_correction_mm=0.05)
+    retry_three = policy.decide(
+        _input(target_load_g=0.913, position_mm=0.03, timestamp_s=4.0, max_safe_correction_mm=0.05)
     )
 
-    sizes = [abs(item.correction_mm) for item in (probe_one, probe_two, probe_three)]
-    assert sizes == pytest.approx([0.02, 0.04, 0.05])
-    assert sizes == sorted(sizes)
-    assert all(size <= 0.25 for size in sizes)
+    retries = (retry_one, retry_two, retry_three)
+    assert all(item.action is ForceControlAction.MOVE_RELATIVE for item in retries)
+    assert all(item.reason == "response_unobservable_bounded_retry" for item in retries)
+    assert [abs(item.correction_mm) for item in retries] == pytest.approx([0.01, 0.01, 0.01])
 
 
-def test_no_response_probe_does_not_shrink_a_large_failed_command() -> None:
+def test_command_is_capped_relative_to_target_and_retry_does_not_escalate() -> None:
     policy = _adaptive(gain=1.0)
-    command = policy.decide(_input(target_load_g=1.04))
-    probe = policy.decide(
-        _input(target_load_g=1.04, position_mm=command.correction_mm, timestamp_s=2.0)
+    command = policy.decide(_input(target_load_g=1.4))
+    retry = policy.decide(
+        _input(target_load_g=1.4, position_mm=command.correction_mm, timestamp_s=2.0)
     )
 
-    assert command.correction_mm == pytest.approx(0.10)
-    assert probe.action is ForceControlAction.PROBE_RELATIVE
-    assert probe.correction_mm == pytest.approx(0.20)
+    assert command.correction_mm == pytest.approx(0.12)
+    assert command.correction_mm <= 0.14
+    assert retry.action is ForceControlAction.MOVE_RELATIVE
+    assert retry.correction_mm == pytest.approx(command.correction_mm)
 
 
 def test_tracking_has_no_pending_response_but_landing_serializes_commands() -> None:
@@ -169,6 +171,28 @@ def test_tracking_has_no_pending_response_but_landing_serializes_commands() -> N
     assert landing.pending_response is True
     assert waiting.action is ForceControlAction.WAIT_FOR_MOTOR
     assert waiting.pending_response is True
+
+
+def test_intent_change_does_not_issue_a_second_command_while_motor_is_active() -> None:
+    policy = _adaptive(gain=2.0)
+    first = policy.decide(
+        _input(intent=ForceControlIntent.ACQUIRE_TARGET, target_load_g=1.2)
+    )
+
+    changed = policy.decide(
+        _input(
+            intent=ForceControlIntent.HOLD_TARGET,
+            target_load_g=1.2,
+            timestamp_s=1.1,
+            motor_complete=False,
+            response_observation_complete=False,
+        )
+    )
+
+    assert first.action is ForceControlAction.MOVE_RELATIVE
+    assert changed.action is ForceControlAction.WAIT_FOR_MOTOR
+    assert changed.reason == "intent_changed_while_motor_active"
+    assert changed.correction_mm == 0.0
 
 
 def test_hold_deadband_uses_filtered_load_and_noise_floor() -> None:

@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-16.1"
+CONTROL_LOGIC_VERSION = "2026-07-17.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -198,6 +198,10 @@ CONTROL_LOGIC_FEATURES = [
     "kosice_adaptive_force_control_state_machine",
     "kosice_observable_probe_escalation",
     "kosice_cumulative_load_position_gain_learning",
+    "kosice_trend_aware_fast_force_estimator",
+    "kosice_post_move_response_window",
+    "kosice_non_escalating_unobservable_retry",
+    "kosice_target_relative_command_cap",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -417,6 +421,7 @@ KERN_KCP_SCALE_REQUEST = "SI"
 KERN_KCP_SCALE_TERMINATOR = "\\r\\n"
 KERN_KCP_SCALE_INTERVAL_MS = 50
 KERN_KCP_SCALE_READABILITY_G = 0.01
+KERN_FORCE_CONTROL_ESTIMATOR_SAMPLES = 9
 SCALE_QUANTIZATION_CHANGE_FACTOR = 0.75
 SCALE_QUANTIZATION_WORSENING_FACTOR = 1.5
 SCALE_NO_DATA_HINT_DELAY_MS = 3500
@@ -19885,7 +19890,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         return timestamp_s - float(since_s) >= SERVO_CURRENT_SWEEP_HOLD_CORRECTION_CONFIRM_S
 
-    def _scale_control_signal_for_basis(self, basis: str, *, window_s: float | None = None) -> ScaleControlSignal | None:
+    def _scale_control_signal_for_basis(
+        self,
+        basis: str,
+        *,
+        window_s: float | None = None,
+        trend_aware: bool = False,
+    ) -> ScaleControlSignal | None:
         if basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return None
         latest = self._scale_signal_buffer.latest()
@@ -19903,10 +19914,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(samples) < 3:
             return None
         loads = [float(sample.applied_load_g) for sample in samples]
-        median_load = statistics.median(loads)
-        deviations = [abs(value - median_load) for value in loads]
-        mad_load = statistics.median(deviations) if deviations else 0.0
-        robust_noise_load = 1.4826 * mad_load
         mean_time = sum(sample.timestamp_s for sample in samples) / len(samples)
         mean_load = sum(loads) / len(loads)
         denominator = sum((sample.timestamp_s - mean_time) ** 2 for sample in samples)
@@ -19916,9 +19923,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 (sample.timestamp_s - mean_time) * (load - mean_load)
                 for sample, load in zip(samples, loads, strict=False)
             ) / denominator
+        if trend_aware:
+            latest_time = float(samples[-1].timestamp_s)
+            endpoint_candidates = [
+                load - slope_load_s * (sample.timestamp_s - latest_time)
+                for sample, load in zip(samples, loads, strict=False)
+            ]
+            filtered_load = statistics.median(endpoint_candidates)
+            residuals = [
+                load - (filtered_load + slope_load_s * (sample.timestamp_s - latest_time))
+                for sample, load in zip(samples, loads, strict=False)
+            ]
+            residual_center = statistics.median(residuals)
+            deviations = [abs(value - residual_center) for value in residuals]
+        else:
+            filtered_load = statistics.median(loads)
+            deviations = [abs(value - filtered_load) for value in loads]
+        mad_load = statistics.median(deviations) if deviations else 0.0
+        robust_noise_load = 1.4826 * mad_load
         if basis == HSW_BASIS_LOAD_G:
             return ScaleControlSignal(
-                value=float(median_load),
+                value=float(filtered_load),
                 latest_value=float(loads[-1]),
                 noise=max(0.0, float(robust_noise_load)),
                 slope_per_s=float(slope_load_s),
@@ -19927,7 +19952,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         config = self._control_config()
         diameter_mm = config.diameter_mm if config is not None else float(self.spin_diameter.value())
-        median_stress = stress_mpa_from_load_g(float(median_load), diameter_mm)
+        median_stress = stress_mpa_from_load_g(float(filtered_load), diameter_mm)
         latest_stress = stress_mpa_from_load_g(float(loads[-1]), diameter_mm)
         noise_stress = stress_mpa_from_load_g(max(0.0, float(robust_noise_load)), diameter_mm)
         slope_stress = stress_mpa_from_load_g(float(slope_load_s), diameter_mm)
@@ -20785,6 +20810,25 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return self._kosice_force_control
 
+    def _kosice_force_control_estimator_window_s(self) -> float:
+        config = self._control_config()
+        interval_ms = (
+            config.scale_interval_ms
+            if config is not None
+            else int(self.spin_scale_interval.value())
+        )
+        return max(0.001, float(interval_ms) / 1000.0) * KERN_FORCE_CONTROL_ESTIMATOR_SAMPLES
+
+    def _kosice_response_observation_complete(self) -> bool:
+        ready_after_s = self._motion_feedback_ready_after_monotonic_s()
+        if ready_after_s is None:
+            return True
+        with self._scale_state_lock:
+            latest_arrival_s = self._latest_scale_arrival_monotonic_s
+        if latest_arrival_s is None:
+            return False
+        return latest_arrival_s >= ready_after_s + self._kosice_force_control_estimator_window_s()
+
     def _kosice_force_control_max_command_mm(self, speed_mm_s: float) -> float:
         config = self._control_config()
         filter_window_s = self._current_sweep_hold_filter_window_s()
@@ -20820,7 +20864,11 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return False
 
-        signal = self._scale_control_signal_for_basis(HSW_BASIS_LOAD_G)
+        signal = self._scale_control_signal_for_basis(
+            HSW_BASIS_LOAD_G,
+            window_s=self._kosice_force_control_estimator_window_s(),
+            trend_aware=True,
+        )
         target_load_g = self._basis_value_as_load_g(basis, target_value)
         tolerance_load_g = self._basis_value_as_load_g(basis, tolerance)
         if signal is None or target_load_g is None or tolerance_load_g is None:
@@ -20846,11 +20894,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         intent = self._kosice_force_control_intent()
         post_move_ready_after_s = self._motion_feedback_ready_after_monotonic_s()
+        response_observation_complete = self._kosice_response_observation_complete()
+        response_ready_after_s = (
+            None
+            if post_move_ready_after_s is None
+            else post_move_ready_after_s + self._kosice_force_control_estimator_window_s()
+        )
         feedback_fresh = self._has_fresh_scale_reading(
             after_monotonic_s=(
                 None
                 if intent is ForceControlIntent.TRACK_TRAJECTORY
-                else post_move_ready_after_s
+                else response_ready_after_s
             )
         )
         speed_mm_s = self._motion_speed_for_current_context(manual_jog=False)
@@ -20895,7 +20949,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_ramp_g_s=target_ramp_g_s,
                 ramp_active=self._automation_phase == "target_ramp",
                 current_mA=float(self._active_current_sweep_last_setpoint_mA or 0.0),
-                current_changing=self._automation_phase in {"current", "current_limit_unwind"},
+                current_changing=self._automation_phase in {
+                    "current",
+                    "current_limit_unwind",
+                    "current_hold",
+                },
                 feedback_fresh=feedback_fresh,
                 motor_complete=self._kosice_motion_complete(),
                 timestamp_s=float(
@@ -20904,6 +20962,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     else signal.timestamp_s
                 ),
                 context_key=self._kosice_force_control_context_key(basis, target_value),
+                response_observation_complete=response_observation_complete,
             )
         )
         error_value = target_value - float(current_basis_value)

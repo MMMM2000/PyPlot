@@ -43,6 +43,7 @@ class ForceControlPlantFamily:
     noise_normalized: float = 0.002
     quantization_normalized: float = 0.002
     response_delay_steps: int = 1
+    response_observation_steps: int = 4
     disturbance_normalized: float = 0.0
     disturbance_start_step: int = 45
     disturbance_ramp_steps: int = 6
@@ -76,6 +77,8 @@ class ForceControlPlantFamily:
             raise ValueError("initial_gain_ratio must be positive")
         if self.response_delay_steps < 1 or self.disturbance_ramp_steps < 1:
             raise ValueError("response delays must be positive")
+        if self.response_observation_steps < 0:
+            raise ValueError("response observation steps must be non-negative")
         if self.disturbance_start_step < 1 or self.max_steps < 1 or self.settle_samples < 1:
             raise ValueError("simulation step counts must be positive")
         return self
@@ -205,6 +208,7 @@ def simulate_force_control_family(
     position_mm = family.initial_load_normalized * family.load_scale_g / family.load_per_mm_g
     pending_command_mm = 0.0
     pending_steps = 0
+    observation_steps_remaining = 0
     command_count = 0
     overlap_count = 0
     max_commands_in_flight = 0
@@ -222,6 +226,9 @@ def simulate_force_control_family(
             if pending_steps == 0:
                 position_mm += pending_command_mm
                 pending_command_mm = 0.0
+                observation_steps_remaining = family.response_observation_steps
+        elif observation_steps_remaining > 0:
+            observation_steps_remaining -= 1
 
         if requires_recovery and step >= family.disturbance_start_step:
             fraction = min(
@@ -270,6 +277,7 @@ def simulate_force_control_family(
                 motor_complete=not command_in_flight,
                 timestamp_s=(step + 1) * family.sample_period_s,
                 context_key=family.name,
+                response_observation_complete=observation_steps_remaining == 0,
             )
         )
 
@@ -300,11 +308,19 @@ def simulate_force_control_family(
         )
 
         after_final_disturbance = not requires_recovery or step >= disturbance_end
-        if after_final_disturbance and abs(normalized_error) <= decision.effective_deadband_g / family.load_scale_g:
+        if (
+            after_final_disturbance
+            and abs(normalized_error)
+            <= decision.effective_deadband_g / family.load_scale_g + 1e-12
+        ):
             settled += 1
         else:
             settled = 0
-        if settled >= family.settle_samples and pending_steps == 0:
+        if (
+            settled >= family.settle_samples
+            and pending_steps == 0
+            and observation_steps_remaining == 0
+        ):
             completion_step = step
             if requires_recovery:
                 recovery_steps = step - disturbance_end + 1

@@ -4147,6 +4147,62 @@ def test_scale_signal_buffer_trims_old_samples() -> None:
     assert summary.raw_last_g == pytest.approx(2.0)
 
 
+def test_kosice_trend_aware_signal_tracks_latest_load_without_ramp_noise_inflation(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._scale_signal_buffer.clear()
+    try:
+        for index in range(10):
+            timestamp_s = 100.0 + index * 0.05
+            load_g = 0.1 * index
+            window._scale_signal_buffer.add_sample(
+                timestamp_s=timestamp_s,
+                raw_g=load_g,
+                applied_load_g=load_g,
+                raw_text=str(load_g),
+            )
+
+        ordinary = window._scale_control_signal_for_basis(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            window_s=0.45,
+        )
+        trend_aware = window._scale_control_signal_for_basis(
+            mini_dma_mod.HSW_BASIS_LOAD_G,
+            window_s=0.45,
+            trend_aware=True,
+        )
+
+        assert ordinary is not None and trend_aware is not None
+        assert ordinary.value == pytest.approx(0.45)
+        assert trend_aware.value == pytest.approx(0.9)
+        assert trend_aware.noise == pytest.approx(0.0, abs=1e-9)
+        assert trend_aware.slope_per_s == pytest.approx(2.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_kosice_response_waits_for_estimator_window_after_motor_completion(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.spin_scale_interval.setValue(50)
+        window._last_motion_command_monotonic_s = 10.0
+        window._last_motion_expected_complete_monotonic_s = 10.2
+        window._latest_scale_arrival_monotonic_s = 10.64
+
+        assert window._kosice_force_control_estimator_window_s() == pytest.approx(0.45)
+        assert window._kosice_response_observation_complete() is False
+
+        window._latest_scale_arrival_monotonic_s = 10.65
+        assert window._kosice_response_observation_complete() is True
+    finally:
+        _close_test_window(window)
+
+
 def test_scale_measurement_updates_freshness_off_ui_thread(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     timestamp_s = time.time()
