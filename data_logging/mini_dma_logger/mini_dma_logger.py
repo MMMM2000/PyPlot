@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-17.2"
+CONTROL_LOGIC_VERSION = "2026-07-17.3"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -204,6 +204,8 @@ CONTROL_LOGIC_FEATURES = [
     "kosice_target_relative_command_cap",
     "kosice_held_current_gain_learning",
     "scale_readability_aware_auto_tolerance_floor",
+    "kosice_joint_scale_motor_resolution_deadband",
+    "kosice_correlated_noise_hold_band",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -31278,24 +31280,28 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> tuple[float, float, float, float, float, float, ScaleControlSignal] | None:
         if step.target_value is None or step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}:
             return None
-        signal = self._scale_control_signal_for_basis(step.basis)
+        signal = self._scale_control_signal_for_basis(step.basis, trend_aware=True)
         if signal is None:
             return None
         signed_error = float(signal.value) - float(step.target_value)
         tolerance = max(1e-12, abs(float(self._automation_tolerance_for_step(step))))
         quantization = self._scale_quantization_band_for_basis(step.basis)
-        estimator_uncertainty = max(0.0, float(signal.noise)) / math.sqrt(max(1, signal.sample_count))
+        # Fast KERN samples are correlated and quantized, so dividing their
+        # observed fluctuation by sqrt(N) makes the control band unrealistically
+        # narrow.  The trend-aware residual MAD is the relevant disturbance
+        # amplitude for deciding whether the motor should intervene.
+        disturbance_band = max(0.0, float(signal.noise))
         pause_band = max(
             tolerance * self._current_sweep_hold_pause_factor(step),
             quantization,
-            estimator_uncertainty * self._current_sweep_hold_noise_sigma(),
+            disturbance_band * self._current_sweep_hold_noise_sigma(),
         )
         resume_band = min(
             pause_band,
             max(
                 tolerance * self._current_sweep_hold_resume_factor(step),
                 quantization,
-                estimator_uncertainty,
+                disturbance_band,
             ),
         )
         return (

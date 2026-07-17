@@ -77,20 +77,44 @@ def test_quantization_sets_deadband_and_minimum_informative_motion() -> None:
 
     assert decision.action is ForceControlAction.NONE
     assert decision.reason == "inside_deadband"
-    assert decision.effective_deadband_g == pytest.approx(0.02)
+    assert decision.effective_deadband_g == pytest.approx(0.03)
     assert decision.minimum_informative_motion_mm == pytest.approx(0.03)
+
+
+def test_prague_profile_keeps_the_legacy_measurement_deadband() -> None:
+    policy = ForceControlPolicy(
+        ForceControlConfig(
+            profile=ForceControlProfile.PRAGUE_LEGACY,
+            initial_load_per_mm_g=1.0,
+        )
+    )
+
+    decision = policy.decide(
+        _input(
+            intent=ForceControlIntent.HOLD_TARGET,
+            target_load_g=1.009,
+            current_load_g=1.0,
+            filtered_load_g=1.0,
+            robust_noise_g=0.001,
+            quantization_g=0.02,
+            readability_g=0.01,
+        )
+    )
+
+    assert decision.action is ForceControlAction.NONE
+    assert decision.effective_deadband_g == pytest.approx(0.02)
 
 
 def test_pending_command_waits_for_complete_response_observation_window() -> None:
     policy = _adaptive(gain=1.0)
-    first = policy.decide(_input(target_load_g=0.913, filtered_load_g=0.9, current_load_g=0.9))
+    first = policy.decide(_input(target_load_g=0.95, filtered_load_g=0.9, current_load_g=0.9))
     assert first.action is ForceControlAction.MOVE_RELATIVE
-    assert first.correction_mm == pytest.approx(0.01)
+    assert first.correction_mm == pytest.approx(0.02)
     assert first.pending_response is True
 
     response = policy.decide(
         _input(
-            target_load_g=0.913,
+            target_load_g=0.95,
             filtered_load_g=0.9,
             current_load_g=0.9,
             position_mm=0.01,
@@ -107,21 +131,52 @@ def test_pending_command_waits_for_complete_response_observation_window() -> Non
 
 def test_no_response_retries_are_bounded_and_never_grow_geometrically() -> None:
     policy = _adaptive(gain=1.0, max_probe_attempts=4)
-    policy.decide(_input(target_load_g=0.913, max_safe_correction_mm=0.05))
+    policy.decide(_input(target_load_g=0.95, max_safe_correction_mm=0.05))
     retry_one = policy.decide(
-        _input(target_load_g=0.913, position_mm=0.01, timestamp_s=2.0, max_safe_correction_mm=0.05)
+        _input(target_load_g=0.95, position_mm=0.02, timestamp_s=2.0, max_safe_correction_mm=0.05)
     )
     retry_two = policy.decide(
-        _input(target_load_g=0.913, position_mm=0.02, timestamp_s=3.0, max_safe_correction_mm=0.05)
+        _input(target_load_g=0.95, position_mm=0.04, timestamp_s=3.0, max_safe_correction_mm=0.05)
     )
     retry_three = policy.decide(
-        _input(target_load_g=0.913, position_mm=0.03, timestamp_s=4.0, max_safe_correction_mm=0.05)
+        _input(target_load_g=0.95, position_mm=0.06, timestamp_s=4.0, max_safe_correction_mm=0.05)
     )
 
     retries = (retry_one, retry_two, retry_three)
     assert all(item.action is ForceControlAction.MOVE_RELATIVE for item in retries)
     assert all(item.reason == "response_unobservable_bounded_retry" for item in retries)
-    assert [abs(item.correction_mm) for item in retries] == pytest.approx([0.01, 0.01, 0.01])
+    assert [abs(item.correction_mm) for item in retries] == pytest.approx([0.02, 0.02, 0.02])
+
+
+def test_unobservable_response_inside_achievable_deadband_does_not_fault() -> None:
+    policy = _adaptive(gain=0.9, max_probe_attempts=1)
+    first = policy.decide(
+        _input(
+            target_load_g=0.925,
+            filtered_load_g=0.9,
+            current_load_g=0.9,
+            quantization_g=0.01,
+            readability_g=0.01,
+        )
+    )
+    assert first.action is ForceControlAction.MOVE_RELATIVE
+    assert first.correction_mm == pytest.approx(0.02)
+
+    settled = policy.decide(
+        _input(
+            target_load_g=0.925,
+            filtered_load_g=0.908,
+            current_load_g=0.908,
+            position_mm=0.02,
+            timestamp_s=2.0,
+            quantization_g=0.01,
+            readability_g=0.01,
+        )
+    )
+
+    assert settled.action is ForceControlAction.NONE
+    assert settled.reason == "response_inside_achievable_deadband"
+    assert settled.effective_deadband_g == pytest.approx(0.018)
 
 
 def test_command_is_capped_relative_to_target_and_retry_does_not_escalate() -> None:
@@ -209,7 +264,7 @@ def test_hold_deadband_uses_filtered_load_and_noise_floor() -> None:
         )
     )
     assert decision.action is ForceControlAction.NONE
-    assert decision.effective_deadband_g == pytest.approx(0.015)
+    assert decision.effective_deadband_g == pytest.approx(0.02)
 
 
 def test_adaptive_gain_learns_from_observable_cumulative_windows() -> None:

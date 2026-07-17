@@ -315,12 +315,26 @@ class ForceControlPolicy:
         )
 
     def _deadband_g(self, inputs: ForceControlInput) -> float:
-        return max(
+        deadband = max(
             inputs.tolerance_g,
             inputs.quantization_g,
             inputs.readability_g,
             self.config.noise_sigma * inputs.robust_noise_g,
         )
+        if self.config.profile is not ForceControlProfile.KOSICE_ADAPTIVE:
+            return deadband
+        gain = self.gain_estimate
+        minimum_motion = self._minimum_informative_motion(
+            self._observation_floor_g(inputs),
+            inputs.motor_resolution_mm,
+            gain,
+        )
+        if minimum_motion is None or gain.load_per_mm_g is None:
+            return deadband
+        # Do not regulate more tightly than one load change that this scale and
+        # actuator can resolve together.  This scales with the live wire gain,
+        # scale readability, and motor resolution instead of a fixed load.
+        return max(deadband, minimum_motion * gain.load_per_mm_g)
 
     def _observation(self, inputs: ForceControlInput) -> _Observation:
         return _Observation(
@@ -519,6 +533,14 @@ class ForceControlPolicy:
                 )
                 self._pending = None
                 if not observable:
+                    error_g = inputs.target_load_g - inputs.filtered_load_g
+                    if abs(error_g) <= self._deadband_g(inputs):
+                        return self._decision(
+                            inputs,
+                            state,
+                            ForceControlAction.NONE,
+                            "response_inside_achievable_deadband",
+                        )
                     next_attempt = pending.probe_attempt + 1
                     if next_attempt > self.config.max_probe_attempts:
                         return self._decision(
@@ -526,14 +548,6 @@ class ForceControlPolicy:
                             ForceControlState.FAULT,
                             ForceControlAction.FAULT,
                             "response_unobservable",
-                        )
-                    error_g = inputs.target_load_g - inputs.filtered_load_g
-                    if abs(error_g) <= self._deadband_g(inputs):
-                        return self._decision(
-                            inputs,
-                            state,
-                            ForceControlAction.NONE,
-                            "response_arrived_inside_deadband",
                         )
                     correction = self._correction_for_error(inputs, error_g)
                     if correction is not None:
@@ -585,7 +599,18 @@ class ForceControlPolicy:
         if gain.load_per_mm_g is None or not gain.trusted:
             return None
         raw = error_g / gain.load_per_mm_g * self.config.correction_fraction
-        return self._bounded_motion(raw, inputs)
+        correction = self._bounded_motion(raw, inputs)
+        if self.config.profile is not ForceControlProfile.KOSICE_ADAPTIVE:
+            return correction
+        minimum = self._minimum_informative_motion(
+            self._observation_floor_g(inputs),
+            inputs.motor_resolution_mm,
+            gain,
+        )
+        if minimum is None or abs(correction) >= minimum:
+            return correction
+        informative = self._bounded_motion(math.copysign(minimum, error_g), inputs)
+        return informative if abs(informative) >= minimum else correction
 
     def _request_probe(
         self,

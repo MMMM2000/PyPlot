@@ -549,7 +549,7 @@ def test_kosice_force_profile_routes_current_sweep_to_adaptive_path(tmp_path: Pa
         _close_test_window(window)
 
 
-def test_kosice_hold_bands_derive_from_tolerance_quantization_and_uncertainty(
+def test_kosice_hold_bands_use_correlated_trend_removed_disturbance(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -566,7 +566,7 @@ def test_kosice_hold_bands_derive_from_tolerance_quantization_and_uncertainty(
         window._automation_tolerance_for_step = lambda _step: 0.02  # type: ignore[method-assign]
         window._scale_quantization_band_for_basis = lambda _basis: 0.01  # type: ignore[method-assign]
         window._current_sweep_hold_noise_sigma = lambda: 3.0  # type: ignore[method-assign]
-        window._scale_control_signal_for_basis = lambda _basis: mini_dma_mod.ScaleControlSignal(  # type: ignore[method-assign]
+        window._scale_control_signal_for_basis = lambda _basis, **_kwargs: mini_dma_mod.ScaleControlSignal(  # type: ignore[method-assign]
             value=1.05,
             latest_value=1.05,
             noise=0.04,
@@ -577,8 +577,8 @@ def test_kosice_hold_bands_derive_from_tolerance_quantization_and_uncertainty(
 
         state = window._kosice_current_sweep_error_bands(step)
         assert state is not None
-        assert state[4] == pytest.approx(0.04)
-        assert state[5] == pytest.approx(0.02)
+        assert state[4] == pytest.approx(0.12)
+        assert state[5] == pytest.approx(0.04)
     finally:
         _close_test_window(window)
 
@@ -23124,6 +23124,7 @@ def test_current_sweep_hold_volatile_response_keeps_waiting_while_still_rising(
     window._last_move_target_mm = 0.07
     window._last_effective_move_target_mm = 0.07
     window._last_motion_command_time_s = now_s - 1.5
+    window._last_tic_status_time_s = now_s - 1.0
     window._last_motion_expected_complete_time_s = now_s - 1.4
     for index, stress_mpa in enumerate([187.0, 218.0, 242.0, 271.0, 275.0]):
         load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
@@ -23223,6 +23224,7 @@ def test_kosice_current_sweep_hold_runaway_uses_adaptive_correction(
     window._last_move_target_mm = 0.07
     window._last_effective_move_target_mm = 0.07
     window._last_motion_command_time_s = now_s - 1.5
+    window._last_tic_status_time_s = now_s - 1.0
     window._last_motion_expected_complete_time_s = now_s - 1.4
     for index, stress_mpa in enumerate([70.0, 72.0, 74.0, 76.0, 78.0]):
         load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
@@ -23326,6 +23328,7 @@ def test_kosice_current_sweep_hold_high_noise_runaway_escapes_single_step(
     window._last_move_target_mm = 0.04
     window._last_effective_move_target_mm = 0.04
     window._last_motion_command_time_s = now_s - 1.5
+    window._last_tic_status_time_s = now_s - 1.0
     window._last_motion_expected_complete_time_s = now_s - 1.4
     for index, stress_mpa in enumerate([34.0, 32.0, 30.0, 29.0, 28.0]):
         load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
@@ -23409,6 +23412,7 @@ def test_current_sweep_hold_volatile_response_can_resume_after_turning_back(
     window._last_move_target_mm = 0.07
     window._last_effective_move_target_mm = 0.07
     window._last_motion_command_time_s = now_s - 1.5
+    window._last_tic_status_time_s = now_s - 1.0
     window._last_motion_expected_complete_time_s = now_s - 1.4
     for index, stress_mpa in enumerate([275.0, 242.0, 218.0, 187.0, 160.0]):
         load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
