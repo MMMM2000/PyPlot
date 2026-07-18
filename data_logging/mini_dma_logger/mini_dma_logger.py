@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-17.3"
+CONTROL_LOGIC_VERSION = "2026-07-18.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -208,6 +208,10 @@ CONTROL_LOGIC_FEATURES = [
     "scale_readability_aware_auto_tolerance_floor",
     "kosice_joint_scale_motor_resolution_deadband",
     "kosice_correlated_noise_hold_band",
+    "shared_tic_target_dispatch_receipts",
+    "shared_tic_target_acceptance_readback",
+    "tic_target_priority_over_coalesced_keepalive",
+    "kosice_exact_confirmed_motor_completion",
 ]
 CONTROL_TRACE_FIELDNAMES = [
     "elapsed_s",
@@ -243,6 +247,12 @@ CONTROL_TRACE_FIELDNAMES = [
     "gain_observable_windows",
     "gain_excluded_windows",
     "pending_response",
+    "motor_command_sequence",
+    "motor_command_state",
+    "tic_planning_mode",
+    "tic_target_position_steps",
+    "tic_current_position_steps",
+    "tic_current_velocity",
     "motor_step_mm",
     "correction_mm",
     "backlash_mm",
@@ -5466,6 +5476,17 @@ class NativeTicUsbController:
             if len(variables) >= 0x26
             else 0
         )
+        planning_mode = variables[0x09] if len(variables) > 0x09 else 0
+        target_position = (
+            int.from_bytes(variables[0x0A:0x0E], "little", signed=True)
+            if len(variables) >= 0x0E
+            else 0
+        )
+        current_velocity = (
+            int.from_bytes(variables[0x26:0x2A], "little", signed=True)
+            if len(variables) >= 0x2A
+            else 0
+        )
         vin_mv = int.from_bytes(variables[0x33:0x35], "little") if len(variables) >= 0x35 else 0
         step_mode_code = variables[0x49] if len(variables) > 0x49 else None
         current_limit_code = variables[0x4A] if len(variables) > 0x4A else None
@@ -5488,7 +5509,10 @@ class NativeTicUsbController:
             [
                 f"VIN voltage: {vin_mv / 1000.0:.2f} V",
                 f"Operation state: {operation_text}",
+                f"Planning mode: {planning_mode}",
+                f"Target position: {target_position}",
                 f"Current position: {current_position}",
+                f"Current velocity: {current_velocity}",
                 f"Max speed: {max_speed}",
                 f"Max acceleration: {max_accel}",
                 f"Max deceleration: {max_decel}",
@@ -5929,6 +5953,42 @@ class TicCommand:
     sequence: int = 0
 
 
+@dataclass(frozen=True)
+class TicCommandResult:
+    sequence: int
+    action: str
+    completed_time_s: float
+    completed_monotonic_s: float
+    error: Exception | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None
+
+
+@dataclass
+class PendingMotionCommand:
+    sequence: int
+    target_steps: int
+    target_mm: float
+    effective_target_mm: float
+    speed_mm_s: float
+    expected_duration_s: float
+    delta_tic_units: int
+    queued_time_s: float
+    queued_monotonic_s: float
+    use_last_target_as_motion_base: bool
+    dispatch_result: TicCommandResult | None = None
+
+    @property
+    def state(self) -> str:
+        if self.dispatch_result is None:
+            return "queued"
+        if not self.dispatch_result.succeeded:
+            return "dispatch_failed"
+        return "awaiting_tic_acceptance"
+
+
 class TicCommandDispatcher:
     def __init__(
         self,
@@ -5944,6 +6004,7 @@ class TicCommandDispatcher:
         self._busy = False
         self._sequence = 0
         self._last_error: Exception | None = None
+        self._command_results: dict[int, TicCommandResult] = {}
         self._thread: Thread | None = None
         if autostart:
             self.start()
@@ -5971,6 +6032,14 @@ class TicCommandDispatcher:
     def set_target_position(self, position_steps: int, max_speed: int | None = None) -> int:
         with self._condition:
             self._sequence += 1
+            previous = self._pending_target
+            if previous is not None:
+                self._record_result_locked(
+                    previous,
+                    RuntimeError(
+                        f"Tic target command {previous.sequence} was superseded before dispatch."
+                    ),
+                )
             self._pending_target = TicCommand(
                 action="target",
                 position_steps=int(position_steps),
@@ -6008,6 +6077,10 @@ class TicCommandDispatcher:
 
     def _enqueue_priority(self, command: TicCommand) -> None:
         with self._condition:
+            if command.action == "keepalive" and any(
+                queued.action == "keepalive" for queued in self._pending_commands
+            ):
+                return
             self._sequence += 1
             command.sequence = self._sequence
             if command.action == "halt":
@@ -6031,12 +6104,33 @@ class TicCommandDispatcher:
         with self._condition:
             return self._last_error
 
+    def command_result(self, sequence: int) -> TicCommandResult | None:
+        with self._condition:
+            return self._command_results.get(int(sequence))
+
+    def _record_result_locked(self, command: TicCommand, error: Exception | None) -> None:
+        self._command_results[command.sequence] = TicCommandResult(
+            sequence=command.sequence,
+            action=command.action,
+            completed_time_s=time.time(),
+            completed_monotonic_s=time.monotonic(),
+            error=error,
+        )
+        while len(self._command_results) > 256:
+            del self._command_results[next(iter(self._command_results))]
+        self._condition.notify_all()
+
     def _next_command(self) -> TicCommand | None:
+        for index, command in enumerate(self._pending_commands):
+            if command.action != "keepalive":
+                return self._pending_commands.pop(index)
+        if self._pending_target is not None:
+            command = self._pending_target
+            self._pending_target = None
+            return command
         if self._pending_commands:
             return self._pending_commands.pop(0)
-        command = self._pending_target
-        self._pending_target = None
-        return command
+        return None
 
     def _run(self) -> None:
         while True:
@@ -6054,6 +6148,7 @@ class TicCommandDispatcher:
                 command = self._next_command()
                 self._busy = command is not None
             if command is not None:
+                command_error: Exception | None = None
                 try:
                     with self._condition:
                         self._last_error = None
@@ -6067,10 +6162,12 @@ class TicCommandDispatcher:
                     elif command.action == "zero" and command.position_steps is not None:
                         controller.set_current_position(command.position_steps)
                 except Exception as exc:
+                    command_error = exc
                     with self._condition:
                         self._last_error = exc
                 finally:
                     with self._condition:
+                        self._record_result_locked(command, command_error)
                         self._busy = False
                         self._condition.notify_all()
 
@@ -7148,6 +7245,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automatic_tic_settings_snapshot: TicConnectionSettings | None = None
         self._recovery_tic_settings_snapshot: TicConnectionSettings | None = None
         self._tic_status_text = ""
+        self._tic_planning_mode: int | None = None
+        self._tic_target_position_steps: int | None = None
+        self._tic_current_velocity: int | None = None
         self._latest_scale_value_g = 0.0
         self._latest_scale_text = ""
         self._latest_scale_timestamp: float | None = None
@@ -7523,6 +7623,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_motion_command_monotonic_s: float | None = None
         self._last_motion_expected_complete_monotonic_s: float | None = None
         self._kosice_active_motion_target_steps: int | None = None
+        self._pending_motion_command: PendingMotionCommand | None = None
         self._last_commanded_speed_mm_s = 0.0
         self._last_tic_status_time_s: float | None = None
         self._last_feedback_wait_log_s = 0.0
@@ -12251,6 +12352,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tic_command_dispatcher_key = None
         if dispatcher is not None and hasattr(dispatcher, "stop"):
             dispatcher.stop()
+        self._pending_motion_command = None
         self._tic_controller = None
         self._tic_controller_key = None
 
@@ -21051,7 +21153,7 @@ class MainWindow(QtWidgets.QMainWindow):
             command_speed_mm_s=max(self._motor_step_mm(), float(speed_mm_s)),
             **{
                 **trace_kwargs,
-                "result": "move_sent" if moved else "move_blocked",
+                "result": "move_queued" if moved else "move_blocked",
             },
         )
         return False
@@ -21873,7 +21975,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 post_move_sample_count=0,
                 target_mm=target_mm,
                 effective_target_mm=effective_base_position_mm,
-                result="move_sent",
+                result="move_queued",
             )
             return False
         target_mm = base_position_mm + movement_direction * (nudge_mm + backlash_takeup_mm)
@@ -21944,7 +22046,7 @@ class MainWindow(QtWidgets.QMainWindow):
             post_move_sample_count=0,
             target_mm=target_mm,
             effective_target_mm=effective_target_mm,
-            result="move_sent",
+            result="move_queued",
             reason=correction_reason,
         )
         self._seek_last_error_by_key[seek_key] = delta_value
@@ -22813,20 +22915,30 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_position_steps = current_position
                 self._current_position_mm = current_position / float(self.spin_steps_per_mm.value())
                 self._last_tic_status_time_s = time.time()
-                if (
-                    self._kosice_active_motion_target_steps is not None
-                    # The Tic can settle one reported microstep beside the commanded
-                    # target.  Requiring exact equality permanently marked a finished
-                    # move as active and blocked every later Košice correction.
-                    and abs(current_position - self._kosice_active_motion_target_steps) <= 1
-                ):
-                    self._kosice_active_motion_target_steps = None
                 if previous_commanded_steps is not None and current_position == previous_commanded_steps:
                     self._effective_position_mm = self._last_effective_move_target_mm
                 elif not self._has_unconfirmed_motion_command():
                     self._effective_position_mm = self._current_position_mm
                 self._last_commanded_position_steps = current_position
         operation_state = _extract_status_value(status_text, "Operation state") or "unknown"
+        planning_mode_text = _extract_status_value(status_text, "Planning mode")
+        planning_mode = _extract_first_int(planning_mode_text) if planning_mode_text is not None else None
+        if planning_mode is None and planning_mode_text is not None:
+            normalized_planning_mode = planning_mode_text.strip().lower()
+            planning_mode = {
+                "off": 0,
+                "target position": 1,
+                "target velocity": 2,
+            }.get(normalized_planning_mode)
+        self._tic_planning_mode = planning_mode
+        target_position_text = _extract_status_value(status_text, "Target position")
+        self._tic_target_position_steps = (
+            None if target_position_text is None else _extract_first_int(target_position_text)
+        )
+        current_velocity_text = _extract_status_value(status_text, "Current velocity")
+        self._tic_current_velocity = (
+            None if current_velocity_text is None else _extract_first_int(current_velocity_text)
+        )
         errors = _extract_status_value(status_text, "Errors currently stopping the motor") or "none"
         vin_text = self._tic_vin_text(vin_v)
         summary = f"Operation state: {operation_state}\nVIN: {vin_text}\nErrors: {errors}"
@@ -22841,6 +22953,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"{operation_state} | {self._tensile_displacement_mm(self._effective_position_mm):.4f} mm tensile | VIN {vin_text}"
             )
         self.label_tic_summary.setText(summary)
+        self._reconcile_pending_motion_command_with_tic_status()
+        if (
+            self._kosice_active_motion_target_steps is not None
+            and self._current_position_steps == self._kosice_active_motion_target_steps
+            and self._tic_current_velocity in {None, 0}
+        ):
+            self._kosice_active_motion_target_steps = None
         self._refresh_tic_settings_summary()
         self._refresh_live_labels()
         self._status_timer.start(self._tic_status_interval_ms())
@@ -23165,6 +23284,125 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Tic command-timeout keepalive failed: {exc}")
                 self._tic_keepalive_warning_active = True
 
+    def _motion_target_confirmation_timeout_s(self) -> float:
+        return max(2.5, 2.5 * self._tic_status_interval_ms() / 1000.0)
+
+    def _pending_motion_command_state(self) -> str:
+        pending = self._pending_motion_command
+        return "idle" if pending is None else pending.state
+
+    def _cancel_unexecuted_force_control_move(self) -> None:
+        if self._kosice_force_control is not None:
+            self._kosice_force_control.cancel_pending()
+
+    def _fail_pending_motion_command(self, reason: str) -> None:
+        pending = self._pending_motion_command
+        if pending is None:
+            return
+        self._pending_motion_command = None
+        self._cancel_unexecuted_force_control_move()
+        if self._automation_basis is not None and self._automation_target_value is not None:
+            self._clear_seek_state(
+                self._seek_error_key(
+                    self._automation_basis,
+                    float(self._automation_target_value),
+                )
+            )
+        self._log(
+            f"Tic motor command {pending.sequence} to {pending.target_steps} units was not accepted: "
+            f"{reason}. The controller will retry from confirmed position "
+            f"{self._current_position_steps}."
+        )
+        self._write_control_trace(
+            decision="motor_command",
+            target_mm=pending.target_mm,
+            effective_target_mm=pending.effective_target_mm,
+            command_speed_mm_s=pending.speed_mm_s,
+            result="dispatch_failed" if pending.dispatch_result and not pending.dispatch_result.succeeded else "target_not_accepted",
+            reason=f"sequence_{pending.sequence}:{reason}",
+        )
+
+    def _poll_pending_motion_dispatch(self) -> None:
+        pending = self._pending_motion_command
+        if pending is None or pending.dispatch_result is not None:
+            return
+        dispatcher = self._tic_command_dispatcher
+        result_getter = getattr(dispatcher, "command_result", None)
+        if not callable(result_getter):
+            return
+        result = result_getter(pending.sequence)
+        if result is None:
+            return
+        pending.dispatch_result = result
+        if not result.succeeded:
+            self._fail_pending_motion_command(str(result.error or "unknown dispatch failure"))
+        elif hasattr(self, "_status_timer"):
+            self._status_timer.start(0)
+
+    def _confirm_pending_motion_command(self) -> None:
+        pending = self._pending_motion_command
+        if pending is None or pending.dispatch_result is None:
+            return
+        result = pending.dispatch_result
+        self._pending_motion_command = None
+        self._last_motion_command_time_s = result.completed_time_s
+        self._last_motion_command_monotonic_s = result.completed_monotonic_s
+        self._last_motion_expected_complete_time_s = (
+            result.completed_time_s + pending.expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        )
+        self._last_motion_expected_complete_monotonic_s = (
+            result.completed_monotonic_s
+            + pending.expected_duration_s
+            + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        )
+        self._kosice_active_motion_target_steps = pending.target_steps
+        self._last_commanded_speed_mm_s = pending.speed_mm_s
+        self._last_commanded_position_steps = pending.target_steps
+        self._last_effective_move_target_mm = pending.effective_target_mm
+        self._last_move_target_mm = pending.target_mm
+        if pending.delta_tic_units != 0:
+            self._last_move_direction = math.copysign(1.0, pending.delta_tic_units)
+        self._manual_jog_uses_last_target = pending.use_last_target_as_motion_base
+        self._log(
+            f"Tic accepted motor command {pending.sequence}: target {pending.target_steps} units "
+            f"confirmed by readback."
+        )
+        self._write_control_trace(
+            decision="motor_command",
+            target_mm=pending.target_mm,
+            effective_target_mm=pending.effective_target_mm,
+            command_speed_mm_s=pending.speed_mm_s,
+            result="target_accepted",
+            reason=f"sequence_{pending.sequence}",
+        )
+
+    def _reconcile_pending_motion_command_with_tic_status(self) -> None:
+        self._poll_pending_motion_dispatch()
+        pending = self._pending_motion_command
+        if pending is None or pending.dispatch_result is None:
+            return
+        result = pending.dispatch_result
+        if not result.succeeded:
+            return
+        target_matches = self._tic_target_position_steps == pending.target_steps
+        planning_mode_matches = self._tic_planning_mode in {None, 1}
+        if target_matches and planning_mode_matches:
+            self._confirm_pending_motion_command()
+            return
+        status_after_dispatch = (
+            self._last_tic_status_time_s is not None
+            and self._last_tic_status_time_s >= result.completed_time_s
+        )
+        if (
+            status_after_dispatch
+            and time.monotonic() - result.completed_monotonic_s
+            >= self._motion_target_confirmation_timeout_s()
+        ):
+            self._fail_pending_motion_command(
+                "Tic readback still reports target "
+                f"{self._tic_target_position_steps} in planning mode {self._tic_planning_mode}"
+            )
+
     def _has_unconfirmed_motion_command(self) -> bool:
         return (
             self._last_motion_command_time_s is not None
@@ -23175,6 +23413,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _kosice_motion_complete(self) -> bool:
+        self._poll_pending_motion_dispatch()
+        if self._pending_motion_command is not None:
+            return False
         if self._kosice_active_motion_target_steps is not None:
             return False
         if (
@@ -23261,6 +23502,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_motion_command_monotonic_s = None
         self._last_motion_expected_complete_monotonic_s = None
         self._kosice_active_motion_target_steps = None
+        self._pending_motion_command = None
         self._last_commanded_speed_mm_s = 0.0
         self._last_commanded_position_steps = self._current_position_steps
         self._last_move_target_mm = self._current_position_mm
@@ -23427,7 +23669,70 @@ class MainWindow(QtWidgets.QMainWindow):
             f"target {_format_compact_unit(target_mm, 'mm')} ({target_steps} {target_unit_label})."
         )
 
+    def _queue_tic_motion_command(
+        self,
+        *,
+        target_steps: int,
+        target_mm: float,
+        effective_target_mm: float,
+        speed_mm_s: float,
+        expected_duration_s: float,
+        delta_tic_units: int,
+        max_speed_units: int,
+        use_last_target_as_motion_base: bool,
+    ) -> bool:
+        self._poll_pending_motion_dispatch()
+        if self._pending_motion_command is not None:
+            self._log_waiting_for_feedback(
+                "Waiting for the previous motor command to be dispatched and accepted by the Tic."
+            )
+            return False
+        dispatcher = self._build_tic_dispatcher()
+        try:
+            sequence_value = dispatcher.set_target_position(
+                target_steps,
+                max_speed=max_speed_units,
+            )
+        except Exception as exc:
+            if self._is_ui_thread():
+                QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to queue Tic move: {exc}")
+            else:
+                self._log(f"Failed to queue Tic move: {exc}")
+            return False
+
+        now_s = time.time()
+        monotonic_s = time.monotonic()
+        sequence = int(sequence_value) if isinstance(sequence_value, int) else 0
+        self._pending_motion_command = PendingMotionCommand(
+            sequence=sequence,
+            target_steps=int(target_steps),
+            target_mm=float(target_mm),
+            effective_target_mm=float(effective_target_mm),
+            speed_mm_s=float(speed_mm_s),
+            expected_duration_s=max(0.0, float(expected_duration_s)),
+            delta_tic_units=int(delta_tic_units),
+            queued_time_s=now_s,
+            queued_monotonic_s=monotonic_s,
+            use_last_target_as_motion_base=bool(use_last_target_as_motion_base),
+        )
+        result_getter = getattr(dispatcher, "command_result", None)
+        if not callable(result_getter):
+            # Synchronous test/legacy dispatchers have already executed the call.
+            self._pending_motion_command.dispatch_result = TicCommandResult(
+                sequence=sequence,
+                action="target",
+                completed_time_s=now_s,
+                completed_monotonic_s=monotonic_s,
+            )
+            self._confirm_pending_motion_command()
+        self._start_tic_keepalive()
+        self._refresh_live_labels()
+        return True
+
     def _move_relative_raw_tic_steps(self, delta_steps: int, *, speed_steps_per_s: float) -> bool:
+        self._poll_pending_motion_dispatch()
+        if self._pending_motion_command is not None:
+            return False
         if self._tic_motor_power_ok is False:
             vin_text = self._tic_vin_text()
             self._log(
@@ -23475,38 +23780,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         selected_speed_steps_per_s = max(1.0, abs(float(speed_steps_per_s)))
         max_speed_units = max(1, int(round(selected_speed_steps_per_s * 10000.0)))
-        try:
-            self._build_tic_dispatcher().set_target_position(target_steps, max_speed=max_speed_units)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to move Tic: {exc}")
-            return False
-
         selected_speed_mm_s = selected_speed_steps_per_s / steps_per_mm
         expected_duration_s = self._move_duration_s(delta_steps / steps_per_mm, selected_speed_mm_s)
         self._log(
             f"Raw-step move command sent to {target_steps} steps "
             f"({delta_steps:+d} steps) at {selected_speed_steps_per_s:.3f} steps/s."
         )
-        command_time_s = time.time()
-        command_monotonic_s = time.monotonic()
-        self._last_motion_command_time_s = command_time_s
-        self._last_motion_command_monotonic_s = command_monotonic_s
-        self._last_motion_expected_complete_time_s = (
-            command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        return self._queue_tic_motion_command(
+            target_steps=target_steps,
+            target_mm=target_mm,
+            effective_target_mm=target_mm,
+            speed_mm_s=selected_speed_mm_s,
+            expected_duration_s=expected_duration_s,
+            delta_tic_units=delta_steps,
+            max_speed_units=max_speed_units,
+            use_last_target_as_motion_base=True,
         )
-        self._last_motion_expected_complete_monotonic_s = (
-            command_monotonic_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
-        )
-        self._kosice_active_motion_target_steps = target_steps
-        self._last_commanded_speed_mm_s = selected_speed_mm_s
-        self._last_commanded_position_steps = target_steps
-        self._last_effective_move_target_mm = target_mm
-        self._last_move_target_mm = target_mm
-        self._manual_jog_uses_last_target = True
-        self._last_move_direction = math.copysign(1.0, delta_steps)
-        self._start_tic_keepalive()
-        self._refresh_live_labels()
-        return True
 
     def _move_to_position_mm(
         self,
@@ -23517,6 +23806,9 @@ class MainWindow(QtWidgets.QMainWindow):
         effective_position_mm: float | None = None,
         speed_mm_s: float | None = None,
     ) -> bool:
+        self._poll_pending_motion_dispatch()
+        if self._pending_motion_command is not None:
+            return False
         if self._tic_motor_power_ok is False:
             vin_text = self._tic_vin_text()
             self._log(
@@ -23582,14 +23874,6 @@ class MainWindow(QtWidgets.QMainWindow):
         command_base_mm = self._relative_motion_base_mm()
         expected_duration_s = self._move_duration_s(position_mm - command_base_mm, selected_speed_mm_s)
         max_speed_units = max(1, int(round(selected_speed_mm_s * steps_per_mm * 10000.0)))
-        try:
-            self._build_tic_dispatcher().set_target_position(target_steps, max_speed=max_speed_units)
-        except Exception as exc:
-            if self._is_ui_thread():
-                QtWidgets.QMessageBox.warning(self, APP_NAME, f"Failed to move Tic: {exc}")
-            else:
-                self._log(f"Failed to move Tic: {exc}")
-            return False
         delta_mm = position_mm - command_base_mm
         self._log(
             self._format_motor_step_log(
@@ -23600,32 +23884,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 target_steps=target_steps,
             )
         )
-        command_time_s = time.time()
-        command_monotonic_s = time.monotonic()
-        self._last_motion_command_time_s = command_time_s
-        self._last_motion_command_monotonic_s = command_monotonic_s
-        self._last_motion_expected_complete_time_s = (
-            command_time_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
+        return self._queue_tic_motion_command(
+            target_steps=target_steps,
+            target_mm=position_mm,
+            effective_target_mm=(
+                float(position_mm) if effective_position_mm is None else float(effective_position_mm)
+            ),
+            speed_mm_s=selected_speed_mm_s,
+            expected_duration_s=expected_duration_s,
+            delta_tic_units=target_steps - current_steps,
+            max_speed_units=max_speed_units,
+            use_last_target_as_motion_base=manual_jog or chain_from_last_target,
         )
-        self._last_motion_expected_complete_monotonic_s = (
-            command_monotonic_s + expected_duration_s + SERVO_MOTION_SETTLE_AFTER_MOVE_S
-        )
-        self._kosice_active_motion_target_steps = target_steps
-        self._last_commanded_speed_mm_s = selected_speed_mm_s
-        self._last_commanded_position_steps = target_steps
-        self._start_tic_keepalive()
-        self._last_effective_move_target_mm = (
-            float(position_mm) if effective_position_mm is None else float(effective_position_mm)
-        )
-        if abs(delta_mm) >= 1e-12:
-            self._last_move_direction = math.copysign(1.0, delta_mm)
-        self._last_move_target_mm = position_mm
-        if manual_jog or chain_from_last_target:
-            self._manual_jog_uses_last_target = True
-        else:
-            self._manual_jog_uses_last_target = False
-        self._refresh_live_labels()
-        return True
 
     def _session_base_paths(self) -> tuple[Path, Path, Path, Path]:
         directory = Path(self.edit_log_dir.text().strip() or _default_download_dir())
@@ -25474,6 +25744,24 @@ class MainWindow(QtWidgets.QMainWindow):
                         "" if gain_excluded_windows is None else int(gain_excluded_windows)
                     ),
                     "pending_response": "" if pending_response is None else int(pending_response),
+                    "motor_command_sequence": (
+                        ""
+                        if self._pending_motion_command is None
+                        else self._pending_motion_command.sequence
+                    ),
+                    "motor_command_state": self._pending_motion_command_state(),
+                    "tic_planning_mode": (
+                        "" if self._tic_planning_mode is None else self._tic_planning_mode
+                    ),
+                    "tic_target_position_steps": (
+                        ""
+                        if self._tic_target_position_steps is None
+                        else self._tic_target_position_steps
+                    ),
+                    "tic_current_position_steps": self._current_position_steps,
+                    "tic_current_velocity": (
+                        "" if self._tic_current_velocity is None else self._tic_current_velocity
+                    ),
                     "motor_step_mm": _number(self._motor_step_mm()),
                     "correction_mm": _number(correction_mm),
                     "backlash_mm": _number(backlash_mm),
@@ -32682,6 +32970,11 @@ class MainWindow(QtWidgets.QMainWindow):
             f"ui_interval={_fmt(actual_interval_ms, ' ms')}, "
             f"ui_handler={_fmt(handler_duration_ms, ' ms')}, "
             f"heartbeat={_fmt(self._ui_heartbeat_interval_ms, ' ms')}; "
+            f"motor_command={self._pending_motion_command_state()}, "
+            f"sequence={None if self._pending_motion_command is None else self._pending_motion_command.sequence}, "
+            f"tic_target={self._tic_target_position_steps}, "
+            f"tic_position={self._current_position_steps}, "
+            f"tic_velocity={self._tic_current_velocity}; "
             f"points={len(self._session_points)}, live_points={len(self._live_plot_points)}, "
             f"live_plot_sample={int(bool(live_plot_sample_recorded))}, "
             f"plot_refresh={int(bool(dashboard_plot_refreshed))}."

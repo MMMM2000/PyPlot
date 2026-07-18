@@ -5889,15 +5889,32 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
     class _FakeController:
         def __init__(self) -> None:
             self.target_steps: int | None = None
+            self.current_steps = 125
 
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.target_steps = position_steps
             self.max_speed = max_speed
 
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 1",
+                    f"Target position: {self.target_steps}",
+                    f"Current position: {self.current_steps}",
+                    "Current velocity: 1",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._current_position_mm = 1.25
     window._current_position_steps = 125
+    window._last_move_target_mm = 1.25
+    window._last_effective_move_target_mm = 1.25
+    window._last_commanded_position_steps = 125
     window.spin_steps_per_mm.setValue(100.0)
 
     try:
@@ -5909,7 +5926,14 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
         assert controller.max_speed == 1000000
         assert window._current_position_mm == pytest.approx(1.25)
         assert window._current_position_steps == 125
+        assert window._last_move_target_mm == pytest.approx(1.25)
+        assert window._pending_motion_command is not None
+
+        assert window._refresh_tic_status() is True
+
         assert window._last_move_target_mm == pytest.approx(2.0)
+        assert window._last_commanded_position_steps == 200
+        assert window._pending_motion_command is None
     finally:
         _close_test_window(window)
 
@@ -6852,9 +6876,24 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
     class _FakeController:
         def __init__(self) -> None:
             self.targets: list[int] = []
+            self.current_steps = 120
 
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.targets.append(position_steps)
+
+        def get_status(self) -> str:
+            target = self.targets[-1] if self.targets else self.current_steps
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 1",
+                    f"Target position: {target}",
+                    f"Current position: {self.current_steps}",
+                    "Current velocity: 1",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
@@ -6869,7 +6908,6 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
     window.spin_steps_per_mm.setValue(100.0)
     window.spin_jog_mm.setValue(0.1)
     window.check_positive_motion_is_tension.setChecked(False)
-    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
     window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
 
     try:
@@ -6878,6 +6916,11 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
         _wait_for_tic_commands(window)
 
         assert controller.targets == [130]
+        assert window._manual_jog_uses_last_target is False
+        assert window._last_move_target_mm == pytest.approx(1.2)
+
+        assert window._refresh_tic_status() is True
+
         assert window._manual_jog_uses_last_target is True
         assert window._last_move_target_mm == pytest.approx(1.3)
     finally:
@@ -14154,21 +14197,27 @@ def test_tic_status_warns_when_motor_power_vin_is_low(tmp_path: Path, qtbot) -> 
         _close_test_window(window)
 
 
-def test_tic_status_accepts_one_step_short_kosice_landing(tmp_path: Path, qtbot) -> None:
+def test_tic_status_requires_exact_stationary_kosice_landing(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
+        current_position = 969
+
         def get_status(self) -> str:
             return "\n".join(
                 [
                     "VIN voltage: 12.00 V",
                     "Operation state: Normal",
-                    "Current position: 969",
+                    "Planning mode: 1",
+                    "Target position: 970",
+                    f"Current position: {self.current_position}",
+                    "Current velocity: 0",
                     "Errors currently stopping the motor: None",
                 ]
             )
 
-    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
+    controller = _FakeController()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
 
     try:
         window._kosice_active_motion_target_steps = 970
@@ -14176,6 +14225,11 @@ def test_tic_status_accepts_one_step_short_kosice_landing(tmp_path: Path, qtbot)
         assert window._refresh_tic_status() is True
 
         assert window._current_position_steps == 969
+        assert window._kosice_active_motion_target_steps == 970
+        assert window._kosice_motion_complete() is False
+
+        controller.current_position = 970
+        assert window._refresh_tic_status() is True
         assert window._kosice_active_motion_target_steps is None
         assert window._kosice_motion_complete() is True
     finally:
@@ -19341,6 +19395,32 @@ def test_tic_command_dispatcher_coalesces_pending_target_moves() -> None:
         dispatcher.stop()
 
 
+def test_tic_command_dispatcher_prioritizes_target_over_coalesced_keepalive() -> None:
+    class _FakeController:
+        def __init__(self) -> None:
+            self.actions: list[str] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.actions.append(f"target:{position_steps}")
+
+        def reset_command_timeout(self) -> None:
+            self.actions.append("keepalive")
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller, autostart=False)
+    try:
+        dispatcher.reset_command_timeout()
+        dispatcher.reset_command_timeout()
+        dispatcher.reset_command_timeout()
+        dispatcher.set_target_position(813, max_speed=500_000)
+        dispatcher.start()
+
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        assert controller.actions == ["target:813", "keepalive"]
+    finally:
+        dispatcher.stop()
+
+
 def test_tic_command_dispatcher_clears_previous_error_after_success() -> None:
     class _FakeController:
         def __init__(self) -> None:
@@ -19365,6 +19445,178 @@ def test_tic_command_dispatcher_clears_previous_error_after_success() -> None:
         assert dispatcher.last_error() is None
     finally:
         dispatcher.stop()
+
+
+def test_tic_command_dispatcher_preserves_target_result_after_keepalive() -> None:
+    class _FakeController:
+        def set_target_position(self, _position_steps: int, max_speed: int | None = None) -> None:
+            raise RuntimeError("target USB write failed")
+
+        def reset_command_timeout(self) -> None:
+            return None
+
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: _FakeController())
+    try:
+        sequence = dispatcher.set_target_position(813, max_speed=500_000)
+        assert dispatcher.wait_until_target_dispatched(sequence, timeout_s=2.0)
+        dispatcher.reset_command_timeout()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+        result = dispatcher.command_result(sequence)
+        assert result is not None
+        assert result.succeeded is False
+        assert "target USB write failed" in str(result.error)
+        assert dispatcher.last_error() is None
+    finally:
+        dispatcher.stop()
+
+
+def test_motion_waits_for_dispatch_and_tic_target_readback(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        target = 0
+        current = 0
+        velocity = 0
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target = int(position_steps)
+
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 1",
+                    f"Target position: {self.target}",
+                    f"Current position: {self.current}",
+                    f"Current velocity: {self.velocity}",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller)
+    window._tic_command_dispatcher = dispatcher
+    window._tic_command_dispatcher_key = window._tic_settings_for_current_command().key()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
+    window._current_position_steps = 0
+    window._last_commanded_position_steps = 0
+
+    try:
+        assert window._move_to_position_mm(0.02, speed_mm_s=1.0) is True
+        pending = window._pending_motion_command
+        assert pending is not None
+        assert window._kosice_active_motion_target_steps is None
+        assert dispatcher.wait_until_target_dispatched(pending.sequence, timeout_s=2.0)
+
+        assert window._refresh_tic_status() is True
+        assert window._pending_motion_command is None
+        assert window._kosice_active_motion_target_steps == 2
+        assert window._last_commanded_position_steps == 2
+
+        controller.current = 2
+        assert window._refresh_tic_status() is True
+        assert window._kosice_active_motion_target_steps is None
+        window._last_motion_expected_complete_monotonic_s = None
+        assert window._kosice_motion_complete() is True
+    finally:
+        dispatcher.stop()
+        _close_test_window(window)
+
+
+def test_unaccepted_tic_target_is_released_for_retry(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        def set_target_position(self, _position_steps: int, max_speed: int | None = None) -> None:
+            return None
+
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 1",
+                    "Target position: 0",
+                    "Current position: 0",
+                    "Current velocity: 0",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller)
+    window._tic_command_dispatcher = dispatcher
+    window._tic_command_dispatcher_key = window._tic_settings_for_current_command().key()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
+
+    try:
+        assert window._move_to_position_mm(0.02, speed_mm_s=1.0) is True
+        pending = window._pending_motion_command
+        assert pending is not None
+        assert dispatcher.wait_until_target_dispatched(pending.sequence, timeout_s=2.0)
+        window._poll_pending_motion_dispatch()
+        pending = window._pending_motion_command
+        assert pending is not None and pending.dispatch_result is not None
+        pending.dispatch_result = dataclasses.replace(
+            pending.dispatch_result,
+            completed_time_s=time.time() - 10.0,
+            completed_monotonic_s=time.monotonic() - 10.0,
+        )
+
+        assert window._refresh_tic_status() is True
+
+        assert window._pending_motion_command is None
+        assert window._kosice_active_motion_target_steps is None
+        assert window._last_commanded_position_steps == 0
+        assert window._move_to_position_mm(0.02, speed_mm_s=1.0) is True
+    finally:
+        dispatcher.stop()
+        _close_test_window(window)
+
+
+def test_failed_motion_dispatch_is_released_for_retry(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        fail_next = True
+        target = 0
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            if self.fail_next:
+                self.fail_next = False
+                raise RuntimeError("temporary target transport failure")
+            self.target = int(position_steps)
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller)
+    window._tic_command_dispatcher = dispatcher
+    window._tic_command_dispatcher_key = window._tic_settings_for_current_command().key()
+    window.spin_steps_per_mm.setValue(100.0)
+
+    try:
+        assert window._move_to_position_mm(0.02, speed_mm_s=1.0) is True
+        first = window._pending_motion_command
+        assert first is not None
+        assert dispatcher.wait_until_target_dispatched(first.sequence, timeout_s=2.0)
+        window._poll_pending_motion_dispatch()
+
+        assert window._pending_motion_command is None
+        assert window._kosice_active_motion_target_steps is None
+        assert window._last_commanded_position_steps == 0
+
+        assert window._move_to_position_mm(0.02, speed_mm_s=1.0) is True
+        second = window._pending_motion_command
+        assert second is not None
+        assert second.sequence > first.sequence
+        assert dispatcher.wait_until_target_dispatched(second.sequence, timeout_s=2.0)
+        assert controller.target == 2
+    finally:
+        dispatcher.stop()
+        _close_test_window(window)
 
 
 def test_move_to_position_uses_persistent_tic_dispatcher(tmp_path: Path, qtbot) -> None:
@@ -21484,7 +21736,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
         _close_test_window(window)
 
 
-def test_load_seek_continues_from_commanded_target_after_fresh_feedback_without_tic_status(
+def test_load_seek_waits_for_tic_acceptance_before_continuing_from_confirmed_target(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -21496,6 +21748,20 @@ def test_load_seek_continues_from_commanded_target_after_fresh_feedback_without_
 
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.targets.append(position_steps)
+
+        def get_status(self) -> str:
+            target = self.targets[-1] if self.targets else 0
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 1",
+                    f"Target position: {target}",
+                    f"Current position: {target}",
+                    "Current velocity: 0",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
@@ -21528,7 +21794,9 @@ def test_load_seek_continues_from_commanded_target_after_fresh_feedback_without_
 
         assert controller.targets == [-10]
 
+        assert window._refresh_tic_status() is True
         window._last_motion_expected_complete_time_s = time.time() - 0.1
+        window._last_motion_expected_complete_monotonic_s = time.monotonic() - 0.1
         window._latest_scale_timestamp = time.time()
         window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
@@ -21646,6 +21914,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_timestamp = time.time()
@@ -21744,6 +22013,7 @@ def test_backlash_takeup_is_not_logged_as_tensile_displacement(tmp_path: Path, q
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.check_zero_on_preload.setChecked(False)
