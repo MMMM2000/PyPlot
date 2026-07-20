@@ -10391,6 +10391,109 @@ def _write_kosice_fixture(root: Path, filename: str) -> Path:
     return path
 
 
+def _kosice_index_with_diameter(
+    root: Path,
+    *,
+    composition: str,
+    wire: str,
+    diameter_mm: float,
+) -> object:
+    draw, piece = (int(value) for value in wire.split("/"))
+    workbook_path = root / "microwire_database.xlsx"
+    return kosice_mod.AnnealingFolderIndex(
+        root=root,
+        source_label="Košice folder",
+        records=(),
+        data_directories=(),
+        sample_records=(
+            kosice_mod.KosiceSampleRecord(
+                workbook_path=workbook_path,
+                sheet_name="Sheet1",
+                row_number=3,
+                composition=composition,
+                draw=draw,
+                piece=piece,
+                diameter_mm=diameter_mm,
+            ),
+        ),
+        sample_workbook=workbook_path,
+    )
+
+
+def test_kosice_diameter_is_second_priority_between_project_and_fabrication(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    composition = "Ni50Fe27Ga23"
+    wire = "19/8"
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            composition: [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition=composition,
+                    draw=19,
+                    piece=8,
+                    label=wire,
+                    diameter_mm=0.014,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_name_composition.setText(composition)
+        window.edit_name_wire.setText(wire)
+        assert window.spin_diameter.value() == pytest.approx(0.014)
+        assert window._diameter_import_source == "fabrication"
+
+        window._kosice_index = _kosice_index_with_diameter(
+            tmp_path,
+            composition=composition,
+            wire=wire,
+            diameter_mm=0.0102,
+        )
+        assert window._apply_kosice_sample_if_possible() is True
+        assert window.spin_diameter.value() == pytest.approx(0.0102)
+        assert window._diameter_import_source == "kosice"
+
+        project_match = mini_dma_mod.ProjectImportResult(
+            path=tmp_path / "microwire_database_latest.pydpj",
+            section="microscope",
+            diameter_mm=0.0137,
+            current_mA=None,
+            matched_row={"Composition": composition, "Microwire": wire, "d (um)": 13.7},
+        )
+        window._apply_project_match(project_match, update_identity=False, quiet=True)
+        assert window.spin_diameter.value() == pytest.approx(0.0137)
+        assert window._diameter_import_source == "project"
+        assert window._apply_kosice_sample_if_possible() is False
+        assert window.spin_diameter.value() == pytest.approx(0.0137)
+        comparison = window.label_diameter_source_comparison.text()
+        assert ".pydpj 13.7 um (priority 1, selected)" in comparison
+        assert "Košice 10.2 um (priority 2)" in comparison
+        assert "fabrication 14 um (priority 3)" in comparison
+        assert "Mismatch: exact source values differ by up to 3.8 um." in comparison
+
+        project_match_without_diameter = dataclasses.replace(
+            project_match,
+            diameter_mm=None,
+            matched_row={"Composition": composition, "Microwire": wire},
+        )
+        window._apply_project_match(
+            project_match_without_diameter,
+            update_identity=False,
+            quiet=True,
+        )
+        assert window.spin_diameter.value() == pytest.approx(0.0102)
+        assert window._diameter_import_source == "kosice"
+        comparison = window.label_diameter_source_comparison.text()
+        assert ".pydpj" not in comparison
+        assert "Košice 10.2 um (priority 2, selected)" in comparison
+        assert "fabrication 14 um (priority 3)" in comparison
+    finally:
+        _close_test_window(window)
+
+
 def test_kosice_folder_preview_uses_milliamps_for_legacy_amp_values(
     tmp_path: Path,
     qtbot,
