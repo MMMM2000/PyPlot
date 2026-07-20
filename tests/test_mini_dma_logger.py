@@ -6220,46 +6220,43 @@ def test_manual_jog_press_refreshes_stale_tic_status(tmp_path: Path, qtbot) -> N
         _close_test_window(window)
 
 
-def test_held_manual_jog_advances_by_configured_linear_speed(
+def test_held_manual_jog_uses_one_continuous_velocity_command(
     tmp_path: Path,
     qtbot,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
         def __init__(self) -> None:
-            self.targets: list[int] = []
+            self.velocities: list[int] = []
+            self.halts = 0
 
-        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
-            self.targets.append(position_steps)
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.velocities.append(velocity_steps_per_10k_s)
+
+        def halt_and_hold(self) -> None:
+            self.halts += 1
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
-    _use_immediate_tic_dispatcher(window, controller)
-    window._current_position_steps = 0
-    window._current_position_mm = 0.0
-    window._last_move_target_mm = 0.0
-    window._manual_jog_uses_last_target = False
     window.spin_steps_per_mm.setValue(100.0)
-    window.spin_jog_mm.setValue(0.01)
     window.spin_motion_speed_mm_s.setValue(1.0)
 
     try:
-        for now_s in (10.0, 10.12, 10.24):
-            # Patch only the command invocation so unrelated background writers
-            # cannot consume this test's synthetic control-loop clock.
-            with monkeypatch.context() as clock_patch:
-                clock_patch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s)
-                window._jog_relative(-1.0)
+        window._start_manual_jog(-1.0)
+        for _ in range(3):
+            window._handle_manual_jog_timer()
             _wait_for_tic_commands(window)
+        window._stop_manual_jog()
+        _wait_for_tic_commands(window)
 
-        assert controller.targets == [-1, -13, -25]
+        assert controller.velocities == [-1_000_000]
+        assert controller.halts == 1
     finally:
         _close_test_window(window)
 
 
-def test_held_manual_jog_caps_delayed_timer_tick(
+def test_held_manual_jog_delayed_timer_starts_only_one_velocity_command(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -6270,10 +6267,10 @@ def test_held_manual_jog_caps_delayed_timer_tick(
 
     class _FakeController:
         def __init__(self) -> None:
-            self.targets: list[int] = []
+            self.velocities: list[int] = []
 
-        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
-            self.targets.append(position_steps)
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.velocities.append(velocity_steps_per_10k_s)
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
@@ -6285,15 +6282,16 @@ def test_held_manual_jog_caps_delayed_timer_tick(
         window._start_manual_jog(-1.0)
         clock["now"] = 10.8
         window._handle_manual_jog_timer()
+        window._handle_manual_jog_timer()
         _wait_for_tic_commands(window)
 
-        assert controller.targets == [-7]
+        assert controller.velocities == [-1_000_000]
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)
 
 
-def test_manual_jog_delayed_timer_does_not_batch_large_move(
+def test_manual_jog_release_halts_velocity_without_batching_position_move(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -6305,13 +6303,20 @@ def test_manual_jog_delayed_timer_does_not_batch_large_move(
     class _FakeController:
         def __init__(self) -> None:
             self.targets: list[int] = []
+            self.velocities: list[int] = []
+            self.halts = 0
 
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.targets.append(position_steps)
 
+        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
+            self.velocities.append(velocity_steps_per_10k_s)
+
+        def halt_and_hold(self) -> None:
+            self.halts += 1
+
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
-    _use_immediate_tic_dispatcher(window, controller)
     window.spin_steps_per_mm.setValue(800.0)
     window.spin_jog_mm.setValue(0.00625)
     window.spin_motion_speed_mm_s.setValue(0.1)
@@ -6321,9 +6326,12 @@ def test_manual_jog_delayed_timer_does_not_batch_large_move(
         clock["now"] = 20.0
         window._handle_manual_jog_timer()
         _wait_for_tic_commands(window)
+        window._stop_manual_jog()
+        _wait_for_tic_commands(window)
 
-        assert controller.targets == [6]
-        assert "1000.00 um" not in window.log_output.toPlainText()
+        assert controller.targets == []
+        assert controller.velocities == [800_000]
+        assert controller.halts == 1
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)
@@ -19594,7 +19602,10 @@ def test_manual_move_accepts_exact_target_with_kosice_planning_mode_via_status_t
         _close_test_window(window)
 
 
-def test_unaccepted_tic_target_is_released_for_retry(tmp_path: Path, qtbot) -> None:
+def test_unaccepted_tic_target_is_released_for_retry_without_post_dispatch_status(
+    tmp_path: Path,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeController:
@@ -19634,8 +19645,11 @@ def test_unaccepted_tic_target_is_released_for_retry(tmp_path: Path, qtbot) -> N
             completed_time_s=time.time() - 10.0,
             completed_monotonic_s=time.monotonic() - 10.0,
         )
+        window._last_tic_status_monotonic_s = None
+        window._tic_target_position_steps = 0
+        window._tic_planning_mode = 1
 
-        assert window._refresh_tic_status() is True
+        window._reconcile_pending_motion_command_with_tic_status()
 
         assert window._pending_motion_command is None
         assert window._kosice_active_motion_target_steps is None

@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-20.1"
+CONTROL_LOGIC_VERSION = "2026-07-20.2"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -212,6 +212,7 @@ CONTROL_LOGIC_FEATURES = [
     "shared_tic_target_acceptance_readback",
     "shared_tic_target_acceptance_ignores_device_specific_planning_enum",
     "manual_tic_command_forces_acceptance_status_refresh",
+    "held_manual_jog_uses_continuous_tic_velocity",
     "tic_target_priority_over_coalesced_keepalive",
     "kosice_exact_confirmed_motor_completion",
 ]
@@ -251,6 +252,10 @@ CONTROL_TRACE_FIELDNAMES = [
     "pending_response",
     "motor_command_sequence",
     "motor_command_state",
+    "tic_operation_state",
+    "tic_errors",
+    "tic_transport",
+    "tic_vin_v",
     "tic_planning_mode",
     "tic_target_position_steps",
     "tic_current_position_steps",
@@ -5951,6 +5956,7 @@ def benchmark_tic_transport_latency(
 class TicCommand:
     action: str
     position_steps: int | None = None
+    velocity_steps_per_10k_s: int | None = None
     max_speed: int | None = None
     sequence: int = 0
 
@@ -6046,6 +6052,25 @@ class TicCommandDispatcher:
                 action="target",
                 position_steps=int(position_steps),
                 max_speed=max_speed,
+                sequence=self._sequence,
+            )
+            self._condition.notify_all()
+            return self._sequence
+
+    def set_target_velocity(self, velocity_steps_per_10k_s: int) -> int:
+        with self._condition:
+            self._sequence += 1
+            previous = self._pending_target
+            if previous is not None:
+                self._record_result_locked(
+                    previous,
+                    RuntimeError(
+                        f"Tic target command {previous.sequence} was superseded before dispatch."
+                    ),
+                )
+            self._pending_target = TicCommand(
+                action="velocity",
+                velocity_steps_per_10k_s=int(velocity_steps_per_10k_s),
                 sequence=self._sequence,
             )
             self._condition.notify_all()
@@ -6157,6 +6182,8 @@ class TicCommandDispatcher:
                     controller = self._controller_factory()
                     if command.action == "target" and command.position_steps is not None:
                         controller.set_target_position(command.position_steps, max_speed=command.max_speed)
+                    elif command.action == "velocity" and command.velocity_steps_per_10k_s is not None:
+                        controller.set_target_velocity(command.velocity_steps_per_10k_s)
                     elif command.action == "keepalive":
                         controller.reset_command_timeout()
                     elif command.action == "halt":
@@ -7279,6 +7306,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_tic_power_good_time_s: float | None = None
         self._tic_power_unknown_since_s: float | None = None
         self._last_tic_status_error: str | None = None
+        self._last_tic_status_monotonic_s: float | None = None
         self._tic_motor_power_ok: bool | None = None
         self._tic_motor_power_warning_active = False
         self._tic_keepalive_warning_active = False
@@ -7619,6 +7647,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
+        self._manual_jog_velocity_sequence: int | None = None
         self._manual_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_motion_command_time_s: float | None = None
         self._last_motion_expected_complete_time_s: float | None = None
@@ -22917,6 +22946,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._current_position_steps = current_position
                 self._current_position_mm = current_position / float(self.spin_steps_per_mm.value())
                 self._last_tic_status_time_s = time.time()
+                self._last_tic_status_monotonic_s = time.monotonic()
                 if previous_commanded_steps is not None and current_position == previous_commanded_steps:
                     self._effective_position_mm = self._last_effective_move_target_mm
                 elif not self._has_unconfirmed_motion_command():
@@ -23082,25 +23112,52 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
+        self._manual_jog_velocity_sequence = None
         self._start_tic_keepalive()
         self._manual_jog_timer.start()
 
     def _stop_manual_jog(self) -> None:
         self._manual_jog_timer.stop()
-        if self._manual_jog_timer_moves > 0:
+        velocity_was_queued = self._manual_jog_velocity_sequence is not None
+        if velocity_was_queued:
+            try:
+                self._build_tic_dispatcher().halt_and_hold()
+            except Exception as exc:
+                self._log(f"Tic manual-jog halt failed: {exc}")
+        if self._manual_jog_timer_moves > 0 or velocity_was_queued:
             self._manual_jog_click_suppressed = True
         self._manual_jog_last_tick_s = None
         self._manual_jog_direction = 0.0
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
+        self._manual_jog_velocity_sequence = None
         if not self._automation_active:
             self._stop_tic_keepalive()
 
     def _handle_manual_jog_timer(self) -> None:
         if self._manual_jog_direction == 0.0:
             return
-        if self._jog_relative(self._manual_jog_direction):
-            self._manual_jog_timer_moves += 1
+        if self._pending_motion_command is not None or self._tic_motor_power_ok is False:
+            return
+        dispatcher = self._build_tic_dispatcher()
+        if self._manual_jog_velocity_sequence is not None:
+            result = dispatcher.command_result(self._manual_jog_velocity_sequence)
+            if result is None or result.succeeded:
+                return
+            self._log(f"Tic manual-jog velocity command failed: {result.error}; retrying.")
+            self._manual_jog_velocity_sequence = None
+        velocity_units = int(
+            round(
+                self._manual_jog_direction
+                * abs(float(self.spin_motion_speed_mm_s.value()))
+                * max(1.0, float(self.spin_steps_per_mm.value()))
+                * 10_000.0
+            )
+        )
+        if velocity_units == 0:
+            return
+        self._manual_jog_velocity_sequence = dispatcher.set_target_velocity(velocity_units)
+        self._manual_jog_timer_moves += 1
 
     def _handle_manual_jog_button_clicked(self, direction: float) -> None:
         if self._manual_jog_click_suppressed:
@@ -23326,20 +23383,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _poll_pending_motion_dispatch(self) -> None:
         pending = self._pending_motion_command
-        if pending is None or pending.dispatch_result is not None:
+        if pending is None:
             return
-        dispatcher = self._tic_command_dispatcher
-        result_getter = getattr(dispatcher, "command_result", None)
-        if not callable(result_getter):
+        if pending.dispatch_result is None:
+            dispatcher = self._tic_command_dispatcher
+            result_getter = getattr(dispatcher, "command_result", None)
+            if not callable(result_getter):
+                return
+            result = result_getter(pending.sequence)
+            if result is None:
+                return
+            pending.dispatch_result = result
+            if not result.succeeded:
+                self._fail_pending_motion_command(str(result.error or "unknown dispatch failure"))
+                return
+            if hasattr(self, "_status_timer"):
+                self._status_timer.start(0)
+
+        result = pending.dispatch_result
+        if result is None or not result.succeeded:
             return
-        result = result_getter(pending.sequence)
-        if result is None:
+        # Exact target-position readback is portable across the Prague and
+        # KoÅ¡ice planning-mode enums. Poll it from the 50 ms control path too,
+        # so retry cannot depend on status-timer scheduling.
+        if self._tic_target_position_steps == pending.target_steps:
+            self._confirm_pending_motion_command()
             return
-        pending.dispatch_result = result
-        if not result.succeeded:
-            self._fail_pending_motion_command(str(result.error or "unknown dispatch failure"))
-        elif hasattr(self, "_status_timer"):
-            self._status_timer.start(0)
+        dispatch_age_s = time.monotonic() - result.completed_monotonic_s
+        if dispatch_age_s < self._motion_target_confirmation_timeout_s():
+            return
+        status_after_dispatch = (
+            self._last_tic_status_monotonic_s is not None
+            and self._last_tic_status_monotonic_s >= result.completed_monotonic_s
+        )
+        status_freshness = "post-dispatch status" if status_after_dispatch else "no post-dispatch status"
+        self._fail_pending_motion_command(
+            "Tic readback still reports target "
+            f"{self._tic_target_position_steps} in planning mode {self._tic_planning_mode} "
+            f"after {dispatch_age_s:.2f} s ({status_freshness})"
+        )
 
     def _confirm_pending_motion_command(self) -> None:
         pending = self._pending_motion_command
@@ -23393,18 +23475,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._tic_target_position_steps == pending.target_steps:
             self._confirm_pending_motion_command()
             return
+        # Compare timestamps from the same monotonic clock. Wall-clock time can
+        # step during a run (for example after Windows synchronizes its clock),
+        # which previously made a fresh status look older than the dispatch and
+        # disabled target-rejection retry indefinitely.
         status_after_dispatch = (
-            self._last_tic_status_time_s is not None
-            and self._last_tic_status_time_s >= result.completed_time_s
+            self._last_tic_status_monotonic_s is not None
+            and self._last_tic_status_monotonic_s >= result.completed_monotonic_s
         )
-        if (
-            status_after_dispatch
-            and time.monotonic() - result.completed_monotonic_s
-            >= self._motion_target_confirmation_timeout_s()
-        ):
+        dispatch_age_s = time.monotonic() - result.completed_monotonic_s
+        if dispatch_age_s >= self._motion_target_confirmation_timeout_s():
+            status_freshness = (
+                "post-dispatch status"
+                if status_after_dispatch
+                else "no post-dispatch status"
+            )
             self._fail_pending_motion_command(
                 "Tic readback still reports target "
-                f"{self._tic_target_position_steps} in planning mode {self._tic_planning_mode}"
+                f"{self._tic_target_position_steps} in planning mode {self._tic_planning_mode} "
+                f"after {dispatch_age_s:.2f} s ({status_freshness})"
             )
 
     def _has_unconfirmed_motion_command(self) -> bool:
@@ -25754,6 +25843,22 @@ class MainWindow(QtWidgets.QMainWindow):
                         else self._pending_motion_command.sequence
                     ),
                     "motor_command_state": self._pending_motion_command_state(),
+                    "tic_operation_state": (
+                        _extract_status_value(self._tic_status_text, "Operation state") or ""
+                    ),
+                    "tic_errors": (
+                        _extract_status_value(
+                            self._tic_status_text,
+                            "Errors currently stopping the motor",
+                        )
+                        or ""
+                    ),
+                    "tic_transport": (
+                        _extract_status_value(self._tic_status_text, "Transport") or ""
+                    ),
+                    "tic_vin_v": _number(
+                        _extract_status_float(self._tic_status_text, "VIN voltage")
+                    ),
                     "tic_planning_mode": (
                         "" if self._tic_planning_mode is None else self._tic_planning_mode
                     ),
