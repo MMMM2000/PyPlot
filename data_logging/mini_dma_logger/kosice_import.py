@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import pandas as pd
+from openpyxl import load_workbook
 
 
 SUPPORTED_EXTENSIONS = frozenset({".dat", ".txt"})
@@ -53,6 +54,28 @@ class AnnealingFolderRecord:
 
 
 @dataclass(frozen=True)
+class KosiceSampleRecord:
+    workbook_path: Path
+    sheet_name: str
+    row_number: int
+    composition: str
+    draw: int
+    piece: int
+    diameter_mm: float
+
+    @property
+    def microwire(self) -> str:
+        return f"{self.draw}/{self.piece}"
+
+
+@dataclass(frozen=True)
+class KosiceWorkbookData:
+    path: Path
+    records: tuple[KosiceSampleRecord, ...]
+    conflicting_sample_count: int = 0
+
+
+@dataclass(frozen=True)
 class AnnealingFolderIndex:
     root: Path
     source_label: str
@@ -60,6 +83,9 @@ class AnnealingFolderIndex:
     data_directories: tuple[Path, ...]
     unsupported_files: tuple[Path, ...] = ()
     skipped_files: tuple[Path, ...] = ()
+    sample_records: tuple[KosiceSampleRecord, ...] = ()
+    sample_workbook: Path | None = None
+    conflicting_sample_count: int = 0
 
     def matching(self, composition: object, microwire: object) -> tuple[AnnealingFolderRecord, ...]:
         composition_key = _normalized_token(composition)
@@ -75,12 +101,127 @@ class AnnealingFolderIndex:
 
     def suggestions(self) -> dict[str, tuple[str, ...]]:
         values: dict[str, set[tuple[int, int]]] = {}
-        for record in self.records:
+        for record in (*self.records, *self.sample_records):
             values.setdefault(record.composition, set()).add((record.draw, record.piece))
         return {
             composition: tuple(f"{draw}/{piece}" for draw, piece in sorted(wires))
             for composition, wires in sorted(values.items(), key=lambda item: item[0].lower())
         }
+
+    def matching_sample(self, composition: object, microwire: object) -> KosiceSampleRecord | None:
+        composition_key = _normalized_token(composition)
+        wire_key = _microwire_key(microwire)
+        if not composition_key or wire_key is None:
+            return None
+        return next(
+            (
+                record
+                for record in self.sample_records
+                if _normalized_token(record.composition) == composition_key
+                and (record.draw, record.piece) == wire_key
+            ),
+            None,
+        )
+
+
+def _workbook_column_kind(value: object) -> str | None:
+    text = str(value or "").strip().replace("μ", "µ")
+    token = _normalized_token(text.replace("µ", "u"))
+    if token == "composition":
+        return "composition"
+    if token in {"microwire", "wire"}:
+        return "microwire"
+    if text.startswith("d") and token in {"dum", "diameterum"}:
+        return "diameter"
+    return None
+
+
+def load_kosice_sample_workbook(
+    path: Path,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> KosiceWorkbookData:
+    """Read exact sample diameters from a Košice database workbook.
+
+    Only sheets with explicit Composition, Microwire, and lower-case ``d``
+    diameter columns are accepted. Repeated measurements may share a sample
+    key when their diameters agree; conflicting keys are omitted.
+    """
+
+    path = Path(path)
+    is_cancelled = cancelled or (lambda: False)
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    grouped: dict[tuple[str, tuple[int, int]], list[KosiceSampleRecord]] = {}
+    recognized_sheet = False
+    try:
+        for worksheet in workbook.worksheets:
+            if is_cancelled():
+                raise InterruptedError("Annealing folder scan cancelled.")
+            columns: dict[str, int] | None = None
+            header_row = 0
+            for row_number, row in enumerate(
+                worksheet.iter_rows(min_row=1, max_row=min(10, worksheet.max_row), values_only=True),
+                start=1,
+            ):
+                found = {
+                    kind: index
+                    for index, value in enumerate(row)
+                    if (kind := _workbook_column_kind(value)) is not None
+                }
+                if {"composition", "microwire", "diameter"}.issubset(found):
+                    columns = found
+                    header_row = row_number
+                    recognized_sheet = True
+                    break
+            if columns is None:
+                continue
+            required_index = max(columns.values())
+            for row_number, row in enumerate(
+                worksheet.iter_rows(min_row=header_row + 1, values_only=True),
+                start=header_row + 1,
+            ):
+                if is_cancelled():
+                    raise InterruptedError("Annealing folder scan cancelled.")
+                if len(row) <= required_index:
+                    continue
+                composition = str(row[columns["composition"]] or "").strip()
+                wire_key = _microwire_key(row[columns["microwire"]])
+                try:
+                    diameter_um = float(row[columns["diameter"]])
+                except (TypeError, ValueError):
+                    continue
+                if not composition or wire_key is None or not math.isfinite(diameter_um) or diameter_um <= 0.0:
+                    continue
+                draw, piece = wire_key
+                record = KosiceSampleRecord(
+                    workbook_path=path,
+                    sheet_name=worksheet.title,
+                    row_number=row_number,
+                    composition=composition,
+                    draw=draw,
+                    piece=piece,
+                    diameter_mm=diameter_um / 1000.0,
+                )
+                grouped.setdefault((_normalized_token(composition), wire_key), []).append(record)
+    finally:
+        workbook.close()
+    if not recognized_sheet:
+        raise ValueError(f"{path.name}: no Košice sample table was found")
+
+    records: list[KosiceSampleRecord] = []
+    conflict_count = 0
+    for candidates in grouped.values():
+        diameters_um = [candidate.diameter_mm * 1000.0 for candidate in candidates]
+        if max(diameters_um) - min(diameters_um) > 1e-6:
+            conflict_count += 1
+            continue
+        records.append(candidates[0])
+    records.sort(key=lambda item: (item.composition.lower(), item.draw, item.piece))
+    return KosiceWorkbookData(
+        path=path,
+        records=tuple(records),
+        conflicting_sample_count=conflict_count,
+    )
 
 
 def parse_annealing_filename(path: Path) -> AnnealingFolderRecord | None:
@@ -151,6 +292,7 @@ def build_annealing_folder_index(
     source_label: str,
     cancelled: Callable[[], bool] | None = None,
     progress: Callable[[str], None] | None = None,
+    include_sample_workbook: bool = False,
 ) -> AnnealingFolderIndex:
     """Index supported flat annealing directories without mutating the source."""
 
@@ -160,8 +302,38 @@ def build_annealing_folder_index(
     is_cancelled = cancelled or (lambda: False)
     report = progress or (lambda _message: None)
     data_directories = _candidate_data_directories(root)
-    if not data_directories:
-        raise ValueError("No Current Annealing folder or supported flat annealing files were found.")
+    workbook_data: KosiceWorkbookData | None = None
+    if include_sample_workbook:
+        try:
+            workbook_paths = sorted(
+                (
+                    child
+                    for child in root.iterdir()
+                    if child.is_file()
+                    and child.suffix.lower() == ".xlsx"
+                    and not child.name.startswith("~$")
+                ),
+                key=lambda item: (item.stat().st_mtime, item.name.lower()),
+                reverse=True,
+            )
+        except OSError:
+            workbook_paths = []
+        for workbook_path in workbook_paths:
+            if is_cancelled():
+                raise InterruptedError("Annealing folder scan cancelled.")
+            report(f"Checking {source_label} workbook: {workbook_path.name}...")
+            try:
+                candidate = load_kosice_sample_workbook(workbook_path, cancelled=is_cancelled)
+            except InterruptedError:
+                raise
+            except Exception:
+                continue
+            workbook_data = candidate
+            break
+    if not data_directories and workbook_data is None:
+        raise ValueError(
+            "No Current Annealing folder, supported flat annealing files, or Košice sample workbook was found."
+        )
 
     unsupported: list[Path] = []
     try:
@@ -201,6 +373,9 @@ def build_annealing_folder_index(
         data_directories=data_directories,
         unsupported_files=tuple(sorted(set(unsupported), key=lambda item: item.name.lower())),
         skipped_files=tuple(skipped),
+        sample_records=() if workbook_data is None else workbook_data.records,
+        sample_workbook=None if workbook_data is None else workbook_data.path,
+        conflicting_sample_count=0 if workbook_data is None else workbook_data.conflicting_sample_count,
     )
 
 
@@ -312,7 +487,10 @@ def load_annealing_curve(path: Path) -> pd.DataFrame:
 __all__ = [
     "AnnealingFolderIndex",
     "AnnealingFolderRecord",
+    "KosiceSampleRecord",
+    "KosiceWorkbookData",
     "build_annealing_folder_index",
+    "load_kosice_sample_workbook",
     "load_annealing_curve",
     "parse_annealing_filename",
 ]

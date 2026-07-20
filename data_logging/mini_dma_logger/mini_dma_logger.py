@@ -3958,10 +3958,17 @@ class AnnealingFolderScanWorker(QtCore.QObject):
     cancelled = QtCore.pyqtSignal(object)
     finished = QtCore.pyqtSignal()
 
-    def __init__(self, root: Path, *, source_label: str) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        source_label: str,
+        include_sample_workbook: bool = False,
+    ) -> None:
         super().__init__()
         self.root = root
         self.source_label = source_label
+        self.include_sample_workbook = include_sample_workbook
         self._cancel_event = Event()
 
     @QtCore.pyqtSlot()
@@ -3976,6 +3983,7 @@ class AnnealingFolderScanWorker(QtCore.QObject):
                 source_label=self.source_label,
                 cancelled=self._cancel_event.is_set,
                 progress=self.progress_changed.emit,
+                include_sample_workbook=self.include_sample_workbook,
             )
         except InterruptedError:
             self.cancelled.emit(self.root)
@@ -7418,6 +7426,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._builder_project_path: Path | None = None
         self._builder_project_match: ProjectImportResult | None = None
         self._diameter_import_sample_key: tuple[str, str, str] | None = None
+        self._diameter_import_source: str | None = None
         self._builder_project_import_thread: DaemonFilesystemTask | None = None
         self._builder_project_import_worker: BuilderProjectImportWorker | None = None
         self._filesystem_worker_tasks: dict[int, DaemonFilesystemTask] = {}
@@ -9262,6 +9271,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_fabrication_status.fontMetrics().lineSpacing() * 3 + 8
         )
         project_form.addRow("", self.label_fabrication_status)
+        self.label_diameter_source_comparison = QtWidgets.QLabel(project_box)
+        self.label_diameter_source_comparison.setWordWrap(True)
+        self.label_diameter_source_comparison.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
+        )
+        self.label_diameter_source_comparison.setMinimumHeight(
+            self.label_diameter_source_comparison.fontMetrics().lineSpacing() * 2 + 8
+        )
+        project_form.addRow("Diameter comparison", self.label_diameter_source_comparison)
+        self.label_diameter_source_comparison_title = project_form.labelForField(
+            self.label_diameter_source_comparison
+        )
+        self.label_diameter_source_comparison.hide()
+        if self.label_diameter_source_comparison_title is not None:
+            self.label_diameter_source_comparison_title.hide()
         self.button_show_annealing = QtWidgets.QPushButton("Show annealing", project_box)
         self.button_show_annealing.setToolTip(
             "Preview the highest-priority matching source: .pydpj, then Košice, then fabrication."
@@ -13760,7 +13785,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fabrication_annealing_index = None
             source_label = "fabrication folder"
 
-        worker = AnnealingFolderScanWorker(root, source_label=source_label)
+        worker = AnnealingFolderScanWorker(
+            root,
+            source_label=source_label,
+            include_sample_workbook=source_kind == "kosice",
+        )
         task = DaemonFilesystemTask(
             worker,
             kind="annealing",
@@ -13813,6 +13842,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._kosice_sample_suggestions = index_obj.suggestions()
             self._refresh_fabrication_completers()
             self._update_kosice_match_status()
+            self._apply_kosice_sample_if_possible()
         else:
             if self._fabrication_folder_path != root:
                 return
@@ -13845,28 +13875,50 @@ class MainWindow(QtWidgets.QMainWindow):
         if index is None or self._annealing_folder_scan_active("kosice"):
             return
         matches = index.matching(self.edit_name_composition.text(), self.edit_name_wire.text())
+        sample = index.matching_sample(self.edit_name_composition.text(), self.edit_name_wire.text())
         unsupported_note = ""
         if index.unsupported_files:
             unsupported_note = (
                 f" {len(index.unsupported_files)} .opju discovered; unsupported and not imported."
             )
-        if matches:
+        workbook_note = ""
+        if index.sample_workbook is not None:
+            workbook_note = (
+                f" {len(index.sample_records)} diameter sample(s) indexed from "
+                f"{index.sample_workbook.name}."
+            )
+        conflict_note = ""
+        if index.conflicting_sample_count:
+            conflict_note = (
+                f" {index.conflicting_sample_count} conflicting diameter sample(s) were not imported."
+            )
+        if matches or sample is not None:
+            match_parts: list[str] = []
+            if matches:
+                match_parts.append(f"{len(matches)} curve(s)")
+            if sample is not None:
+                match_parts.append(
+                    f"diameter {_format_compact_unit(sample.diameter_mm * 1000.0, 'um', decimals=3)}"
+                )
             self.label_kosice_status.setText(
-                f"Košice match: {len(matches)} curve(s) for "
-                f"{matches[0].composition} {matches[0].microwire} (priority 2 after .pydpj)."
-                f"{unsupported_note}"
+                f"Košice match: {', '.join(match_parts)} for "
+                f"{self.edit_name_composition.text().strip()} "
+                f"{MicrowireLineEdit.to_display_text(self.edit_name_wire.text())} "
+                f"(priority 2 after .pydpj).{workbook_note}{conflict_note}{unsupported_note}"
             )
         elif self.edit_name_composition.text().strip() and self.edit_name_wire.text().strip():
             self.label_kosice_status.setText(
-                f"Košice indexed {len(index.records)} annealing file(s), but none match the current sample."
-                f"{unsupported_note}"
+                f"Košice indexed {len(index.records)} annealing file(s) and "
+                f"{len(index.sample_records)} diameter sample(s), but none match the current sample."
+                f"{conflict_note}{unsupported_note}"
             )
         else:
             self.label_kosice_status.setText(
                 f"Košice indexed {len(index.records)} annealing file(s) from "
                 f"{len(index.data_directories)} folder(s). Select a composition and microwire to see match status."
-                f"{unsupported_note}"
+                f"{workbook_note}{conflict_note}{unsupported_note}"
             )
+        self._refresh_diameter_source_comparison()
 
     def _fabrication_load_active(self) -> bool:
         task = self._fabrication_thread
@@ -14008,6 +14060,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Type/select a composition to load microwires."
             )
         self._apply_fabrication_sample_if_possible()
+        self._refresh_diameter_source_comparison()
         self._ensure_fabrication_composition_loaded(defer=True)
 
     def _handle_fabrication_load_failure(self, root_obj: object, message: str) -> None:
@@ -14081,6 +14134,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Loaded {sample_count} microwire suggestion(s) from {len(files)} fabrication workbook(s)."
         )
         self._apply_fabrication_sample_if_possible()
+        self._refresh_diameter_source_comparison()
         return True
 
     def _refresh_fabrication_completers(self) -> None:
@@ -14272,6 +14326,39 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         return self._fabrication_record_lookup.get((_normalized_token(composition), current_wire))
 
+    def _apply_kosice_sample_if_possible(self, *, force: bool = False) -> bool:
+        index = self._kosice_index
+        if index is None:
+            return False
+        if (
+            self._diameter_imported
+            and self._diameter_import_source not in {None, "fabrication"}
+            and not force
+        ):
+            return False
+        record = index.matching_sample(
+            self.edit_name_composition.text(),
+            self.edit_name_wire.text(),
+        )
+        if record is None:
+            return False
+        try:
+            diameter_mm = float(record.diameter_mm)
+            if not math.isfinite(diameter_mm) or diameter_mm <= 0.0:
+                raise ValueError(f"invalid diameter {record.diameter_mm!r}")
+            self.spin_diameter.setValue(diameter_mm)
+            self._mark_diameter_imported(True, source="kosice")
+            self.label_kosice_status.setText(
+                f"Exact-match Košice workbook diameter "
+                f"{_format_compact_unit(diameter_mm * 1000.0, 'um', decimals=3)} "
+                f"is available for {record.composition} {record.microwire} (priority 2 after .pydpj)."
+            )
+        except Exception as exc:
+            self._mark_diameter_imported(False)
+            self.label_kosice_status.setText(f"Košice diameter import failed: {exc}")
+            return False
+        return True
+
     def _apply_fabrication_sample_if_possible(self, *, force: bool = False) -> bool:
         if self._diameter_imported and not force:
             return False
@@ -14287,16 +14374,92 @@ class MainWindow(QtWidgets.QMainWindow):
             if not math.isfinite(diameter_mm) or diameter_mm <= 0.0:
                 raise ValueError(f"invalid diameter {record.diameter_mm!r}")
             self.spin_diameter.setValue(diameter_mm)
-            self._mark_diameter_imported(True)
+            self._mark_diameter_imported(True, source="fabrication")
             self.label_fabrication_status.setText(
-                f"Using fabrication diameter {_format_compact_unit(diameter_mm * 1000.0, 'um', decimals=3)} "
-                f"for {record.composition} {record.label}."
+                f"Exact-match fabrication diameter "
+                f"{_format_compact_unit(diameter_mm * 1000.0, 'um', decimals=3)} "
+                f"is available for {record.composition} {record.label}."
             )
         except Exception as exc:
             self._mark_diameter_imported(False)
             self.label_fabrication_status.setText(f"Fabrication diameter import failed: {exc}")
             return False
         return True
+
+    def _apply_fallback_diameter_if_possible(self, *, force: bool = False) -> bool:
+        if self._apply_kosice_sample_if_possible(force=force):
+            return True
+        return self._apply_fabrication_sample_if_possible(force=force)
+
+    def _exact_diameter_source_values(self) -> list[tuple[str, str, float]]:
+        values: list[tuple[str, str, float]] = []
+        project_match = self._builder_project_match
+        if (
+            project_match is not None
+            and project_match.diameter_mm is not None
+            and self._builder_project_path == project_match.path
+            and self._project_row_matches_current_sample(project_match.matched_row)
+        ):
+            values.append(("project", ".pydpj", float(project_match.diameter_mm)))
+
+        kosice_record = None
+        if self._kosice_index is not None:
+            kosice_record = self._kosice_index.matching_sample(
+                self.edit_name_composition.text(),
+                self.edit_name_wire.text(),
+            )
+        if kosice_record is not None:
+            values.append(("kosice", "Košice", float(kosice_record.diameter_mm)))
+
+        fabrication_record = self._matching_fabrication_record()
+        if fabrication_record is not None and fabrication_record.diameter_mm is not None:
+            diameter_mm = float(fabrication_record.diameter_mm)
+            if math.isfinite(diameter_mm) and diameter_mm > 0.0:
+                values.append(("fabrication", "fabrication", diameter_mm))
+        return values
+
+    def _refresh_diameter_source_comparison(self) -> None:
+        if not hasattr(self, "label_diameter_source_comparison"):
+            return
+        try:
+            values = self._exact_diameter_source_values()
+        except Exception:
+            values = []
+        label = self.label_diameter_source_comparison
+        if not values:
+            label.clear()
+            label.hide()
+            if self.label_diameter_source_comparison_title is not None:
+                self.label_diameter_source_comparison_title.hide()
+            return
+
+        priorities = {"project": 1, "kosice": 2, "fabrication": 3}
+        parts: list[str] = []
+        for source, display_name, diameter_mm in values:
+            selection = ", selected" if source == self._diameter_import_source else ""
+            parts.append(
+                f"{display_name} {_format_compact_unit(diameter_mm * 1000.0, 'um', decimals=3)} "
+                f"(priority {priorities[source]}{selection})"
+            )
+        diameters_mm = [diameter_mm for _source, _name, diameter_mm in values]
+        spread_um = (max(diameters_mm) - min(diameters_mm)) * 1000.0
+        mismatch = len(diameters_mm) > 1 and spread_um > 0.0005
+        if mismatch:
+            conclusion = (
+                f"Mismatch: exact source values differ by up to "
+                f"{_format_compact_unit(spread_um, 'um', decimals=3)}."
+            )
+            label.setStyleSheet("QLabel { color: #d97706; font-weight: 600; }")
+        elif len(diameters_mm) > 1:
+            conclusion = "Exact source values agree."
+            label.setStyleSheet("QLabel { color: #16a34a; }")
+        else:
+            conclusion = "Only one exact source value is available."
+            label.setStyleSheet("")
+        label.setText("; ".join(parts) + ". " + conclusion)
+        label.show()
+        if self.label_diameter_source_comparison_title is not None:
+            self.label_diameter_source_comparison_title.show()
 
     def _refresh_diameter_import_state(self) -> None:
         self._mark_diameter_imported(
@@ -14318,8 +14481,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._mark_diameter_imported(False)
 
-    def _mark_diameter_imported(self, imported: bool) -> None:
+    def _mark_diameter_imported(self, imported: bool, *, source: str | None = None) -> None:
         self._diameter_imported = bool(imported)
+        self._diameter_import_source = (
+            source or self._diameter_import_source or "external"
+        ) if self._diameter_imported else None
         self._diameter_import_sample_key = self._current_diameter_import_sample_key() if self._diameter_imported else None
         if not hasattr(self, "spin_diameter"):
             return
@@ -14328,15 +14494,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 "QDoubleSpinBox { border: 1px solid #16a34a; background-color: rgba(22, 163, 74, 0.10); }"
             )
             self.spin_diameter.setToolTip(
-                "Wire diameter imported for the current sample from the Microwire Data Builder project or fabrication folder; manual edits are allowed."
+                "Wire diameter imported for the current sample from the Microwire Data Builder project, "
+                "Košice workbook, or fabrication folder; manual edits are allowed."
             )
         else:
             self.spin_diameter.setStyleSheet(
                 "QDoubleSpinBox { border: 1px solid #dc2626; background-color: rgba(220, 38, 38, 0.10); }"
             )
             self.spin_diameter.setToolTip(
-                "Wire diameter has not been imported for the current sample from the Builder project or fabrication folder; manual edits are allowed."
+                "Wire diameter has not been imported for the current sample from the Builder project, "
+                "Košice workbook, or fabrication folder; manual edits are allowed."
             )
+        self._refresh_diameter_source_comparison()
 
     def _read_builder_project_payload(self, path: Path) -> Any:
         return _read_builder_project_cache_entry(path).payload
@@ -14792,9 +14961,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.edit_name_specimen.setText(str(specimen_value))
             if match.diameter_mm is not None:
                 self.spin_diameter.setValue(match.diameter_mm)
-                self._mark_diameter_imported(True)
+                self._mark_diameter_imported(True, source="project")
             else:
-                if not self._apply_fabrication_sample_if_possible(force=True):
+                if not self._apply_fallback_diameter_if_possible(force=True):
                     self._mark_diameter_imported(False)
             if match.current_mA is not None:
                 self.spin_current_sweep_end_mA.setValue(match.current_mA)
@@ -14919,13 +15088,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
             return
         if not isinstance(match_obj, ProjectImportResult):
-            self._mark_diameter_imported(False)
+            if not self._apply_fallback_diameter_if_possible(force=True):
+                self._mark_diameter_imported(False)
             self.label_project_status.setText("Failed to apply saved project sample match: invalid result.")
             return
         try:
             self._apply_project_match(match_obj, update_identity=False, quiet=quiet)
         except Exception as exc:
-            self._mark_diameter_imported(False)
+            if not self._apply_fallback_diameter_if_possible(force=True):
+                self._mark_diameter_imported(False)
             self.label_project_status.setText(f"Failed to apply saved project sample match: {exc}")
             return
         self._builder_project_last_auto_import_request_key = self._project_import_request_key(Path(path_obj))
@@ -14938,7 +15109,8 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> None:
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
             return
-        self._mark_diameter_imported(False)
+        if not self._apply_fallback_diameter_if_possible(force=True):
+            self._mark_diameter_imported(False)
         self.label_project_status.setText(message)
 
     def _handle_builder_project_suggestions(
@@ -14970,7 +15142,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _handle_builder_project_auto_import_no_match(self, path_obj: object, key_obj: object) -> None:
         if not self._builder_project_auto_import_is_current(path_obj, key_obj):
             return
-        if not self._apply_fabrication_sample_if_possible(force=True):
+        if not self._apply_fallback_diameter_if_possible(force=True):
             self._mark_diameter_imported(False)
         self._builder_project_last_auto_import_request_key = self._project_import_request_key(Path(path_obj))
         self.label_project_status.setText(
@@ -16178,10 +16350,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_kosice_match_status()
             self._schedule_builder_project_auto_import()
             try:
-                self._apply_fabrication_sample_if_possible()
+                self._apply_fallback_diameter_if_possible()
             except Exception as exc:
                 self._mark_diameter_imported(False)
-                self.label_fabrication_status.setText(f"Failed to apply fabrication sample suggestion: {exc}")
+                self.label_fabrication_status.setText(f"Failed to apply diameter sample suggestion: {exc}")
             self._persist_settings_if_enabled()
         finally:
             self._sync_name_fields_in_progress = False
