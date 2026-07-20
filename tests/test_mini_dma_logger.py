@@ -19526,6 +19526,74 @@ def test_motion_waits_for_dispatch_and_tic_target_readback(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_manual_move_accepts_exact_target_with_kosice_planning_mode_via_status_timer(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        target = 100
+        current = 100
+        status_reads = 0
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target = int(position_steps)
+            self.current = self.target
+
+        def reset_command_timeout(self) -> None:
+            return None
+
+        def get_status(self) -> str:
+            self.status_reads += 1
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 2",
+                    f"Target position: {self.target}",
+                    f"Current position: {self.current}",
+                    "Current velocity: 0",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller)
+    window._tic_command_dispatcher = dispatcher
+    window._tic_command_dispatcher_key = window._tic_settings_for_current_command().key()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    window._tic_motor_power_ok = True
+    window.spin_steps_per_mm.setValue(100.0)
+    window.spin_jog_mm.setValue(0.1)
+    window._current_position_mm = 1.0
+    window._current_position_steps = 100
+    window._last_move_target_mm = 1.0
+    window._last_commanded_position_steps = 100
+
+    try:
+        window._handle_manual_jog_button_clicked(1.0)
+        pending = window._pending_motion_command
+        assert pending is not None
+        assert dispatcher.wait_until_target_dispatched(pending.sequence, timeout_s=2.0)
+        assert controller.target == 110
+
+        # Exercise the real timer handler while no recipe or session is active.
+        window._handle_status_timer()
+
+        assert controller.status_reads == 1
+        assert window._pending_motion_command is None
+        assert window._tic_planning_mode == 2
+        assert window._tic_target_position_steps == 110
+        assert window._current_position_steps == 110
+        assert window._kosice_active_motion_target_steps is None
+        assert "Tic accepted motor command" in window.log_output.toPlainText()
+        assert "was not accepted" not in window.log_output.toPlainText()
+    finally:
+        dispatcher.stop()
+        _close_test_window(window)
+
+
 def test_unaccepted_tic_target_is_released_for_retry(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

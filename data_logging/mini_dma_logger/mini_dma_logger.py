@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-18.1"
+CONTROL_LOGIC_VERSION = "2026-07-20.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -210,6 +210,8 @@ CONTROL_LOGIC_FEATURES = [
     "kosice_correlated_noise_hold_band",
     "shared_tic_target_dispatch_receipts",
     "shared_tic_target_acceptance_readback",
+    "shared_tic_target_acceptance_ignores_device_specific_planning_enum",
+    "manual_tic_command_forces_acceptance_status_refresh",
     "tic_target_priority_over_coalesced_keepalive",
     "kosice_exact_confirmed_motor_completion",
 ]
@@ -23384,9 +23386,11 @@ class MainWindow(QtWidgets.QMainWindow):
         result = pending.dispatch_result
         if not result.succeeded:
             return
-        target_matches = self._tic_target_position_steps == pending.target_steps
-        planning_mode_matches = self._tic_planning_mode in {None, 1}
-        if target_matches and planning_mode_matches:
+        # Exact target-position readback is the portable acceptance signal. Prague's
+        # Tic reports planning mode 1 for position commands, while the Košice Tic
+        # reports mode 2 after accepting and completing the same command. Treating
+        # that device-specific enum as a universal gate falsely rejected real moves.
+        if self._tic_target_position_steps == pending.target_steps:
             self._confirm_pending_motion_command()
             return
         status_after_dispatch = (
@@ -32802,7 +32806,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_controller.execute_next_tick()
 
     def _handle_status_timer(self) -> None:
-        if self._automation_active or self._session_active:
+        if (
+            self._automation_active
+            or self._session_active
+            or self._pending_motion_command is not None
+            or self._kosice_active_motion_target_steps is not None
+            or self._manual_jog_timer.isActive()
+            or self._motor_step_calibration_active
+        ):
             self._refresh_tic_status()
         if self._supply_controller is not None and self._supply_controller.is_connected():
             self._refresh_supply_snapshot()
