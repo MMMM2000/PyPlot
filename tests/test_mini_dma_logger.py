@@ -19660,6 +19660,60 @@ def test_unaccepted_tic_target_is_released_for_retry_without_post_dispatch_statu
         _close_test_window(window)
 
 
+def test_dispatched_tic_target_schedules_acceptance_readback_on_ui_thread(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeController:
+        target = 0
+        status_reads = 0
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target = int(position_steps)
+
+        def get_status(self) -> str:
+            self.status_reads += 1
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 2",
+                    f"Target position: {self.target}",
+                    f"Current position: {self.target}",
+                    "Current velocity: 0",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller)
+    window._tic_command_dispatcher = dispatcher
+    window._tic_command_dispatcher_key = window._tic_settings_for_current_command().key()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    window.spin_steps_per_mm.setValue(100.0)
+
+    try:
+        assert window._move_to_position_mm(0.02, speed_mm_s=1.0) is True
+        pending = window._pending_motion_command
+        assert pending is not None
+        assert dispatcher.wait_until_target_dispatched(pending.sequence, timeout_s=2.0)
+
+        polling_thread = threading.Thread(target=window._poll_pending_motion_dispatch)
+        polling_thread.start()
+        polling_thread.join(timeout=2.0)
+        assert not polling_thread.is_alive()
+
+        qtbot.waitUntil(lambda: controller.status_reads >= 1, timeout=2000)
+        qtbot.waitUntil(lambda: window._pending_motion_command is None, timeout=2000)
+        assert window._tic_target_position_steps == 2
+        assert "Tic accepted motor command" in window.log_output.toPlainText()
+    finally:
+        dispatcher.stop()
+        _close_test_window(window)
+
+
 def test_failed_motion_dispatch_is_released_for_retry(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 

@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-20.2"
+CONTROL_LOGIC_VERSION = "2026-07-20.3"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -212,6 +212,7 @@ CONTROL_LOGIC_FEATURES = [
     "shared_tic_target_acceptance_readback",
     "shared_tic_target_acceptance_ignores_device_specific_planning_enum",
     "manual_tic_command_forces_acceptance_status_refresh",
+    "tic_acceptance_status_refresh_runs_on_ui_thread",
     "held_manual_jog_uses_continuous_tic_velocity",
     "tic_target_priority_over_coalesced_keepalive",
     "kosice_exact_confirmed_motor_completion",
@@ -23346,6 +23347,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _motion_target_confirmation_timeout_s(self) -> float:
         return max(2.5, 2.5 * self._tic_status_interval_ms() / 1000.0)
 
+    def _schedule_tic_status_refresh(self) -> None:
+        """Request a prompt Tic readback without touching a UI timer off-thread."""
+        if not self._is_ui_thread():
+            self._run_on_ui_thread(WeakOwnerCallback(self, "_schedule_tic_status_refresh"))
+            return
+        if hasattr(self, "_status_timer"):
+            self._status_timer.start(0)
+
     def _pending_motion_command_state(self) -> str:
         pending = self._pending_motion_command
         return "idle" if pending is None else pending.state
@@ -23397,8 +23406,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not result.succeeded:
                 self._fail_pending_motion_command(str(result.error or "unknown dispatch failure"))
                 return
-            if hasattr(self, "_status_timer"):
-                self._status_timer.start(0)
+            self._schedule_tic_status_refresh()
 
         result = pending.dispatch_result
         if result is None or not result.succeeded:
