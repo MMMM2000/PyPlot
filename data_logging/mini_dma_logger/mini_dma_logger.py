@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-20.3"
+CONTROL_LOGIC_VERSION = "2026-07-20.4"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -20919,6 +20919,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         if self._accept_pending_linear_zero_plateau_if_stable():
             return True
+        if self._pending_motion_command is None:
+            self._move_to_position_mm(
+                float(target_mm),
+                speed_mm_s=self._setup_return_speed_for_distance_mm_s(
+                    abs(float(self._current_position_mm) - float(target_mm))
+                ),
+            )
         if self._setup_zero_fallback_reason == "linear_unload_slack":
             self._log_waiting_for_feedback("Returning to the linear-unload zero-stress position before computing l0.")
         else:

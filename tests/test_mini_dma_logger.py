@@ -3386,6 +3386,31 @@ def test_pending_linear_unload_fallback_accepts_stable_near_zero_plateau(
         _close_test_window(window)
 
 
+def test_pending_linear_unload_fallback_retries_blocked_return_move(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    targets: list[float] = []
+    window.spin_steps_per_mm.setValue(100.0)
+    window._automation_step_note = "setup_return_zero"
+    window._setup_zero_position_mm = 3.9723
+    window._setup_zero_fallback_return_position_mm = 3.9723
+    window._setup_zero_fallback_reason = "linear_unload_slack"
+    window._current_position_mm = 3.94
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._move_to_position_mm = (  # type: ignore[method-assign]
+        lambda target_mm, **_kwargs: targets.append(target_mm) or True
+    )
+
+    try:
+        assert window._handle_pending_setup_zero_fallback() is False
+        assert targets == [pytest.approx(3.9723)]
+
+        window._current_position_mm = 3.97
+        assert window._handle_pending_setup_zero_fallback() is True
+        assert window._setup_zero_fallback_return_position_mm is None
+    finally:
+        _close_test_window(window)
+
+
 def test_setup_return_zero_ignores_legacy_zero_stable_setting(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     window.spin_setup_zero_stable_s.setValue(30.0)
