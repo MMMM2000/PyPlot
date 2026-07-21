@@ -129,6 +129,11 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def _stub_canonical_tic_profile_checks(window: object) -> None:
+    window._apply_tic_persistent_profile = lambda: (True, "PASS")  # type: ignore[attr-defined,method-assign]
+    window._capture_verified_tic_profile = lambda: (True, "PASS")  # type: ignore[attr-defined,method-assign]
+
+
 def _snapshot_settings() -> dict[str, object]:
     settings = _test_settings()
     return {key: settings.value(key) for key in settings.allKeys()}
@@ -6658,6 +6663,9 @@ def test_manual_auto_connect_applies_tic_settings_after_status(tmp_path: Path, q
         return True
 
     window._ensure_tic_ready_for_recipe = _tic_ready  # type: ignore[method-assign]
+    window._apply_tic_persistent_profile = (  # type: ignore[method-assign]
+        lambda: called.append("persistent") or (True, "PASS: canonical persistent profile")
+    )
     window._apply_tic_configured_step_mode = (  # type: ignore[method-assign]
         lambda: called.append("step") or (True, "PASS: Tic step mode 1/8 step")
     )
@@ -6668,11 +6676,17 @@ def test_manual_auto_connect_applies_tic_settings_after_status(tmp_path: Path, q
         lambda: called.append("motion")
         or (True, "PASS: Tic motion limits speed 10000000, accel 100000, decel 100000.")
     )
+    window._capture_verified_tic_profile = (  # type: ignore[method-assign]
+        lambda: called.append("verified") or (True, "PASS: canonical runtime profile")
+    )
 
     try:
         window._run_manual_auto_connect_hardware()
 
-        assert called == ["scale", "supply", "current", "tic", "step", "current_limit", "motion"]
+        assert called == [
+            "scale", "supply", "current", "tic", "persistent",
+            "step", "current_limit", "motion", "verified",
+        ]
         log_text = window.log_output.toPlainText()
         assert "Manual hardware auto-connect: PASS: Tic step mode 1/8 step" in log_text
         assert "Manual hardware auto-connect: PASS: Tic current limit 343 mA." in log_text
@@ -6731,6 +6745,7 @@ def test_recipe_preflight_shows_auto_connect_progress_when_requested(
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+    _stub_canonical_tic_profile_checks(window)
     window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
@@ -6769,6 +6784,7 @@ def test_recipe_preflight_does_not_show_auto_connect_progress_by_default(
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+    _stub_canonical_tic_profile_checks(window)
     window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
@@ -14285,6 +14301,7 @@ def test_recipe_preflight_restores_real_gram_zero_load_reference_before_setup(tm
         window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        _stub_canonical_tic_profile_checks(window)
         window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
@@ -27645,6 +27662,7 @@ def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: P
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    _stub_canonical_tic_profile_checks(window)
     window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
@@ -28071,6 +28089,13 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    def _verified_persistent_profile() -> tuple[bool, str]:
+        window._verified_tic_persistent_settings = dict(  # type: ignore[attr-defined]
+            mini_dma_mod.CANONICAL_TIC_PERSISTENT_SETTINGS
+        )
+        return True, "PASS: canonical persistent profile"
+
+    window._apply_tic_persistent_profile = _verified_persistent_profile  # type: ignore[method-assign]
     window.combo_current_sweep_supply_channel.setCurrentIndex(
         window.combo_current_sweep_supply_channel.findData(3)
     )
@@ -28174,6 +28199,7 @@ def test_recipe_preflight_blocks_start_when_tic_current_limit_fails(
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        _stub_canonical_tic_profile_checks(window)
         window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._apply_tic_current_limit = lambda: (False, "FAIL: Tic current limit could not be set.")  # type: ignore[method-assign]
 
@@ -28211,6 +28237,7 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        _stub_canonical_tic_profile_checks(window)
         window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._build_tic_controller = lambda _settings=None: _BusyTic()  # type: ignore[method-assign]
         window._tic_status_text = "\n".join(
@@ -28234,7 +28261,7 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
         _close_test_window(window)
 
 
-def test_apply_tic_configured_step_mode_writes_selected_mode(tmp_path: Path, qtbot) -> None:
+def test_apply_tic_configured_step_mode_writes_and_reads_back_canonical_mode(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeTic:
@@ -28253,8 +28280,11 @@ def test_apply_tic_configured_step_mode_writes_selected_mode(tmp_path: Path, qtb
     try:
         window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
         window._tic_status_text = "VIN voltage: 12.00 V\nErrors currently stopping the motor: None"
-        window.spin_full_steps_per_mm.setValue(100.0)
-        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
+        window._refresh_tic_status = lambda: setattr(  # type: ignore[method-assign]
+            window,
+            "_tic_status_text",
+            "VIN voltage: 12.00 V\nStep mode: 1/8 step\nErrors currently stopping the motor: None",
+        ) or True
 
         ok, message = window._apply_tic_configured_step_mode()
 
@@ -30950,7 +30980,7 @@ def test_current_sweep_predictive_correction_uses_stress_cap_not_feedback_interv
         _close_test_window(window)
 
 
-def test_mini_dma_defaults_to_provisional_microstep_steps_per_mm(tmp_path: Path, qtbot) -> None:
+def test_mini_dma_defaults_to_canonical_microstep_units_per_mm(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
     try:
@@ -30966,114 +30996,151 @@ def test_mini_dma_defaults_to_provisional_microstep_steps_per_mm(tmp_path: Path,
         _close_test_window(window)
 
 
-def test_apply_tic_step_mode_preserves_physical_mm_position(tmp_path: Path, qtbot) -> None:
+def test_tic_step_mode_ui_cannot_override_canonical_profile(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
-        class _FakeController:
-            def __init__(self) -> None:
-                self.step_modes: list[str] = []
-                self.positions: list[int] = []
-                self.halted = False
-
-            def set_step_mode(self, step_mode: str) -> None:
-                self.step_modes.append(step_mode)
-
-            def halt_and_hold(self) -> None:
-                self.halted = True
-
-            def set_current_position(self, position_steps: int) -> None:
-                self.positions.append(position_steps)
-
-        controller = _FakeController()
-        _use_immediate_tic_dispatcher(window, controller)
-        window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
-        window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
-        window.spin_full_steps_per_mm.setValue(100.0)
-        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
-        window.spin_steps_per_mm.setValue(800.0)
-        window._current_position_steps = 4800
-        window._current_position_mm = 4800 / 800.0
-        window._effective_position_mm = window._current_position_mm
-        window._last_effective_move_target_mm = window._current_position_mm
-        window._last_move_target_mm = window._current_position_mm
-        window._last_commanded_position_steps = 4800
         window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("4"))
 
-        assert window._apply_tic_step_mode(confirm=False) is True
-
-        expected_mm = 4800 / 800.0
-        expected_steps = round(expected_mm * 400.0)
-        assert controller.halted is True
-        assert controller.step_modes == ["4"]
-        assert controller.positions == [expected_steps]
-        assert window.spin_steps_per_mm.value() == pytest.approx(400.0)
-        assert window._current_position_mm == pytest.approx(expected_mm)
-        assert window._effective_position_mm == pytest.approx(expected_mm)
-        assert window._last_move_target_mm == pytest.approx(expected_mm)
-        assert window._last_commanded_position_steps == expected_steps
+        assert window._selected_tic_step_mode() == "8"
+        window._sync_tic_units_per_mm_from_full_steps(persist=False)
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
+        assert window.combo_tic_step_mode.isEnabled() is False
     finally:
         _close_test_window(window)
 
 
-def test_apply_tic_step_mode_keeps_requested_mode_after_status_refresh(
-    tmp_path: Path,
-    qtbot,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    window = _build_window(tmp_path, qtbot)
+def test_canonical_tic_settings_patch_preserves_unrelated_device_settings() -> None:
+    original = """# Pololu Tic settings
+control_mode: analog
+step_mode: full
+current_limit: 174
+max_speed: 2000000
+custom_unrelated_setting: 17
+"""
+
+    patched = mini_dma_mod.patch_tic_settings_text(
+        original,
+        mini_dma_mod.CANONICAL_TIC_PERSISTENT_SETTINGS,
+    )
+    parsed = mini_dma_mod.parse_tic_settings_text(patched)
+
+    assert mini_dma_mod.tic_settings_mismatches(parsed) == {}
+    assert parsed["custom_unrelated_setting"] == "17"
+    assert parsed["control_mode"] == "serial"
+    assert parsed["step_mode"] == "8"
+    assert parsed["current_limit"] == "343"
+
+
+def test_saved_full_step_settings_cannot_override_canonical_t500_profile(tmp_path: Path, qtbot) -> None:
+    settings = _test_settings()
+    settings.setValue("motor_defaults_version", mini_dma_mod.MOTOR_DEFAULTS_VERSION)
+    settings.setValue("tic_step_mode", "full")
+    settings.setValue("full_steps_per_mm", 100.0)
+    settings.setValue("steps_per_mm", 100.0)
+    settings.setValue("tic_current_limit_mA", 174)
+    settings.setValue("tic_max_speed", 2_000_000)
+    settings.sync()
+
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
     try:
-        class _FakeController:
-            def __init__(self) -> None:
-                self.step_modes: list[str] = []
-                self.positions: list[int] = []
-
-            def set_step_mode(self, step_mode: str) -> None:
-                self.step_modes.append(step_mode)
-
-            def halt_and_hold(self) -> None:
-                return None
-
-            def set_current_position(self, position_steps: int) -> None:
-                self.positions.append(position_steps)
-
-        controller = _FakeController()
-        _use_immediate_tic_dispatcher(window, controller)
-        window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
-        monkeypatch.setattr(
-            mini_dma_mod.QtWidgets.QMessageBox,
-            "question",
-            lambda *_args, **_kwargs: mini_dma_mod.QtWidgets.QMessageBox.StandardButton.Yes,
-        )
-        window.spin_full_steps_per_mm.setValue(100.0)
-        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("4"))
-        window.spin_steps_per_mm.setValue(800.0)
-        window._current_position_steps = 800
-        window._current_position_mm = 1.0
-        window._last_commanded_position_steps = 800
-
-        refresh_calls = 0
-
-        def _status_refresh_resets_to_live_mode() -> bool:
-            nonlocal refresh_calls
-            refresh_calls += 1
-            mode = "8" if refresh_calls == 1 else "4"
-            units = 800.0 if mode == "8" else 400.0
-            window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData(mode))
-            window.spin_steps_per_mm.setValue(units)
-            return True
-
-        window._refresh_tic_status = _status_refresh_resets_to_live_mode  # type: ignore[method-assign]
-
-        assert window._apply_tic_step_mode(confirm=True) is True
-
-        assert controller.step_modes == ["4"]
-        assert controller.positions == [400]
-        assert window.combo_tic_step_mode.currentData() == "4"
+        assert window._selected_tic_step_mode() == "8"
+        assert window.combo_tic_step_mode.currentData() == "8"
+        assert window.spin_full_steps_per_mm.value() == pytest.approx(100.0)
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
+        assert window.spin_tic_current_limit_mA.value() == 343
+        assert window.spin_tic_max_speed.value() == 10_000_000
     finally:
         _close_test_window(window)
 
 
-def test_refresh_tic_status_updates_step_mode_and_tic_units(tmp_path: Path, qtbot) -> None:
+def test_apply_tic_persistent_profile_repairs_and_verifies_controller(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeTic:
+        def __init__(self) -> None:
+            self.settings_text = """control_mode: analog
+never_sleep: false
+disable_safe_start: false
+ignore_err_line_high: false
+auto_clear_driver_error: true
+soft_error_response: decel_to_hold
+command_timeout: 1000
+invert_motor_direction: false
+max_speed: 2000000
+starting_speed: 0
+max_accel: 40000
+max_decel: 0
+step_mode: full
+current_limit: 174
+unrelated: keep
+"""
+            self.writes: list[str] = []
+
+        def get_persistent_settings_text(self) -> str:
+            return self.settings_text
+
+        def set_persistent_settings_text(self, text: str) -> None:
+            self.writes.append(text)
+            self.settings_text = text
+
+    tic = _FakeTic()
+    window._stop_tic_dispatcher = lambda: None  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
+    try:
+        ok, message = window._apply_tic_persistent_profile()
+
+        assert ok is True
+        assert "applied and verified" in message
+        assert len(tic.writes) == 1
+        parsed = mini_dma_mod.parse_tic_settings_text(tic.settings_text)
+        assert mini_dma_mod.tic_settings_mismatches(parsed) == {}
+        assert parsed["unrelated"] == "keep"
+
+        ok, message = window._apply_tic_persistent_profile()
+        assert ok is True
+        assert "already verified" in message
+        assert len(tic.writes) == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_verified_tic_profile_is_recorded_in_run_metadata(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_tic_serial.setText("00501366")
+    window._verified_tic_persistent_settings = dict(  # type: ignore[attr-defined]
+        mini_dma_mod.CANONICAL_TIC_PERSISTENT_SETTINGS
+    )
+    window._tic_status_text = "\n".join(
+        [
+            "VIN voltage: 12.00 V",
+            "Step mode: 1/8 step",
+            "Max speed: 10000000",
+            "Max acceleration: 100000",
+            "Max deceleration: 100000",
+            "Current limit: 343 mA",
+            "Errors currently stopping the motor: None",
+        ]
+    )
+    try:
+        ok, message = window._capture_verified_tic_profile()
+        metadata = window._session_metadata_from_ui()
+
+        assert ok is True
+        assert "800 Tic units/mm" in message
+        profile = metadata["tic_motor_profile"]
+        assert profile["name"] == mini_dma_mod.CANONICAL_TIC_PROFILE_NAME
+        assert profile["device_serial"] == "00501366"
+        assert profile["step_mode"] == "8"
+        assert profile["tic_units_per_mm"] == pytest.approx(800.0)
+        assert profile["readback"]["step_mode"] == "8"
+        assert profile["readback"]["current_limit_mA"] == 343
+        assert profile["persistent_readback"]["step_mode"] == "8"
+        assert len(profile["fingerprint_sha256"]) == 64
+    finally:
+        _close_test_window(window)
+
+
+def test_refresh_tic_status_does_not_replace_canonical_step_mode(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     try:
         class _FakeController:
@@ -31099,16 +31166,16 @@ def test_refresh_tic_status_updates_step_mode_and_tic_units(tmp_path: Path, qtbo
 
         assert window._refresh_tic_status() is True
 
-        assert window.combo_tic_step_mode.currentData() == "4"
-        assert window.spin_steps_per_mm.value() == pytest.approx(400.0)
-        assert window._current_position_mm == pytest.approx(1.0)
+        assert window.combo_tic_step_mode.currentData() == "8"
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
+        assert window._current_position_mm == pytest.approx(0.5)
         assert "1/4 step" in window.label_tic_settings_summary.text()
-        assert "400 Tic units/mm" in window.label_tic_settings_summary.text()
+        assert "800 Tic units/mm" in window.label_tic_settings_summary.text()
     finally:
         _close_test_window(window)
 
 
-def test_legacy_default_steps_per_mm_migrates_to_provisional_microstep_value(tmp_path: Path, qtbot) -> None:
+def test_legacy_default_steps_per_mm_migrates_to_canonical_microstep_value(tmp_path: Path, qtbot) -> None:
     snapshot = _snapshot_settings()
     settings = _test_settings()
     settings.clear()
@@ -31125,7 +31192,7 @@ def test_legacy_default_steps_per_mm_migrates_to_provisional_microstep_value(tmp
         _restore_settings(snapshot)
 
 
-def test_custom_steps_per_mm_survives_motor_defaults_migration(tmp_path: Path, qtbot) -> None:
+def test_custom_steps_per_mm_is_replaced_by_canonical_profile(tmp_path: Path, qtbot) -> None:
     snapshot = _snapshot_settings()
     settings = _test_settings()
     settings.clear()
@@ -31136,7 +31203,7 @@ def test_custom_steps_per_mm_survives_motor_defaults_migration(tmp_path: Path, q
     qtbot.addWidget(window)
 
     try:
-        assert window.spin_steps_per_mm.value() == pytest.approx(1000.0)
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
     finally:
         _close_test_window(window)
         _restore_settings(snapshot)

@@ -12,6 +12,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import weakref
 from collections import deque
@@ -125,7 +126,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-21.1"
+CONTROL_LOGIC_VERSION = "2026-07-21.2"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -617,7 +618,7 @@ CALIBRATION_PRELOAD = "calibration_preload"
 CALIBRATION_FORWARD = "calibration_forward"
 CALIBRATION_REVERSE = "calibration_reverse"
 CALIBRATION_DEFAULTS_VERSION = 4
-MOTOR_DEFAULTS_VERSION = 4
+MOTOR_DEFAULTS_VERSION = 5
 DEFAULT_FULL_STEPS_PER_MM = 100.0
 DEFAULT_TIC_STEP_MODE = "8"
 DEFAULT_STEPS_PER_MM = 800.0
@@ -625,6 +626,56 @@ DEFAULT_TIC_CURRENT_LIMIT_MA = 343
 DEFAULT_TIC_MAX_SPEED = 10_000_000
 DEFAULT_TIC_MAX_ACCEL = 100_000
 DEFAULT_TIC_MAX_DECEL = 100_000
+CANONICAL_TIC_PROFILE_NAME = "tma-t500-1_8-v1"
+CANONICAL_TIC_PERSISTENT_SETTINGS: dict[str, str] = {
+    "control_mode": "serial",
+    "serial_baud_rate": "9600",
+    "serial_device_number": "14",
+    "serial_enable_alt_device_number": "false",
+    "serial_14bit_device_number": "false",
+    "serial_crc_for_commands": "false",
+    "serial_crc_for_responses": "false",
+    "serial_7bit_responses": "false",
+    "serial_response_delay": "0",
+    "never_sleep": "false",
+    "disable_safe_start": "false",
+    "ignore_err_line_high": "false",
+    "auto_clear_driver_error": "true",
+    "soft_error_response": "decel_to_hold",
+    "current_limit_during_error": "-1",
+    "command_timeout": "1000",
+    "vin_calibration": "0",
+    "scl_config": "default",
+    "sda_config": "default",
+    "tx_config": "default",
+    "rx_config": "default",
+    "rc_config": "default",
+    "input_averaging_enabled": "true",
+    "input_hysteresis": "0",
+    "input_scaling_degree": "linear",
+    "input_invert": "false",
+    "input_min": "0",
+    "input_neutral_min": "2015",
+    "input_neutral_max": "2080",
+    "input_max": "4095",
+    "output_min": "-200",
+    "output_max": "200",
+    "encoder_prescaler": "1",
+    "encoder_postscaler": "1",
+    "encoder_unlimited": "false",
+    "invert_motor_direction": "false",
+    "max_speed": str(DEFAULT_TIC_MAX_SPEED),
+    "starting_speed": "0",
+    "max_accel": str(DEFAULT_TIC_MAX_ACCEL),
+    # Zero is the persistent representation of "use max acceleration for deceleration".
+    "max_decel": "0",
+    "step_mode": DEFAULT_TIC_STEP_MODE,
+    "current_limit": str(DEFAULT_TIC_CURRENT_LIMIT_MA),
+    "auto_homing": "false",
+    "auto_homing_forward": "false",
+    "homing_speed_towards": "1000000",
+    "homing_speed_away": "500000",
+}
 DEFAULT_MOTOR_SUPPLY_CURRENT_LIMIT_A = 0.5
 TIC_CURRENT_LIMIT_STEP_MA = 1
 TIC_T500_CURRENT_LIMITS_MA: tuple[int, ...] = (
@@ -1226,6 +1277,54 @@ def tic_units_per_mm(full_steps_per_mm: float, step_mode: object) -> float:
     if factor is None:
         raise ValueError(f"Unsupported Tic step mode: {step_mode!r}")
     return float(full_steps_per_mm) * float(factor)
+
+
+TIC_SETTINGS_LINE_PATTERN = re.compile(
+    r"^(?P<indent>\s*)(?P<key>[a-z0-9_]+)(?P<separator>\s*:\s*)"
+    r"(?P<value>[^#\r\n]*?)(?P<suffix>\s*(?:#.*)?)$"
+)
+
+
+def parse_tic_settings_text(text: str) -> dict[str, str]:
+    settings: dict[str, str] = {}
+    for line in str(text).splitlines():
+        match = TIC_SETTINGS_LINE_PATTERN.match(line)
+        if match is None:
+            continue
+        settings[match.group("key")] = match.group("value").strip()
+    return settings
+
+
+def patch_tic_settings_text(text: str, desired: Mapping[str, str]) -> str:
+    remaining = {str(key): str(value) for key, value in desired.items()}
+    patched_lines: list[str] = []
+    for line in str(text).splitlines():
+        match = TIC_SETTINGS_LINE_PATTERN.match(line)
+        if match is None or match.group("key") not in remaining:
+            patched_lines.append(line)
+            continue
+        key = match.group("key")
+        patched_lines.append(
+            f"{match.group('indent')}{key}{match.group('separator')}"
+            f"{remaining.pop(key)}{match.group('suffix')}"
+        )
+    if remaining:
+        if patched_lines and patched_lines[-1].strip():
+            patched_lines.append("")
+        patched_lines.append("# TMA canonical Tic T500 profile")
+        patched_lines.extend(f"{key}: {value}" for key, value in remaining.items())
+    return "\n".join(patched_lines) + "\n"
+
+
+def tic_settings_mismatches(
+    actual: Mapping[str, str],
+    desired: Mapping[str, str] = CANONICAL_TIC_PERSISTENT_SETTINGS,
+) -> dict[str, tuple[str | None, str]]:
+    return {
+        str(key): (actual.get(str(key)), str(expected))
+        for key, expected in desired.items()
+        if actual.get(str(key)) != str(expected)
+    }
 
 
 def _tic_step_mode_label(step_mode: object) -> str:
@@ -5705,6 +5804,25 @@ class TicController:
                 raise RuntimeError(detail)
             return stdout
 
+    def get_persistent_settings_text(self) -> str:
+        # ticcmd uses its own USB handle. Release a native PyUSB handle first so
+        # WinUSB does not reject the settings read on Windows.
+        self.close()
+        with tempfile.TemporaryDirectory(prefix="tma-tic-settings-") as temporary_directory:
+            settings_path = Path(temporary_directory) / "tic-settings.txt"
+            self.run("--get-settings", str(settings_path), timeout_s=10.0)
+            return settings_path.read_text(encoding="utf-8")
+
+    def set_persistent_settings_text(self, settings_text: str) -> None:
+        # Loading settings reinitializes the Tic. This is intentionally kept out
+        # of ordinary motion commands and is only used by preflight when a
+        # canonical setting actually differs.
+        self.close()
+        with tempfile.TemporaryDirectory(prefix="tma-tic-settings-") as temporary_directory:
+            settings_path = Path(temporary_directory) / "tic-settings.txt"
+            settings_path.write_text(str(settings_text), encoding="utf-8", newline="\n")
+            self.run("--settings", str(settings_path), timeout_s=15.0)
+
     def get_status(self) -> str:
         with self._transport_lock:
             native = self._native_controller()
@@ -7323,6 +7441,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._ir_ui_bridge: SensorUiBridge | None = None
         self._tic_controller: TicController | None = None
         self._tic_controller_key: tuple[str, str, bool] | None = None
+        self._verified_tic_profile: dict[str, Any] | None = None
+        self._verified_tic_persistent_settings: dict[str, str] | None = None
         self._tic_command_dispatcher: TicCommandDispatcher | None = None
         self._tic_command_dispatcher_key: tuple[str, str, bool] | None = None
         self._tic_settings_lock = RLock()
@@ -8730,9 +8850,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_full_steps_per_mm.setRange(0.001, 100000.0)
         self.spin_full_steps_per_mm.setValue(DEFAULT_FULL_STEPS_PER_MM)
         self.spin_full_steps_per_mm.setToolTip(
-            "Mechanical full motor steps per mm before Tic microstepping. "
-            "The current external-gauge calibration confirms about 100 full steps/mm."
+            "Canonical TMA mechanics: 100 full motor steps/mm before 1/8 microstepping. "
+            "This is enforced identically in Prague and Košice."
         )
+        self.spin_full_steps_per_mm.setReadOnly(True)
         motion_advanced_form.addRow("Full steps/mm", self.spin_full_steps_per_mm)
 
         step_mode_row = QtWidgets.QHBoxLayout()
@@ -8743,14 +8864,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if default_step_mode_index >= 0:
             self.combo_tic_step_mode.setCurrentIndex(default_step_mode_index)
         self.combo_tic_step_mode.setToolTip(
-            "Tic microstep mode. Applying this changes the controller step mode and rescales the Tic "
-            "position register so the physical mm position stays continuous."
+            "Canonical Tic T500 step mode: 1/8 step in both Prague and Košice. "
+            "Live device status is compared with this value and never replaces it."
         )
+        self.combo_tic_step_mode.setEnabled(False)
         self.button_apply_tic_step_mode = QtWidgets.QPushButton("Apply", motion_advanced_box)
         self.button_apply_tic_step_mode.setToolTip(
             "Apply the selected Tic step mode, then rewrite the current Tic position to preserve physical mm."
         )
         self.button_apply_tic_step_mode.clicked.connect(self._apply_tic_step_mode)
+        self.button_apply_tic_step_mode.setVisible(False)
         step_mode_row.addWidget(self.combo_tic_step_mode, stretch=1)
         step_mode_row.addWidget(self.button_apply_tic_step_mode)
         motion_advanced_form.addRow("Tic step mode", step_mode_row)
@@ -8761,8 +8884,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tic_current_limit_mA.setValue(DEFAULT_TIC_CURRENT_LIMIT_MA)
         self.spin_tic_current_limit_mA.setSuffix(" mA")
         self.spin_tic_current_limit_mA.setToolTip(
-            "Tic motor winding current limit. This is separate from the HMP motor-supply rail current limit."
+            "Canonical Tic T500 winding current limit. This is separate from the HMP motor-supply rail current limit."
         )
+        self.spin_tic_current_limit_mA.setReadOnly(True)
         motion_advanced_form.addRow("Tic motor current limit", self.spin_tic_current_limit_mA)
 
         self.spin_tic_max_speed = QtWidgets.QSpinBox(motion_advanced_box)
@@ -8770,9 +8894,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tic_max_speed.setSingleStep(100_000)
         self.spin_tic_max_speed.setValue(DEFAULT_TIC_MAX_SPEED)
         self.spin_tic_max_speed.setToolTip(
-            "Temporary Tic runtime max speed in microsteps per 10000 s. "
-            "Preflight applies this before recipes so the controller does not depend on its stored profile."
+            "Canonical Tic runtime max speed in microsteps per 10000 s. "
+            "Preflight applies and verifies it before every recipe."
         )
+        self.spin_tic_max_speed.setReadOnly(True)
         motion_advanced_form.addRow("Tic max speed", self.spin_tic_max_speed)
 
         self.spin_tic_max_accel = QtWidgets.QSpinBox(motion_advanced_box)
@@ -8780,9 +8905,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tic_max_accel.setSingleStep(10_000)
         self.spin_tic_max_accel.setValue(DEFAULT_TIC_MAX_ACCEL)
         self.spin_tic_max_accel.setToolTip(
-            "Temporary Tic runtime max acceleration in microsteps per 100 s^2. "
-            "The Prague/Kosice default is 100000."
+            "Canonical Tic runtime max acceleration in microsteps per 100 s^2. "
+            "The same 1/8-step profile is enforced in Prague and Košice."
         )
+        self.spin_tic_max_accel.setReadOnly(True)
         motion_advanced_form.addRow("Tic max acceleration", self.spin_tic_max_accel)
 
         self.spin_tic_max_decel = QtWidgets.QSpinBox(motion_advanced_box)
@@ -8790,9 +8916,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_tic_max_decel.setSingleStep(10_000)
         self.spin_tic_max_decel.setValue(DEFAULT_TIC_MAX_DECEL)
         self.spin_tic_max_decel.setToolTip(
-            "Temporary Tic runtime max deceleration in microsteps per 100 s^2. "
-            "Preflight applies this together with max speed and max acceleration."
+            "Canonical Tic runtime max deceleration in microsteps per 100 s^2. "
+            "Preflight applies and verifies it together with speed and acceleration."
         )
+        self.spin_tic_max_decel.setReadOnly(True)
         motion_advanced_form.addRow("Tic max deceleration", self.spin_tic_max_decel)
 
         self.spin_steps_per_mm = CompactDoubleSpinBox(motion_advanced_box)
@@ -8801,14 +8928,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_steps_per_mm.setValue(DEFAULT_STEPS_PER_MM)
         self.spin_steps_per_mm.setReadOnly(True)
         self.spin_steps_per_mm.setToolTip(
-            "Tic units/mm, not full motor steps/mm. The current 800 Tic units/mm default "
-            "matches 100 full motor steps/mm with the Tic set to 1/8 step."
+            "Canonical Tic units/mm, not full motor steps/mm. The enforced 800 Tic units/mm "
+            "equals 100 full motor steps/mm with the Tic set to 1/8 step."
         )
         motion_advanced_form.addRow("Tic units/mm", self.spin_steps_per_mm)
 
         self.label_tic_settings_summary = QtWidgets.QLabel("Live Tic settings: not queried yet.", motion_advanced_box)
         self.label_tic_settings_summary.setWordWrap(True)
         motion_advanced_form.addRow("", self.label_tic_settings_summary)
+
+        self.button_apply_tic_canonical_profile = QtWidgets.QPushButton(
+            "Apply and verify canonical T500 profile",
+            motion_advanced_box,
+        )
+        self.button_apply_tic_canonical_profile.setToolTip(
+            "Provision the same persistent Tic T500 safety and motor settings used by both TMA benches, "
+            "then read them and the runtime motor settings back. Recipe preflight does this automatically."
+        )
+        self.button_apply_tic_canonical_profile.clicked.connect(self._apply_tic_canonical_profile_from_ui)
+        motion_advanced_form.addRow("", self.button_apply_tic_canonical_profile)
 
         self.spin_motor_step_calibration_increment_steps = QtWidgets.QSpinBox(motion_advanced_box)
         self.spin_motor_step_calibration_increment_steps.setRange(1, 1000000)
@@ -16666,11 +16804,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._log(f"Reference position set to the current specimen position ({self._position_reference_mm:.4f} mm).")
 
     def _selected_tic_step_mode(self) -> str:
-        value = self.combo_tic_step_mode.currentData()
-        normalized = normalize_tic_step_mode(value)
-        if normalized is None:
-            normalized = DEFAULT_TIC_STEP_MODE
-        return normalized
+        return DEFAULT_TIC_STEP_MODE
+
+    def _enforce_canonical_tic_ui_profile(self) -> None:
+        widgets_and_values = (
+            (self.spin_full_steps_per_mm, DEFAULT_FULL_STEPS_PER_MM),
+            (self.spin_tic_current_limit_mA, DEFAULT_TIC_CURRENT_LIMIT_MA),
+            (self.spin_tic_max_speed, DEFAULT_TIC_MAX_SPEED),
+            (self.spin_tic_max_accel, DEFAULT_TIC_MAX_ACCEL),
+            (self.spin_tic_max_decel, DEFAULT_TIC_MAX_DECEL),
+        )
+        blockers = [QtCore.QSignalBlocker(widget) for widget, _value in widgets_and_values]
+        for widget, value in widgets_and_values:
+            widget.setValue(value)
+        self._set_tic_step_mode_combo(DEFAULT_TIC_STEP_MODE)
+        del blockers
+        self._set_tic_units_per_mm(DEFAULT_STEPS_PER_MM)
 
     def _set_tic_step_mode_combo(self, step_mode: object) -> bool:
         normalized = normalize_tic_step_mode(step_mode)
@@ -16695,8 +16844,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sync_tic_units_per_mm_from_full_steps(self, *_args: object, persist: bool = True) -> None:
         try:
             units_per_mm = tic_units_per_mm(
-                float(self.spin_full_steps_per_mm.value()),
-                self._selected_tic_step_mode(),
+                DEFAULT_FULL_STEPS_PER_MM,
+                DEFAULT_TIC_STEP_MODE,
             )
         except Exception:
             return
@@ -16724,7 +16873,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 speed_detail = f" ({max_speed_units / 10000.0 / units_per_mm:.4g} mm/s)"
         parts = [
             f"step mode {_tic_step_mode_label(step_mode)}",
-            f"{float(self.spin_full_steps_per_mm.value()):.4g} full steps/mm",
+            f"{DEFAULT_FULL_STEPS_PER_MM:.4g} full steps/mm",
             f"{units_per_mm:.4g} Tic units/mm",
         ]
         if max_speed:
@@ -16737,11 +16886,128 @@ class MainWindow(QtWidgets.QMainWindow):
             parts.append(f"current limit {current_limit}")
         self.label_tic_settings_summary.setText("Live Tic settings: " + " | ".join(parts))
 
+    def _apply_tic_persistent_profile(self) -> tuple[bool, str]:
+        self._verified_tic_profile = None
+        self._verified_tic_persistent_settings = None
+        self._enforce_canonical_tic_ui_profile()
+        try:
+            # A dispatcher can own a separate native handle. Stop it and release
+            # the shared controller before ticcmd performs the settings exchange.
+            self._stop_tic_dispatcher()
+            controller = self._build_tic_controller()
+            before_text = controller.get_persistent_settings_text()
+            before = parse_tic_settings_text(before_text)
+            mismatches = tic_settings_mismatches(before)
+            after = before
+            if mismatches:
+                controller.set_persistent_settings_text(
+                    patch_tic_settings_text(before_text, CANONICAL_TIC_PERSISTENT_SETTINGS)
+                )
+                after = parse_tic_settings_text(controller.get_persistent_settings_text())
+        except Exception as exc:
+            return False, f"FAIL: canonical Tic T500 settings could not be read/applied ({exc})."
+        remaining = tic_settings_mismatches(after)
+        if remaining:
+            detail = ", ".join(
+                f"{key}={actual!r} (expected {expected!r})"
+                for key, (actual, expected) in remaining.items()
+            )
+            return False, f"FAIL: canonical Tic T500 settings did not verify: {detail}."
+        self._verified_tic_persistent_settings = {
+            key: after[key] for key in CANONICAL_TIC_PERSISTENT_SETTINGS
+        }
+        action = "applied and verified" if mismatches else "already verified"
+        return True, f"PASS: canonical Tic T500 persistent profile {action}."
+
+    def _capture_verified_tic_profile(self) -> tuple[bool, str]:
+        status_text = self._tic_status_text or ""
+        reported_step_mode = _extract_tic_step_mode(status_text)
+        reported_current_mA = _extract_tic_current_limit_mA(status_text)
+        motion_readbacks = self._tic_motion_limit_readbacks(status_text)
+        motion_targets = self._selected_tic_motion_limits()
+        problems: list[str] = []
+        if reported_step_mode != DEFAULT_TIC_STEP_MODE:
+            problems.append(
+                f"step mode {_tic_step_mode_label(reported_step_mode)} (expected 1/8 step)"
+            )
+        if reported_current_mA != DEFAULT_TIC_CURRENT_LIMIT_MA:
+            problems.append(
+                f"current limit {reported_current_mA} mA (expected {DEFAULT_TIC_CURRENT_LIMIT_MA} mA)"
+            )
+        if not self._tic_motion_limits_match(motion_readbacks, motion_targets):
+            problems.append(
+                f"motion limits {self._format_tic_motion_limits(motion_readbacks)} "
+                f"(expected {self._format_tic_motion_limits(motion_targets)})"
+            )
+        units_per_mm = tic_units_per_mm(DEFAULT_FULL_STEPS_PER_MM, DEFAULT_TIC_STEP_MODE)
+        if not math.isclose(float(self.spin_steps_per_mm.value()), units_per_mm, abs_tol=1e-9):
+            problems.append(
+                f"application scale {float(self.spin_steps_per_mm.value()):g} Tic units/mm "
+                f"(expected {units_per_mm:g})"
+            )
+        if problems:
+            self._verified_tic_profile = None
+            return False, "FAIL: canonical Tic T500 runtime profile mismatch: " + "; ".join(problems) + "."
+        persistent_readback = self._verified_tic_persistent_settings
+        if persistent_readback is None:
+            problems.append("persistent settings were not verified during this preflight")
+        if problems:
+            self._verified_tic_profile = None
+            return False, "FAIL: canonical Tic T500 runtime profile mismatch: " + "; ".join(problems) + "."
+        persistent_profile = dict(CANONICAL_TIC_PERSISTENT_SETTINGS)
+        profile_basis = {
+            "name": CANONICAL_TIC_PROFILE_NAME,
+            "full_steps_per_mm": DEFAULT_FULL_STEPS_PER_MM,
+            "step_mode": DEFAULT_TIC_STEP_MODE,
+            "tic_units_per_mm": units_per_mm,
+            "current_limit_mA": DEFAULT_TIC_CURRENT_LIMIT_MA,
+            "runtime_motion_limits": motion_targets,
+            "persistent_settings": persistent_profile,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(profile_basis, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self._verified_tic_profile = {
+            **profile_basis,
+            "fingerprint_sha256": fingerprint,
+            "verified_utc": _utc_timestamp(),
+            "device_serial": self.edit_tic_serial.text().strip() or None,
+            "persistent_readback": dict(persistent_readback),
+            "readback": {
+                "step_mode": reported_step_mode,
+                "current_limit_mA": reported_current_mA,
+                **motion_readbacks,
+            },
+        }
+        return True, (
+            f"PASS: canonical Tic T500 runtime profile verified: 1/8 step, "
+            f"{units_per_mm:g} Tic units/mm, {reported_current_mA} mA, "
+            f"{self._format_tic_motion_limits(motion_readbacks)}."
+        )
+
+    def _apply_tic_canonical_profile_from_ui(self) -> None:
+        checks = (
+            self._apply_tic_persistent_profile,
+            self._apply_tic_configured_step_mode,
+            self._apply_tic_current_limit,
+            self._apply_tic_motion_limits,
+            self._capture_verified_tic_profile,
+        )
+        messages: list[str] = []
+        for check in checks:
+            ok, message = check()
+            messages.append(message)
+            self._log(message)
+            if not ok:
+                QtWidgets.QMessageBox.warning(self, APP_NAME, "\n".join(messages))
+                return
+        QtWidgets.QMessageBox.information(self, APP_NAME, "\n".join(messages))
+
     def _apply_tic_configured_step_mode(self) -> tuple[bool, str]:
         requested_step_mode = self._selected_tic_step_mode()
         requested_label = _tic_step_mode_label(requested_step_mode)
         try:
-            requested_units_per_mm = tic_units_per_mm(float(self.spin_full_steps_per_mm.value()), requested_step_mode)
+            requested_units_per_mm = tic_units_per_mm(DEFAULT_FULL_STEPS_PER_MM, requested_step_mode)
         except ValueError as exc:
             return False, f"FAIL: Tic step mode is invalid ({exc})."
         reported_step_mode = _extract_tic_step_mode(self._tic_status_text)
@@ -16761,11 +17027,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             return False, f"FAIL: Tic step mode could not be set ({exc})."
         self._set_tic_units_per_mm(requested_units_per_mm)
+        try:
+            refreshed = self._refresh_tic_status()
+        except Exception as exc:
+            return False, f"FAIL: Tic step mode was written but readback failed ({exc})."
+        if not refreshed:
+            return False, "FAIL: Tic step mode was written but fresh readback was unavailable."
+        reported_step_mode = _extract_tic_step_mode(self._tic_status_text)
+        if reported_step_mode != normalize_tic_step_mode(requested_step_mode):
+            return (
+                False,
+                f"FAIL: Tic step mode read back as {_tic_step_mode_label(reported_step_mode)}, "
+                f"expected {requested_label}.",
+            )
         self._refresh_tic_settings_summary()
         return (
             True,
             f"PASS: Tic step mode {requested_label}; "
-            f"{float(self.spin_full_steps_per_mm.value()):.4g} full steps/mm -> "
+            f"{DEFAULT_FULL_STEPS_PER_MM:.4g} full steps/mm -> "
             f"{requested_units_per_mm:.3f} Tic units/mm.",
         )
 
@@ -23157,9 +23436,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
         self._last_tic_status_error = None
         self._tic_status_text = status_text
-        step_mode_text = _extract_status_value(status_text, "Step mode")
-        if step_mode_text is not None and self._set_tic_step_mode_combo(step_mode_text):
-            self._sync_tic_units_per_mm_from_full_steps(persist=False)
         vin_v = _extract_status_float(status_text, "VIN voltage")
         power_warning = self._tic_motor_power_warning(vin_v)
         if vin_v is not None:
@@ -23526,9 +23802,11 @@ class MainWindow(QtWidgets.QMainWindow):
         messages: list[str] = []
         ok = True
         for apply_settings in (
+            self._apply_tic_persistent_profile,
             self._apply_tic_configured_step_mode,
             self._apply_tic_current_limit,
             self._apply_tic_motion_limits,
+            self._capture_verified_tic_profile,
         ):
             setting_ok, message = apply_settings()
             messages.append(message)
@@ -25093,6 +25371,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "wire_diameter_mm": float(self.spin_diameter.value()),
             "mandatory_length_setup": True,
             "steps_per_mm": float(self.spin_steps_per_mm.value()),
+            "tic_motor_profile": (
+                None if self._verified_tic_profile is None else dict(self._verified_tic_profile)
+            ),
             "position_reference_mm": float(self._position_reference_mm),
             "preload_reference_armed": self._preload_reference_armed,
             "preload_trigger_elapsed_s": self._preload_trigger_elapsed_s,
@@ -26889,6 +27170,11 @@ class MainWindow(QtWidgets.QMainWindow):
                         "Turn on the motor supply, or enable the HMP motor-supply channel option and run Check motor again."
                     )
             if not issues and self._recipe_requires_tic(steps):
+                tic_profile_ok, tic_profile_message = self._apply_tic_persistent_profile()
+                self._log(f"Recipe preflight: {tic_profile_message}")
+                if not tic_profile_ok:
+                    issues.append(tic_profile_message.replace("FAIL: ", "", 1))
+            if not issues and self._recipe_requires_tic(steps):
                 tic_step_ok, tic_step_message = self._apply_tic_configured_step_mode()
                 self._log(f"Recipe preflight: {tic_step_message}")
                 if not tic_step_ok:
@@ -26903,6 +27189,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Recipe preflight: {tic_motion_message}")
                 if not tic_motion_ok:
                     issues.append(tic_motion_message.replace("FAIL: ", "", 1))
+            if not issues and self._recipe_requires_tic(steps):
+                tic_verified_ok, tic_verified_message = self._capture_verified_tic_profile()
+                self._log(f"Recipe preflight: {tic_verified_message}")
+                if not tic_verified_ok:
+                    issues.append(tic_verified_message.replace("FAIL: ", "", 1))
             self._set_manual_auto_connect_progress("Checking scale...", 3, preflight_steps)
             if self._recipe_requires_scale(steps) and not self._ensure_scale_ready_for_recipe():
                 issues.append(
@@ -26925,7 +27216,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._close_manual_auto_connect_progress()
 
     def _apply_tic_current_limit(self) -> tuple[bool, str]:
-        target_mA = float(self.spin_tic_current_limit_mA.value())
+        target_mA = float(DEFAULT_TIC_CURRENT_LIMIT_MA)
         safe_mA = safe_tic_current_limit_mA(target_mA)
         try:
             controller = self._build_tic_controller()
@@ -26945,6 +27236,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return False, f"FAIL: Tic current limit could not be set ({exc})."
         if applied_mA != safe_mA:
             return False, f"FAIL: Tic current limit returned {applied_mA} mA, expected {safe_mA} mA."
+        try:
+            refreshed = self._refresh_tic_status()
+        except Exception as exc:
+            return False, f"FAIL: Tic current limit was written but readback failed ({exc})."
+        if not refreshed:
+            return False, "FAIL: Tic current limit was written but fresh readback was unavailable."
+        reported_mA = _extract_tic_current_limit_mA(self._tic_status_text)
+        if reported_mA != safe_mA:
+            return False, f"FAIL: Tic current limit read back as {reported_mA} mA, expected {safe_mA} mA."
         return True, f"PASS: Tic current limit {applied_mA} mA."
 
     def _tic_motion_limit_readbacks(self, status_text: str | None = None) -> dict[str, int | None]:
@@ -26964,9 +27264,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _selected_tic_motion_limits(self) -> dict[str, int]:
         return {
-            "max_speed": int(self.spin_tic_max_speed.value()),
-            "max_accel": int(self.spin_tic_max_accel.value()),
-            "max_decel": int(self.spin_tic_max_decel.value()),
+            "max_speed": DEFAULT_TIC_MAX_SPEED,
+            "max_accel": DEFAULT_TIC_MAX_ACCEL,
+            "max_decel": DEFAULT_TIC_MAX_DECEL,
         }
 
     def _tic_motion_limits_match(self, readbacks: Mapping[str, int | None], targets: Mapping[str, int]) -> bool:
@@ -27094,15 +27394,18 @@ class MainWindow(QtWidgets.QMainWindow):
             ok = False
         else:
             statuses.append("PASS: Tic status/VIN check passed.")
-            tic_step_ok, tic_step_message = self._apply_tic_configured_step_mode()
-            statuses.append(tic_step_message)
-            ok = ok and tic_step_ok
-            tic_ok, tic_message = self._apply_tic_current_limit()
-            statuses.append(tic_message)
-            ok = ok and tic_ok
-            tic_motion_ok, tic_motion_message = self._apply_tic_motion_limits()
-            statuses.append(tic_motion_message)
-            ok = ok and tic_motion_ok
+            for check in (
+                self._apply_tic_persistent_profile,
+                self._apply_tic_configured_step_mode,
+                self._apply_tic_current_limit,
+                self._apply_tic_motion_limits,
+                self._capture_verified_tic_profile,
+            ):
+                check_ok, check_message = check()
+                statuses.append(check_message)
+                ok = ok and check_ok
+                if not check_ok:
+                    break
 
         status_text = "\n".join(statuses)
         self.label_hardware_provisioning_status.setText(status_text)
@@ -34177,18 +34480,12 @@ class MainWindow(QtWidgets.QMainWindow):
             bool(self.settings.value("tic_native_usb_preferred", True, type=bool))
         )
         self.edit_tic_serial.setText(self.settings.value("tic_serial", "", type=str))
-        self.spin_tic_current_limit_mA.setValue(
-            int(float(self.settings.value("tic_current_limit_mA", DEFAULT_TIC_CURRENT_LIMIT_MA)))
-        )
-        self.spin_tic_max_speed.setValue(
-            int(float(self.settings.value("tic_max_speed", DEFAULT_TIC_MAX_SPEED)))
-        )
-        self.spin_tic_max_accel.setValue(
-            int(float(self.settings.value("tic_max_accel", DEFAULT_TIC_MAX_ACCEL)))
-        )
-        self.spin_tic_max_decel.setValue(
-            int(float(self.settings.value("tic_max_decel", DEFAULT_TIC_MAX_DECEL)))
-        )
+        # Motor configuration is a single canonical T500 profile shared by the
+        # Prague and Košice benches. Local QSettings must never override it.
+        self.spin_tic_current_limit_mA.setValue(DEFAULT_TIC_CURRENT_LIMIT_MA)
+        self.spin_tic_max_speed.setValue(DEFAULT_TIC_MAX_SPEED)
+        self.spin_tic_max_accel.setValue(DEFAULT_TIC_MAX_ACCEL)
+        self.spin_tic_max_decel.setValue(DEFAULT_TIC_MAX_DECEL)
         self.spin_tic_status_interval.setValue(
             int(self.settings.value("tic_status_interval_ms", DEFAULT_TIC_STATUS_INTERVAL_MS))
         )
@@ -34196,23 +34493,8 @@ class MainWindow(QtWidgets.QMainWindow):
             int(self.settings.value("tic_keepalive_interval_ms", TIC_KEEPALIVE_INTERVAL_MS))
         )
         self._apply_hardware_timer_intervals()
-        motor_defaults_version = int(self.settings.value("motor_defaults_version", 0))
-        saved_step_mode = self.settings.value("tic_step_mode", DEFAULT_TIC_STEP_MODE, type=str)
-        if not self._set_tic_step_mode_combo(saved_step_mode):
-            self._set_tic_step_mode_combo(DEFAULT_TIC_STEP_MODE)
-        saved_steps_per_mm = float(self.settings.value("steps_per_mm", DEFAULT_STEPS_PER_MM))
-        if (
-            motor_defaults_version < MOTOR_DEFAULTS_VERSION
-            and math.isclose(saved_steps_per_mm, 100.0, rel_tol=1e-9, abs_tol=1e-9)
-        ):
-            saved_steps_per_mm = DEFAULT_STEPS_PER_MM
-        saved_full_steps_value = self.settings.value("full_steps_per_mm", None)
-        if saved_full_steps_value is None:
-            factor = tic_step_mode_factor(self._selected_tic_step_mode()) or tic_step_mode_factor(DEFAULT_TIC_STEP_MODE) or 1
-            saved_full_steps_per_mm = saved_steps_per_mm / float(factor)
-        else:
-            saved_full_steps_per_mm = float(saved_full_steps_value)
-        self.spin_full_steps_per_mm.setValue(max(0.001, saved_full_steps_per_mm))
+        self._set_tic_step_mode_combo(DEFAULT_TIC_STEP_MODE)
+        self.spin_full_steps_per_mm.setValue(DEFAULT_FULL_STEPS_PER_MM)
         self._sync_tic_units_per_mm_from_full_steps(persist=False)
         self.spin_motor_step_calibration_increment_steps.setValue(
             max(
