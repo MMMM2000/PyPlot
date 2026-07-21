@@ -125,7 +125,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-20.4"
+CONTROL_LOGIC_VERSION = "2026-07-21.1"
 CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
@@ -215,6 +215,8 @@ CONTROL_LOGIC_FEATURES = [
     "tic_acceptance_status_refresh_runs_on_ui_thread",
     "held_manual_jog_uses_continuous_tic_velocity",
     "tic_target_priority_over_coalesced_keepalive",
+    "tic_native_usb_deterministic_handle_recovery",
+    "tic_status_polling_survives_transport_outage",
     "kosice_exact_confirmed_motor_completion",
 ]
 CONTROL_TRACE_FIELDNAMES = [
@@ -5352,6 +5354,13 @@ class NativeTicUsbController:
         self._usb_core, self._usb_util, self._usb_backend = _load_pyusb_backend()
         self._device = self._find_device()
 
+    def close(self) -> None:
+        device = self._device
+        if device is None:
+            return
+        self._device = None
+        self._usb_util.dispose_resources(device)
+
     def _device_string(self, device: Any, index: int | None) -> str:
         if not index:
             return ""
@@ -5559,6 +5568,7 @@ class TicController:
         self._native_attempted = False
         self._native_error: Exception | None = None
         self._native_success_logged = False
+        self._native_recovery_error: Exception | None = None
         self._ticcmd_fallback_messages: set[str] = set()
         self._transport_lock = RLock()
 
@@ -5581,6 +5591,7 @@ class TicController:
             self._native_backend = NativeTicUsbController(device_serial=self.device_serial)
         except Exception as exc:
             self._native_error = exc
+            self._native_attempted = False
             if self._native_only() or not self._fallback_allowed():
                 raise RuntimeError(f"Native Tic USB transport is unavailable: {exc}") from exc
             self._log_ticcmd_fallback(f"native USB setup failed: {exc}")
@@ -5588,6 +5599,14 @@ class TicController:
         return self._native_backend
 
     def _log_native_success_once(self) -> None:
+        recovery_error = self._native_recovery_error
+        self._native_recovery_error = None
+        self._native_error = None
+        if recovery_error is not None and self.transport_logger is not None:
+            self.transport_logger(
+                "Tic transport: native USB recovered after releasing the failed handle "
+                f"({type(recovery_error).__name__}: {recovery_error})."
+            )
         if self._native_success_logged:
             return
         self._native_success_logged = True
@@ -5605,18 +5624,45 @@ class TicController:
     def _reopen_native_controller(self) -> NativeTicUsbController | None:
         if not self._native_allowed():
             return None
+        previous_backend = self._native_backend
         self._native_backend = None
         self._native_attempted = True
+        if previous_backend is not None:
+            # PyUSB handle destruction is not deterministic. WinUSB can reject the
+            # replacement handle until dispose_resources() closes the old one.
+            close = getattr(previous_backend, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    self._native_error = exc
+                    self._native_attempted = False
+                    return None
         try:
             self._native_backend = NativeTicUsbController(device_serial=self.device_serial)
         except Exception as exc:
             self._native_error = exc
             self._native_backend = None
+            self._native_attempted = False
         return self._native_backend
 
     def _native_retry_after_failure(self, initial_error: Exception) -> NativeTicUsbController | None:
         self._native_error = initial_error
+        if self._native_recovery_error is None:
+            self._native_recovery_error = initial_error
         return self._reopen_native_controller()
+
+    def close(self) -> None:
+        with self._transport_lock:
+            native = self._native_backend
+            self._native_backend = None
+            self._native_attempted = False
+            self._native_recovery_error = None
+            if native is None:
+                return
+            close = getattr(native, "close", None)
+            if callable(close):
+                close()
 
     def executable(self) -> str | None:
         if self._native_only():
@@ -5952,6 +5998,8 @@ def benchmark_tic_transport_latency(
                 status_times.append(time.perf_counter() - started)
         except Exception as exc:
             error = str(exc)
+        finally:
+            controller.close()
         results[label] = {
             "reset_median_ms": None if error else (_median(reset_times) or 0.0) * 1000.0,
             "status_median_ms": None if error else (_median(status_times) or 0.0) * 1000.0,
@@ -12377,6 +12425,7 @@ class MainWindow(QtWidgets.QMainWindow):
         selected = settings or self._tic_settings_for_current_command()
         key = selected.key()
         if self._tic_controller is None or self._tic_controller_key != key:
+            previous_controller = self._tic_controller
             self._tic_controller = TicController(
                 command_path=selected.command_path,
                 device_serial=selected.device_serial,
@@ -12385,6 +12434,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 transport_logger=WeakOwnerCallback(self, "_log"),
             )
             self._tic_controller_key = key
+            if previous_controller is not None:
+                close = getattr(previous_controller, "close", None)
+                if callable(close):
+                    close()
         return self._tic_controller
 
     def _build_tic_dispatcher(
@@ -12410,8 +12463,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if dispatcher is not None and hasattr(dispatcher, "stop"):
             dispatcher.stop()
         self._pending_motion_command = None
+        controller = self._tic_controller
         self._tic_controller = None
         self._tic_controller_key = None
+        if controller is not None:
+            close = getattr(controller, "close", None)
+            if callable(close):
+                close()
 
     def _wait_for_tic_dispatcher(
         self,
@@ -23091,7 +23149,8 @@ class MainWindow(QtWidgets.QMainWindow):
             recent_ok = self._mark_tic_power_unknown(reason)
             if not recent_ok:
                 self.label_card_motion.setText("Tic unavailable")
-                self._status_timer.stop()
+                self._refresh_live_labels()
+                self._status_timer.start(self._tic_status_interval_ms())
                 return False
             self._refresh_live_labels()
             self._status_timer.start(self._tic_status_interval_ms())

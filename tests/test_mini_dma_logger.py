@@ -14468,6 +14468,56 @@ def test_tic_status_missing_vin_blocks_after_recent_good_power_expires(
         _close_test_window(window)
 
 
+def test_tic_status_keeps_polling_and_recovers_after_transport_outage(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = 1000.0
+
+    class _FakeController:
+        available = True
+
+        def get_status(self) -> str:
+            if not self.available:
+                raise OSError(13, "Access denied (insufficient permissions)")
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Operation state: Normal",
+                    "Planning mode: 1",
+                    "Target position: 42",
+                    "Current position: 42",
+                    "Current velocity: 0",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    controller = _FakeController()
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: now_s)
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+
+    try:
+        window._status_timer.stop()
+        assert window._refresh_tic_status() is True
+        assert window._tic_motor_power_ok is True
+
+        now_s += mini_dma_mod.TIC_MOTOR_POWER_STALE_GRACE_S + 1.0
+        controller.available = False
+        assert window._refresh_tic_status() is False
+        assert window._tic_motor_power_ok is False
+        assert window._status_timer.isActive() is True
+
+        window._status_timer.stop()
+        controller.available = True
+        assert window._refresh_tic_status() is True
+        assert window._tic_motor_power_ok is True
+        assert window._last_tic_status_error is None
+    finally:
+        _close_test_window(window)
+
+
 def test_recipe_preflight_blocks_when_tic_motor_power_is_low(
     tmp_path: Path,
     qtbot,
@@ -18995,6 +19045,45 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
     ]
 
 
+def test_native_tic_usb_controller_disposes_device_resources_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeDevice:
+        idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
+        iProduct = 1
+        iSerialNumber = 2
+
+    device = _FakeDevice()
+
+    class _FakeCore:
+        @staticmethod
+        def find(*, find_all: bool, idVendor: int, backend: object | None = None) -> list[_FakeDevice]:
+            return [device]
+
+    disposed: list[_FakeDevice] = []
+
+    class _FakeUtil:
+        @staticmethod
+        def get_string(_device: _FakeDevice, index: int) -> str:
+            return {1: "Pololu Tic T500", 2: "00501366"}[index]
+
+        @staticmethod
+        def dispose_resources(disposed_device: _FakeDevice) -> None:
+            disposed.append(disposed_device)
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_FakeCore, _FakeUtil, object()),
+    )
+
+    controller = mini_dma_mod.NativeTicUsbController(device_serial="00501366")
+    controller.close()
+    controller.close()
+
+    assert disposed == [device]
+
+
 def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeDevice:
         idVendor = mini_dma_mod.TIC_USB_VENDOR_ID
@@ -19414,11 +19503,15 @@ def test_tic_controller_reopens_native_usb_once_before_ticcmd_fallback(
         def __init__(self, *, device_serial: str = "") -> None:
             self.device_serial = device_serial
             self.targets: list[tuple[int, int | None]] = []
+            self.closed = False
 
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             if len(created) == 1:
                 raise OSError(2, "Entity not found")
             self.targets.append((position_steps, max_speed))
+
+        def close(self) -> None:
+            self.closed = True
 
     class _Completed:
         returncode = 0
@@ -19432,6 +19525,8 @@ def test_tic_controller_reopens_native_usb_once_before_ticcmd_fallback(
     created: list[_FakeNative] = []
 
     def _make_native(*, device_serial: str = "") -> _FakeNative:
+        if any(not native.closed for native in created):
+            raise OSError(13, "Access denied (insufficient permissions)")
         native = _FakeNative(device_serial=device_serial)
         created.append(native)
         return native
@@ -19450,9 +19545,50 @@ def test_tic_controller_reopens_native_usb_once_before_ticcmd_fallback(
     controller.set_target_position(-42, max_speed=123)
 
     assert len(created) == 2
+    assert created[0].closed is True
+    assert created[1].closed is False
     assert created[1].targets == [(-42, 123)]
     assert calls == []
-    assert logs == ["Tic transport: native USB active."]
+    assert logs == [
+        "Tic transport: native USB recovered after releasing the failed handle "
+        "(FileNotFoundError: [Errno 2] Entity not found).",
+        "Tic transport: native USB active.",
+    ]
+
+    controller.close()
+    assert created[1].closed is True
+
+
+def test_tic_controller_retries_native_discovery_after_device_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    class _FakeNative:
+        def __init__(self, *, device_serial: str = "") -> None:
+            self.device_serial = device_serial
+
+        def get_status(self) -> str:
+            return "VIN voltage: 12.00 V\nTransport: native USB\n"
+
+    def _make_native(*, device_serial: str = "") -> _FakeNative:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("No Pololu Tic USB device was found.")
+        return _FakeNative(device_serial=device_serial)
+
+    monkeypatch.setattr(mini_dma_mod, "NativeTicUsbController", _make_native)
+    controller = mini_dma_mod.TicController(
+        command_path="native-usb",
+        device_serial="00501366",
+    )
+
+    with pytest.raises(RuntimeError, match="No Pololu Tic USB device"):
+        controller.get_status()
+
+    assert "VIN voltage: 12.00 V" in controller.get_status()
+    assert attempts == 2
 
 
 def test_tic_controller_is_reused_until_connection_settings_change(
@@ -19462,6 +19598,7 @@ def test_tic_controller_is_reused_until_connection_settings_change(
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     created: list[tuple[str, str]] = []
+    controllers: list[_FakeController] = []
 
     class _FakeController:
         def __init__(
@@ -19474,6 +19611,11 @@ def test_tic_controller_is_reused_until_connection_settings_change(
             transport_logger: object | None = None,
         ) -> None:
             created.append((command_path, device_serial))
+            self.closed = False
+            controllers.append(self)
+
+        def close(self) -> None:
+            self.closed = True
 
     monkeypatch.setattr(mini_dma_mod, "TicController", _FakeController)
     window.edit_ticcmd_path.setText("ticcmd-a")
@@ -19488,6 +19630,8 @@ def test_tic_controller_is_reused_until_connection_settings_change(
         assert first is second
         assert third is not first
         assert created == [("ticcmd-a", "serial-a"), ("ticcmd-a", "serial-b")]
+        assert controllers[0].closed is True
+        assert controllers[1].closed is False
     finally:
         _close_test_window(window)
 
