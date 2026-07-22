@@ -206,7 +206,35 @@ def test_automation_control_loop_pause_resume_and_stop() -> None:
         time.sleep(0.08)
         assert len(ticks) == stopped_count
         assert loop.is_running() is False
+        assert loop.is_alive() is False
     finally:
+        loop.stop()
+
+
+def test_automation_control_loop_retains_live_thread_when_stop_times_out() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_tick() -> None:
+        entered.set()
+        release.wait(timeout=3.0)
+
+    loop = mini_dma_mod.AutomationControlLoop(blocked_tick)
+    try:
+        loop.start(10)
+        assert entered.wait(timeout=1.0)
+
+        assert loop.stop() is False
+        assert loop.is_alive() is True
+
+        release.set()
+        deadline = time.monotonic() + 1.0
+        while loop.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert loop.stop() is True
+        assert loop.is_alive() is False
+    finally:
+        release.set()
         loop.stop()
 
 
@@ -12082,6 +12110,8 @@ def test_setup_preload_target_ramp_finishes_inside_automatic_tolerance(
     )
 
     try:
+        assert window._handle_target_ramp_step(step, 7) is False
+        now_s[0] += mini_dma_mod.TARGET_RAMP_ENDPOINT_STABLE_S + 0.01
         assert window._handle_target_ramp_step(step, 7) is True
         assert moves == []
         assert window._active_target_ramp_step_index is None
@@ -12111,9 +12141,9 @@ def test_target_ramp_switches_to_endpoint_acquisition_with_zero_setpoint_rate(
         basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
         note="1",
     )
-    times = iter((100.0, 101.0, 102.1))
+    now_s = [101.0]
     decisions: list[tuple[float, mini_dma_mod.ForceControlIntent, float | None]] = []
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
 
     def _record_seek(_basis: str, target: float, _tolerance: float) -> bool:
         decisions.append(
@@ -12126,13 +12156,22 @@ def test_target_ramp_switches_to_endpoint_acquisition_with_zero_setpoint_rate(
         return True
 
     window._seek_distribution_target = _record_seek  # type: ignore[method-assign]
+    window._active_target_ramp_step_index = 7
+    window._active_target_ramp_started_s = 100.0
+    window._active_target_ramp_start_value = start_value
+    window._active_target_ramp_end_value = end_value
+    window._active_target_ramp_rate_value_s = 5.0
 
     try:
         assert window._handle_target_ramp_step(step, 7) is False
+        now_s[0] = 102.1
+        assert window._handle_target_ramp_step(step, 7) is False
+        now_s[0] += mini_dma_mod.TARGET_RAMP_ENDPOINT_STABLE_S + 0.01
         assert window._handle_target_ramp_step(step, 7) is True
 
         assert decisions == [
             (5.0, mini_dma_mod.ForceControlIntent.TRACK_TRAJECTORY, moving_rate),
+            (end_value, mini_dma_mod.ForceControlIntent.ACQUIRE_TARGET, 0.0),
             (end_value, mini_dma_mod.ForceControlIntent.ACQUIRE_TARGET, 0.0),
         ]
         assert window._active_target_ramp_setpoint_rate_value_s is None
@@ -14532,6 +14571,34 @@ def test_tic_status_missing_vin_blocks_after_recent_good_power_expires(
 
         assert window._tic_motor_power_ok is False
         assert "Motor power" in window.label_card_motion.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_stationary_before_exact_target_is_released_as_incomplete(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._kosice_active_motion_target_steps = 814
+    window._tic_target_position_steps = 814
+    window._current_position_steps = 813
+    window._current_position_mm = 8.13
+    window._tic_current_velocity = 0
+    window._last_commanded_position_steps = 814
+
+    try:
+        window._reconcile_active_motion_status(observed_monotonic_s=100.0)
+        assert window._kosice_active_motion_target_steps == 814
+
+        window._reconcile_active_motion_status(
+            observed_monotonic_s=100.0 + mini_dma_mod.TIC_STATIONARY_TARGET_MISMATCH_CONFIRM_S + 0.01
+        )
+
+        assert window._kosice_active_motion_target_steps is None
+        assert window._last_commanded_position_steps == 813
+        assert window._last_move_target_mm == pytest.approx(8.13)
+        assert "stationary before the accepted target" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -19769,6 +19836,52 @@ def test_tic_command_dispatcher_prioritizes_target_over_coalesced_keepalive() ->
         dispatcher.stop()
 
 
+def test_tic_command_dispatcher_halt_cancels_queued_target_with_result() -> None:
+    class _FakeController:
+        def halt_and_hold(self) -> None:
+            return None
+
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: _FakeController(), autostart=False)
+    try:
+        target_sequence = dispatcher.set_target_position(814, max_speed=500_000)
+        dispatcher.halt_and_hold()
+        result = dispatcher.command_result(target_sequence)
+
+        assert result is not None
+        assert result.succeeded is False
+        assert "cancelled by halt-and-hold" in str(result.error)
+
+        dispatcher.start()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+    finally:
+        dispatcher.stop()
+
+
+def test_tic_command_dispatcher_keepalive_runs_without_qt_event_processing() -> None:
+    class _FakeController:
+        def __init__(self) -> None:
+            self.keepalives = 0
+
+        def reset_command_timeout(self) -> None:
+            self.keepalives += 1
+
+        def get_status(self) -> str:
+            return "Current position: 0\nCurrent velocity: 0"
+
+    controller = _FakeController()
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: controller)
+    try:
+        dispatcher.start_keepalive(interval_s=0.05)
+        deadline = time.monotonic() + 0.5
+        while controller.keepalives < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert controller.keepalives >= 3
+        assert dispatcher.latest_status() is not None
+    finally:
+        dispatcher.stop()
+
+
 def test_tic_command_dispatcher_clears_previous_error_after_success() -> None:
     class _FakeController:
         def __init__(self) -> None:
@@ -20000,7 +20113,7 @@ def test_unaccepted_tic_target_is_released_for_retry_without_post_dispatch_statu
         _close_test_window(window)
 
 
-def test_dispatched_tic_target_schedules_acceptance_readback_on_ui_thread(
+def test_dispatched_tic_target_confirms_without_ui_status_refresh(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -20045,10 +20158,10 @@ def test_dispatched_tic_target_schedules_acceptance_readback_on_ui_thread(
         polling_thread.join(timeout=2.0)
         assert not polling_thread.is_alive()
 
-        qtbot.waitUntil(lambda: controller.status_reads >= 1, timeout=2000)
-        qtbot.waitUntil(lambda: window._pending_motion_command is None, timeout=2000)
+        assert controller.status_reads >= 1
+        assert window._pending_motion_command is None
         assert window._tic_target_position_steps == 2
-        assert "Tic accepted motor command" in window.log_output.toPlainText()
+        assert window._current_position_steps == 2
     finally:
         dispatcher.stop()
         _close_test_window(window)
@@ -20147,10 +20260,15 @@ def test_manual_halt_waits_for_persistent_tic_dispatcher(tmp_path: Path, qtbot) 
     window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
 
     try:
+        window._kosice_active_motion_target_steps = 814
+        window._current_position_steps = 813
+        window._current_position_mm = 8.13
         window._halt_tic()
 
         assert dispatcher.halted is True
         assert dispatcher.waited is True
+        assert window._kosice_active_motion_target_steps is None
+        assert window._last_commanded_position_steps == 813
     finally:
         _close_test_window(window)
 
@@ -20679,6 +20797,52 @@ def test_control_trace_write_failure_disables_trace_without_stopping(tmp_path: P
         assert "Control trace disabled after write failure" in window.log_output.toPlainText()
     finally:
         window._session_active = False
+        _close_test_window(window)
+
+
+def test_control_trace_flush_is_batched_off_the_control_path(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    rows: list[dict[str, object]] = []
+    now_s = [100.0]
+
+    class _TraceWriter:
+        def writerow(self, row: dict[str, object]) -> None:
+            rows.append(row)
+
+    class _TraceHandle:
+        flush_count = 0
+
+        def flush(self) -> None:
+            self.flush_count += 1
+
+    handle = _TraceHandle()
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    try:
+        window._session_active = True
+        window._session_start_monotonic = 90.0
+        window._session_control_trace_writer = _TraceWriter()  # type: ignore[assignment]
+        window._session_control_trace_handle = handle
+        window._last_control_trace_flush_s = now_s[0]
+
+        window._write_control_trace(decision="first")
+        now_s[0] += mini_dma_mod.CONTROL_TRACE_FLUSH_INTERVAL_S / 2.0
+        window._write_control_trace(decision="second")
+        assert len(rows) == 2
+        assert handle.flush_count == 0
+
+        now_s[0] += mini_dma_mod.CONTROL_TRACE_FLUSH_INTERVAL_S
+        window._write_control_trace(decision="third")
+        assert len(rows) == 3
+        assert handle.flush_count == 1
+    finally:
+        window._session_active = False
+        window._session_control_trace_writer = None
+        window._session_control_trace_handle = None
         _close_test_window(window)
 
 
@@ -28122,6 +28286,7 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         def get_status(self) -> str:
             return "\n".join(
                 [
+                    "Device model: Tic T500",
                     "VIN voltage: 12.00 V",
                     "Step mode: 1/8 step",
                     f"Max speed: {self.max_speed}",
@@ -31060,6 +31225,45 @@ def test_tic_step_mode_ui_cannot_override_canonical_profile(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
+def test_recipe_pause_halts_and_releases_active_motion(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeDispatcher:
+        halted = False
+
+        def halt_and_hold(self) -> None:
+            self.halted = True
+
+        def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
+            return True
+
+        def last_error(self) -> Exception | None:
+            return None
+
+    dispatcher = _FakeDispatcher()
+    window._build_tic_dispatcher = lambda: dispatcher  # type: ignore[method-assign]
+    window._pause_automation_control_loop = lambda: None  # type: ignore[method-assign]
+    window._stop_tic_keepalive = lambda: None  # type: ignore[method-assign]
+    window._disable_supply_output = lambda: None  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_paused = False
+    window._kosice_active_motion_target_steps = 814
+    window._current_position_steps = 813
+    window._current_position_mm = 8.13
+
+    try:
+        window._pause_recipe()
+
+        assert window._automation_paused is True
+        assert dispatcher.halted is True
+        assert window._kosice_active_motion_target_steps is None
+        assert window._last_commanded_position_steps == 813
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_canonical_tic_settings_patch_preserves_unrelated_device_settings() -> None:
     original = """# Pololu Tic settings
 control_mode: analog
@@ -31163,6 +31367,7 @@ def test_verified_tic_profile_is_recorded_in_run_metadata(tmp_path: Path, qtbot)
     )
     window._tic_status_text = "\n".join(
         [
+            "Device model: Tic T500",
             "VIN voltage: 12.00 V",
             "Step mode: 1/8 step",
             "Max speed: 10000000",
@@ -31187,6 +31392,30 @@ def test_verified_tic_profile_is_recorded_in_run_metadata(tmp_path: Path, qtbot)
         assert profile["readback"]["current_limit_mA"] == 343
         assert profile["persistent_readback"]["step_mode"] == "8"
         assert len(profile["fingerprint_sha256"]) == 64
+    finally:
+        _close_test_window(window)
+
+
+def test_verified_tic_profile_rejects_wrong_device_model(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._verified_tic_persistent_settings = dict(
+        mini_dma_mod.CANONICAL_TIC_PERSISTENT_SETTINGS
+    )
+    window._tic_status_text = "\n".join(
+        [
+            "Device model: Tic T825",
+            "Step mode: 1/8 step",
+            "Max speed: 10000000",
+            "Max acceleration: 100000",
+            "Max deceleration: 100000",
+            "Current limit: 343 mA",
+        ]
+    )
+    try:
+        ok, message = window._capture_verified_tic_profile()
+
+        assert ok is False
+        assert "expected Tic T500" in message
     finally:
         _close_test_window(window)
 

@@ -338,6 +338,25 @@ def test_tracking_has_no_pending_response_but_landing_serializes_commands() -> N
     assert waiting.pending_response is True
 
 
+def test_uncalibrated_descending_trajectory_probes_in_relaxation_direction() -> None:
+    policy = _adaptive(gain=None)
+
+    decision = policy.decide(
+        _input(
+            intent=ForceControlIntent.TRACK_TRAJECTORY,
+            target_load_g=0.8,
+            current_load_g=1.0,
+            filtered_load_g=1.0,
+            target_ramp_g_s=-0.1,
+            ramp_active=True,
+        )
+    )
+
+    assert decision.action is ForceControlAction.PROBE_RELATIVE
+    assert decision.reason == "trajectory_gain_untrusted"
+    assert decision.correction_mm < 0.0
+
+
 def test_quiet_ramp_endpoint_switches_from_feedforward_to_acquisition() -> None:
     policy = _adaptive(gain=2.0)
     tracking = policy.decide(

@@ -508,8 +508,8 @@ def test_stress_ladder_combined_policy_grid_supports_small_slices(tmp_path: Path
     assert all(item["target_stress_sequence_mpa"] == [50.0, 100.0] for item in summaries)
     assert any(item["quality_status"] == "ok" for item in summaries)
     assert any(item["quality_status"] == "needs_tuning" for item in summaries)
-    assert any(item["quality_status"] == "failed" for item in summaries)
-    assert any("incomplete" in item["quality_flags"] for item in summaries)
+    assert all(item["quality_status"] in {"ok", "needs_tuning"} for item in summaries)
+    assert all(item["stop_reason"] == "completed" for item in summaries)
     assert paths["summary_csv"].exists()
     assert paths["policy_rank"].exists()
     assert paths["policy_plot"].exists()
@@ -565,8 +565,10 @@ def test_current_resume_target_crossing_is_opt_in_tradeoff() -> None:
 
     assert default_summary["current_resume_requires_target_crossing"] is False
     assert crossing_summary["current_resume_requires_target_crossing"] is True
-    assert crossing_summary["p95_abs_current_sweep_error_mpa"] < default_summary["p95_abs_current_sweep_error_mpa"]
+    assert crossing_summary["response_crossing_count"] > default_summary["response_crossing_count"]
+    assert crossing_summary["time_outside_recovery_band_s"] < default_summary["time_outside_recovery_band_s"]
     assert crossing_summary["current_hold_time_s"] > default_summary["current_hold_time_s"]
+    assert crossing_summary["total_measurement_time_s"] > default_summary["total_measurement_time_s"]
     assert all(crossing_trace.invariants.values())
 
 

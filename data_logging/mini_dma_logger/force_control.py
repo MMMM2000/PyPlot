@@ -461,9 +461,15 @@ class ForceControlPolicy:
             if inputs.ramp_active
             else 0.0
         )
-        correction = self._correction_for_error(inputs, error_g + ramp_feedforward_g)
+        trajectory_error_g = error_g + ramp_feedforward_g
+        correction = self._correction_for_error(inputs, trajectory_error_g)
         if correction is None:
-            return self._request_probe(inputs, observation, "trajectory_gain_untrusted")
+            return self._request_probe(
+                inputs,
+                observation,
+                "trajectory_gain_untrusted",
+                direction=1.0 if trajectory_error_g >= 0.0 else -1.0,
+            )
         if abs(error_g) <= deadband_g and abs(ramp_feedforward_g) <= deadband_g:
             return self._decision(
                 inputs,

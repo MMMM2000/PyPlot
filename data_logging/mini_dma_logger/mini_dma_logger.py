@@ -477,6 +477,7 @@ TIC_CMD_SET_MAX_ACCEL = 0xEA
 TIC_CMD_HALT_AND_SET_POSITION = 0xEC
 TIC_KEEPALIVE_INTERVAL_MS = 500
 DEFAULT_TIC_STATUS_INTERVAL_MS = 1000
+TIC_STATIONARY_TARGET_MISMATCH_CONFIRM_S = 1.0
 DEFAULT_SUPPLY_READ_INTERVAL_MS = 750
 DEFAULT_CONTROL_INTERVAL_MS = 50
 DEFAULT_LOG_INTERVAL_MS = 500
@@ -490,6 +491,7 @@ KOSICE_SCALE_CONTROL_INTERVAL_MS = 50
 KOSICE_SCALE_UI_REFRESH_INTERVAL_MS = 200
 KOSICE_SCALE_GRAPH_REFRESH_INTERVAL_MS = 500
 SESSION_DATA_FLUSH_INTERVAL_S = 2.0
+CONTROL_TRACE_FLUSH_INTERVAL_S = 1.0
 SESSION_SENSOR_FILE_CLOSE_WAIT_S = 0.1
 SESSION_METADATA_WRITE_INTERVAL_S = 5.0
 DEFAULT_SCALE_REQUEST_INTERVAL_MS = 250
@@ -836,6 +838,7 @@ SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
+TARGET_RAMP_ENDPOINT_STABLE_S = 0.75
 CURRENT_SWEEP_HOLD_ESTIMATE_MIN_S = 10.0
 CURRENT_SWEEP_HOLD_ESTIMATE_FRACTION = 0.25
 CURRENT_SWEEP_HOLD_ESTIMATE_MAX_S = 60.0
@@ -4962,7 +4965,7 @@ class AutomationControlLoop:
                 self._paused = False
                 self._condition.notify_all()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         with self._condition:
             self._running = False
             self._paused = False
@@ -4971,8 +4974,14 @@ class AutomationControlLoop:
         if thread is not None and thread is not current_thread():
             thread.join(timeout=1.0)
         with self._condition:
-            if self._thread is thread:
+            stopped = thread is None or not thread.is_alive()
+            if stopped and self._thread is thread:
                 self._thread = None
+            return stopped
+
+    def is_alive(self) -> bool:
+        with self._condition:
+            return self._thread is not None and self._thread.is_alive()
 
     def is_running(self) -> bool:
         with self._condition:
@@ -5359,6 +5368,8 @@ class MiniDmaRunMetadataSnapshot:
     recipe_mode: str
     log_interval_ms: int
     graph_refresh_interval_ms: int
+    tic_status_interval_ms: int
+    tic_keepalive_interval_ms: int
     supply_read_interval_ms: int
     supply_voltage_limit_v: float
     supply_profile_id: str
@@ -5450,6 +5461,7 @@ class NativeTicUsbController:
     def __init__(self, *, device_serial: str = "", timeout_ms: int = 1000) -> None:
         self.device_serial = device_serial.strip()
         self.timeout_ms = max(100, int(timeout_ms))
+        self.product_name = ""
         self._usb_core, self._usb_util, self._usb_backend = _load_pyusb_backend()
         self._device = self._find_device()
 
@@ -5490,13 +5502,15 @@ class NativeTicUsbController:
             tic_devices.append((device, product, serial))
             if self.device_serial and not serial:
                 serial_unreadable_devices.append(device)
-        for device, _product, serial in tic_devices:
+        for device, product, serial in tic_devices:
             if self.device_serial and serial and serial != self.device_serial:
                 continue
             if self.device_serial and not serial:
                 continue
+            self.product_name = product
             return device
         if self.device_serial and len(tic_devices) == 1 and len(serial_unreadable_devices) == 1:
+            self.product_name = tic_devices[0][1]
             return serial_unreadable_devices[0]
         serial_text = f" with serial {self.device_serial}" if self.device_serial else ""
         raise RuntimeError(f"No Pololu Tic USB device{serial_text} was found.")
@@ -5632,6 +5646,7 @@ class NativeTicUsbController:
         return "\n".join(
             [
                 f"VIN voltage: {vin_mv / 1000.0:.2f} V",
+                f"Device model: {self.product_name or 'unknown'}",
                 f"Operation state: {operation_text}",
                 f"Planning mode: {planning_mode}",
                 f"Target position: {target_position}",
@@ -6143,6 +6158,7 @@ class TicCommandResult:
     completed_time_s: float
     completed_monotonic_s: float
     error: Exception | None = None
+    status_text: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -6188,6 +6204,10 @@ class TicCommandDispatcher:
         self._sequence = 0
         self._last_error: Exception | None = None
         self._command_results: dict[int, TicCommandResult] = {}
+        self._keepalive_interval_s: float | None = None
+        self._next_keepalive_monotonic_s: float | None = None
+        self._latest_status_text: str | None = None
+        self._latest_status_monotonic_s: float | None = None
         self._thread: Thread | None = None
         if autostart:
             self.start()
@@ -6205,8 +6225,26 @@ class TicCommandDispatcher:
         thread: Thread | None
         with self._condition:
             self._stop_requested = True
+            if self._pending_target is not None:
+                self._record_result_locked(
+                    self._pending_target,
+                    RuntimeError(
+                        f"Tic target command {self._pending_target.sequence} was cancelled because "
+                        "the dispatcher stopped before dispatch."
+                    ),
+                )
             self._pending_target = None
+            for command in self._pending_commands:
+                self._record_result_locked(
+                    command,
+                    RuntimeError(
+                        f"Tic {command.action} command {command.sequence} was cancelled because "
+                        "the dispatcher stopped before dispatch."
+                    ),
+                )
             self._pending_commands.clear()
+            self._keepalive_interval_s = None
+            self._next_keepalive_monotonic_s = None
             self._condition.notify_all()
             thread = self._thread
         if thread is not None and thread.is_alive():
@@ -6254,6 +6292,25 @@ class TicCommandDispatcher:
     def reset_command_timeout(self) -> None:
         self._enqueue_priority(TicCommand(action="keepalive"))
 
+    def start_keepalive(self, *, interval_s: float) -> None:
+        with self._condition:
+            self._keepalive_interval_s = max(0.05, float(interval_s))
+            self._next_keepalive_monotonic_s = (
+                time.monotonic() + self._keepalive_interval_s
+            )
+            self._condition.notify_all()
+
+    def stop_keepalive(self) -> None:
+        with self._condition:
+            self._keepalive_interval_s = None
+            self._next_keepalive_monotonic_s = None
+            self._pending_commands = [
+                command
+                for command in self._pending_commands
+                if command.action != "keepalive"
+            ]
+            self._condition.notify_all()
+
     def halt_and_hold(self) -> None:
         self._enqueue_priority(TicCommand(action="halt"))
 
@@ -6286,6 +6343,14 @@ class TicCommandDispatcher:
             self._sequence += 1
             command.sequence = self._sequence
             if command.action == "halt":
+                if self._pending_target is not None:
+                    self._record_result_locked(
+                        self._pending_target,
+                        RuntimeError(
+                            f"Tic target command {self._pending_target.sequence} was cancelled "
+                            "by halt-and-hold before dispatch."
+                        ),
+                    )
                 self._pending_target = None
                 self._pending_commands.insert(0, command)
             else:
@@ -6310,14 +6375,33 @@ class TicCommandDispatcher:
         with self._condition:
             return self._command_results.get(int(sequence))
 
-    def _record_result_locked(self, command: TicCommand, error: Exception | None) -> None:
+    def latest_status(self) -> tuple[str, float] | None:
+        with self._condition:
+            if (
+                self._latest_status_text is None
+                or self._latest_status_monotonic_s is None
+            ):
+                return None
+            return self._latest_status_text, self._latest_status_monotonic_s
+
+    def _record_result_locked(
+        self,
+        command: TicCommand,
+        error: Exception | None,
+        *,
+        status_text: str | None = None,
+    ) -> None:
         self._command_results[command.sequence] = TicCommandResult(
             sequence=command.sequence,
             action=command.action,
             completed_time_s=time.time(),
             completed_monotonic_s=time.monotonic(),
             error=error,
+            status_text=status_text,
         )
+        if status_text:
+            self._latest_status_text = status_text
+            self._latest_status_monotonic_s = time.monotonic()
         while len(self._command_results) > 256:
             del self._command_results[next(iter(self._command_results))]
         self._condition.notify_all()
@@ -6342,7 +6426,24 @@ class TicCommandDispatcher:
                     and self._pending_target is None
                     and not self._pending_commands
                 ):
-                    self._condition.wait()
+                    keepalive_due_s = self._next_keepalive_monotonic_s
+                    if keepalive_due_s is None:
+                        self._condition.wait()
+                        continue
+                    remaining_s = keepalive_due_s - time.monotonic()
+                    if remaining_s > 0.0:
+                        self._condition.wait(timeout=remaining_s)
+                        continue
+                    self._sequence += 1
+                    self._pending_commands.append(
+                        TicCommand(action="keepalive", sequence=self._sequence)
+                    )
+                    interval_s = self._keepalive_interval_s
+                    self._next_keepalive_monotonic_s = (
+                        None
+                        if interval_s is None
+                        else time.monotonic() + interval_s
+                    )
                 if self._stop_requested:
                     self._busy = False
                     self._condition.notify_all()
@@ -6351,6 +6452,7 @@ class TicCommandDispatcher:
                 self._busy = command is not None
             if command is not None:
                 command_error: Exception | None = None
+                status_text: str | None = None
                 try:
                     with self._condition:
                         self._last_error = None
@@ -6365,13 +6467,27 @@ class TicCommandDispatcher:
                         controller.halt_and_hold()
                     elif command.action == "zero" and command.position_steps is not None:
                         controller.set_current_position(command.position_steps)
+                    if command.action in {"target", "keepalive"}:
+                        get_status = getattr(controller, "get_status", None)
+                        if callable(get_status):
+                            try:
+                                status_text = str(get_status())
+                            except Exception:
+                                # The command itself succeeded. A later dispatcher/UI
+                                # status read can still confirm it without turning a
+                                # transient read failure into a duplicate move.
+                                status_text = None
                 except Exception as exc:
                     command_error = exc
                     with self._condition:
                         self._last_error = exc
                 finally:
                     with self._condition:
-                        self._record_result_locked(command, command_error)
+                        self._record_result_locked(
+                            command,
+                            command_error,
+                            status_text=status_text,
+                        )
                         self._busy = False
                         self._condition.notify_all()
 
@@ -7538,6 +7654,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ir_temperature_path: Path | None = None
         self._session_control_trace_handle: Any = None
         self._session_control_trace_writer: csv.DictWriter[str] | None = None
+        self._session_control_trace_lock = RLock()
+        self._last_control_trace_flush_s = 0.0
         self._session_ui_telemetry_handle: Any = None
         self._session_ui_telemetry_writer: csv.DictWriter[str] | None = None
         self._session_setup_txt_handle: Any = None
@@ -7739,6 +7857,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value: float | None = None
         self._active_target_ramp_rate_value_s: float | None = None
         self._active_target_ramp_setpoint_rate_value_s: float | None = None
+        self._target_ramp_endpoint_in_band_since_s: float | None = None
         self._active_timed_step_index: int | None = None
         self._active_timed_step_started_s = 0.0
         self._active_timed_move_sent = False
@@ -7834,6 +7953,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_motion_expected_complete_monotonic_s: float | None = None
         self._kosice_active_motion_target_steps: int | None = None
         self._pending_motion_command: PendingMotionCommand | None = None
+        self._last_dispatcher_status_monotonic_s: float | None = None
+        self._stationary_target_mismatch_since_s: float | None = None
+        self._stationary_target_mismatch_target_steps: int | None = None
         self._last_commanded_speed_mm_s = 0.0
         self._last_tic_status_time_s: float | None = None
         self._last_feedback_wait_log_s = 0.0
@@ -12561,50 +12683,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self,
         settings: TicConnectionSettings | None = None,
     ) -> TicController:
-        selected = settings or self._tic_settings_for_current_command()
-        key = selected.key()
-        if self._tic_controller is None or self._tic_controller_key != key:
-            previous_controller = self._tic_controller
-            self._tic_controller = TicController(
-                command_path=selected.command_path,
-                device_serial=selected.device_serial,
-                prefer_native_usb=selected.prefer_native_usb,
-                allow_ticcmd_fallback=not selected.prefer_native_usb,
-                transport_logger=WeakOwnerCallback(self, "_log"),
-            )
-            self._tic_controller_key = key
-            if previous_controller is not None:
-                close = getattr(previous_controller, "close", None)
-                if callable(close):
-                    close()
-        return self._tic_controller
+        with self._tic_settings_lock:
+            selected = settings or self._tic_settings_for_current_command()
+            key = selected.key()
+            if self._tic_controller is None or self._tic_controller_key != key:
+                previous_controller = self._tic_controller
+                self._tic_controller = TicController(
+                    command_path=selected.command_path,
+                    device_serial=selected.device_serial,
+                    prefer_native_usb=selected.prefer_native_usb,
+                    allow_ticcmd_fallback=not selected.prefer_native_usb,
+                    transport_logger=WeakOwnerCallback(self, "_log"),
+                )
+                self._tic_controller_key = key
+                if previous_controller is not None:
+                    close = getattr(previous_controller, "close", None)
+                    if callable(close):
+                        close()
+            return self._tic_controller
 
     def _build_tic_dispatcher(
         self,
         settings: TicConnectionSettings | None = None,
     ) -> TicCommandDispatcher:
-        selected = settings or self._tic_settings_for_current_command()
-        key = selected.key()
-        if self._tic_command_dispatcher is not None and self._tic_command_dispatcher_key != key:
-            self._tic_command_dispatcher.stop()
-            self._tic_command_dispatcher = None
-        if self._tic_command_dispatcher is None:
-            self._tic_command_dispatcher = TicCommandDispatcher(
-                WeakTicControllerFactory(self, selected)
-            )
-            self._tic_command_dispatcher_key = key
-        return self._tic_command_dispatcher
+        dispatcher_to_stop: TicCommandDispatcher | None = None
+        with self._tic_settings_lock:
+            selected = settings or self._tic_settings_for_current_command()
+            key = selected.key()
+            if self._tic_command_dispatcher is not None and self._tic_command_dispatcher_key != key:
+                dispatcher_to_stop = self._tic_command_dispatcher
+                self._tic_command_dispatcher = None
+                self._tic_command_dispatcher_key = None
+        if dispatcher_to_stop is not None:
+            dispatcher_to_stop.stop()
+        with self._tic_settings_lock:
+            if self._tic_command_dispatcher is None:
+                self._tic_command_dispatcher = TicCommandDispatcher(
+                    WeakTicControllerFactory(self, selected)
+                )
+                self._tic_command_dispatcher_key = key
+            return self._tic_command_dispatcher
 
     def _stop_tic_dispatcher(self) -> None:
-        dispatcher = self._tic_command_dispatcher
-        self._tic_command_dispatcher = None
-        self._tic_command_dispatcher_key = None
+        with self._tic_settings_lock:
+            dispatcher = self._tic_command_dispatcher
+            self._tic_command_dispatcher = None
+            self._tic_command_dispatcher_key = None
         if dispatcher is not None and hasattr(dispatcher, "stop"):
             dispatcher.stop()
         self._pending_motion_command = None
-        controller = self._tic_controller
-        self._tic_controller = None
-        self._tic_controller_key = None
+        with self._tic_settings_lock:
+            controller = self._tic_controller
+            self._tic_controller = None
+            self._tic_controller_key = None
         if controller is not None:
             close = getattr(controller, "close", None)
             if callable(close):
@@ -16922,11 +17053,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _capture_verified_tic_profile(self) -> tuple[bool, str]:
         status_text = self._tic_status_text or ""
+        reported_model = (
+            _extract_status_value(status_text, "Device model") or ""
+        ).strip()
         reported_step_mode = _extract_tic_step_mode(status_text)
         reported_current_mA = _extract_tic_current_limit_mA(status_text)
         motion_readbacks = self._tic_motion_limit_readbacks(status_text)
         motion_targets = self._selected_tic_motion_limits()
         problems: list[str] = []
+        if "t500" not in reported_model.lower():
+            problems.append(
+                f"device model {reported_model or 'unavailable'} (expected Tic T500)"
+            )
         if reported_step_mode != DEFAULT_TIC_STEP_MODE:
             problems.append(
                 f"step mode {_tic_step_mode_label(reported_step_mode)} (expected 1/8 step)"
@@ -16973,6 +17111,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "fingerprint_sha256": fingerprint,
             "verified_utc": _utc_timestamp(),
             "device_serial": self.edit_tic_serial.text().strip() or None,
+            "device_model": reported_model,
             "persistent_readback": dict(persistent_readback),
             "readback": {
                 "step_mode": reported_step_mode,
@@ -17852,10 +17991,16 @@ class MainWindow(QtWidgets.QMainWindow):
             100.0 * relative_position_mm / current_l0_mm,
         )
 
-    def _motor_step_mm(self) -> float:
+    def _run_steps_per_mm(self) -> float:
         config = self._control_config()
-        steps_per_mm = config.steps_per_mm if config is not None else float(self.spin_steps_per_mm.value())
-        return 1.0 / max(1.0, steps_per_mm)
+        if config is not None:
+            return max(1.0, float(config.steps_per_mm))
+        if self._is_ui_thread():
+            return max(1.0, float(self.spin_steps_per_mm.value()))
+        return max(1.0, DEFAULT_STEPS_PER_MM)
+
+    def _motor_step_mm(self) -> float:
+        return 1.0 / self._run_steps_per_mm()
 
     def _quantize_backlash_mm(self, backlash_mm: float) -> float:
         step_mm = self._motor_step_mm()
@@ -21716,6 +21861,25 @@ class MainWindow(QtWidgets.QMainWindow):
         target_value: float,
         tolerance: float,
     ) -> bool:
+        self._poll_pending_motion_dispatch()
+        motion_active_or_settling = (
+            self._pending_motion_command is not None
+            or self._kosice_active_motion_target_steps is not None
+            or (
+                self._last_motion_expected_complete_monotonic_s is not None
+                and time.monotonic() < self._last_motion_expected_complete_monotonic_s
+            )
+        )
+        if motion_active_or_settling:
+            self._write_control_trace(
+                decision="wait",
+                basis=basis,
+                target_value=target_value,
+                tolerance=tolerance,
+                result="waiting",
+                reason="motor_active_or_settling",
+            )
+            return False
         if basis in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA} and not self._has_fresh_scale_reading():
             age_s = self._scale_reading_age_s()
             if age_s is None or age_s > CLOSED_LOOP_STALE_SCALE_ABORT_AFTER_S:
@@ -23505,16 +23669,127 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self.label_tic_summary.setText(summary)
         self._reconcile_pending_motion_command_with_tic_status()
-        if (
-            self._kosice_active_motion_target_steps is not None
-            and self._current_position_steps == self._kosice_active_motion_target_steps
-            and self._tic_current_velocity in {None, 0}
-        ):
-            self._kosice_active_motion_target_steps = None
+        self._reconcile_active_motion_status(observed_monotonic_s=time.monotonic())
         self._refresh_tic_settings_summary()
         self._refresh_live_labels()
         self._status_timer.start(self._tic_status_interval_ms())
         return True
+
+    def _reconcile_active_motion_status(self, *, observed_monotonic_s: float) -> None:
+        target_steps = self._kosice_active_motion_target_steps
+        if target_steps is None:
+            self._stationary_target_mismatch_since_s = None
+            self._stationary_target_mismatch_target_steps = None
+            return
+        if (
+            self._current_position_steps == target_steps
+            and self._tic_current_velocity in {None, 0}
+        ):
+            self._kosice_active_motion_target_steps = None
+            self._stationary_target_mismatch_since_s = None
+            self._stationary_target_mismatch_target_steps = None
+            return
+        accepted_target_is_still_active = self._tic_target_position_steps == target_steps
+        if not accepted_target_is_still_active or self._tic_current_velocity != 0:
+            self._stationary_target_mismatch_since_s = None
+            self._stationary_target_mismatch_target_steps = None
+            return
+        if self._stationary_target_mismatch_target_steps != target_steps:
+            self._stationary_target_mismatch_target_steps = target_steps
+            self._stationary_target_mismatch_since_s = observed_monotonic_s
+            return
+        since_s = self._stationary_target_mismatch_since_s
+        if (
+            since_s is None
+            or observed_monotonic_s - since_s
+            < TIC_STATIONARY_TARGET_MISMATCH_CONFIRM_S
+        ):
+            return
+
+        confirmed_steps = int(self._current_position_steps)
+        missed_steps = int(target_steps - confirmed_steps)
+        self._kosice_active_motion_target_steps = None
+        self._stationary_target_mismatch_since_s = None
+        self._stationary_target_mismatch_target_steps = None
+        self._last_motion_expected_complete_time_s = None
+        self._last_motion_expected_complete_monotonic_s = None
+        self._last_commanded_position_steps = confirmed_steps
+        self._last_move_target_mm = self._current_position_mm
+        self._last_effective_move_target_mm = self._effective_position_mm
+        self._manual_jog_uses_last_target = False
+        self._cancel_unexecuted_force_control_move()
+        self._log(
+            "Tic became stationary before the accepted target: "
+            f"target {target_steps}, confirmed position {confirmed_steps} "
+            f"({missed_steps:+d} units remaining). Releasing the command as incomplete so "
+            "closed-loop control can retry from confirmed position."
+        )
+        self._write_control_trace(
+            decision="motor_command",
+            target_mm=target_steps / max(1.0, self._run_steps_per_mm()),
+            effective_target_mm=self._last_effective_move_target_mm,
+            result="stationary_before_target",
+            reason=(
+                f"accepted_target_{target_steps}:confirmed_{confirmed_steps}:"
+                f"remaining_{missed_steps}"
+            ),
+        )
+
+    def _consume_dispatcher_motion_status(self) -> None:
+        dispatcher = self._tic_command_dispatcher
+        latest_status = getattr(dispatcher, "latest_status", None)
+        if not callable(latest_status):
+            return
+        snapshot = latest_status()
+        if snapshot is None:
+            return
+        status_text, observed_monotonic_s = snapshot
+        if (
+            self._last_dispatcher_status_monotonic_s is not None
+            and observed_monotonic_s <= self._last_dispatcher_status_monotonic_s
+        ):
+            return
+        self._last_dispatcher_status_monotonic_s = observed_monotonic_s
+        planning_mode_text = _extract_status_value(status_text, "Planning mode")
+        planning_mode = (
+            _extract_first_int(planning_mode_text)
+            if planning_mode_text is not None
+            else None
+        )
+        if planning_mode is None and planning_mode_text is not None:
+            planning_mode = {
+                "off": 0,
+                "target position": 1,
+                "target velocity": 2,
+            }.get(planning_mode_text.strip().lower())
+        target_text = _extract_status_value(status_text, "Target position")
+        velocity_text = _extract_status_value(status_text, "Current velocity")
+        current_text = _extract_status_value(status_text, "Current position")
+        self._tic_planning_mode = planning_mode
+        self._tic_target_position_steps = (
+            None if target_text is None else _extract_first_int(target_text)
+        )
+        self._tic_current_velocity = (
+            None if velocity_text is None else _extract_first_int(velocity_text)
+        )
+        current_steps = None if current_text is None else _extract_first_int(current_text)
+        if current_steps is not None:
+            previous_commanded_steps = self._last_commanded_position_steps
+            self._current_position_steps = int(current_steps)
+            self._current_position_mm = int(current_steps) / max(
+                1.0,
+                self._run_steps_per_mm(),
+            )
+            if previous_commanded_steps == current_steps:
+                self._effective_position_mm = self._last_effective_move_target_mm
+            elif not self._has_unconfirmed_motion_command():
+                self._effective_position_mm = self._current_position_mm
+            self._last_commanded_position_steps = int(current_steps)
+            self._last_tic_status_time_s = time.time()
+            self._last_tic_status_monotonic_s = observed_monotonic_s
+        self._reconcile_active_motion_status(
+            observed_monotonic_s=observed_monotonic_s
+        )
 
     def _zero_tic_position(self) -> None:
         try:
@@ -23556,6 +23831,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_move_direction = 0.0
         self._log("Sent halt-and-hold to Tic.")
         self._refresh_tic_status()
+        self._release_motion_tracking_after_halt(reason="manual halt-and-hold")
+        if self._automation_active and not self._automation_paused:
+            self._start_tic_keepalive()
 
     def _configure_manual_jog_button(
         self,
@@ -23831,22 +24109,31 @@ class MainWindow(QtWidgets.QMainWindow):
         return sensor_mode in {IR_SENSOR_MLX90614, IR_SENSOR_MLX90640} and bool(port_name)
 
     def _start_tic_keepalive(self) -> None:
-        if not self._is_ui_thread():
-            self._run_on_ui_thread(self._start_tic_keepalive)
-            return
         self._tic_keepalive_warning_active = False
-        self._tic_keepalive_timer.setInterval(self._tic_keepalive_interval_ms())
-        if not self._tic_keepalive_timer.isActive():
-            self._tic_keepalive_timer.start()
+        dispatcher = self._build_tic_dispatcher()
+        start_keepalive = getattr(dispatcher, "start_keepalive", None)
+        if callable(start_keepalive):
+            start_keepalive(interval_s=self._tic_keepalive_interval_ms() / 1000.0)
+        if self._is_ui_thread():
+            self._tic_keepalive_timer.stop()
+        else:
+            self._run_on_ui_thread(self._tic_keepalive_timer.stop)
 
     def _stop_tic_keepalive(self) -> None:
-        if not self._is_ui_thread():
-            self._run_on_ui_thread(self._stop_tic_keepalive)
-            return
-        self._tic_keepalive_timer.stop()
+        dispatcher = self._tic_command_dispatcher
+        stop_keepalive = getattr(dispatcher, "stop_keepalive", None)
+        if callable(stop_keepalive):
+            stop_keepalive()
+        if self._is_ui_thread():
+            self._tic_keepalive_timer.stop()
+        else:
+            self._run_on_ui_thread(self._tic_keepalive_timer.stop)
         self._tic_keepalive_warning_active = False
 
     def _handle_tic_keepalive_timer(self) -> None:
+        # Compatibility path for restored settings/older tests. Production
+        # keepalive scheduling lives in TicCommandDispatcher so Qt repaint or
+        # dialog latency cannot trip the Tic's command timeout.
         if (
             not self._automation_active
             and not self._manual_jog_timer.isActive()
@@ -23857,7 +24144,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._tic_motor_power_ok is False:
             return
         try:
-            self._build_tic_dispatcher().reset_command_timeout()
+            dispatcher = self._build_tic_dispatcher()
+            start_keepalive = getattr(dispatcher, "start_keepalive", None)
+            if callable(start_keepalive):
+                dispatcher.reset_command_timeout()
+                start_keepalive(interval_s=self._tic_keepalive_interval_ms() / 1000.0)
+                self._tic_keepalive_timer.stop()
+            else:
+                dispatcher.reset_command_timeout()
             self._tic_keepalive_warning_active = False
         except Exception as exc:
             if not self._tic_keepalive_warning_active:
@@ -23882,6 +24176,57 @@ class MainWindow(QtWidgets.QMainWindow):
     def _cancel_unexecuted_force_control_move(self) -> None:
         if self._kosice_force_control is not None:
             self._kosice_force_control.cancel_pending()
+
+    def _release_motion_tracking_after_halt(self, *, reason: str) -> None:
+        pending = self._pending_motion_command
+        active_target_steps = self._kosice_active_motion_target_steps
+        self._pending_motion_command = None
+        self._kosice_active_motion_target_steps = None
+        self._stationary_target_mismatch_since_s = None
+        self._stationary_target_mismatch_target_steps = None
+        self._last_motion_command_time_s = None
+        self._last_motion_command_monotonic_s = None
+        self._last_motion_expected_complete_time_s = None
+        self._last_motion_expected_complete_monotonic_s = None
+        self._last_commanded_position_steps = int(self._current_position_steps)
+        self._last_move_target_mm = float(self._current_position_mm)
+        self._last_effective_move_target_mm = float(self._effective_position_mm)
+        self._manual_jog_uses_last_target = False
+        self._cancel_unexecuted_force_control_move()
+        if self._automation_basis is not None and self._automation_target_value is not None:
+            self._clear_seek_state(
+                self._seek_error_key(
+                    self._automation_basis,
+                    float(self._automation_target_value),
+                )
+            )
+        if pending is None and active_target_steps is None:
+            return
+        target_steps = (
+            pending.target_steps
+            if pending is not None
+            else int(active_target_steps)
+        )
+        self._log(
+            f"Tic motion to {target_steps} units was cancelled by {reason}; "
+            f"confirmed position is {self._current_position_steps}. Any resumed closed-loop "
+            "control will recompute from that confirmed position."
+        )
+        self._write_control_trace(
+            decision="motor_command",
+            target_mm=(
+                pending.target_mm
+                if pending is not None
+                else target_steps / self._run_steps_per_mm()
+            ),
+            effective_target_mm=(
+                pending.effective_target_mm
+                if pending is not None
+                else self._last_effective_move_target_mm
+            ),
+            result="cancelled_by_halt",
+            reason=reason,
+        )
 
     def _fail_pending_motion_command(self, reason: str) -> None:
         pending = self._pending_motion_command
@@ -23911,6 +24256,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _poll_pending_motion_dispatch(self) -> None:
+        self._consume_dispatcher_motion_status()
         pending = self._pending_motion_command
         if pending is None:
             return
@@ -23923,6 +24269,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if result is None:
                 return
             pending.dispatch_result = result
+            if result.status_text:
+                self._consume_dispatcher_motion_status()
             if not result.succeeded:
                 self._fail_pending_motion_command(str(result.error or "unknown dispatch failure"))
                 return
@@ -24034,6 +24382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _kosice_motion_complete(self) -> bool:
+        self._consume_dispatcher_motion_status()
         self._poll_pending_motion_dispatch()
         if self._pending_motion_command is not None:
             return False
@@ -24742,11 +25091,17 @@ class MainWindow(QtWidgets.QMainWindow):
         return DEFAULT_GRAPH_REFRESH_INTERVAL_MS
 
     def _tic_status_interval_ms(self) -> int:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return int(snapshot.tic_status_interval_ms)
         if hasattr(self, "spin_tic_status_interval"):
             return int(self.spin_tic_status_interval.value())
         return DEFAULT_TIC_STATUS_INTERVAL_MS
 
     def _tic_keepalive_interval_ms(self) -> int:
+        snapshot = self._run_metadata_snapshot
+        if not self._is_ui_thread() and snapshot is not None:
+            return int(snapshot.tic_keepalive_interval_ms)
         if hasattr(self, "spin_tic_keepalive_interval"):
             return int(self.spin_tic_keepalive_interval.value())
         return TIC_KEEPALIVE_INTERVAL_MS
@@ -25165,6 +25520,8 @@ class MainWindow(QtWidgets.QMainWindow):
             recipe_mode=str(payload.get("recipe_mode") or "ramp"),
             log_interval_ms=int(payload["logging"]["log_interval_ms"]),
             graph_refresh_interval_ms=int(payload["control"]["graph_refresh_interval_ms"]),
+            tic_status_interval_ms=int(payload["control"]["tic_status_interval_ms"]),
+            tic_keepalive_interval_ms=int(payload["control"]["tic_keepalive_interval_ms"]),
             supply_read_interval_ms=int(payload["control"]["supply_read_interval_ms"]),
             supply_voltage_limit_v=float(payload["heating"]["voltage_limit_v"]),
             supply_profile_id=str(payload["heating"]["profile"]),
@@ -25863,6 +26220,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session_ir_temperature_path = ir_temperature_path
         self._session_control_trace_handle = control_trace_handle
         self._session_control_trace_writer = control_trace_writer
+        self._last_control_trace_flush_s = 0.0
         self._session_ui_telemetry_handle = ui_telemetry_handle
         self._session_ui_telemetry_writer = ui_telemetry_writer
         self._session_setup_txt_handle = setup_txt_handle
@@ -26102,10 +26460,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._session_csv_handle.close()
             self._session_csv_handle = None
         self._session_csv_writer = None
-        if self._session_control_trace_handle is not None:
-            self._session_control_trace_handle.close()
-            self._session_control_trace_handle = None
-        self._session_control_trace_writer = None
+        with self._session_control_trace_lock:
+            if self._session_control_trace_handle is not None:
+                self._session_control_trace_handle.flush()
+                self._session_control_trace_handle.close()
+                self._session_control_trace_handle = None
+            self._session_control_trace_writer = None
+            self._last_control_trace_flush_s = 0.0
         if self._session_ui_telemetry_handle is not None:
             self._session_ui_telemetry_handle.close()
             self._session_ui_telemetry_handle = None
@@ -26288,13 +26649,6 @@ class MainWindow(QtWidgets.QMainWindow):
         reason: str = "",
         task_text: str | None = None,
     ) -> None:
-        if (
-            not self._session_active
-            or self._session_control_trace_writer is None
-            or self._session_control_trace_handle is None
-        ):
-            return
-
         def _number(value: float | None) -> str:
             if value is None:
                 return ""
@@ -26323,7 +26677,14 @@ class MainWindow(QtWidgets.QMainWindow):
         scale_recent_rate_hz = self._scale_signal_buffer.sample_rate_hz(now_s=time.time())
         voltage_limit_v = self._run_supply_voltage_limit_v()
         try:
-            self._session_control_trace_writer.writerow(
+            with self._session_control_trace_lock:
+                if (
+                    not self._session_active
+                    or self._session_control_trace_writer is None
+                    or self._session_control_trace_handle is None
+                ):
+                    return
+                self._session_control_trace_writer.writerow(
                 {
                     "elapsed_s": f"{elapsed_s:.6f}",
                     "timestamp_utc": _utc_timestamp(),
@@ -26421,17 +26782,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     "result": result,
                     "reason": reason,
                 }
-            )
-            self._session_control_trace_handle.flush()
+                )
+                if now_s - self._last_control_trace_flush_s >= CONTROL_TRACE_FLUSH_INTERVAL_S:
+                    self._session_control_trace_handle.flush()
+                    self._last_control_trace_flush_s = now_s
         except (OSError, ValueError) as exc:
-            handle = self._session_control_trace_handle
-            self._session_control_trace_writer = None
-            self._session_control_trace_handle = None
-            try:
-                if handle is not None:
-                    handle.close()
-            except Exception:
-                pass
+            with self._session_control_trace_lock:
+                handle = self._session_control_trace_handle
+                self._session_control_trace_writer = None
+                self._session_control_trace_handle = None
+                self._last_control_trace_flush_s = 0.0
+                try:
+                    if handle is not None:
+                        handle.close()
+                except Exception:
+                    pass
             self._log(f"Control trace disabled after write failure; recipe will continue: {exc}")
 
     def _reserve_raw_scale_sample_locked(
@@ -29499,6 +29864,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
+        self._target_ramp_endpoint_in_band_since_s = None
         self._setup_zero_fallback_return_position_mm = None
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
@@ -29544,7 +29910,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise RuntimeError("Tic command settings were not captured before control-worker start.")
         self._automation_control_error = None
         if self._automation_control_loop is not None:
-            self._automation_control_loop.stop()
+            if not self._automation_control_loop.stop():
+                raise RuntimeError(
+                    "The previous TMA control worker did not stop within 1 s; "
+                    "refusing to start a second controller."
+                )
             self._automation_control_loop = None
         self._auto_ramp_timer.stop()
         self._automation_control_loop = AutomationControlLoop(
@@ -29560,15 +29930,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _resume_automation_control_loop(self) -> None:
         self._auto_ramp_timer.stop()
-        if self._automation_control_loop is not None:
+        if (
+            self._automation_control_loop is not None
+            and self._automation_control_loop.is_running()
+        ):
             self._automation_control_loop.resume()
             return
         self._start_automation_control_loop(self._automation_interval_ms)
 
     def _stop_automation_control_loop(self) -> None:
         if self._automation_control_loop is not None:
-            self._automation_control_loop.stop()
-            self._automation_control_loop = None
+            if self._automation_control_loop.stop():
+                self._automation_control_loop = None
+            else:
+                self._log(
+                    "TMA control worker is still finishing its current hardware call; "
+                    "it remains owned and no replacement worker will be started."
+                )
         if self._is_ui_thread():
             self._auto_ramp_timer.stop()
         else:
@@ -29770,6 +30148,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
+        self._target_ramp_endpoint_in_band_since_s = None
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
         self._setup_starting_length_mm = None
@@ -29870,6 +30249,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log("Pause requested a Tic halt, but the command did not finish cleanly.")
         except Exception as exc:
             self._log(f"Pause could not halt Tic: {exc}")
+        try:
+            self._refresh_tic_status()
+        except Exception:
+            pass
+        self._release_motion_tracking_after_halt(reason="recipe pause")
         self._disable_supply_output()
         self._set_automation_context(phase="paused")
         self._log("Recipe paused. Current annealing output is off.")
@@ -30739,6 +31123,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
+        self._target_ramp_endpoint_in_band_since_s = None
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
         self._active_mechanical_scan_move_count = 0
@@ -33033,6 +33418,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._setup_preload_ramp_skipped = False
         if self._active_target_ramp_step_index != step_index:
             self._active_target_ramp_step_index = step_index
+            self._target_ramp_endpoint_in_band_since_s = None
             self._active_target_ramp_started_s = time.monotonic()
             self._active_target_ramp_rate_value_s = configured_ramp_rate
             self._active_target_ramp_end_value = end_value
@@ -33135,13 +33521,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
 
         if elapsed_s >= duration_s and reached:
+            now_s = time.monotonic()
+            if self._target_ramp_endpoint_in_band_since_s is None:
+                self._target_ramp_endpoint_in_band_since_s = now_s
+                return False
+            if now_s - self._target_ramp_endpoint_in_band_since_s < TARGET_RAMP_ENDPOINT_STABLE_S:
+                return False
             self._active_target_ramp_step_index = None
             self._active_target_ramp_started_s = 0.0
             self._active_target_ramp_start_value = None
             self._active_target_ramp_end_value = None
             self._active_target_ramp_rate_value_s = None
             self._active_target_ramp_setpoint_rate_value_s = None
+            self._target_ramp_endpoint_in_band_since_s = None
             return True
+        if elapsed_s >= duration_s:
+            self._target_ramp_endpoint_in_band_since_s = None
         return False
 
     def _handle_starting_length_prompt_step(self) -> bool:
