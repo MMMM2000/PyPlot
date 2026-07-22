@@ -285,6 +285,124 @@ def test_main_window_automation_tick_delegates_to_controller(tmp_path: Path, qtb
         _close_test_window(window)
 
 
+def test_tma_shared_broker_controller_uses_scheduled_two_hz_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            return {
+                "ok": True,
+                "snapshot": {
+                    "bench_profile": {
+                        "channels": {
+                            "4": {
+                                "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                "confirmed": True,
+                                "voltage_limit_v": 32.05,
+                                "current_limit_a": None,
+                            }
+                        }
+                    }
+                },
+            }
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": "lease-4"}
+
+        def start_scheduler(self, *, tick_s: float) -> None:
+            self.calls.append(("start_scheduler", {"tick_s": tick_s}))
+
+        def configure_polling(
+            self, *, channel: int, lease_id: str, requested_hz: float
+        ) -> dict[str, object]:
+            self.calls.append(
+                (
+                    "configure_polling",
+                    {"channel": channel, "lease_id": lease_id, "requested_hz": requested_hz},
+                )
+            )
+            return {
+                "generation": 7,
+                "polling": {"requested_hz": requested_hz, "effective_hz": 2.0},
+            }
+
+        def configure_channel(self, **payload: object) -> None:
+            self.calls.append(("configure_channel", dict(payload)))
+
+        def schedule_current(self, **payload: object) -> None:
+            self.calls.append(("schedule_current", dict(payload)))
+
+        def latest_readback(self, **payload: object) -> dict[str, object]:
+            self.calls.append(("latest_readback", dict(payload)))
+            return {
+                "voltage_V": 0.5,
+                "current_mA": 10.0,
+                "cadence": {
+                    "generation": 7,
+                    "polling": {"requested_hz": 2.0, "effective_hz": 2.0},
+                },
+            }
+
+    clients: list[_Client] = []
+
+    def _factory(*, host: str, port: int) -> _Client:
+        client = _Client(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        requested_readback_hz=2.0,
+    )
+
+    controller.connect()
+    controller.initialize_output(current_mA=10.0, reset_on_start=False)
+    controller.set_current_mA(10.4)
+    readback = controller.measure()
+
+    assert controller.cadence_status() == {
+        "requested_hz": 2.0,
+        "effective_hz": 2.0,
+        "generation": 7,
+    }
+    assert readback["current_mA"] == pytest.approx(10.0)
+    assert (
+        "configure_polling",
+        {"channel": 4, "lease_id": "lease-4", "requested_hz": 2.0},
+    ) in clients[0].calls
+    assert (
+        "schedule_current",
+        {"channel": 4, "lease_id": "lease-4", "current_mA": 10.4},
+    ) in clients[0].calls
+    assert (
+        "latest_readback",
+        {"channel": 4, "max_age_s": 2.5, "fallback_to_measure": True},
+    ) in clients[0].calls
+
+
+def test_tma_psu_readback_selector_controls_direct_interval(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert window.combo_supply_readback_rate.itemData(0) == pytest.approx(1.0)
+        assert window.combo_supply_readback_rate.itemData(1) == pytest.approx(2.0)
+
+        window.combo_supply_readback_rate.setCurrentIndex(1)
+
+        assert window._requested_supply_readback_hz() == pytest.approx(2.0)
+        assert window._supply_read_interval_ms() == 500
+    finally:
+        _close_test_window(window)
+
+
 def test_background_control_loop_advances_recipe_without_ui_events(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     calls: list[int] = []
@@ -13119,7 +13237,8 @@ def test_hardware_cadence_settings_restore_and_update_timers(tmp_path: Path, qtb
         window._save_settings()
         assert int(settings.value("tic_status_interval_ms")) == 1500
         assert int(settings.value("tic_keepalive_interval_ms")) == 450
-        assert int(settings.value("supply_read_interval_ms")) == 1250
+        assert int(settings.value("supply_read_interval_ms")) == 1000
+        assert float(settings.value("supply_readback_hz")) == pytest.approx(1.0)
         assert int(settings.value("graph_refresh_interval_ms")) == 500
         assert int(settings.value("current_sweep_supply_channel")) == 2
     finally:

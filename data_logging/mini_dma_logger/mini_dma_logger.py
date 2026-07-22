@@ -45,6 +45,10 @@ from plotting.shared.utils import ensure_app_theme, install_standard_menu
 from data_logging.shared_power_supply.broker import SharedPowerSupplyBroker, ROLE_MINI_DMA_CURRENT, ROLE_MINI_DMA_MOTOR
 from data_logging.shared_power_supply.bench_guard import identify_hmp_with_blank_retry
 from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.discovery import (
+    SerialPortIdentity,
+    sort_hmp_port_identities,
+)
 from data_logging.shared_power_supply.protocol import (
     BrokerJsonClient,
     broker_failure_diagnostic,
@@ -481,7 +485,7 @@ TIC_KEEPALIVE_INTERVAL_MS = 500
 TIC_DISPATCH_RESULT_TIMEOUT_S = 5.0
 DEFAULT_TIC_STATUS_INTERVAL_MS = 1000
 TIC_STATIONARY_TARGET_MISMATCH_CONFIRM_S = 1.0
-DEFAULT_SUPPLY_READ_INTERVAL_MS = 750
+DEFAULT_SUPPLY_READ_INTERVAL_MS = 1000
 DEFAULT_CONTROL_INTERVAL_MS = 50
 DEFAULT_LOG_INTERVAL_MS = 500
 DEFAULT_UI_REFRESH_INTERVAL_MS = 200
@@ -4872,19 +4876,40 @@ class AsyncRunLogWriter:
 class SerialPortDescriptor:
     device: str
     description: str
+    manufacturer: str = ""
+    hwid: str = ""
+    vid: int | None = None
+    pid: int | None = None
+
+    def identity(self) -> SerialPortIdentity:
+        return SerialPortIdentity(
+            device=self.device,
+            description=self.description,
+            manufacturer=self.manufacturer,
+            hwid=self.hwid,
+            vid=self.vid,
+            pid=self.pid,
+        )
 
 
 def _enumerate_serial_port_descriptors() -> tuple[SerialPortDescriptor, ...]:
     if list_ports is None:
         raise RuntimeError("pyserial is unavailable.")
-    return tuple(
+    descriptors = tuple(
         SerialPortDescriptor(
             device=str(getattr(port, "device", "") or "").strip(),
             description=str(getattr(port, "description", "") or "").strip(),
+            manufacturer=str(getattr(port, "manufacturer", "") or "").strip(),
+            hwid=str(getattr(port, "hwid", "") or "").strip(),
+            vid=getattr(port, "vid", None),
+            pid=getattr(port, "pid", None),
         )
         for port in list_ports.comports()
         if str(getattr(port, "device", "") or "").strip()
     )
+    identities = sort_hmp_port_identities(descriptor.identity() for descriptor in descriptors)
+    by_device = {descriptor.device: descriptor for descriptor in descriptors}
+    return tuple(by_device[identity.device] for identity in identities)
 
 
 class SerialPortEnumerationTask:
@@ -6935,6 +6960,7 @@ class SharedBrokerSupplyController:
         motor_voltage_limit_v: float | None = None,
         motor_current_limit_a: float | None = None,
         owner: str = "mini_dma_logger",
+        requested_readback_hz: float = 1.0,
     ) -> None:
         self.host = str(host or "127.0.0.1").strip() or "127.0.0.1"
         self.port = int(port)
@@ -6949,6 +6975,9 @@ class SharedBrokerSupplyController:
         self.motor_voltage_limit_v = None if motor_voltage_limit_v is None else float(motor_voltage_limit_v)
         self.motor_current_limit_a = None if motor_current_limit_a is None else float(motor_current_limit_a)
         self.owner = owner
+        self.requested_readback_hz = 2.0 if float(requested_readback_hz) >= 2.0 else 1.0
+        self.effective_readback_hz = self.requested_readback_hz
+        self.cadence_generation = 0
         self._client: Any = None
         self._leases: dict[int, str] = {}
         self._connected = False
@@ -6964,6 +6993,69 @@ class SharedBrokerSupplyController:
                 broker_failure_diagnostic(exc, context="TMA shared HMP broker")
             ) from exc
         self._connected = True
+
+    def preview_polling(self) -> dict[str, object]:
+        channel = self.selected_channel()
+        if channel <= 0:
+            raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
+        method = getattr(self._require_client(), "preview_polling", None)
+        if not callable(method):
+            return {"requires_confirmation": False}
+        return dict(
+            method(
+                channel=channel,
+                requested_hz=self.requested_readback_hz,
+                owner=self.owner,
+                role=ROLE_MINI_DMA_CURRENT,
+            )
+        )
+
+    def _apply_cadence_status(self, status: object) -> None:
+        if not isinstance(status, Mapping):
+            return
+        polling = status.get("polling")
+        if not isinstance(polling, Mapping):
+            return
+        try:
+            effective_hz = float(polling.get("effective_hz", self.requested_readback_hz))
+        except (TypeError, ValueError):
+            return
+        if effective_hz > 0.0:
+            self.effective_readback_hz = effective_hz
+        try:
+            self.cadence_generation = int(status.get("generation", self.cadence_generation))
+        except (TypeError, ValueError):
+            pass
+
+    def cadence_status(self) -> dict[str, float | int]:
+        return {
+            "requested_hz": self.requested_readback_hz,
+            "effective_hz": self.effective_readback_hz,
+            "generation": self.cadence_generation,
+        }
+
+    def configure_requested_polling(self, requested_hz: float | None = None) -> dict[str, object]:
+        if requested_hz is not None:
+            self.requested_readback_hz = 2.0 if float(requested_hz) >= 2.0 else 1.0
+        channel = self.selected_channel()
+        lease_id = self._lease_channel(channel)
+        client = self._require_client()
+        start_scheduler = getattr(client, "start_scheduler", None)
+        configure_polling = getattr(client, "configure_polling", None)
+        if not callable(configure_polling):
+            self.effective_readback_hz = self.requested_readback_hz
+            return self.cadence_status()
+        if callable(start_scheduler):
+            start_scheduler(tick_s=0.05)
+        status = dict(
+            configure_polling(
+                channel=channel,
+                lease_id=lease_id,
+                requested_hz=self.requested_readback_hz,
+            )
+        )
+        self._apply_cadence_status(status)
+        return status
 
     def disconnect(self) -> None:
         with self._io_lock:
@@ -7144,6 +7236,7 @@ class SharedBrokerSupplyController:
         channel = self.selected_channel()
         if channel <= 0:
             raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
+        self.configure_requested_polling()
         self.configure_channel(
             channel=channel,
             voltage_v=max(0.0, float(self.max_voltage_v)),
@@ -7156,8 +7249,11 @@ class SharedBrokerSupplyController:
         if channel <= 0:
             raise RuntimeError("Select a shared HMP broker current-sweep channel first.")
         with self._io_lock:
+            client = self._require_client()
+            schedule_current = getattr(client, "schedule_current", None)
+            method = schedule_current if callable(schedule_current) else client.set_current
             try:
-                self._require_client().set_current(
+                method(
                     channel=channel,
                     lease_id=self._lease_channel(channel),
                     current_mA=self.quantize_current_mA(current_mA),
@@ -7168,7 +7264,10 @@ class SharedBrokerSupplyController:
                         broker_failure_diagnostic(exc, context="TMA shared HMP broker")
                     ) from exc
                 self._forget_lease(channel)
-                self._require_client().set_current(
+                client = self._require_client()
+                schedule_current = getattr(client, "schedule_current", None)
+                method = schedule_current if callable(schedule_current) else client.set_current
+                method(
                     channel=channel,
                     lease_id=self._lease_channel(channel),
                     current_mA=self.quantize_current_mA(current_mA),
@@ -7266,7 +7365,19 @@ class SharedBrokerSupplyController:
                 "resistance_ohm": None,
                 "power_W": None,
             }
-        readback = dict(self._require_client().measure_channel(channel=channel))
+        client = self._require_client()
+        latest_readback = getattr(client, "latest_readback", None)
+        if callable(latest_readback):
+            readback = dict(
+                latest_readback(
+                    channel=channel,
+                    max_age_s=2.5,
+                    fallback_to_measure=True,
+                )
+            )
+            self._apply_cadence_status(readback.get("cadence"))
+        else:
+            readback = dict(client.measure_channel(channel=channel))
         voltage_v = readback.get("voltage_V")
         current_mA = readback.get("current_mA")
         current_a = None if current_mA is None else float(current_mA) / 1000.0
@@ -8038,6 +8149,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "power_W": None,
         }
         self._supply_snapshot_monotonic = 0.0
+        self._supply_cadence_generation = 0
+        self._supply_effective_readback_hz = 1.0
         self._supply_output_enabled = False
         self._supply_last_setpoint_mA: float | None = None
         self._heating_program_current_mA: float | None = None
@@ -9509,6 +9622,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_supply_voltage_limit.setValue(float(SUPPLY_PROFILES["hmp4030"]["max_voltage"]))
         self.spin_supply_voltage_limit.setSuffix(" V")
         supply_form.addRow("Voltage limit", self.spin_supply_voltage_limit)
+
+        self.combo_supply_readback_rate = QtWidgets.QComboBox(supply_box)
+        self.combo_supply_readback_rate.addItem("1 Hz (fixed)", 1.0)
+        self.combo_supply_readback_rate.addItem("Up to 2 Hz (1 Hz when shared)", 2.0)
+        self.combo_supply_readback_rate.setToolTip(
+            "The shared HMP broker has 2 Hz total fresh-readback capacity. Two simultaneous "
+            "2 Hz loggers run at 1 Hz each without changing recipe ramp rates."
+        )
+        self.combo_supply_readback_rate.currentIndexChanged.connect(
+            self._handle_supply_readback_rate_changed
+        )
+        supply_form.addRow("PSU readback", self.combo_supply_readback_rate)
+        self.label_supply_cadence = QtWidgets.QLabel("Effective PSU rate: 1 Hz", supply_box)
+        self.label_supply_cadence.setWordWrap(True)
+        supply_form.addRow("", self.label_supply_cadence)
 
         self.spin_supply_manual_current = CompactDoubleSpinBox(supply_box)
         self.spin_supply_manual_current.setDecimals(2)
@@ -12382,8 +12510,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.combo_supply_port.setCurrentIndex(self.combo_supply_port.count() - 1)
 
     def _auto_select_shared_broker_hmp_port(self) -> bool:
-        if str(self.combo_supply_port.currentData() or "").strip():
-            return True
         if list_ports is None:
             self._log("Shared HMP broker auto-start cannot scan supply ports because pyserial is missing.")
             return False
@@ -12404,6 +12530,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._log(
                 f"Auto-detected HMP supply on {match['port']} at {match['baudrate']} baud "
                 "for shared broker auto-start."
+            )
+            return True
+        if str(self.combo_supply_port.currentData() or "").strip():
+            self._log(
+                "Shared HMP broker auto-start kept the selected supply port because no "
+                "supported HMP responded during preferred-port probing."
             )
             return True
         self._log("Shared HMP broker auto-start did not find a supported serial power supply.")
@@ -13215,6 +13347,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 current_limit_a=None,
                 motor_voltage_limit_v=float(self.spin_motor_supply_voltage.value()),
                 motor_current_limit_a=float(self.spin_motor_supply_current_limit.value()),
+                requested_readback_hz=self._requested_supply_readback_hz(),
             )
         return PowerSupplyController(
             port_name=str(self.combo_supply_port.currentData() or "").strip(),
@@ -13379,6 +13512,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Supply connected on {controller.port_name} at {controller.baudrate} baud ({controller.profile['label']})."
             )
         self._log(self.label_supply_status.text())
+        self._refresh_supply_cadence_status()
         self._refresh_supply_snapshot(force=True)
         return True
 
@@ -13471,6 +13605,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_channel_limit_checked = None
         self._supply_output_enabled = False
         self.label_supply_status.setText("Supply disconnected.")
+        self._supply_effective_readback_hz = self._requested_supply_readback_hz()
+        self._supply_cadence_generation = 0
+        self._refresh_supply_cadence_status()
         self._refresh_supply_live_label()
 
     def _refresh_supply_live_label(self) -> None:
@@ -13795,6 +13932,7 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._supply_snapshot = dict(self._supply_controller.measure())
             self._supply_snapshot_monotonic = now_s
+            self._refresh_supply_cadence_status(announce=True)
         except Exception as exc:
             self._log(f"Supply read failed: {exc}")
         self._refresh_supply_live_label()
@@ -25577,9 +25715,55 @@ class MainWindow(QtWidgets.QMainWindow):
         snapshot = self._run_metadata_snapshot
         if not self._is_ui_thread() and snapshot is not None:
             return int(snapshot.supply_read_interval_ms)
-        if hasattr(self, "spin_supply_read_interval"):
-            return int(self.spin_supply_read_interval.value())
-        return DEFAULT_SUPPLY_READ_INTERVAL_MS
+        return max(1, round(1000.0 / self._effective_supply_readback_hz()))
+
+    def _requested_supply_readback_hz(self) -> float:
+        combo = getattr(self, "combo_supply_readback_rate", None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            try:
+                return 2.0 if float(combo.currentData()) >= 2.0 else 1.0
+            except (TypeError, ValueError):
+                pass
+        return 1.0
+
+    def _effective_supply_readback_hz(self) -> float:
+        controller = self._supply_controller
+        if isinstance(controller, SharedBrokerSupplyController):
+            return max(1.0, float(controller.effective_readback_hz))
+        return self._requested_supply_readback_hz()
+
+    def _refresh_supply_cadence_status(self, *, announce: bool = False) -> None:
+        controller = self._supply_controller
+        requested_hz = self._requested_supply_readback_hz()
+        effective_hz = self._effective_supply_readback_hz()
+        generation = 0
+        if isinstance(controller, SharedBrokerSupplyController):
+            generation = int(controller.cadence_generation)
+        limited = isinstance(controller, SharedBrokerSupplyController) and effective_hz < requested_hz
+        label = getattr(self, "label_supply_cadence", None)
+        if isinstance(label, QtWidgets.QLabel):
+            suffix = " (shared broker capacity)" if limited else ""
+            label.setText(f"Effective PSU rate: {effective_hz:g} Hz{suffix}")
+            label.setStyleSheet("color: #b45309;" if limited else "color: #15803d;")
+        if announce and generation != self._supply_cadence_generation:
+            before_hz = self._supply_effective_readback_hz
+            self._supply_cadence_generation = generation
+            self._supply_effective_readback_hz = effective_hz
+            if abs(before_hz - effective_hz) > 1e-12:
+                reason = " because another broker client is active" if limited else ""
+                self._log(f"Shared HMP readback changed to {effective_hz:g} Hz{reason}.")
+
+    def _handle_supply_readback_rate_changed(self) -> None:
+        requested_hz = self._requested_supply_readback_hz()
+        controller = self._supply_controller
+        if isinstance(controller, SharedBrokerSupplyController) and controller.is_connected():
+            try:
+                controller.configure_requested_polling(requested_hz)
+            except Exception as exc:
+                self._log(f"Could not change shared HMP readback rate: {exc}")
+        self._refresh_supply_cadence_status(announce=True)
+        if hasattr(self, "_settings_save_timer"):
+            self._settings_save_timer.start()
 
     def _current_sweep_log_interval_ms(self) -> int:
         return self._log_interval_ms()
@@ -26297,6 +26481,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "tic_keepalive_interval_ms": self._tic_keepalive_interval_ms(),
                 "tic_status_interval_ms": self._tic_status_interval_ms(),
                 "supply_read_interval_ms": self._supply_read_interval_ms(),
+                "supply_readback_requested_hz": self._requested_supply_readback_hz(),
+                "supply_readback_effective_hz": self._effective_supply_readback_hz(),
+                "supply_readback_cadence_generation": int(self._supply_cadence_generation),
             },
             "heating": {
                 "port": str(self.combo_supply_port.currentData() or ""),
@@ -26309,6 +26496,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "continuity_monitor_enabled": self._continuity_monitor_enabled(),
                 "continuity_current_mA": self._continuity_current_mA(),
                 "output_off_on_stop": True,
+                "readback_requested_hz": self._requested_supply_readback_hz(),
+                "readback_effective_hz": self._effective_supply_readback_hz(),
+                "readback_cadence_generation": int(self._supply_cadence_generation),
                 "motor_supply_enabled": self.check_motor_supply_power.isChecked(),
                 "motor_supply_channel": self._motor_supply_channel(),
                 "motor_supply_voltage_v": float(self.spin_motor_supply_voltage.value()),
@@ -27968,6 +28158,40 @@ class MainWindow(QtWidgets.QMainWindow):
             allow_start_owned_broker=True,
         )
 
+    def _confirm_shared_supply_cadence_for_recipe(self) -> bool:
+        controller = self._supply_controller
+        if not isinstance(controller, SharedBrokerSupplyController):
+            return True
+        try:
+            preview = controller.preview_polling()
+        except Exception as exc:
+            self._log(f"Shared HMP cadence preview failed: {exc}")
+            return False
+        if not bool(preview.get("requires_confirmation")):
+            return True
+        candidate = preview.get("candidate")
+        effective_hz = (
+            float(candidate.get("effective_hz", 1.0))
+            if isinstance(candidate, Mapping)
+            else 1.0
+        )
+        downgrades = preview.get("downgrades")
+        affected = ", ".join(
+            f"{item.get('owner', 'another app')} CH{item.get('channel', '?')}"
+            for item in downgrades if isinstance(item, Mapping)
+        ) if isinstance(downgrades, Sequence) else ""
+        detail = f" This also reduces {affected} to 1 Hz." if affected else ""
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Shared PSU readback rate",
+            f"The requested {controller.requested_readback_hz:g} Hz rate will run at "
+            f"{effective_hz:g} Hz because the shared HMP broker has 2 Hz total readback "
+            f"capacity.{detail}\n\nStart the recipe anyway?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
     def _ensure_tic_ready_for_recipe(self) -> bool:
         if not self.edit_tic_serial.text().strip():
             self._log("Preflight: Tic controller is not selected, trying auto-detect.")
@@ -28002,6 +28226,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_manual_auto_connect_progress("Checking power supply...", 0, preflight_steps)
             if self._recipe_requires_supply(steps) and not self._ensure_supply_ready_for_recipe():
                 issues.append("Power supply is not connected. Use Auto-detect/connect supply and check the supply is powered on.")
+            if not issues and self._recipe_requires_supply(steps) and not self._confirm_shared_supply_cadence_for_recipe():
+                issues.append("Recipe start cancelled because the shared PSU readback rate was not accepted.")
             if not issues and self._recipe_uses_explicit_current(steps) and not self._ensure_current_sweep_channel_limit():
                 issues.append("Current-sweep channel limit could not be updated for the active recipe current range.")
             self._set_manual_auto_connect_progress("Checking motor supply...", 1, preflight_steps)
@@ -35120,6 +35346,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("ui_refresh_interval_ms", self._ui_refresh_interval_ms())
         self.settings.setValue("graph_refresh_interval_ms", self._graph_refresh_interval_ms())
         self.settings.setValue("supply_read_interval_ms", self._supply_read_interval_ms())
+        self.settings.setValue("supply_readback_hz", self._requested_supply_readback_hz())
         self.settings.setValue("ramp_distance_mm", self.spin_ramp_distance.value())
         self.settings.setValue("ramp_step_mm", self.spin_ramp_step.value())
         self.settings.setValue("ramp_interval_ms", self.spin_ramp_interval.value())
@@ -35356,6 +35583,11 @@ class MainWindow(QtWidgets.QMainWindow):
         supply_profile_index = self.combo_supply_profile.findData(supply_profile)
         if supply_profile_index >= 0:
             self.combo_supply_profile.setCurrentIndex(supply_profile_index)
+        requested_readback_hz = float(self.settings.value("supply_readback_hz", 1.0))
+        readback_index = self.combo_supply_readback_rate.findData(
+            2.0 if requested_readback_hz >= 2.0 else 1.0
+        )
+        self.combo_supply_readback_rate.setCurrentIndex(max(0, readback_index))
         supply_profile_defaults = SUPPLY_PROFILES.get(str(self.combo_supply_profile.currentData() or supply_profile), SUPPLY_PROFILES["hmp4030"])
         supply_baud = self.settings.value(
             "supply_baud",

@@ -35,6 +35,10 @@ from data_logging.naming_history import LineEditHistory
 from data_logging.data_logger.file_name_builder import composition_warning_state
 from data_logging.shared_power_supply.broker import ROLE_CURRENT_ANNEALING, SharedPowerSupplyBroker
 from data_logging.shared_power_supply.driver import HmpSerialDriver
+from data_logging.shared_power_supply.discovery import (
+    SerialPortIdentity,
+    hmp_port_preference_key,
+)
 from data_logging.shared_power_supply.profiles import HMP4030_PROFILE, HMP4040_PROFILE, SupplyProfile
 from data_logging.shared_power_supply.protocol import (
     BrokerJsonClient,
@@ -787,6 +791,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._init_mode_menu(menu_bar)
         # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
+        cadence_combo = getattr(self.ui, "comboBox_hmp_readback_rate", None)
+        if isinstance(cadence_combo, QtWidgets.QComboBox):
+            saved_hz = float(self.settings.value("hmp_readback_hz", 1.0))
+            cadence_index = cadence_combo.findData(saved_hz)
+            cadence_combo.setCurrentIndex(max(0, cadence_index))
         self._metadata_records_by_composition: dict[str, list[AnnealingSampleRecord]] = {}
         self._metadata_composition_lookup: dict[str, str] = {}
         self._metadata_record_lookup: dict[tuple[str, str], AnnealingSampleRecord] = {}
@@ -859,12 +868,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_role_checked_channel: int | None = None
         self._shared_broker_current_limit_mA: float | None = None
         self._shared_broker_limit_warning_shown = False
+        self._shared_broker_effective_hz = self._requested_hmp_readback_hz()
+        self._shared_broker_cadence_generation = 0
         self._owned_shared_broker_server: Any = None
         self._owned_shared_broker_thread: Any = None
         self._owned_shared_broker_driver: Any = None
         self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._sleep_guard: Any = None
         self.is_connected = False
+        self._update_hmp_cadence_label()
         self._init_supply_profile()
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
@@ -912,6 +924,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.process_running = False
 
         self.current_current_set = self._start_current_A()
+        self._ramp_ideal_current_A = self.current_current_set
         self.current_current_read = 0.0
         self.current_increment = 0.001
         self.temp_resistance_maximum = 0.0
@@ -1035,6 +1048,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_broker_host.textChanged.connect(self.handle_broker_settings_changed)
         if hasattr(self.ui, 'spinBox_broker_port'):
             self.ui.spinBox_broker_port.valueChanged.connect(self.handle_broker_settings_changed)
+        if hasattr(self.ui, 'comboBox_hmp_readback_rate'):
+            self.ui.comboBox_hmp_readback_rate.currentIndexChanged.connect(
+                self.handle_hmp_readback_rate_changed
+            )
         if hasattr(self.ui, 'pushButton_browse_dir'):
             self.ui.pushButton_browse_dir.clicked.connect(self.handle_browse_log_dir)
         if hasattr(self.ui, 'pushButton_open_dir'):
@@ -2607,7 +2624,7 @@ class MainWindow(QtWidgets.QMainWindow):
         step_mA = max(
             self._current_resolution_mA(),
             abs(float(getattr(self, "current_step_mA", self._current_resolution_mA()) or self._current_resolution_mA())),
-        )
+        ) / self._effective_hmp_command_hz()
         up_steps = max(0, math.ceil(max(0.0, float(max_mA - start_mA)) / step_mA))
         down_steps = up_steps if self._reverse_to_zero_after_max_enabled() else 0
         return max(1, int(up_steps + down_steps))
@@ -3047,6 +3064,150 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _requested_hmp_readback_hz(self) -> float:
+        combo = getattr(self.ui, "comboBox_hmp_readback_rate", None)
+        if isinstance(combo, QtWidgets.QComboBox):
+            try:
+                return 2.0 if float(combo.currentData()) >= 2.0 else 1.0
+            except (TypeError, ValueError):
+                pass
+        return 1.0
+
+    def _effective_hmp_command_hz(self) -> float:
+        if self._using_shared_broker():
+            return max(1.0, float(getattr(self, "_shared_broker_effective_hz", 1.0)))
+        return self._requested_hmp_readback_hz()
+
+    def _current_increment_for_direction(self, direction: float) -> float:
+        magnitude = abs(float(getattr(self, "current_step_A", 0.001)))
+        magnitude /= self._effective_hmp_command_hz()
+        return math.copysign(magnitude, direction)
+
+    def _set_current_ramp_direction(self, direction: float) -> None:
+        self.current_increment = self._current_increment_for_direction(direction)
+        self._ramp_ideal_current_A = float(getattr(self, "current_current_set", 0.0) or 0.0)
+
+    def _advance_current_setpoint(self) -> None:
+        current = float(getattr(self, "current_current_set", 0.0) or 0.0)
+        ideal = float(getattr(self, "_ramp_ideal_current_A", current) or current)
+        ideal += float(getattr(self, "current_increment", 0.0) or 0.0)
+        self._ramp_ideal_current_A = ideal
+        resolution_a = self._current_resolution_mA() / 1000.0
+        quantized = round(ideal / resolution_a) * resolution_a
+        self.current_current_set = max(0.0, quantized)
+
+    def _refresh_current_increment_for_cadence(self) -> None:
+        current = float(getattr(self, "current_increment", 0.0) or 0.0)
+        if current:
+            self.current_increment = self._current_increment_for_direction(current)
+
+    def _update_hmp_cadence_label(self) -> None:
+        label = getattr(self.ui, "label_hmp_cadence_status", None)
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        requested = self._requested_hmp_readback_hz()
+        effective = self._effective_hmp_command_hz()
+        sharing = self._using_shared_broker() and effective + 1e-12 < requested
+        suffix = " (shared broker capacity)" if sharing else ""
+        label.setText(f"Effective PSU rate: {effective:g} Hz{suffix}")
+        label.setStyleSheet("color: #b45309;" if sharing else "color: #15803d;")
+
+    def _apply_shared_broker_cadence_status(
+        self,
+        status: Mapping[str, Any] | None,
+        *,
+        announce: bool,
+    ) -> None:
+        if not isinstance(status, Mapping):
+            return
+        polling = status.get("polling")
+        if not isinstance(polling, Mapping):
+            return
+        try:
+            effective_hz = float(polling.get("effective_hz", 1.0))
+        except (TypeError, ValueError):
+            return
+        if effective_hz <= 0:
+            return
+        before_hz = float(getattr(self, "_shared_broker_effective_hz", 1.0))
+        self._shared_broker_effective_hz = effective_hz
+        try:
+            self._shared_broker_cadence_generation = int(status.get("generation", 0))
+        except (TypeError, ValueError):
+            pass
+        self._refresh_current_increment_for_cadence()
+        if self.timer_command.isActive():
+            self.timer_command.setInterval(max(1, round(1000.0 / effective_hz)))
+        self._update_hmp_cadence_label()
+        if announce and abs(before_hz - effective_hz) > 1e-12:
+            requested = self._requested_hmp_readback_hz()
+            reason = " because another broker client is active" if effective_hz < requested else ""
+            message = f"Shared HMP readback changed to {effective_hz:g} Hz{reason}."
+            LOGGER.info(message)
+            self._show_status_message(message, timeout_ms=15000)
+
+    def handle_hmp_readback_rate_changed(self) -> None:
+        requested_hz = self._requested_hmp_readback_hz()
+        try:
+            self.settings.setValue("hmp_readback_hz", requested_hz)
+        except Exception:
+            pass
+        if not self._using_shared_broker():
+            self._shared_broker_effective_hz = requested_hz
+        elif self.process_running and self._shared_broker_lease_id:
+            try:
+                status = self._get_shared_broker_client().configure_polling(
+                    channel=self._shared_broker_channel(),
+                    lease_id=self._shared_broker_lease_id,
+                    requested_hz=requested_hz,
+                )
+                self._apply_shared_broker_cadence_status(status, announce=True)
+            except Exception as exc:
+                self._show_status_message(f"Could not change shared HMP readback rate: {exc}")
+        self._refresh_current_increment_for_cadence()
+        if self.timer_command.isActive():
+            self.timer_command.setInterval(max(1, round(1000.0 / self._effective_hmp_command_hz())))
+        self._update_hmp_cadence_label()
+
+    def _confirm_shared_broker_cadence_start(self) -> bool:
+        if not self._using_shared_broker():
+            return True
+        client = self._get_shared_broker_client()
+        preview_polling = getattr(client, "preview_polling", None)
+        if not callable(preview_polling):
+            return True
+        requested_hz = self._requested_hmp_readback_hz()
+        preview = preview_polling(
+            channel=self._shared_broker_channel(),
+            requested_hz=requested_hz,
+            owner=self._shared_broker_owner,
+            role=ROLE_CURRENT_ANNEALING,
+        )
+        if not bool(preview.get("requires_confirmation")):
+            return True
+        candidate = preview.get("candidate") if isinstance(preview, Mapping) else None
+        effective_hz = (
+            float(candidate.get("effective_hz", 1.0))
+            if isinstance(candidate, Mapping)
+            else 1.0
+        )
+        downgrades = preview.get("downgrades") if isinstance(preview, Mapping) else []
+        affected = ", ".join(
+            f"{item.get('owner', 'another app')} CH{item.get('channel', '?')}"
+            for item in downgrades
+            if isinstance(item, Mapping)
+        )
+        detail = f" This also reduces {affected} to 1 Hz." if affected else ""
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Shared PSU readback rate",
+            f"The requested {requested_hz:g} Hz rate will run at {effective_hz:g} Hz because the "
+            f"shared HMP broker has 2 Hz total readback capacity.{detail}\n\nStart anyway?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
     def _connect_shared_broker_mode(self) -> None:
         host = self._shared_broker_host()
         configured_port = self._shared_broker_port()
@@ -3141,18 +3302,31 @@ class MainWindow(QtWidgets.QMainWindow):
     def _candidate_hmp_ports_for_broker(self, *, include_all: bool = False) -> list[str]:
         candidates: list[str] = []
         selected = self._selected_hmp_port_name()
-        if selected:
+        if selected and not include_all:
             candidates.append(selected)
         if not include_all:
             return candidates
         combo = getattr(self.ui, "comboBox_port", None)
         if isinstance(combo, QtWidgets.QComboBox):
+            items: list[tuple[tuple[int, str], str]] = []
             for index in range(combo.count()):
                 data = combo.itemData(index)
                 text = combo.itemText(index).strip()
                 value = str(data or text.split(" - ")[0]).strip()
-                if value and value not in candidates:
+                if value:
+                    items.append(
+                        (
+                            hmp_port_preference_key(
+                                SerialPortIdentity(device=value, description=text)
+                            ),
+                            value,
+                        )
+                    )
+            for _key, value in sorted(items):
+                if value not in candidates:
                     candidates.append(value)
+        if selected and selected not in candidates:
+            candidates.append(selected)
         return candidates
 
     def _probe_hmp_candidate(self, port_name: str) -> dict[str, Any] | None:
@@ -3477,6 +3651,17 @@ class MainWindow(QtWidgets.QMainWindow):
         channel = self._shared_broker_channel()
         lease_id = self._ensure_shared_broker_lease()
         client = self._get_shared_broker_client()
+        start_scheduler = getattr(client, "start_scheduler", None)
+        if callable(start_scheduler):
+            start_scheduler(tick_s=0.05)
+        configure_polling = getattr(client, "configure_polling", None)
+        if callable(configure_polling):
+            status = configure_polling(
+                channel=channel,
+                lease_id=lease_id,
+                requested_hz=self._requested_hmp_readback_hz(),
+            )
+            self._apply_shared_broker_cadence_status(status, announce=False)
         client.configure_channel(
             channel=channel,
             lease_id=lease_id,
@@ -3484,12 +3669,6 @@ class MainWindow(QtWidgets.QMainWindow):
             current_a=max(0.0, float(self.current_current_set)),
             output_on=True,
         )
-        configure_polling = getattr(client, "configure_polling", None)
-        if callable(configure_polling):
-            configure_polling(channel=channel, interval_s=1.0)
-        start_scheduler = getattr(client, "start_scheduler", None)
-        if callable(start_scheduler):
-            start_scheduler(tick_s=0.05)
 
     def _read_shared_broker_sample(self) -> bool:
         if self._read_shared_broker_sample_once():
@@ -3507,6 +3686,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 latest_readback = getattr(client, "latest_readback", None)
                 if callable(latest_readback):
                     readback = latest_readback(channel=channel, max_age_s=2.5, fallback_to_measure=True)
+                    cadence = readback.get("cadence") if isinstance(readback, Mapping) else None
+                    self._apply_shared_broker_cadence_status(cadence, announce=True)
                 else:
                     readback = client.measure_channel(channel=channel)
             except Exception:
@@ -3620,6 +3801,8 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             client.release(channel=channel, lease_id=lease_id)
             self._shared_broker_lease_id = None
+            self._shared_broker_effective_hz = self._requested_hmp_readback_hz()
+            self._update_hmp_cadence_label()
 
     def _handle_loop_value_changed(self, value: int) -> None:
         try:
@@ -4136,7 +4319,10 @@ class MainWindow(QtWidgets.QMainWindow):
             planned_max = float(self.ui.spinBox_max_current.value())
         except Exception:
             planned_max = float(getattr(self, 'max_current_mA', 0))
-        step_mA = abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+        step_mA = (
+            abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+            / self._effective_hmp_command_hz()
+        )
         tolerance = step_mA * 0.5
         if limit_mA is None:
             if self._applied_limit_current_mA is not None or force:
@@ -5122,6 +5308,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if preflight_errors:
                 self._show_start_preflight_errors(preflight_errors)
                 return
+            if not self._confirm_shared_broker_cadence_start():
+                self._show_status_message("Annealing start cancelled; shared PSU rate was not accepted.")
+                return
             self.process_running = True
             self._last_run_error = ""
             self._update_mode_action_state()
@@ -5172,9 +5361,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 if hasattr(self.ui, 'label_time_to_limit'):
                     self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
-                self.current_increment = self.current_step_A
+                self._set_current_ramp_direction(1.0)
                 self.direction_ascending = True
                 self.current_current_set = self._start_current_A()
+                self._ramp_ideal_current_A = self.current_current_set
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
@@ -5188,7 +5378,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # for the one-second timer interval to elapse.  This avoids
                 # an unnecessary pause after the user presses *Start*.
                 self.handle_send_new_command()
-                self.timer_command.start(1000)
+                self.timer_command.start(max(1, round(1000.0 / self._effective_hmp_command_hz())))
                 
             elif(self.operation_mode == 2):
                 # Prepare output file with overwrite prompt
@@ -5200,9 +5390,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._set_process_state("idle")
                     return
                 self._record_name_history()
-                self.current_increment = self.current_step_A
+                self._set_current_ramp_direction(1.0)
                 self.direction_ascending = True
                 self.current_current_set = self._start_current_A()
+                self._ramp_ideal_current_A = self.current_current_set
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
@@ -5236,7 +5427,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Kick off the first acquisition immediately so the
                 # measurement starts without a one-second delay.
                 self.handle_send_new_command()
-                self.timer_command.start(1000)
+                self.timer_command.start(max(1, round(1000.0 / self._effective_hmp_command_hz())))
                 
             else:
                 pass
@@ -5246,7 +5437,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Immediately ramp current down toward zero."""
         if not self.process_running:
             return
-        self.current_increment = -abs(self.current_step_A)
+        self._set_current_ramp_direction(-1.0)
         self.line_color = "b"
         self.force_stop_at_zero = True
         self.direction_ascending = False
@@ -5264,11 +5455,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_status_message("Updated running settings.")
             return
         if self.current_increment != 0:
-            self.current_increment = math.copysign(abs(self.current_step_A), self.current_increment)
+            self.current_increment = self._current_increment_for_direction(self.current_increment)
         if self.direction_ascending and self.current_increment > 0:
             current_set_mA = float(getattr(self, "current_current_set", 0.0) or 0.0) * 1000.0
             if current_set_mA >= float(getattr(self, "max_current_mA", current_set_mA)):
-                self.current_increment = -abs(self.current_step_A)
+                self._set_current_ramp_direction(-1.0)
                 self.line_color = "b"
                 self.direction_ascending = False
                 self._reset_voltage_projection()
@@ -5444,7 +5635,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
             # Iterate the current set point
-            self.current_current_set += self.current_increment
+            self._advance_current_setpoint()
             self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             # Stop the process once we are below the configured start current.
@@ -5504,7 +5695,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Reverse or stop immediately at the configured maximum current.
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
-                self.current_increment = -self.current_step_A
+                self._set_current_ramp_direction(-1.0)
                 self.line_color = "b"
                 self.direction_ascending = False
                 self._reset_voltage_projection()
@@ -5512,7 +5703,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Iterate the current set point
             if not self.process_running:
                 return
-            self.current_current_set += self.current_increment
+            self._advance_current_setpoint()
             self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             if not self.process_running:
@@ -5529,8 +5720,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.stop_annealing("Reverse completed; stopping measurement.", show_dialog=True)
                 elif loops_pending:
                     # prepare next loop
-                    self.current_increment = self.current_step_A
+                    self._set_current_ramp_direction(1.0)
                     self.current_current_set = self._start_current_A()
+                    self._ramp_ideal_current_A = self.current_current_set
                     self.line_color = "r"
                     self.direction_ascending = True
                     self._reset_voltage_projection()
@@ -5857,7 +6049,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _adjust_progress_for_reverse(self) -> None:
         if not self.total_steps:
             return
-        step_mA = abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+        step_mA = (
+            abs(float(getattr(self, 'current_step_mA', self._current_resolution_mA()) or self._current_resolution_mA()))
+            / self._effective_hmp_command_hz()
+        )
         current_mA = getattr(self, 'curr_value_x', None)
         if current_mA is None:
             current_mA = self.current_current_set * 1000.0
@@ -5876,12 +6071,7 @@ class MainWindow(QtWidgets.QMainWindow):
             action = "reverse"
         limit_label = f"{self._format_voltage_limit()} V"
         if action == "reverse":
-            step = abs(getattr(self, "current_step_A", 0.0))
-            if step == 0.0:
-                step = abs(getattr(self, "current_step_mA", 1)) / 1000.0
-                if step == 0.0:
-                    step = 0.001
-            self.current_increment = -step
+            self._set_current_ramp_direction(-1.0)
             self.line_color = "b"
             next_loop = int(getattr(self, 'loop_idx', 0)) + 1
             if self._has_remaining_loops(next_loop):
@@ -6372,6 +6562,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "broker_source": "owned"
             if self._owned_shared_broker_server is not None
             else ("existing" if self._using_shared_broker() else "direct"),
+            "readback_requested_hz": self._requested_hmp_readback_hz(),
+            "readback_effective_hz": self._effective_hmp_command_hz(),
+            "readback_cadence_generation": int(
+                getattr(self, "_shared_broker_cadence_generation", 0)
+            ),
         }
         diameter_um = self._diameter_um()
         return {
@@ -6558,7 +6753,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.comboBox_port.clear()
             # 1) Normal OS-reported ports
             seen: set[str] = set()
-            for info in QSerialPortInfo.availablePorts():
+            port_infos = list(QSerialPortInfo.availablePorts())
+
+            def _identity(info: QSerialPortInfo) -> SerialPortIdentity:
+                sysloc = info.systemLocation() if hasattr(info, 'systemLocation') else info.portName()
+                try:
+                    manufacturer = info.manufacturer()
+                except Exception:
+                    manufacturer = ""
+                try:
+                    vid = info.vendorIdentifier() if info.hasVendorIdentifier() else None
+                except Exception:
+                    vid = None
+                try:
+                    pid = info.productIdentifier() if info.hasProductIdentifier() else None
+                except Exception:
+                    pid = None
+                try:
+                    description = info.description()
+                except Exception:
+                    description = ""
+                return SerialPortIdentity(
+                    device=str(sysloc or info.portName()),
+                    description=str(description or ""),
+                    manufacturer=str(manufacturer or ""),
+                    vid=vid,
+                    pid=pid,
+                )
+
+            for info in sorted(port_infos, key=lambda item: hmp_port_preference_key(_identity(item))):
                 sysloc = info.systemLocation() if hasattr(info, 'systemLocation') else info.portName()
                 name = info.portName()
                 label = name

@@ -56,7 +56,28 @@ The broker API is intentionally channel-scoped. Logger integrations replace dire
 - `set_current`
 - `set_output`
 - `measure_channel`
+- `preview_polling`
+- `configure_polling`
+- `latest_readback`
+- `schedule_current`
 - `snapshot`
+
+## Readback cadence and simultaneous loggers
+
+The broker owns a single bounded scheduler with 2 Hz total fresh HMP readback capacity. Current Annealing and TMA expose two operator choices:
+
+- **1 Hz (fixed)** requests one fresh readback per second.
+- **Up to 2 Hz (1 Hz when shared)** requests two fresh readbacks per second while the logger is the only active poller.
+
+When a second 2 Hz logger starts, the broker previews the allocation before output enable. The starting app warns that both clients will run at 1 Hz and lets the operator cancel. If accepted, both apps show and log the effective 1 Hz cadence. When either lease is released, the remaining 2 Hz client returns to 2 Hz automatically. Current setpoints are coalesced separately from readback polling, so a slow query cannot build an unbounded command queue.
+
+Current Annealing changes its command timer together with the effective cadence. At 2 Hz it uses resolution-aware alternating setpoints whose average slope remains the configured mA/s value; changing to 1 Hz therefore does not change the physical ramp rate. TMA recipe timing and the separate Prague and Košice control policies are unchanged by readback arbitration.
+
+Cadence state carries a monotonically increasing generation, requested/effective rates, and a bounded transition-event history in the broker snapshot. Logger metadata records the requested and effective rate at run start.
+
+## USB-D preference
+
+Serial discovery ranks the HMP native USB-D virtual COM interface ahead of generic USB-to-RS232 adapters. The native interface is recognized by the HAMEG HO720 identity, including USB VID/PID `0403:ED72`, while all other ports remain available as fallbacks. This is a connection preference only: both transports use the same SCPI operations and the broker retains the measured 2 Hz total fresh-readback budget.
 
 Current Annealing Logger exposes **Shared HMP broker** as an optional supply profile. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current setpoints through the broker, and turns off/releases only the leased channel on stop. Its raw serial command box is disabled in broker mode.
 
