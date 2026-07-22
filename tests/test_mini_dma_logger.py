@@ -1158,14 +1158,14 @@ def test_tma_history_blocked_scan_close_is_nonblocking_and_qthread_free(
         _close_test_window(window)
 
 
-def test_run_summary_generation_keeps_one_active_and_latest_pending(
+def test_run_summary_generation_keeps_one_active_and_all_pending(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
     started: list[Path] = []
-    releases = [threading.Event(), threading.Event()]
+    releases = [threading.Event() for _index in range(6)]
 
     def _blocked_generate(run_dir: Path) -> dict[str, Path]:
         index = len(started)
@@ -1186,17 +1186,22 @@ def test_run_summary_generation_keeps_one_active_and_latest_pending(
         qtbot.waitUntil(lambda: started == [run_dirs[0]], timeout=2000)
         assert window._run_summary_task is not None
         assert window._run_summary_task.request == (run_dirs[0], False)
-        assert window._run_summary_pending == (run_dirs[-1], False)
+        assert list(window._run_summary_pending) == [
+            (run_dir, False) for run_dir in run_dirs[1:]
+        ]
 
         releases[0].set()
-        qtbot.waitUntil(lambda: started == [run_dirs[0], run_dirs[-1]], timeout=3000)
+        qtbot.waitUntil(lambda: started == run_dirs[:2], timeout=3000)
         assert window._run_summary_task is not None
-        assert window._run_summary_task.request == (run_dirs[-1], False)
-        assert window._run_summary_pending is None
+        assert window._run_summary_task.request == (run_dirs[1], False)
+        assert list(window._run_summary_pending) == [
+            (run_dir, False) for run_dir in run_dirs[2:]
+        ]
 
-        releases[1].set()
+        for release in releases[1:]:
+            release.set()
         qtbot.waitUntil(lambda: window._run_summary_task is None, timeout=3000)
-        assert started == [run_dirs[0], run_dirs[-1]]
+        assert started == run_dirs
     finally:
         for release in releases:
             release.set()
@@ -2104,6 +2109,12 @@ def _wait_for_tic_commands(window: mini_dma_mod.MainWindow) -> None:
         assert dispatcher.wait_until_idle(timeout_s=2.0)
 
 
+def _complete_immediate_tic_motion(window: mini_dma_mod.MainWindow) -> None:
+    _wait_for_tic_commands(window)
+    window._poll_pending_motion_dispatch()
+    window._kosice_active_motion_target_steps = None
+
+
 def test_length_setup_dialog_close_clears_owned_widgets_and_restores_focus(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     focus_requests: list[bool] = []
@@ -2155,28 +2166,97 @@ def test_window_close_suppresses_recovery_prompt_and_closes_setup_dialog(tmp_pat
 class _ImmediateTicDispatcher:
     def __init__(self, controller: object) -> None:
         self.controller = controller
+        self.generation = 1
+        self._sequence = 0
+        self._results: dict[int, mini_dma_mod.TicCommandResult] = {}
+        self._latest_status: tuple[str, float] | None = None
+
+    def _record_result(self, action: str, *, status_text: str | None = None) -> int:
+        self._sequence += 1
+        now_wall_s = time.time()
+        now_monotonic_s = time.monotonic()
+        self._results[self._sequence] = mini_dma_mod.TicCommandResult(
+            sequence=self._sequence,
+            action=action,
+            completed_time_s=now_wall_s,
+            completed_monotonic_s=now_monotonic_s,
+            dispatcher_generation=self.generation,
+            status_text=status_text,
+        )
+        if status_text is not None:
+            self._latest_status = (status_text, now_monotonic_s)
+        return self._sequence
 
     def set_target_position(self, position_steps: int, max_speed: int | None = None) -> int:
         self.controller.set_target_position(position_steps, max_speed=max_speed)
-        return 1
+        get_status = getattr(self.controller, "get_status", None)
+        status_text = get_status() if callable(get_status) else "\n".join(
+            [
+                "Planning mode: 1",
+                f"Target position: {position_steps}",
+                f"Current position: {position_steps}",
+                "Current velocity: 0",
+            ]
+        )
+        return self._record_result("target", status_text=status_text)
 
     def reset_command_timeout(self) -> None:
         if hasattr(self.controller, "reset_command_timeout"):
             self.controller.reset_command_timeout()
 
-    def halt_and_hold(self) -> None:
+    def halt_and_hold(self) -> int:
         if hasattr(self.controller, "halt_and_hold"):
             self.controller.halt_and_hold()
+        return self._record_result("halt")
 
-    def set_current_position(self, position_steps: int) -> None:
+    def set_current_position(self, position_steps: int) -> int:
         if hasattr(self.controller, "set_current_position"):
             self.controller.set_current_position(position_steps)
+        return self._record_result("zero")
+
+    def command_result(
+        self,
+        sequence: int,
+        *,
+        dispatcher_generation: int | None = None,
+    ) -> mini_dma_mod.TicCommandResult | None:
+        result = self._results.get(int(sequence))
+        if (
+            result is not None
+            and dispatcher_generation is not None
+            and result.dispatcher_generation != dispatcher_generation
+        ):
+            return None
+        return result
+
+    def wait_for_result(
+        self,
+        sequence: int,
+        *,
+        timeout_s: float = 2.0,
+        dispatcher_generation: int | None = None,
+    ) -> mini_dma_mod.TicCommandResult | None:
+        del timeout_s
+        return self.command_result(
+            sequence,
+            dispatcher_generation=dispatcher_generation,
+        )
+
+    def acknowledge_result(self, sequence: int) -> None:
+        self._results.pop(int(sequence), None)
+
+    def latest_status(self) -> tuple[str, float] | None:
+        return self._latest_status
+
+    def is_alive(self) -> bool:
+        return True
 
     def wait_until_idle(self, *, timeout_s: float = 2.0) -> bool:
         return True
 
-    def stop(self, *, timeout_s: float = 2.0) -> None:
-        return None
+    def stop(self, *, timeout_s: float = 2.0) -> bool:
+        del timeout_s
+        return True
 
 
 def _use_immediate_tic_dispatcher(window: mini_dma_mod.MainWindow, controller: object) -> None:
@@ -3321,18 +3401,10 @@ def test_setup_zero_plateau_fallback_waits_until_return_position_is_reached(
 
     try:
         window._current_position_mm = -1.2
-        assert window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_LOAD_G,
-            target_value=0.0,
-            tolerance=0.02,
-        ) is False
+        assert window._handle_pending_setup_zero_fallback() is False
 
         window._current_position_mm = -1.0
-        assert window._seek_distribution_target(
-            mini_dma_mod.HSW_BASIS_LOAD_G,
-            target_value=0.0,
-            tolerance=0.02,
-        ) is True
+        assert window._handle_pending_setup_zero_fallback() is True
         assert window._setup_zero_fallback_return_position_mm is None
     finally:
         _close_test_window(window)
@@ -6017,6 +6089,16 @@ def test_calibration_relative_moves_chain_from_commanded_targets(
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.targets.append(position_steps)
 
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "Planning mode: 1",
+                    f"Target position: {self.targets[-1]}",
+                    "Current position: 0",
+                    "Current velocity: 1",
+                ]
+            )
+
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
@@ -6037,8 +6119,10 @@ def test_calibration_relative_moves_chain_from_commanded_targets(
     try:
         assert window._handle_calibration_move_step(step, 1) is True
         _wait_for_tic_commands(window)
+        window._poll_pending_motion_dispatch()
         assert window._handle_calibration_move_step(step, 2) is True
         _wait_for_tic_commands(window)
+        window._poll_pending_motion_dispatch()
 
         assert controller.targets == [1, 2]
         assert window._current_position_steps == 0
@@ -6162,6 +6246,16 @@ def test_manual_jog_repeats_from_last_commanded_target(
         def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
             self.targets.append(position_steps)
 
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "Planning mode: 1",
+                    f"Target position: {self.targets[-1]}",
+                    "Current position: 0",
+                    "Current velocity: 1",
+                ]
+            )
+
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
@@ -6175,10 +6269,13 @@ def test_manual_jog_repeats_from_last_commanded_target(
     try:
         window._jog_relative(-1.0)
         _wait_for_tic_commands(window)
+        window._poll_pending_motion_dispatch()
         window._jog_relative(-1.0)
         _wait_for_tic_commands(window)
+        window._poll_pending_motion_dispatch()
         window._jog_relative(1.0)
         _wait_for_tic_commands(window)
+        window._poll_pending_motion_dispatch()
 
         assert controller.targets == [-10, -20, -10]
         assert window._last_move_target_mm == pytest.approx(-0.1)
@@ -6974,6 +7071,7 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window._automation_active = True
     window._automation_steps = [mini_dma_mod.AutomationStep("move", target_mm=5.0)]
     window._automation_index = 0
@@ -6989,12 +7087,15 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
 
     try:
         window._stop_auto_ramp(user_initiated=True)
-        window._jog_relative(-window._tension_motion_sign())
-        _wait_for_tic_commands(window)
-
-        assert controller.targets == [130]
         assert window._manual_jog_uses_last_target is False
         assert window._last_move_target_mm == pytest.approx(1.2)
+
+        window._jog_relative(-window._tension_motion_sign())
+        _complete_immediate_tic_motion(window)
+
+        assert controller.targets == [130]
+        assert window._manual_jog_uses_last_target is True
+        assert window._last_move_target_mm == pytest.approx(1.3)
 
         assert window._refresh_tic_status() is True
 
@@ -8824,6 +8925,7 @@ def test_async_run_log_writer_bounds_queue_and_drops_optional_first(
             assert release.wait(timeout=5.0)
 
     monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    monkeypatch.setattr(mini_dma_mod, "_append_session_log_text", _blocked_append)
     writer = mini_dma_mod.AsyncRunLogWriter(
         lambda *_args: None,
         warnings.append,
@@ -8871,7 +8973,7 @@ def test_async_run_log_writer_stop_discards_queued_writes(
         started.set()
         assert release.wait(timeout=5.0)
 
-    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    monkeypatch.setattr(mini_dma_mod, "_append_session_log_text", _blocked_append)
     writer = mini_dma_mod.AsyncRunLogWriter(
         lambda *_args: None,
         warnings.append,
@@ -8912,7 +9014,7 @@ def test_async_run_log_writer_failure_counts_failed_purged_and_coalesced_lines(
         assert release.wait(timeout=5.0)
         raise OSError("synthetic session append failure")
 
-    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    monkeypatch.setattr(mini_dma_mod, "_append_session_log_text", _blocked_failure)
     writer = mini_dma_mod.AsyncRunLogWriter(
         lambda channel, path, generation, error: failures.append(
             (channel, path, generation, error)
@@ -8960,7 +9062,7 @@ def test_async_run_log_writer_reset_purges_stale_queue_and_reclaims_capacity(
             started.set()
             assert release.wait(timeout=5.0)
 
-    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_first_append)
+    monkeypatch.setattr(mini_dma_mod, "_append_session_log_text", _blocked_first_append)
     writer = mini_dma_mod.AsyncRunLogWriter(
         lambda *_args: None,
         warnings.append,
@@ -16855,15 +16957,13 @@ def test_voltage_limit_during_nominal_return_keeps_rate_limited_return(
     window._current_sweep_voltage_limit_step_index = 1
     window._current_sweep_voltage_limit_started_s = 100.0
     window._current_sweep_voltage_limit_start_mA = 60.0
-    ticks = iter([100.0, 100.4])
-
-    def _fake_monotonic() -> float:
-        try:
-            return next(ticks)
-        except StopIteration:
-            return 100.4
-
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", _fake_monotonic)
+    window._active_current_sweep_step_index = 1
+    window._active_current_sweep_started_s = 100.0
+    window._active_current_sweep_wall_started_s = 100.0
+    window._active_current_sweep_last_schedule_update_s = 100.0
+    window._active_current_sweep_last_setpoint_mA = 60.0
+    supply.commands.append(60.0)
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 100.4)
     return_step = window._automation_steps[1]
 
     try:
@@ -19877,7 +19977,9 @@ def test_tic_command_dispatcher_keepalive_runs_without_qt_event_processing() -> 
             time.sleep(0.01)
 
         assert controller.keepalives >= 3
-        assert dispatcher.latest_status() is not None
+        health = dispatcher.health_snapshot()
+        assert health["last_keepalive_monotonic_s"] is not None
+        assert health["max_keepalive_gap_s"] is not None
     finally:
         dispatcher.stop()
 
@@ -19930,6 +20032,62 @@ def test_tic_command_dispatcher_preserves_target_result_after_keepalive() -> Non
         assert dispatcher.last_error() is None
     finally:
         dispatcher.stop()
+
+
+def test_tic_command_dispatcher_returns_target_readback_without_ui_polling() -> None:
+    class _FakeController:
+        target = 0
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.target = int(position_steps)
+
+        def get_status(self) -> str:
+            time.sleep(0.12)
+            return "\n".join(
+                [
+                    "Planning mode: 2",
+                    f"Target position: {self.target}",
+                    f"Current position: {self.target}",
+                    "Current velocity: 0",
+                ]
+            )
+
+    dispatcher = mini_dma_mod.TicCommandDispatcher(lambda: _FakeController())
+    try:
+        sequence = dispatcher.set_target_position(814, max_speed=500_000)
+        result = dispatcher.wait_for_result(sequence, timeout_s=1.0)
+
+        assert result is not None
+        assert result.succeeded is True
+        assert "Target position: 814" in str(result.status_text)
+        assert dispatcher.latest_status() is not None
+    finally:
+        dispatcher.stop()
+
+
+def test_tic_device_lock_prevents_two_persistent_windows_owning_one_motor(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    first = _build_window(tmp_path / "first", qtbot)
+    second = _build_window(tmp_path / "second", qtbot)
+    test_serial = f"unit-test-tic-lock-{time.time_ns()}"
+    for window in (first, second):
+        window.edit_tic_serial.setText(test_serial)
+        window._persist_settings = True
+    try:
+        first._build_tic_dispatcher()
+        with pytest.raises(RuntimeError, match="already owned"):
+            second._build_tic_dispatcher()
+
+        assert first._stop_tic_dispatcher()
+        first._release_tic_device_lock()
+        second._build_tic_dispatcher()
+    finally:
+        first._persist_settings = False
+        second._persist_settings = False
+        _close_test_window(first)
+        _close_test_window(second)
 
 
 def test_motion_waits_for_dispatch_and_tic_target_readback(tmp_path: Path, qtbot) -> None:
@@ -20042,7 +20200,8 @@ def test_manual_move_accepts_exact_target_with_kosice_planning_mode_via_status_t
         # Exercise the real timer handler while no recipe or session is active.
         window._handle_status_timer()
 
-        assert controller.status_reads == 1
+        # One serialized acceptance readback plus the explicit status-timer read.
+        assert controller.status_reads == 2
         assert window._pending_motion_command is None
         assert window._tic_planning_mode == 2
         assert window._tic_target_position_steps == 110
@@ -22503,6 +22662,7 @@ def test_load_seek_accepts_near_target_crossing_without_reverse_hunt(tmp_path: P
 
     controller = _FakeController()
     window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_steps_per_mm.setValue(100.0)
@@ -22524,10 +22684,11 @@ def test_load_seek_accepts_near_target_crossing_without_reverse_hunt(tmp_path: P
             target_value=5.0,
             tolerance=0.25,
         ) is False
-        _wait_for_tic_commands(window)
+        _complete_immediate_tic_motion(window)
 
         window._latest_scale_value_g = -5.35
         window._last_motion_expected_complete_time_s = time.time() - 0.1
+        window._last_motion_expected_complete_monotonic_s = time.monotonic() - 0.1
         window._latest_scale_timestamp = time.time()
         assert window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
@@ -22573,10 +22734,11 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             target_value=5.0,
             tolerance=0.25,
         )
-        _wait_for_tic_commands(window)
+        _complete_immediate_tic_motion(window)
 
         window._latest_scale_value_g = -20.0
         window._last_motion_expected_complete_time_s = time.time() - 0.1
+        window._last_motion_expected_complete_monotonic_s = time.monotonic() - 0.1
         window._latest_scale_timestamp = time.time()
         window._seek_distribution_target(
             mini_dma_mod.HSW_BASIS_LOAD_G,
@@ -22682,6 +22844,7 @@ def test_backlash_takeup_is_not_logged_as_tensile_displacement(tmp_path: Path, q
             tolerance=0.02,
         )
         _wait_for_tic_commands(window)
+        window._poll_pending_motion_dispatch()
         point = window._capture_measurement_point(
             elapsed_s=1.0,
             position_mm=window._measurement_position_mm(),
@@ -29878,6 +30041,13 @@ def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
         assert "scale_recent_rate_hz" in telemetry_rows[-1]
         assert telemetry_rows[-1]["raw_scale_sample_count"] == "2"
         assert window._session_json_path is not None
+        qtbot.waitUntil(
+            lambda: json.loads(window._session_json_path.read_text(encoding="utf-8"))["logging"][
+                "run_log_complete"
+            ]
+            is True,
+            timeout=3000,
+        )
         payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
         assert payload["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
         assert payload["logging"]["run_log_complete"] is True
@@ -29934,7 +30104,7 @@ def test_blocked_session_log_close_persists_final_flush_timeout(
         started.set()
         release.wait()
 
-    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    monkeypatch.setattr(mini_dma_mod, "_append_session_log_text", _blocked_append)
     window._async_run_log_writer = mini_dma_mod.AsyncRunLogWriter(
         window._handle_async_run_log_write_failure,
         window._handle_async_run_log_overload,
@@ -29957,6 +30127,15 @@ def test_blocked_session_log_close_persists_final_flush_timeout(
         assert payload["logging"]["run_log_incomplete_lines"] >= 1
         assert payload["logging"]["run_log_incomplete_reason"] == "close_flush_timeout"
         assert "run_log_complete=false" in window.log_output.toPlainText()
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: json.loads(metadata_path.read_text(encoding="utf-8"))["logging"][
+                "run_log_complete"
+            ]
+            is True,
+            timeout=3000,
+        )
     finally:
         release.set()
         window._async_run_log_writer._thread.join(timeout=3.0)
@@ -29993,7 +30172,7 @@ def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadat
         "create_experiment_sleep_guard",
         lambda _reason: _FakeSleepGuard(),
     )
-    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    monkeypatch.setattr(mini_dma_mod, "_append_session_log_text", _blocked_failure)
     writer = mini_dma_mod.AsyncRunLogWriter(
         window._handle_async_run_log_write_failure,
         window._handle_async_run_log_overload,
@@ -30159,7 +30338,7 @@ def test_old_session_completion_cannot_contaminate_same_path_replacement_generat
         "create_experiment_sleep_guard",
         lambda _reason: _FakeSleepGuard(),
     )
-    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_completes)
+    monkeypatch.setattr(mini_dma_mod, "_append_session_log_text", _old_blocks_then_completes)
     writer = mini_dma_mod.AsyncRunLogWriter(
         window._handle_async_run_log_write_failure,
         window._handle_async_run_log_overload,
@@ -31319,7 +31498,7 @@ disable_safe_start: false
 ignore_err_line_high: false
 auto_clear_driver_error: true
 soft_error_response: decel_to_hold
-command_timeout: 1000
+command_timeout: 5000
 invert_motor_direction: false
 max_speed: 2000000
 starting_speed: 0
@@ -31339,7 +31518,7 @@ unrelated: keep
             self.settings_text = text
 
     tic = _FakeTic()
-    window._stop_tic_dispatcher = lambda: None  # type: ignore[method-assign]
+    window._stop_tic_dispatcher = lambda: True  # type: ignore[method-assign]
     window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
     try:
         ok, message = window._apply_tic_persistent_profile()
@@ -31693,6 +31872,7 @@ def test_motor_step_calibration_move_uses_raw_tic_steps_not_current_calibration(
     try:
         moved = window._move_relative_raw_tic_steps(800, speed_steps_per_s=8.0)
         _wait_for_tic_commands(window)
+        window._poll_pending_motion_dispatch()
 
         assert moved is True
         assert controller.targets == [(2000, 80000)]
