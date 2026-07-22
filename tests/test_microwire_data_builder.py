@@ -7152,6 +7152,16 @@ def test_assemble_projection_forces_identity_first_and_only_selected_family_stru
     )
 
 
+def test_assemble_projection_keeps_core_and_glass_diameters_distinct() -> None:
+    projection = core.resolve_assemble_projection(
+        ("Composition", "Microwire", "d (µm)", "D (µm)", "d/D"),
+        selected_columns=["d (µm)"],
+        column_order=["d (µm)"],
+    )
+
+    assert projection.columns == ("Composition", "Microwire", "d (µm)")
+
+
 def test_assemble_projection_resolves_legacy_tma_alias_and_rejects_public_unsafe_columns() -> None:
     projection = core.resolve_assemble_projection(
         (
@@ -13819,6 +13829,104 @@ def test_assemble_import_project_payload_preserves_hidden_columns_and_order(qtbo
         ]
     finally:
         window.close()
+
+
+def test_assemble_visibility_order_and_complete_ingestion_survive_refresh_round_trip(
+    qtbot,
+) -> None:
+    _ensure_qapp()
+    log = logging.getLogger("test")
+    fabrication = builder_ui.FabricationSection(log, lambda *_: None)
+    assembly = builder_ui.AssemblySection(
+        {"fabrication": fabrication}, log, lambda *_: None
+    )
+    qtbot.addWidget(fabrication)
+    qtbot.addWidget(assembly)
+    try:
+        fabrication.apply_data(
+            builder_ui.MiniDatabaseData(
+                table=pd.DataFrame(
+                    [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Draw": 12,
+                            "Piece": 2,
+                            "Length (m)": 1.2,
+                        }
+                    ]
+                )
+            )
+        )
+        payload = {
+            "columns": ["Composition", "Microwire", "Length (m)", "FMR graphs"],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "11/1",
+                    "Length (m)": 1.0,
+                    "FMR graphs": ["loop"],
+                }
+            ],
+            "selected_columns": ["Composition", "Microwire", "Length (m)"],
+            "column_order": ["Microwire", "Composition", "Length (m)"],
+            "export_settings": {
+                "sections": {
+                    key: False for key, _label in assembly._section_choices  # noqa: SLF001
+                }
+            },
+        }
+
+        assembly.import_project_payload(payload)
+        QtWidgets.QApplication.processEvents()
+
+        assert assembly.status_label.text() == (
+            "Assemble is out of date — 1 source sample is missing. "
+            "Click Rebuild preview."
+        )
+        assert assembly._selected_sections() == {  # noqa: SLF001
+            key for key, _label in assembly._section_choices  # noqa: SLF001
+        }
+        assert all(assembly._section_states.values())  # noqa: SLF001
+        assert assembly._current_preview_column_order()[:3] == [  # noqa: SLF001
+            "Microwire",
+            "Composition",
+            "Length (m)",
+        ]
+
+        refreshed = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Length (m)": 1.2,
+                    "FMR graphs": ["new-loop"],
+                }
+            ]
+        )
+        assembly._clear_preview_stale()  # noqa: SLF001
+        assembly._update_preview(refreshed)  # noqa: SLF001
+        round_trip = assembly.export_project_payload()
+
+        restored = builder_ui.AssemblySection({}, log, lambda *_: None)
+        qtbot.addWidget(restored)
+        restored.import_project_payload(round_trip)
+        QtWidgets.QApplication.processEvents()
+
+        assert restored._selected_columns == {  # noqa: SLF001
+            "Composition",
+            "Microwire",
+            "Length (m)",
+        }
+        assert restored._current_preview_column_order()[:3] == [  # noqa: SLF001
+            "Microwire",
+            "Composition",
+            "Length (m)",
+        ]
+        assert all(restored._section_states.values())  # noqa: SLF001
+        restored.close()
+    finally:
+        assembly.close()
+        fabrication.close()
 
 
 def test_assemble_default_visible_columns_do_not_disable_export_sections(qtbot) -> None:

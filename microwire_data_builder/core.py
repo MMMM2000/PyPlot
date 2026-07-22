@@ -971,8 +971,15 @@ def _assemble_projection_column_key(column: object) -> str:
         .replace("Ω", "ohm")
         .replace("Ω", "ohm")
     )
+    dimension_role = ""
+    if re.match(r"^d\s*\(", text):
+        dimension_role = "core diameter "
+    elif re.match(r"^D\s*\(", text):
+        dimension_role = "glass diameter "
+    elif re.match(r"^d\s*/\s*D$", text):
+        dimension_role = "diameter ratio "
     text = text.casefold().replace("µ", "u").replace("²", "2")
-    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+    return dimension_role + re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
 def assemble_projection_column_is_public_safe(column: object) -> bool:

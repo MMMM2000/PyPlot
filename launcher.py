@@ -1011,6 +1011,124 @@ def _builder_section_rows_as_frame(
     return frame
 
 
+def _builder_section_entries_from_rows(
+    *,
+    builder_ui: Any,
+    sections: Mapping[str, Any],
+    section_name: str,
+    value_columns: Sequence[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Return saved per-sample table edits in the form expected by build_database."""
+
+    frame = _builder_section_rows_as_frame(sections, section_name)
+    if frame.empty:
+        return {}
+    entries: dict[str, dict[str, object]] = {}
+    for _, row in frame.iterrows():
+        key = builder_ui._row_to_microwire_key(row)
+        if not key:
+            continue
+        entry = entries.setdefault(str(key), {})
+        columns = value_columns or tuple(str(column) for column in frame.columns)
+        for column in columns:
+            value = row.get(column)
+            if value_columns is not None and not builder_ui._shape_memory_has_value(value):
+                continue
+            entry[str(column)] = value
+    return entries
+
+
+def _builder_section_extra_mapping(
+    sections: Mapping[str, Any], section_name: str, key: str
+) -> dict[str, Any]:
+    section = sections.get(section_name)
+    if not isinstance(section, Mapping):
+        return {}
+    extra = section.get("extra")
+    if not isinstance(extra, Mapping):
+        return {}
+    value = extra.get(key)
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(item_key): item_value for item_key, item_value in value.items()}
+
+
+def _overlay_saved_imported_assemble_rows(
+    dataframe: pd.DataFrame,
+    previous_assemble: object,
+) -> pd.DataFrame:
+    """Reapply saved workbook imports after a non-interactive Assemble rebuild."""
+
+    if not isinstance(previous_assemble, Mapping):
+        return dataframe
+    if previous_assemble.get("show_imported", True) is False:
+        return dataframe
+    imported_rows = previous_assemble.get("imported_rows")
+    if not isinstance(imported_rows, list) or not imported_rows:
+        return dataframe
+
+    result = dataframe.copy() if isinstance(dataframe, pd.DataFrame) else pd.DataFrame()
+    key_to_index: dict[tuple[str, str], object] = {}
+    if not result.empty:
+        for index, row in result.iterrows():
+            key = _analysis_identity_key(row)
+            if key[0] and key[1] and key not in key_to_index:
+                key_to_index[key] = index
+    append_rows: list[dict[str, object]] = []
+    for raw_row in imported_rows:
+        if not isinstance(raw_row, Mapping):
+            continue
+        imported = {str(column): value for column, value in raw_row.items()}
+        key = _analysis_identity_key(imported)
+        if not key[0] or not key[1]:
+            continue
+        existing_index = key_to_index.get(key)
+        if existing_index is None:
+            append_rows.append(imported)
+            continue
+        for column, value in imported.items():
+            if column in {"Composition", "Microwire"} or _is_blank_export_value(value):
+                continue
+            if column not in result.columns:
+                result[column] = None
+            if _is_blank_export_value(result.at[existing_index, column]):
+                result.at[existing_index, column] = value
+    if append_rows:
+        result = pd.concat([result, pd.DataFrame(append_rows)], ignore_index=True, sort=False)
+    return result
+
+
+def _rebuilt_assemble_payload(
+    previous_assemble: object,
+    dataframe: pd.DataFrame,
+    *,
+    builder_ui: Any,
+) -> dict[str, Any]:
+    """Replace only Assemble table data while retaining user-controlled state."""
+
+    state: dict[str, Any] = {}
+    if isinstance(previous_assemble, Mapping):
+        state = {
+            str(key): value
+            for key, value in previous_assemble.items()
+            if key not in {"section", "title", "columns", "rows", "index", "payloads"}
+        }
+    rows = [
+        {str(column): builder_ui._json_safe(row.get(column)) for column in dataframe.columns}
+        for row in dataframe.to_dict(orient="records")
+    ]
+    state.update(
+        {
+            "section": "assemble",
+            "title": "Assemble",
+            "columns": [str(column) for column in dataframe.columns],
+            "rows": rows,
+            "index": [builder_ui._json_safe(index) for index in dataframe.index.tolist()],
+        }
+    )
+    return state
+
+
 def _transition_rows_to_map(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
     if frame.empty:
         return {}
@@ -1132,15 +1250,23 @@ def _run_builder_rebuild_assemble_command_lightweight(
     sections: dict[str, Any],
     output_project: Path,
 ) -> dict[str, Any]:
-    selected = _builder_rebuild_sections_from_command(
+    requested_sections = _builder_rebuild_sections_from_command(
         command,
         sections=sections,
         command_index=command_index,
     )
-    if not selected:
+    if not requested_sections:
         raise _AutomationRecipeError(
             f"Builder rebuild_assemble command {command_index} has no section payloads to assemble."
         )
+    # Assemble is one integrated database.  A command-level section list identifies
+    # what triggered the rebuild; it must never turn the rebuild into a destructive
+    # one-family replacement of the existing Assemble table.
+    selected = {
+        str(key)
+        for key, payload in sections.items()
+        if key not in {"assemble", "compare"} and _builder_section_has_payload(payload)
+    }
 
     def _payload(section_name: str, payload_name: str, fallback: Any) -> Any:
         value = _decode_builder_section_payload(builder_ui, sections, section_name, payload_name)
@@ -1181,10 +1307,45 @@ def _run_builder_rebuild_assemble_command_lightweight(
                     for key, value in raw_reviews.items()
                     if isinstance(value, Mapping)
                 }
+    fabrication_index = _payload(
+        "fabrication", "fabrication_index", builder_ui.FabricationIndex()
+    )
+    fabrication_frame = _builder_section_rows_as_frame(sections, "fabrication")
+    if not fabrication_frame.empty:
+        table_index = builder_ui.AssemblySection._fabrication_index_from_frame(
+            fabrication_frame
+        )
+        fabrication_index = builder_ui.AssemblySection._merge_fabrication_indexes(
+            fabrication_index,
+            table_index,
+        )
+    shape_memory_columns = tuple(
+        dict.fromkeys(
+            [
+                *getattr(builder_ui.ShapeMemoryStressStrainSection, "VALUE_COLUMNS", ()),
+                *getattr(builder_ui.ShapeMemoryStressStrainSection, "FRACTURE_COLUMNS", ()),
+            ]
+        )
+    )
+    shape_memory_entries = _builder_section_entries_from_rows(
+        builder_ui=builder_ui,
+        sections=sections,
+        section_name="shape_memory_stress_strain",
+        value_columns=shape_memory_columns,
+    )
+    strain_entries = _builder_section_entries_from_rows(
+        builder_ui=builder_ui,
+        sections=sections,
+        section_name="strain",
+    )
+    video_overrides = _builder_section_extra_mapping(
+        sections, "videos", "overrides"
+    )
+    previous_assemble = sections.get("assemble")
     result = builder_ui.build_database(
         config,
         logger=LOGGER,
-        fabrication_index=_payload("fabrication", "fabrication_index", builder_ui.FabricationIndex()),
+        fabrication_index=fabrication_index,
         measurement_records=(
             _payload("annealing", "annealing_records", [])
             if "annealing" in selected
@@ -1219,6 +1380,9 @@ def _run_builder_rebuild_assemble_command_lightweight(
             if "shape_memory_stress_strain" in selected
             else []
         ),
+        shape_memory_entries=(
+            shape_memory_entries if "shape_memory_stress_strain" in selected else {}
+        ),
         fmr_records=(
             _payload("fmr", "fmr_records", [])
             if "fmr" in selected
@@ -1239,10 +1403,12 @@ def _run_builder_rebuild_assemble_command_lightweight(
             if "strain" in selected
             else {}
         ),
+        strain_entries=strain_entries if "strain" in selected else {},
         transition_temps=transition_points if "transition_temps" in selected else {},
         mini_dma_transition_reviews=(
             mini_dma_transition_reviews if "mini_dma" in selected else {}
         ),
+        video_overrides=video_overrides if "videos" in selected else {},
         skip_exports=True,
         include_fabrication_draw_siblings=True,
     )
@@ -1257,21 +1423,17 @@ def _run_builder_rebuild_assemble_command_lightweight(
             sections=sections,
             dataframe=dataframe,
         )
-    rows = [
-        {str(column): builder_ui._json_safe(row.get(column)) for column in dataframe.columns}
-        for row in dataframe.to_dict(orient="records")
-    ]
-    sections["assemble"] = {
-        "section": "assemble",
-        "title": "Assemble",
-        "columns": [str(column) for column in dataframe.columns],
-        "rows": rows,
-        "index": [builder_ui._json_safe(index) for index in dataframe.index.tolist()],
-    }
+    dataframe = _overlay_saved_imported_assemble_rows(dataframe, previous_assemble)
+    sections["assemble"] = _rebuilt_assemble_payload(
+        previous_assemble,
+        dataframe,
+        builder_ui=builder_ui,
+    )
     return {
         "action": "rebuild_assemble",
         "status": "ok",
         "sections": sorted(selected),
+        "requested_sections": sorted(requested_sections),
         "row_count": int(len(dataframe.index)),
         "column_count": int(len(dataframe.columns)),
     }
@@ -2541,6 +2703,11 @@ def _overlay_saved_video_table_values(
     for column in _VIDEO_TABLE_EXPORT_COLUMNS:
         if column not in result.columns:
             result[column] = None
+        else:
+            # Saved table edits may legitimately be textual ranges (for example
+            # ``194-202``) even when an all-empty rebuilt column was inferred as
+            # float.  Use object dtype before applying those saved values.
+            result[column] = result[column].astype(object)
 
     def _is_missing(value: object) -> bool:
         if value is None:
@@ -2881,9 +3048,10 @@ def _prepare_assemble_export_project_payload(
     selected_sections: Collection[str] | None = export_sections
     include_payloads = False
     if force_rebuild:
-        selected_sections = (
-            set(rebuild_sections) | {"assemble"} if rebuild_sections else None
-        )
+        # Rebuilding Assemble must see every available measurement family.  The
+        # optional list records the trigger/focus, not permission to erase all
+        # other families from the integrated table.
+        selected_sections = None
         include_payloads = True
     source_payload = _load_builder_project_object(
         project_path,
@@ -3304,11 +3472,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             if action == "update_section":
                 required_sections.add(str(command.get("section") or "").strip())
             elif action == "rebuild_assemble":
-                scoped = command.get("sections")
-                if isinstance(scoped, list) and scoped:
-                    required_sections.update(str(item) for item in scoped)
-                else:
-                    load_all_sections = True
+                load_all_sections = True
             elif action == "export_assemble":
                 required_sections.update({
                     "annealing", "vsm_temperature_scan", "mini_dma"
@@ -3855,7 +4019,10 @@ def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]
         "--microwire-assemble-rebuild-section",
         action="append",
         default=None,
-        help="Limit --microwire-assemble-rebuild to a section. Can be repeated.",
+        help=(
+            "Record which section triggered --microwire-assemble-rebuild. "
+            "Can be repeated; the integrated rebuild still includes every available section."
+        ),
     )
     parser.add_argument(
         "--microwire-assemble-working-copy-dir",

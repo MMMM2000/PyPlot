@@ -32416,6 +32416,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._show_oe_samples = False
         self._preview_search_text: str = ""
         self._preview_source_filter_text: str = SOURCE_LABEL_ALL
+        self._preview_stale_reason: str = ""
         self._project_path_getter: Callable[[], Optional[Path]] | None = None
         self._preview_background_cache: Dict[Any, QtGui.QBrush] = {}
 
@@ -32701,6 +32702,13 @@ class AssemblySection(QtWidgets.QWidget):
         self.analyze_button.clicked.connect(self._open_eda_window)
         button_row.addWidget(self.analyze_button)
         self.preview_button = QtWidgets.QPushButton("Preview database")
+        self.preview_button.setText("Rebuild preview")
+        self.preview_button.setToolTip(
+            "Rebuild Assemble from every available measurement section."
+        )
+        self.preview_button.setAccessibleName(
+            "Rebuild Assemble preview from all measurement sections"
+        )
         self.preview_button.clicked.connect(self._preview)
         button_row.addWidget(self.preview_button)
         layout.addLayout(button_row)
@@ -32727,6 +32735,64 @@ class AssemblySection(QtWidgets.QWidget):
                 model.layoutChanged.emit()
             except Exception:
                 pass
+
+    @staticmethod
+    def _assemble_identity_keys(frame: object) -> Set[str]:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return set()
+        keys: Set[str] = set()
+        for _, row in frame.iterrows():
+            key = _row_to_microwire_key(row)
+            if key:
+                keys.add(key)
+                continue
+            composition = str(row.get("Composition") or "").strip()
+            if not composition or composition == "Imported data:":
+                continue
+            try:
+                draw = int(float(row.get("Draw")))
+                piece = int(float(row.get("Piece")))
+            except (TypeError, ValueError):
+                continue
+            keys.add(_microwire_key_to_str((composition, draw, piece, None)))
+        return keys
+
+    def mark_preview_stale(self, reason: str = "Source data changed") -> None:
+        self._preview_stale_reason = str(reason or "Source data changed").strip()
+        self._decorate_stale_status()
+
+    def _clear_preview_stale(self) -> None:
+        self._preview_stale_reason = ""
+
+    def _assess_preview_source_coverage(self) -> None:
+        source_keys: Set[str] = set()
+        for key, section in self.sections.items():
+            if key == "compare":
+                continue
+            frame = getattr(getattr(section, "data", None), "table", None)
+            if not isinstance(frame, pd.DataFrame):
+                model = getattr(section, "model", None)
+                frame_provider = getattr(model, "frame", None)
+                frame = frame_provider() if callable(frame_provider) else None
+            source_keys.update(self._assemble_identity_keys(frame))
+        assemble_keys = self._assemble_identity_keys(self._raw_preview_frame)
+        missing = source_keys - assemble_keys
+        if missing:
+            count = len(missing)
+            self._preview_stale_reason = (
+                f"{count} source sample{'s are' if count != 1 else ' is'} missing"
+            )
+        else:
+            self._preview_stale_reason = ""
+        self._decorate_stale_status()
+
+    def _decorate_stale_status(self) -> None:
+        if not self._preview_stale_reason:
+            return
+        self.status_label.setText(
+            f"Assemble is out of date — {self._preview_stale_reason}. "
+            "Click Rebuild preview."
+        )
 
     def _analysis_filtered_rows(self) -> tuple[int, ...]:
         raw_frame = self._raw_preview_frame
@@ -33008,6 +33074,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._raw_preview_frame = frame
         self._refresh_preview_source_filter_options()
         self._refresh_preview_frame()
+        self._assess_preview_source_coverage()
 
     def _open_export_dialog(self) -> None:
         dialog = _AssemblyExportDialog(
@@ -33057,9 +33124,12 @@ class AssemblySection(QtWidgets.QWidget):
             self._export_origin = True
         sections = settings.get("sections")
         if isinstance(sections, Mapping):
-            for key, _label in self._section_choices:
-                if key in sections:
-                    self._section_states[key] = bool(sections.get(key))
+            # Old projects stored source-family switches derived from the visible
+            # columns.  Retain compatibility with the payload shape but migrate
+            # the behavior to complete ingestion on load.
+            self._section_states = {
+                key: True for key, _label in self._section_choices
+            }
         self._update_export_summary()
 
     def _open_import_dialog(self) -> None:
@@ -33456,7 +33526,9 @@ class AssemblySection(QtWidgets.QWidget):
             return None
 
     def _selected_sections(self) -> set[str]:
-        return {key for key, enabled in self._section_states.items() if enabled}
+        # Assemble is the integrated database.  Column visibility is a display
+        # and public-export projection, not a source-ingestion switch.
+        return {key for key, _label in self._section_choices}
 
     @staticmethod
     def _merge_fabrication_indexes(
@@ -34650,6 +34722,7 @@ class AssemblySection(QtWidgets.QWidget):
             columns=len(display_frame.columns) if isinstance(display_frame, pd.DataFrame) else 0,
             load=loading,
         )
+        self._decorate_stale_status()
 
     @staticmethod
     def _normalise_search_text(value: object) -> str:
@@ -35237,6 +35310,9 @@ class AssemblySection(QtWidgets.QWidget):
                         break
             _assign_if_present(piece_data, "length_m", row.get("Length (m)"))
             _assign_if_present(piece_data, "piece_date", row.get("Piece date"))
+            _assign_if_present(piece_data, "d_um", row.get(MICROSCOPE_D_COLUMN))
+            _assign_if_present(piece_data, "D_um", row.get(MICROSCOPE_CAP_D_COLUMN))
+            _assign_if_present(piece_data, "d_over_D", row.get("d/D"))
             _assign_if_present(piece_data, "fabrication_resistance_ohm", row.get("Resistance (Ω)"))
             _assign_if_present(piece_data, "glass_pull_off", row.get(GLASS_PULL_COLUMN))
             _assign_if_present(piece_data, "notes", row.get("Notes"))
@@ -35776,14 +35852,13 @@ class AssemblySection(QtWidgets.QWidget):
         selected_columns: Set[str],
         available_columns: Sequence[str],
     ) -> None:
-        mapping = self._section_column_map(available_columns)
-        for key, _label in self._section_choices:
-            section_columns = mapping.get(key, [])
-            if not section_columns:
-                continue
-            self._section_states[key] = any(
-                column in selected_columns for column in section_columns
-            )
+        # Kept as a compatibility hook for older project payloads.  Historically
+        # this coupled hidden columns to disabled input sections, which could
+        # silently remove measurements and even whole samples on the next rebuild.
+        # All source sections now remain enabled; selected_columns controls only
+        # the preview/export projection.
+        del selected_columns, available_columns
+        self._section_states = {key: True for key, _label in self._section_choices}
         self._update_export_summary()
 
     def _column_groups(self, columns: Sequence[str]) -> Dict[str, List[str]]:
@@ -37586,6 +37661,7 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _handle_preview_finished(self, dataframe: object) -> None:
         self._close_preview_progress()
+        self._clear_preview_stale()
         if isinstance(dataframe, pd.DataFrame):
             self._measured_preview_frame = dataframe.copy()
             merged = self._merge_imported_rows(dataframe)
@@ -37664,6 +37740,7 @@ class AssemblySection(QtWidgets.QWidget):
             self.logger.error("Combine finished with unexpected result type: %s", type(result))
             return
         exports: Dict[str, Path] = dict(result.exports or {})
+        self._clear_preview_stale()
         self._update_preview(result.dataframe)
         export_frame = self._preview_export_frame()
         output_dir = self._combine_output_dir or Path(self._output_dir or Path.cwd())
@@ -39193,6 +39270,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
             assembly = getattr(self, "assembly_section", None)
             if isinstance(assembly, AssemblySection):
                 assembly.invalidate_source_caches()
+                assembly.mark_preview_stale(
+                    f"{getattr(self.sections.get(key), 'section_title', key)} changed"
+                )
             compare = getattr(self, "compare_section", None)
             if isinstance(compare, CompareSection):
                 compare.invalidate_source_caches()

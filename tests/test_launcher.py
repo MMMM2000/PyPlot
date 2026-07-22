@@ -320,8 +320,10 @@ def test_microwire_assemble_export_cli_writes_public_workbook_and_manifest(
     assert "125 MPa / 3.65 g" not in {entry["TMA target"] for entry in tma_rows}
 
 
+@pytest.mark.parametrize("force_rebuild", [False, True])
 def test_saved_public_projection_exports_only_selected_tma_family_structure(
     tmp_path: Path,
+    force_rebuild: bool,
 ) -> None:
     openpyxl = pytest.importorskip("openpyxl")
     project_path = _write_synthetic_assemble_project(tmp_path / "selected.pydpj")
@@ -331,6 +333,34 @@ def test_saved_public_projection_exports_only_selected_tma_family_structure(
         "Mini DMA transition status",
     ]
     payload["sections"]["assemble"]["column_order"] = ["d (µm)"]
+    if force_rebuild:
+        payload["sections"]["mini_dma"]["payloads"] = {
+            "mini_dma_records": builder_ui._encode_project_payload(  # noqa: SLF001
+                [
+                    MiniDmaRecord(
+                        path=tmp_path / "run01",
+                        sample="Ni50Fe27Ga23 12_2",
+                        data=pd.DataFrame(),
+                        key=("Ni50Fe27Ga23", 12, 2),
+                        label="run01",
+                        strain_summary=("50 MPa / 1.46 g: 5.16% @ 15 mA",),
+                    )
+                ]
+            )
+        }
+        payload["sections"]["fabrication"] = {
+            "section": "fabrication",
+            "columns": ["Composition", "Draw", "Piece", "Length (m)", "d (µm)"],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Draw": 12,
+                    "Piece": 2,
+                    "Length (m)": 1.2,
+                    "d (µm)": 20.0,
+                }
+            ],
+        }
     project_path.write_text(json.dumps(payload), encoding="utf-8")
     workbook_path = tmp_path / "selected.xlsx"
 
@@ -339,6 +369,8 @@ def test_saved_public_projection_exports_only_selected_tma_family_structure(
         output_path=workbook_path,
         copy_project=True,
         working_copy_dir=tmp_path / "working",
+        force_rebuild=force_rebuild,
+        rebuild_sections=["mini_dma"] if force_rebuild else None,
     )
 
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
@@ -358,14 +390,25 @@ def test_saved_public_projection_exports_only_selected_tma_family_structure(
         dict(zip(headers, [cell.value for cell in cells], strict=False))
         for cells in worksheet.iter_rows(min_row=2)
     ]
-    assert [row["TMA target"] for row in rows] == [
-        "50 MPa / 1.46 g",
-        "75 MPa / 2.19 g",
-        "100 MPa / 2.92 g",
-        "150 MPa / 4.38 g",
-    ]
-    assert rows[1]["TMA As (mA)"] == "No transition"
-    assert rows[2]["TMA Ms (mA)"] == "Not observed"
+    targets = [row["TMA target"] for row in rows]
+    if force_rebuild:
+        assert targets.count("50 MPa / 1.46 g") == 2
+        assert set(targets) == {
+            "50 MPa / 1.46 g",
+            "75 MPa / 2.19 g",
+            "100 MPa / 2.92 g",
+        }
+    else:
+        assert targets == [
+            "50 MPa / 1.46 g",
+            "75 MPa / 2.19 g",
+            "100 MPa / 2.92 g",
+            "150 MPa / 4.38 g",
+        ]
+    no_transition = next(row for row in rows if row["TMA target"] == "75 MPa / 2.19 g")
+    not_observed = next(row for row in rows if row["TMA target"] == "100 MPa / 2.92 g")
+    assert no_transition["TMA As (mA)"] == "No transition"
+    assert not_observed["TMA Ms (mA)"] == "Not observed"
     assert "125 MPa / 3.65 g" not in {row["TMA target"] for row in rows}
 
 
@@ -762,8 +805,8 @@ def test_saved_video_table_values_overlay_rebuilt_assemble_rows() -> None:
             {
                 "Composition": "Ni50Fe27Ga23",
                 "Microwire": "12/2",
-                "Length (m)": None,
-                "Video wire range (m)": None,
+                "Length (m)": float("nan"),
+                "Video wire range (m)": float("nan"),
             }
         ]
     )
@@ -2638,6 +2681,172 @@ def test_builder_automation_recipe_updates_microscope_copy(
     assemble_row = assemble_rows[0]
     assert assemble_row["Composition"] == "Ni50Fe27Ga23"
     assert assemble_row["Microwire"] == "12/2"
+
+
+def test_lightweight_assemble_rebuild_is_complete_and_preserves_user_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _ensure_app()
+    previous_assemble = {
+        "section": "assemble",
+        "title": "Assemble",
+        "columns": ["Composition", "Microwire", "Old"],
+        "rows": [
+            {"Composition": "Ni50Fe27Ga23", "Microwire": "12/2", "Old": 1}
+        ],
+        "index": [0],
+        "selected_columns": ["Composition", "Microwire", "FMR graphs"],
+        "column_order": ["Microwire", "Composition", "FMR graphs"],
+        "sort_spec": [["Microwire", True]],
+        "search_query": "12/2",
+        "source_filter": "All sources",
+        "export_settings": {"sections": {"fmr": True}},
+        "graph_preview": True,
+        "show_imported": True,
+        "show_oe_samples": False,
+        "imported_sources": ["saved.xlsx"],
+        "imported_rows": [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Imported value": 7.5,
+            },
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "13/1",
+                "Imported value": 8.5,
+            },
+        ],
+    }
+    sections: dict[str, object] = {
+        "assemble": previous_assemble,
+        "vsm_hysteresis": {
+            "columns": ["Composition", "Microwire"],
+            "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}],
+        },
+        "fmr": {
+            "columns": ["Composition", "Microwire"],
+            "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}],
+        },
+        "fabrication": {
+            "columns": [
+                "Composition",
+                "Microwire",
+                "Draw",
+                "Piece",
+                "Length (m)",
+                builder_ui.MICROSCOPE_D_COLUMN,
+                builder_ui.MICROSCOPE_CAP_D_COLUMN,
+                "d/D",
+            ],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Draw": 12,
+                    "Piece": 2,
+                    "Length (m)": 1.25,
+                    builder_ui.MICROSCOPE_D_COLUMN: 18.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 30.0,
+                    "d/D": 0.6,
+                }
+            ],
+        },
+        "shape_memory_stress_strain": {
+            "columns": [
+                "Composition",
+                "Microwire",
+                builder_ui.SHAPE_MEMORY_LOAD_COLUMN,
+            ],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    builder_ui.SHAPE_MEMORY_LOAD_COLUMN: 4.2,
+                }
+            ],
+        },
+        "strain": {
+            "columns": ["Composition", "Microwire", "Legacy strain"],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Legacy strain": 2.3,
+                }
+            ],
+        },
+        "videos": {
+            "columns": ["Composition", "Microwire"],
+            "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}],
+            "extra": {"overrides": {"Ni50Fe27Ga23|12|2": {"Length (m)": 1.2}}},
+        },
+    }
+    captured: dict[str, object] = {}
+
+    def fake_build_database(_config: object, **kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            dataframe=pd.DataFrame(
+                [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "VSM hysteresis graphs": ["loop"],
+                        "FMR graphs": ["fmr"],
+                    }
+                ]
+            )
+        )
+
+    monkeypatch.setattr(builder_ui, "build_database", fake_build_database)
+    result = launcher_module._run_builder_rebuild_assemble_command_lightweight(  # noqa: SLF001
+        builder_ui=builder_ui,
+        command={"action": "rebuild_assemble", "sections": ["vsm_hysteresis"]},
+        command_index=0,
+        sections=sections,  # type: ignore[arg-type]
+        output_project=tmp_path / "copy.pydpj",
+    )
+
+    assert result["requested_sections"] == ["vsm_hysteresis"]
+    assert {"fabrication", "fmr", "shape_memory_stress_strain", "strain", "videos", "vsm_hysteresis"}.issubset(
+        result["sections"]
+    )
+    rebuilt = sections["assemble"]
+    assert isinstance(rebuilt, dict)
+    for key in (
+        "selected_columns",
+        "column_order",
+        "sort_spec",
+        "search_query",
+        "source_filter",
+        "export_settings",
+        "graph_preview",
+        "show_imported",
+        "show_oe_samples",
+        "imported_sources",
+        "imported_rows",
+    ):
+        assert rebuilt[key] == previous_assemble[key]
+    rows = rebuilt["rows"]
+    assert len(rows) == 2
+    assert rows[0]["Imported value"] == pytest.approx(7.5)
+    assert rows[1]["Microwire"] == "13/1"
+    assert rows[1]["Imported value"] == pytest.approx(8.5)
+    fabrication_index = captured["fabrication_index"]
+    fabrication_piece = fabrication_index.get_piece("Ni50Fe27Ga23", 12, 2)
+    assert fabrication_piece["length_m"] == pytest.approx(1.25)
+    assert fabrication_piece["d_um"] == pytest.approx(18.0)
+    assert fabrication_piece["D_um"] == pytest.approx(30.0)
+    assert fabrication_piece["d_over_D"] == pytest.approx(0.6)
+    assert captured["shape_memory_entries"]["Ni50Fe27Ga23|12|2"][  # type: ignore[index]
+        builder_ui.SHAPE_MEMORY_LOAD_COLUMN
+    ] == pytest.approx(4.2)
+    assert captured["strain_entries"]["Ni50Fe27Ga23|12|2"]["Legacy strain"] == pytest.approx(2.3)  # type: ignore[index]
+    assert captured["video_overrides"] == {
+        "Ni50Fe27Ga23|12|2": {"Length (m)": 1.2}
+    }
 
 
 def test_builder_automation_recipe_updates_vsm_hysteresis_copy(
