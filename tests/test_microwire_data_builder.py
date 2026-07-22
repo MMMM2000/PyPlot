@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import importlib.util
 import logging
 import sys
+import threading
 import time
 
 import pandas as pd
@@ -11003,6 +11004,45 @@ def test_auto_open_project_failure_does_not_show_modal(
         window.close()
 
 
+def test_project_load_disables_save_until_background_failure_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    release_worker = threading.Event()
+
+    def _failing_prepare(_path: Path) -> builder_ui._PreparedProjectLoad:
+        release_worker.wait(timeout=5)
+        raise RuntimeError("synthetic background failure")
+
+    monkeypatch.setattr(builder_ui, "_prepare_project_payload_for_gui", _failing_prepare)
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda *_args, **_kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+    )
+
+    window = BuilderWindow()
+    try:
+        window.annealing_section.data.table = pd.DataFrame({"value": [1]})
+        window._update_project_actions()
+        assert window._save_project_as_action.isEnabled()
+
+        window._load_project_from_path(tmp_path / "broken.pydpj")
+        assert window._project_load_in_progress is True
+        assert not window._save_project_as_action.isEnabled()
+
+        release_worker.set()
+        _wait_for_qt(lambda: not window._project_load_in_progress)
+        assert window._save_project_as_action.isEnabled()
+    finally:
+        release_worker.set()
+        window._dirty = False
+        window.hide()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_tma_transition_dialog_reports_active_load_threads() -> None:
     _ensure_qapp()
     dialog = builder_ui._MiniDmaTransitionReviewDialog([], logging.getLogger("test"))
@@ -13927,6 +13967,90 @@ def test_assemble_visibility_order_and_complete_ingestion_survive_refresh_round_
     finally:
         assembly.close()
         fabrication.close()
+
+
+def test_assemble_imported_rows_toggle_clear_and_fill_every_sample_row(qtbot) -> None:
+    _ensure_qapp()
+    assembly = builder_ui.AssemblySection({}, logging.getLogger("test"), lambda *_: None)
+    qtbot.addWidget(assembly)
+    try:
+        measured = pd.DataFrame(
+            [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Manual stress/strain graphs": "standard",
+                    "Imported value": None,
+                },
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    "Manual stress/strain graphs": "fracture",
+                    "Imported value": None,
+                },
+            ]
+        )
+        assembly._measured_preview_frame = measured.copy()  # noqa: SLF001
+        assembly._raw_preview_frame = measured.copy()  # noqa: SLF001
+        assembly._imported_rows = {  # noqa: SLF001
+            "Ni50Fe27Ga23|12|2": {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Imported value": 7.5,
+            }
+        }
+        assembly._imported_sources = ["saved.xlsx"]  # noqa: SLF001
+        changed: list[bool] = []
+        assembly.data_updated.connect(lambda: changed.append(True))
+
+        assembly.set_show_imported(False)
+        assert assembly._raw_preview_frame["Imported value"].isna().all()  # noqa: SLF001
+
+        assembly.set_show_imported(True)
+        assert assembly._raw_preview_frame["Imported value"].tolist() == [7.5, 7.5]  # noqa: SLF001
+        assert changed
+
+        assembly.clear_imported_data()
+        assert assembly._raw_preview_frame["Imported value"].isna().all()  # noqa: SLF001
+        assert assembly._imported_rows == {}  # noqa: SLF001
+        assert assembly._imported_sources == []  # noqa: SLF001
+    finally:
+        assembly.close()
+
+
+def test_builder_visibility_preferences_emit_project_changes(qtbot) -> None:
+    _ensure_qapp()
+    log = logging.getLogger("test")
+    assembly = builder_ui.AssemblySection({}, log, lambda *_: None)
+    microscope = builder_ui.MicroscopeSection(log, lambda *_: None)
+    fmr = builder_ui.FmrSection(log, lambda *_: None)
+    for widget in (assembly, microscope, fmr):
+        qtbot.addWidget(widget)
+    try:
+        assembly_changes: list[bool] = []
+        microscope_changes: list[bool] = []
+        fmr_changes: list[bool] = []
+        assembly.data_updated.connect(lambda: assembly_changes.append(True))
+        microscope.data_updated.connect(lambda: microscope_changes.append(True))
+        fmr.data_updated.connect(lambda: fmr_changes.append(True))
+
+        assembly.set_show_oe_samples(True)
+        assembly._handle_preview_search_changed("12/2")  # noqa: SLF001
+        assembly._handle_preview_source_filter_changed("Measured")  # noqa: SLF001
+        assembly.graph_panel_checkbox.setChecked(True)
+        microscope._toggle_other_ends(False)  # noqa: SLF001
+        fmr._hidden_paths = {"hidden.csv"}  # noqa: SLF001
+        fmr._store_hidden_paths()  # noqa: SLF001
+
+        assert len(assembly_changes) >= 4
+        assert microscope_changes
+        assert fmr_changes
+        assert microscope.data.extra["show_other_ends"] is False
+        assert fmr.data.extra["hidden_paths"] == ["hidden.csv"]
+    finally:
+        assembly.close()
+        microscope.close()
+        fmr.close()
 
 
 def test_assemble_default_visible_columns_do_not_disable_export_sections(qtbot) -> None:

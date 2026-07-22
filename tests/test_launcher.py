@@ -1104,8 +1104,10 @@ def test_tma_target_export_recalculates_stale_strain_summary_from_raw_run(
 
 def test_builder_automation_recipe_exports_assemble_public_workbook(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     openpyxl = pytest.importorskip("openpyxl")
+    monkeypatch.delenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", raising=False)
     project_path = _write_synthetic_assemble_project(tmp_path / "synthetic.pydpj")
     output_project = tmp_path / "working" / "updated.pydpj"
     workbook_path = tmp_path / "exports" / "assemble_public.xlsx"
@@ -1145,6 +1147,38 @@ def test_builder_automation_recipe_exports_assemble_public_workbook(
     workbook = openpyxl.load_workbook(workbook_path, data_only=True)
     assert workbook.sheetnames == ["Analysis"]
     assert [cell.value for cell in workbook["Analysis"][1]][:2] == ["Composition", "Microwire"]
+    assert "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS" not in os.environ
+
+
+def test_forced_assemble_export_restores_temporary_headless_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_path = _write_synthetic_assemble_project(tmp_path / "synthetic.pydpj")
+    output_path = tmp_path / "public.xlsx"
+    monkeypatch.delenv("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", raising=False)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setattr(
+        launcher_module,
+        "_run_builder_rebuild_assemble_command_lightweight",
+        lambda **_kwargs: {"status": "ok"},
+    )
+
+    _payload, copied_project, rebuild_result = (
+        launcher_module._prepare_assemble_export_project_payload(  # noqa: SLF001
+            source_project=project_path,
+            output_path=output_path,
+            working_copy_dir=tmp_path / "working",
+            copy_project=True,
+            force_rebuild=True,
+            rebuild_sections=None,
+        )
+    )
+
+    assert copied_project is not None
+    assert rebuild_result == {"status": "ok"}
+    assert "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS" not in os.environ
+    assert "QT_QPA_PLATFORM" not in os.environ
 
 
 def test_builder_update_filters_existing_records_under_refresh_root(tmp_path: Path) -> None:
@@ -2847,6 +2881,118 @@ def test_lightweight_assemble_rebuild_is_complete_and_preserves_user_state(
     assert captured["video_overrides"] == {
         "Ni50Fe27Ga23|12|2": {"Length (m)": 1.2}
     }
+
+
+def test_saved_imported_assemble_values_fill_all_duplicate_sample_rows() -> None:
+    frame = pd.DataFrame(
+        [
+            {"Composition": "Ni50Fe27Ga23", "Microwire": "12/2", "Imported": None},
+            {"Composition": "Ni50Fe27Ga23", "Microwire": "12/2", "Imported": None},
+        ]
+    )
+    previous = {
+        "show_imported": True,
+        "imported_rows": [
+            {
+                "Composition": "Ni50Fe27Ga23",
+                "Microwire": "12/2",
+                "Imported": 7.5,
+            }
+        ],
+    }
+
+    updated = launcher_module._overlay_saved_imported_assemble_rows(frame, previous)  # noqa: SLF001
+
+    assert updated["Imported"].tolist() == [7.5, 7.5]
+
+
+def test_lightweight_assemble_rebuild_uses_visible_records_and_reviewed_microscope_table(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _ensure_app()
+    visible_path = tmp_path / "visible.csv"
+    hidden_path = tmp_path / "hidden.csv"
+    visible_record = builder_ui.FmrRecord(
+        path=visible_path,
+        sample="Ni50Fe27Ga23 12/2",
+        data=pd.DataFrame({"field": [0.0], "signal": [1.0]}),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="visible",
+    )
+    hidden_record = builder_ui.FmrRecord(
+        path=hidden_path,
+        sample="Ni50Fe27Ga23 12/2",
+        data=pd.DataFrame({"field": [0.0], "signal": [2.0]}),
+        key=("Ni50Fe27Ga23", 12, 2),
+        label="hidden",
+    )
+    sections: dict[str, object] = {
+        "fmr": {
+            "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}],
+            "extra": {
+                "hidden_paths": [str(hidden_path)],
+                "payloads": {"fmr_records": "fmr_records"},
+            },
+            "payloads": {
+                "fmr_records": builder_ui._encode_project_payload(  # noqa: SLF001
+                    [visible_record, hidden_record]
+                )
+            },
+        },
+        "microscope": {
+            "columns": [
+                "Composition",
+                "Microwire",
+                "_key",
+                builder_ui.MICROSCOPE_D_COLUMN,
+                builder_ui.MICROSCOPE_CAP_D_COLUMN,
+            ],
+            "rows": [
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2",
+                    builder_ui.MICROSCOPE_D_COLUMN: "22,0",
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: "44.0",
+                },
+                {
+                    "Composition": "Ni50Fe27Ga23",
+                    "Microwire": "12/2oe",
+                    "_key": "Ni50Fe27Ga23|12|2|oe",
+                    builder_ui.MICROSCOPE_D_COLUMN: 8.0,
+                    builder_ui.MICROSCOPE_CAP_D_COLUMN: 40.0,
+                },
+            ],
+            "extra": {"show_other_ends": False},
+        },
+    }
+    captured: dict[str, object] = {}
+
+    def fake_build_database(_config: object, **kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            dataframe=pd.DataFrame(
+                [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]
+            )
+        )
+
+    monkeypatch.setattr(builder_ui, "build_database", fake_build_database)
+
+    launcher_module._run_builder_rebuild_assemble_command_lightweight(  # noqa: SLF001
+        builder_ui=builder_ui,
+        command={"action": "rebuild_assemble", "sections": ["fmr", "microscope"]},
+        command_index=0,
+        sections=sections,  # type: ignore[arg-type]
+        output_project=tmp_path / "copy.pydpj",
+    )
+
+    fmr_records = captured["fmr_records"]
+    assert [record.path for record in fmr_records] == [visible_path]  # type: ignore[union-attr]
+    microscope_index = captured["microscope_index"]
+    assert set(microscope_index) == {("Ni50Fe27Ga23", 12, 2, None)}  # type: ignore[arg-type]
+    measurements = microscope_index[("Ni50Fe27Ga23", 12, 2, None)]  # type: ignore[index]
+    assert measurements.best_core() == pytest.approx(22.0)
+    assert measurements.best_glass() == pytest.approx(44.0)
 
 
 def test_builder_automation_recipe_updates_vsm_hysteresis_copy(

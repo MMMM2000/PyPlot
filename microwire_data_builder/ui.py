@@ -14732,6 +14732,7 @@ class AnnealingSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist annealing visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[MeasurementRecord]
@@ -16231,6 +16232,10 @@ class MicroscopeSection(MiniDatabaseSection):
         self._search_proxy.set_row_predicate(self._row_visible)
         self._refresh_status_column()
         self._ensure_valid_selection()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
 
     def _row_visible(self, row: pd.Series) -> bool:  # type: ignore[override]
         if self._show_other_ends:
@@ -18224,8 +18229,30 @@ class MicroscopeSection(MiniDatabaseSection):
         index: Dict[MicrowireKey, MicroscopeMeasurements] = {}
         if not isinstance(table, pd.DataFrame) or table.empty:
             return index
+
+        def _positive_float(value: object) -> Optional[float]:
+            if isinstance(value, str):
+                value = value.strip().replace(",", ".")
+                if not value:
+                    return None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return numeric if math.isfinite(numeric) and numeric > 0 else None
+
         for _, row in table.iterrows():
             key = _microwire_key_from_string(str(row.get("_key") or "").strip())
+            if key is None:
+                composition = str(row.get("Composition") or "").strip()
+                parsed = _microwire_parts_from_label_safe(
+                    str(row.get("Microwire") or "").strip()
+                )
+                if composition and parsed is not None:
+                    try:
+                        key = (composition, int(parsed[0]), int(parsed[1]), parsed[2])
+                    except (TypeError, ValueError):
+                        key = None
             if key is None:
                 continue
             measurements = index.setdefault(key, MicroscopeMeasurements())
@@ -18240,10 +18267,10 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 glass_image = None
 
-            d_value = row.get(MICROSCOPE_D_COLUMN)
-            if isinstance(d_value, (int, float)) and math.isfinite(float(d_value)) and float(d_value) > 0:
+            d_value = _positive_float(row.get(MICROSCOPE_D_COLUMN))
+            if d_value is not None:
                 detection = MicroscopeDetection(
-                    value=float(d_value),
+                    value=d_value,
                     image_path=core_image,
                     source="manual",
                 )
@@ -18252,10 +18279,10 @@ class MicroscopeSection(MiniDatabaseSection):
             elif core_image is not None:
                 measurements.add_placeholder("core", core_image)
 
-            D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
-            if isinstance(D_value, (int, float)) and math.isfinite(float(D_value)) and float(D_value) > 0:
+            D_value = _positive_float(row.get(MICROSCOPE_CAP_D_COLUMN))
+            if D_value is not None:
                 detection = MicroscopeDetection(
-                    value=float(D_value),
+                    value=D_value,
                     image_path=glass_image,
                     source="manual",
                 )
@@ -23925,6 +23952,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist VSM hysteresis visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[VsmHysteresisRecord]
@@ -24526,6 +24554,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             self.logger.exception(
                 "Failed to persist VSM temperature scan visibility settings"
             )
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[VsmTemperatureScanRecord]
@@ -25012,6 +25041,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist DMA iso-stress visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[DmaIsoStressRecord]
@@ -27135,6 +27165,7 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             self.logger.exception(
                 "Failed to persist manual stress/strain visibility settings"
             )
+        self.data_updated.emit()
 
     def _visible_records(
         self, records: Sequence[ShapeMemoryStressStrainRecord]
@@ -28552,6 +28583,7 @@ class FmrSection(MiniDatabaseSection):
             self.store.save(self.data)
         except Exception:
             self.logger.exception("Failed to persist FMR visibility settings")
+        self.data_updated.emit()
 
     def _visible_records(self, records: Sequence[FmrRecord]) -> List[FmrRecord]:
         if not self._hidden_paths:
@@ -32930,7 +32962,7 @@ class AssemblySection(QtWidgets.QWidget):
             "columns": columns,
             "rows": rows,
             "index": index_payload,
-            "selected_columns": list(self._selected_columns or []),
+            "selected_columns": sorted(self._selected_columns or []),
             "column_order": list(self._column_order),
             "sort_spec": list(self._sort_spec),
             "search_query": self._preview_search_text,
@@ -33172,7 +33204,7 @@ class AssemblySection(QtWidgets.QWidget):
             )
         if str(path) not in self._imported_sources:
             self._imported_sources.append(str(path))
-        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        base_frame = self._base_preview_frame()
         if isinstance(base_frame, pd.DataFrame) and not base_frame.empty:
             merged = self._merge_imported_rows(base_frame)
             self._update_preview(merged)
@@ -33336,35 +33368,35 @@ class AssemblySection(QtWidgets.QWidget):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return imported
         merged_frame = frame.copy()
-        key_index: Dict[str, int] = {}
+        key_indexes: Dict[str, List[int]] = {}
         for idx, row in merged_frame.iterrows():
             key = _row_to_microwire_key(row)
-            if key and key not in key_index:
-                key_index[key] = idx
+            if key:
+                key_indexes.setdefault(key, []).append(idx)
         append_rows: List[Dict[str, Any]] = []
         for key, record in self._imported_rows.items():
-            if key in key_index:
-                row_idx = key_index[key]
-                row = merged_frame.loc[row_idx]
-                updated = False
-                for column, value in record.items():
-                    if column in {"Composition", "Microwire"}:
-                        continue
-                    if column not in merged_frame.columns:
-                        merged_frame[column] = None
-                    existing = row.get(column)
-                    if self._should_fill_import_value(existing, value):
-                        try:
-                            merged_frame[column] = merged_frame[column].astype(object)
-                        except Exception:
-                            pass
-                        merged_frame.at[row_idx, column] = value
-                        updated = True
-                if updated:
-                    current_source = str(row.get("Data source") or "").strip()
-                    merged_frame.at[row_idx, "Data source"] = _data_source_with_import(
-                        current_source
-                    )
+            if key in key_indexes:
+                for row_idx in key_indexes[key]:
+                    row = merged_frame.loc[row_idx]
+                    updated = False
+                    for column, value in record.items():
+                        if column in {"Composition", "Microwire"}:
+                            continue
+                        if column not in merged_frame.columns:
+                            merged_frame[column] = None
+                        existing = row.get(column)
+                        if self._should_fill_import_value(existing, value):
+                            try:
+                                merged_frame[column] = merged_frame[column].astype(object)
+                            except Exception:
+                                pass
+                            merged_frame.at[row_idx, column] = value
+                            updated = True
+                    if updated:
+                        current_source = str(row.get("Data source") or "").strip()
+                        merged_frame.at[row_idx, "Data source"] = _data_source_with_import(
+                            current_source
+                        )
             else:
                 append_rows.append(record)
         if append_rows:
@@ -33407,9 +33439,17 @@ class AssemblySection(QtWidgets.QWidget):
             "updated_labels": updated_labels,
         }
 
+    def _base_preview_frame(self) -> Optional[pd.DataFrame]:
+        if isinstance(self._measured_preview_frame, pd.DataFrame):
+            return self._measured_preview_frame
+        if isinstance(self._raw_preview_frame, pd.DataFrame):
+            return self._raw_preview_frame
+        return None
+
     def set_show_imported(self, enabled: bool) -> None:
+        changed = self._show_imported != bool(enabled)
         self._show_imported = bool(enabled)
-        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        base_frame = self._base_preview_frame()
         if isinstance(base_frame, pd.DataFrame) and not base_frame.empty:
             merged = self._merge_imported_rows(base_frame)
             self._update_preview(merged)
@@ -33417,8 +33457,11 @@ class AssemblySection(QtWidgets.QWidget):
             self._update_preview(pd.DataFrame(list(self._imported_rows.values())))
         else:
             self._update_preview(pd.DataFrame())
+        if changed:
+            self._mark_dirty()
 
     def set_show_oe_samples(self, enabled: bool) -> None:
+        changed = self._show_oe_samples != bool(enabled)
         self._show_oe_samples = bool(enabled)
         if hasattr(self, "oe_samples_checkbox"):
             try:
@@ -33427,17 +33470,20 @@ class AssemblySection(QtWidgets.QWidget):
             finally:
                 self.oe_samples_checkbox.blockSignals(False)
         self._refresh_preview_frame()
+        if changed:
+            self._mark_dirty()
 
     def clear_imported_data(self) -> None:
         if not self._imported_rows and not self._imported_sources:
             return
         self._imported_rows = {}
         self._imported_sources = []
-        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        base_frame = self._base_preview_frame()
         if isinstance(base_frame, pd.DataFrame):
             self._update_preview(base_frame)
         else:
             self._update_preview(pd.DataFrame())
+        self._mark_dirty()
 
     @staticmethod
     def _row_is_oe_sample(row: pd.Series) -> bool:
@@ -33454,7 +33500,6 @@ class AssemblySection(QtWidgets.QWidget):
             return False
         suffix = str(parsed[2] or "").strip().lower()
         return suffix == "oe"
-        self._mark_dirty()
 
     def imported_sources(self) -> List[str]:
         return list(self._imported_sources)
@@ -34749,10 +34794,13 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _handle_preview_search_changed(self, text: str) -> None:
         query = self._normalise_search_text(text)
+        changed = query != self._preview_search_text
         self._preview_search_text = query
         if hasattr(self, "search_clear_button"):
             self.search_clear_button.setEnabled(bool(query))
         self._refresh_preview_frame()
+        if changed:
+            self._mark_dirty()
 
     def _clear_preview_search(self) -> None:
         if hasattr(self, "search_edit"):
@@ -34786,8 +34834,11 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _handle_preview_source_filter_changed(self, text: str) -> None:
         selected = str(text or "").strip() or SOURCE_LABEL_ALL
+        changed = selected != self._preview_source_filter_text
         self._preview_source_filter_text = selected
         self._refresh_preview_frame()
+        if changed:
+            self._mark_dirty()
 
     def _apply_source_filter(
         self,
@@ -35602,6 +35653,7 @@ class AssemblySection(QtWidgets.QWidget):
             else:
                 splitter.setSizes([1, 0])
         self._update_graph_preview_panel()
+        self._mark_dirty()
 
     def _update_graph_preview_panel(self, *_: Any) -> None:
         try:
@@ -39165,7 +39217,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         path = self._log_capture_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
             level_name = logging.getLevelName(int(level))
             append_text_with_rotation(path, f"{timestamp} [{level_name}] {message}\n")
         except Exception as exc:
@@ -39203,7 +39255,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         previous_hook = sys.excepthook
 
         def _exception_hook(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
-            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
             trace = "".join(traceback.format_exception(exc_type, exc, tb))
             try:
                 self._crash_log_handle.write(
@@ -40133,6 +40185,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._invalidate_deferred_project_loads()
         self._project_load_cancelled = False
         self._project_load_in_progress = True
+        self._update_project_actions()
         try:
             self.statusBar().showMessage(f"Inspecting project…  {target.name}")
         except Exception:
@@ -40222,6 +40275,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _cleanup_project_load_worker(self) -> None:
         self._project_load_thread = None
         self._project_load_worker = None
+        self._update_project_actions()
         if self._close_after_project_load:
             self._close_after_project_load = False
             QtCore.QTimer.singleShot(0, self.close)
@@ -40298,6 +40352,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._project_load_auto_open = False
         MiniDatabaseSection._project_load_batch_mode = False
         self._suppress_dirty = False
+        self._update_project_actions()
 
     def _offer_trusted_legacy_project_migration(
         self, source: Path, error: Exception

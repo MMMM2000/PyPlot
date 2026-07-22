@@ -1068,12 +1068,12 @@ def _overlay_saved_imported_assemble_rows(
         return dataframe
 
     result = dataframe.copy() if isinstance(dataframe, pd.DataFrame) else pd.DataFrame()
-    key_to_index: dict[tuple[str, str], object] = {}
+    key_to_indexes: dict[tuple[str, str], list[object]] = {}
     if not result.empty:
         for index, row in result.iterrows():
             key = _analysis_identity_key(row)
-            if key[0] and key[1] and key not in key_to_index:
-                key_to_index[key] = index
+            if key[0] and key[1]:
+                key_to_indexes.setdefault(key, []).append(index)
     append_rows: list[dict[str, object]] = []
     for raw_row in imported_rows:
         if not isinstance(raw_row, Mapping):
@@ -1082,17 +1082,18 @@ def _overlay_saved_imported_assemble_rows(
         key = _analysis_identity_key(imported)
         if not key[0] or not key[1]:
             continue
-        existing_index = key_to_index.get(key)
-        if existing_index is None:
+        existing_indexes = key_to_indexes.get(key)
+        if not existing_indexes:
             append_rows.append(imported)
             continue
-        for column, value in imported.items():
-            if column in {"Composition", "Microwire"} or _is_blank_export_value(value):
-                continue
-            if column not in result.columns:
-                result[column] = None
-            if _is_blank_export_value(result.at[existing_index, column]):
-                result.at[existing_index, column] = value
+        for existing_index in existing_indexes:
+            for column, value in imported.items():
+                if column in {"Composition", "Microwire"} or _is_blank_export_value(value):
+                    continue
+                if column not in result.columns:
+                    result[column] = None
+                if _is_blank_export_value(result.at[existing_index, column]):
+                    result.at[existing_index, column] = value
     if append_rows:
         result = pd.concat([result, pd.DataFrame(append_rows)], ignore_index=True, sort=False)
     return result
@@ -1272,6 +1273,32 @@ def _run_builder_rebuild_assemble_command_lightweight(
         value = _decode_builder_section_payload(builder_ui, sections, section_name, payload_name)
         return value if value is not None else fallback
 
+    def _visible_records(section_name: str, payload_name: str) -> list[Any]:
+        records = _payload(section_name, payload_name, [])
+        if not isinstance(records, (list, tuple)):
+            return []
+        section = sections.get(section_name)
+        extra = section.get("extra") if isinstance(section, Mapping) else None
+        hidden_values = extra.get("hidden_paths") if isinstance(extra, Mapping) else None
+        hidden = {
+            str(path)
+            for path in hidden_values
+            if path
+        } if isinstance(hidden_values, (list, tuple, set)) else set()
+        if not hidden:
+            return list(records)
+        path_key = getattr(builder_ui, "_record_path_key", None)
+        visible: list[Any] = []
+        for record in records:
+            try:
+                key = str(path_key(record) or "") if callable(path_key) else str(getattr(record, "path", "") or "")
+            except Exception:
+                key = str(getattr(record, "path", "") or "")
+            if key and key in hidden:
+                continue
+            visible.append(record)
+        return visible
+
     config = builder_ui.BuilderConfig(
         annealing_files=[],
         fabrication_files=[],
@@ -1341,41 +1368,72 @@ def _run_builder_rebuild_assemble_command_lightweight(
     video_overrides = _builder_section_extra_mapping(
         sections, "videos", "overrides"
     )
+    microscope_index = _payload("microscope", "microscope_index", {})
+    if not isinstance(microscope_index, dict):
+        microscope_index = {}
+    microscope_frame = _builder_section_rows_as_frame(sections, "microscope")
+    table_microscope_index = builder_ui.MicroscopeSection._build_microscope_index_from_table(
+        microscope_frame
+    )
+    if table_microscope_index:
+        microscope_index = table_microscope_index
+    microscope_overrides = _builder_section_extra_mapping(
+        sections, "microscope", "overrides"
+    )
+    if microscope_overrides:
+        microscope_index = builder_ui._apply_microscope_overrides(
+            microscope_index,
+            microscope_overrides,
+        )
+    microscope_section = sections.get("microscope")
+    microscope_extra = (
+        microscope_section.get("extra")
+        if isinstance(microscope_section, Mapping)
+        else None
+    )
+    show_other_ends = (
+        bool(microscope_extra.get("show_other_ends", True))
+        if isinstance(microscope_extra, Mapping)
+        else True
+    )
+    microscope_index = builder_ui._filter_other_end_microscope_index(
+        microscope_index,
+        show_other_ends=show_other_ends,
+    )
     previous_assemble = sections.get("assemble")
     result = builder_ui.build_database(
         config,
         logger=LOGGER,
         fabrication_index=fabrication_index,
         measurement_records=(
-            _payload("annealing", "annealing_records", [])
+            _visible_records("annealing", "annealing_records")
             if "annealing" in selected
             else []
         ),
         vsm_hysteresis_records=(
-            _payload("vsm_hysteresis", "vsm_hysteresis_records", [])
+            _visible_records("vsm_hysteresis", "vsm_hysteresis_records")
             if "vsm_hysteresis" in selected
             else []
         ),
         vsm_temperature_scan_records=(
-            _payload("vsm_temperature_scan", "vsm_temperature_scan_records", [])
+            _visible_records("vsm_temperature_scan", "vsm_temperature_scan_records")
             if "vsm_temperature_scan" in selected
             else []
         ),
         dma_iso_stress_records=(
-            _payload("dma_iso_stress", "dma_iso_stress_records", [])
+            _visible_records("dma_iso_stress", "dma_iso_stress_records")
             if "dma_iso_stress" in selected
             else []
         ),
         mini_dma_records=(
-            _payload("mini_dma", "mini_dma_records", [])
+            _visible_records("mini_dma", "mini_dma_records")
             if "mini_dma" in selected
             else []
         ),
         shape_memory_stress_strain_records=(
-            _payload(
+            _visible_records(
                 "shape_memory_stress_strain",
                 "shape_memory_stress_strain_records",
-                [],
             )
             if "shape_memory_stress_strain" in selected
             else []
@@ -1384,12 +1442,12 @@ def _run_builder_rebuild_assemble_command_lightweight(
             shape_memory_entries if "shape_memory_stress_strain" in selected else {}
         ),
         fmr_records=(
-            _payload("fmr", "fmr_records", [])
+            _visible_records("fmr", "fmr_records")
             if "fmr" in selected
             else []
         ),
         microscope_index=(
-            _payload("microscope", "microscope_index", {})
+            microscope_index
             if "microscope" in selected
             else {}
         ),
@@ -3083,25 +3141,34 @@ def _prepare_assemble_export_project_payload(
 
     rebuild_result: dict[str, Any] | None = None
     if force_rebuild:
-        os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        app = QtWidgets.QApplication.instance()
-        if app is None:
-            app = QtWidgets.QApplication([])
-        from microwire_data_builder import storage as builder_storage
-        from microwire_data_builder import ui as builder_ui
-
-        store_root = (working_copy_dir or (output_path.parent / "_assemble_export_project_copy")) / "_builder_store"
-        if store_root.exists():
-            shutil.rmtree(store_root)
-        original_storage_root = builder_storage._storage_root
-        builder_storage._storage_root = lambda: store_root  # type: ignore[assignment]
-        builder_storage.MiniDatabaseStore._memory_data = {}
-        builder_storage.MiniDatabaseStore._memory_payloads = {}
-        builder_storage.MiniDatabaseStore._pending_sections = set()
-        builder_storage.MiniDatabaseStore._pending_payloads = set()
-        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+        previous_dialog_setting = os.environ.get(
+            "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"
+        )
+        previous_qt_platform = os.environ.get("QT_QPA_PLATFORM")
+        builder_storage: Any = None
+        original_storage_root: Any = None
         try:
+            os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            app = QtWidgets.QApplication.instance()
+            if app is None:
+                app = QtWidgets.QApplication([])
+            from microwire_data_builder import storage as builder_storage
+            from microwire_data_builder import ui as builder_ui
+
+            store_root = (
+                working_copy_dir
+                or (output_path.parent / "_assemble_export_project_copy")
+            ) / "_builder_store"
+            if store_root.exists():
+                shutil.rmtree(store_root)
+            original_storage_root = builder_storage._storage_root
+            builder_storage._storage_root = lambda: store_root  # type: ignore[assignment]
+            builder_storage.MiniDatabaseStore._memory_data = {}
+            builder_storage.MiniDatabaseStore._memory_payloads = {}
+            builder_storage.MiniDatabaseStore._pending_sections = set()
+            builder_storage.MiniDatabaseStore._pending_payloads = set()
+            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
             command: dict[str, Any] = {"action": "rebuild_assemble"}
             if rebuild_sections:
                 command["sections"] = list(rebuild_sections)
@@ -3113,12 +3180,23 @@ def _prepare_assemble_export_project_payload(
                 output_project=copied_project or output_path.with_suffix(".pydpj"),
             )
         finally:
-            builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
-            builder_storage.MiniDatabaseStore._memory_data = {}
-            builder_storage.MiniDatabaseStore._memory_payloads = {}
-            builder_storage.MiniDatabaseStore._pending_sections = set()
-            builder_storage.MiniDatabaseStore._pending_payloads = set()
-            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            if builder_storage is not None and original_storage_root is not None:
+                builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
+                builder_storage.MiniDatabaseStore._memory_data = {}
+                builder_storage.MiniDatabaseStore._memory_payloads = {}
+                builder_storage.MiniDatabaseStore._pending_sections = set()
+                builder_storage.MiniDatabaseStore._pending_payloads = set()
+                builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            if previous_dialog_setting is None:
+                os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
+            else:
+                os.environ["MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"] = (
+                    previous_dialog_setting
+                )
+            if previous_qt_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_qt_platform
 
     return payload, copied_project, rebuild_result
 
@@ -3503,27 +3581,31 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             else:
                 manifest_path = output_project.with_suffix(".manifest.json")
 
-        os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
-        app = QtWidgets.QApplication.instance()
-        if app is None:
-            app = QtWidgets.QApplication([])
-
-        from microwire_data_builder import storage as builder_storage
-        from microwire_data_builder import ui as builder_ui
-
-        original_storage_root = builder_storage._storage_root
-        automation_store = working_copy_dir / "_builder_store"
-        if automation_store.exists():
-            shutil.rmtree(automation_store)
-        builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
-        builder_storage.MiniDatabaseStore._memory_data = {}
-        builder_storage.MiniDatabaseStore._memory_payloads = {}
-        builder_storage.MiniDatabaseStore._pending_sections = set()
-        builder_storage.MiniDatabaseStore._pending_payloads = set()
-        builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
-
+        previous_dialog_setting = os.environ.get(
+            "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"
+        )
+        builder_storage: Any = None
+        original_storage_root: Any = None
         command_results: list[dict[str, Any]] = []
         try:
+            os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
+            app = QtWidgets.QApplication.instance()
+            if app is None:
+                app = QtWidgets.QApplication([])
+
+            from microwire_data_builder import storage as builder_storage
+            from microwire_data_builder import ui as builder_ui
+
+            original_storage_root = builder_storage._storage_root
+            automation_store = working_copy_dir / "_builder_store"
+            if automation_store.exists():
+                shutil.rmtree(automation_store)
+            builder_storage._storage_root = lambda: automation_store  # type: ignore[assignment]
+            builder_storage.MiniDatabaseStore._memory_data = {}
+            builder_storage.MiniDatabaseStore._memory_payloads = {}
+            builder_storage.MiniDatabaseStore._pending_sections = set()
+            builder_storage.MiniDatabaseStore._pending_payloads = set()
+            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
             for index, command in enumerate(commands):
                 if not isinstance(command, dict):
                     raise _AutomationRecipeError(f"Builder command {index} must be an object.")
@@ -3567,12 +3649,19 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                     )
                 )
         finally:
-            builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
-            builder_storage.MiniDatabaseStore._memory_data = {}
-            builder_storage.MiniDatabaseStore._memory_payloads = {}
-            builder_storage.MiniDatabaseStore._pending_sections = set()
-            builder_storage.MiniDatabaseStore._pending_payloads = set()
-            builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            if builder_storage is not None and original_storage_root is not None:
+                builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
+                builder_storage.MiniDatabaseStore._memory_data = {}
+                builder_storage.MiniDatabaseStore._memory_payloads = {}
+                builder_storage.MiniDatabaseStore._pending_sections = set()
+                builder_storage.MiniDatabaseStore._pending_payloads = set()
+                builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            if previous_dialog_setting is None:
+                os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
+            else:
+                os.environ["MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"] = (
+                    previous_dialog_setting
+                )
 
         project_payload["saved_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         _write_builder_project_object(output_project, project_payload)
