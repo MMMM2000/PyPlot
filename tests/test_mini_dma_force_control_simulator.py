@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from data_logging.mini_dma_logger.force_control import ForceControlAction
+from data_logging.mini_dma_logger.force_control import (
+    ForceControlAction,
+    ForceControlIntent,
+)
 from data_logging.mini_dma_logger.force_control_simulator import (
     ForceControlPlantFamily,
     scaled_plant_families,
@@ -99,6 +102,49 @@ def test_delayed_transport_keeps_policy_commands_serialized() -> None:
     assert any(
         sample.action is ForceControlAction.WAIT_FOR_MOTOR for sample in result.samples
     )
+
+
+@pytest.mark.parametrize(
+    ("noise_normalized", "fluctuation_normalized"),
+    ((0.001, 0.0), (0.02, 0.015)),
+)
+def test_target_ramp_transitions_to_endpoint_acquisition_and_completes(
+    noise_normalized: float,
+    fluctuation_normalized: float,
+) -> None:
+    family = ForceControlPlantFamily(
+        name=f"ramp-endpoint-{noise_normalized}",
+        load_scale_g=1.0,
+        load_per_mm_g=2.0,
+        initial_load_normalized=0.25,
+        tolerance_normalized=0.006,
+        noise_normalized=noise_normalized,
+        quantization_normalized=0.001,
+        fluctuation_normalized=fluctuation_normalized,
+        target_ramp_steps=40,
+        max_steps=300,
+    )
+
+    result = simulate_force_control_family(family)
+    ramp_samples = [
+        sample
+        for sample in result.samples
+        if sample.intent is ForceControlIntent.TRACK_TRAJECTORY
+    ]
+    acquisition_samples = [
+        sample
+        for sample in result.samples
+        if sample.intent is ForceControlIntent.ACQUIRE_TARGET
+    ]
+
+    assert result.metrics.completed is True
+    assert ramp_samples
+    assert acquisition_samples
+    assert ramp_samples[-1].target_normalized < family.target_normalized
+    assert acquisition_samples[0].target_normalized == pytest.approx(
+        family.target_normalized
+    )
+    assert result.metrics.overlap_count == 0
 
 
 def test_transformation_family_reports_recovery_after_disturbance() -> None:

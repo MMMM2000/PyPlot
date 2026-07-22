@@ -12089,6 +12089,57 @@ def test_setup_preload_target_ramp_finishes_inside_automatic_tolerance(
         _close_test_window(window)
 
 
+@pytest.mark.parametrize(
+    ("start_value", "end_value", "moving_rate"),
+    ((0.0, 10.0, 5.0), (10.0, 0.0, -5.0)),
+)
+def test_target_ramp_switches_to_endpoint_acquisition_with_zero_setpoint_rate(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    start_value: float,
+    end_value: float,
+    moving_rate: float,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    step = mini_dma_mod.AutomationStep(
+        "ramp_target",
+        target_value=end_value,
+        target_start_value=start_value,
+        target_end_value=end_value,
+        target_ramp_rate_value_s=5.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        note="1",
+    )
+    times = iter((100.0, 101.0, 102.1))
+    decisions: list[tuple[float, mini_dma_mod.ForceControlIntent, float | None]] = []
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: next(times))
+
+    def _record_seek(_basis: str, target: float, _tolerance: float) -> bool:
+        decisions.append(
+            (
+                target,
+                window._kosice_force_control_intent(),
+                window._active_target_ramp_setpoint_rate_value_s,
+            )
+        )
+        return True
+
+    window._seek_distribution_target = _record_seek  # type: ignore[method-assign]
+
+    try:
+        assert window._handle_target_ramp_step(step, 7) is False
+        assert window._handle_target_ramp_step(step, 7) is True
+
+        assert decisions == [
+            (5.0, mini_dma_mod.ForceControlIntent.TRACK_TRAJECTORY, moving_rate),
+            (end_value, mini_dma_mod.ForceControlIntent.ACQUIRE_TARGET, 0.0),
+        ]
+        assert window._active_target_ramp_setpoint_rate_value_s is None
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_setup_preload_rejects_contact_scale_residual(
     tmp_path: Path,
     qtbot,

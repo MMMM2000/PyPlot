@@ -338,6 +338,44 @@ def test_tracking_has_no_pending_response_but_landing_serializes_commands() -> N
     assert waiting.pending_response is True
 
 
+def test_quiet_ramp_endpoint_switches_from_feedforward_to_acquisition() -> None:
+    policy = _adaptive(gain=2.0)
+    tracking = policy.decide(
+        _input(
+            intent=ForceControlIntent.TRACK_TRAJECTORY,
+            target_load_g=1.0,
+            current_load_g=1.0,
+            filtered_load_g=1.0,
+            tolerance_g=0.01,
+            robust_noise_g=0.001,
+            quantization_g=0.001,
+            readability_g=0.001,
+            target_ramp_g_s=0.10,
+            ramp_active=True,
+        )
+    )
+    acquired = policy.decide(
+        _input(
+            intent=ForceControlIntent.ACQUIRE_TARGET,
+            target_load_g=1.0,
+            current_load_g=1.0,
+            filtered_load_g=1.0,
+            tolerance_g=0.01,
+            robust_noise_g=0.001,
+            quantization_g=0.001,
+            readability_g=0.001,
+            target_ramp_g_s=0.0,
+            ramp_active=False,
+            timestamp_s=2.0,
+        )
+    )
+
+    assert tracking.action is ForceControlAction.MOVE_RELATIVE
+    assert tracking.reason == "trajectory_correction"
+    assert acquired.action is ForceControlAction.NONE
+    assert acquired.reason == "inside_deadband"
+
+
 def test_intent_change_does_not_issue_a_second_command_while_motor_is_active() -> None:
     policy = _adaptive(gain=2.0)
     first = policy.decide(

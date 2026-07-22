@@ -55,6 +55,7 @@ class ForceControlPlantFamily:
     sample_period_s: float = 0.1
     max_steps: int = 240
     settle_samples: int = 5
+    target_ramp_steps: int = 0
 
     def validated(self) -> "ForceControlPlantFamily":
         positive = (
@@ -89,6 +90,8 @@ class ForceControlPlantFamily:
             raise ValueError("response observation steps must be non-negative")
         if self.disturbance_start_step < 1 or self.max_steps < 1 or self.settle_samples < 1:
             raise ValueError("simulation step counts must be positive")
+        if self.target_ramp_steps < 0:
+            raise ValueError("target_ramp_steps must be non-negative")
         return self
 
     @property
@@ -107,6 +110,8 @@ class ForceControlPlantFamily:
 @dataclass(frozen=True, slots=True)
 class ForceControlSimulationSample:
     step: int
+    intent: ForceControlIntent
+    target_normalized: float
     normalized_load: float
     normalized_error: float
     command_mm: float
@@ -285,15 +290,39 @@ def simulate_force_control_family(
             family.quantization_normalized,
         )
         command_in_flight = pending_steps > 0
+        ramp_sample = step + 1
+        ramp_active = (
+            family.target_ramp_steps > 0
+            and ramp_sample < family.target_ramp_steps
+        )
+        if family.target_ramp_steps > 0:
+            ramp_fraction = min(1.0, ramp_sample / family.target_ramp_steps)
+            target_normalized = family.initial_load_normalized + (
+                family.target_normalized - family.initial_load_normalized
+            ) * ramp_fraction
+            target_ramp_g_s = (
+                (family.target_normalized - family.initial_load_normalized)
+                * family.load_scale_g
+                / (family.target_ramp_steps * family.sample_period_s)
+                if ramp_active
+                else 0.0
+            )
+        else:
+            target_normalized = family.target_normalized
+            target_ramp_g_s = 0.0
         intent = (
             ForceControlIntent.RECOVER_DISTURBANCE
             if requires_recovery and step >= family.disturbance_start_step
-            else ForceControlIntent.ACQUIRE_TARGET
+            else (
+                ForceControlIntent.TRACK_TRAJECTORY
+                if ramp_active
+                else ForceControlIntent.ACQUIRE_TARGET
+            )
         )
         decision = policy.decide(
             ForceControlInput(
                 intent=intent,
-                target_load_g=family.target_load_g,
+                target_load_g=target_normalized * family.load_scale_g,
                 current_load_g=measured_normalized * family.load_scale_g,
                 filtered_load_g=measured_normalized * family.load_scale_g,
                 tolerance_g=family.tolerance_normalized * family.load_scale_g,
@@ -304,8 +333,8 @@ def simulate_force_control_family(
                 motor_resolution_mm=family.motor_resolution_mm,
                 max_safe_correction_mm=family.max_safe_correction_mm,
                 speed_mm_s=family.max_safe_correction_mm / family.sample_period_s,
-                target_ramp_g_s=0.0,
-                ramp_active=False,
+                target_ramp_g_s=target_ramp_g_s,
+                ramp_active=ramp_active,
                 current_mA=1.0 if intent is ForceControlIntent.RECOVER_DISTURBANCE else 0.0,
                 current_changing=(
                     requires_recovery
@@ -346,11 +375,13 @@ def simulate_force_control_family(
         commands_in_flight = int(pending_steps > 0)
         max_commands_in_flight = max(max_commands_in_flight, commands_in_flight)
 
-        normalized_error = family.target_normalized - measured_normalized
+        normalized_error = target_normalized - measured_normalized
         command_normalized = command_mm * family.load_per_mm_g / family.load_scale_g
         samples.append(
             ForceControlSimulationSample(
                 step=step,
+                intent=intent,
+                target_normalized=target_normalized,
                 normalized_load=measured_normalized,
                 normalized_error=normalized_error,
                 command_mm=command_mm,
@@ -361,9 +392,14 @@ def simulate_force_control_family(
             )
         )
 
+        after_target_ramp = (
+            family.target_ramp_steps == 0
+            or ramp_sample >= family.target_ramp_steps
+        )
         after_final_disturbance = not requires_recovery or step >= disturbance_end
         if (
-            after_final_disturbance
+            after_target_ramp
+            and after_final_disturbance
             and abs(normalized_error)
             <= decision.effective_deadband_g / family.load_scale_g + 1e-12
         ):

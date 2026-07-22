@@ -7738,6 +7738,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_start_value: float | None = None
         self._active_target_ramp_end_value: float | None = None
         self._active_target_ramp_rate_value_s: float | None = None
+        self._active_target_ramp_setpoint_rate_value_s: float | None = None
         self._active_timed_step_index: int | None = None
         self._active_timed_step_started_s = 0.0
         self._active_timed_move_sent = False
@@ -21464,6 +21465,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _kosice_force_control_intent(self) -> ForceControlIntent:
         if self._automation_phase == "target_ramp":
+            if self._active_target_ramp_setpoint_rate_value_s == 0.0:
+                return ForceControlIntent.ACQUIRE_TARGET
             return ForceControlIntent.TRACK_TRAJECTORY
         if self._automation_phase == "current_hold":
             return ForceControlIntent.RECOVER_DISTURBANCE
@@ -21588,22 +21591,20 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         speed_mm_s = self._motion_speed_for_current_context(manual_jog=False)
-        ramp_rate_basis_s = self._target_ramp_rate_value_s_for_context(
-            basis,
-            current_value=float(current_basis_value),
-            target_value=target_value,
-        )
+        ramp_rate_basis_s = self._active_target_ramp_setpoint_rate_value_s
+        if ramp_rate_basis_s is None:
+            ramp_rate_basis_s = self._target_ramp_rate_value_s_for_context(
+                basis,
+                current_value=float(current_basis_value),
+                target_value=target_value,
+            )
         target_ramp_g_s = 0.0
         if ramp_rate_basis_s is not None:
             if basis == HSW_BASIS_LOAD_G:
-                target_ramp_g_s = abs(float(ramp_rate_basis_s))
+                target_ramp_g_s = float(ramp_rate_basis_s)
             else:
                 converted = self._basis_value_as_load_g(basis, float(ramp_rate_basis_s))
-                target_ramp_g_s = 0.0 if converted is None else abs(float(converted))
-            target_ramp_g_s = math.copysign(
-                target_ramp_g_s,
-                float(target_load_g) - float(signal.value),
-            )
+                target_ramp_g_s = 0.0 if converted is None else float(converted)
 
         readability_g = self._scale_readability_g() or 0.0
         if self._session_active:
@@ -21627,7 +21628,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 max_safe_correction_mm=self._kosice_force_control_max_command_mm(speed_mm_s),
                 speed_mm_s=max(0.0, float(speed_mm_s)),
                 target_ramp_g_s=target_ramp_g_s,
-                ramp_active=self._automation_phase == "target_ramp",
+                ramp_active=(
+                    self._automation_phase == "target_ramp"
+                    and self._active_target_ramp_setpoint_rate_value_s != 0.0
+                ),
                 current_mA=float(self._active_current_sweep_last_setpoint_mA or 0.0),
                 current_changing=self._kosice_force_control_current_changing(),
                 feedback_fresh=feedback_fresh,
@@ -29494,6 +29498,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_start_value = None
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
+        self._active_target_ramp_setpoint_rate_value_s = None
         self._setup_zero_fallback_return_position_mm = None
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
@@ -29764,6 +29769,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_start_value = None
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
+        self._active_target_ramp_setpoint_rate_value_s = None
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
         self._setup_starting_length_mm = None
@@ -30732,6 +30738,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_start_value = None
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
+        self._active_target_ramp_setpoint_rate_value_s = None
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
         self._active_mechanical_scan_move_count = 0
@@ -33107,6 +33114,9 @@ class MainWindow(QtWidgets.QMainWindow):
             desired_value = min(end_value, desired_value)
         else:
             desired_value = max(end_value, desired_value)
+        self._active_target_ramp_setpoint_rate_value_s = (
+            direction * ramp_rate if elapsed_s < duration_s else 0.0
+        )
 
         plateau_index = int(step.note) if step.note.isdigit() else None
         self._set_automation_context(
@@ -33130,6 +33140,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_target_ramp_start_value = None
             self._active_target_ramp_end_value = None
             self._active_target_ramp_rate_value_s = None
+            self._active_target_ramp_setpoint_rate_value_s = None
             return True
         return False
 
