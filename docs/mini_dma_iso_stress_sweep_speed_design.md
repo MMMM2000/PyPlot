@@ -240,6 +240,37 @@ A candidate must pass all gates across fitted, hold-out, and adversarial scenari
 
 The speed threshold is intentionally material: a small gain does not justify a more complex controller.
 
+## Closed-loop simulation results (2026-07-22)
+
+A dependency-light simulator now closes the loop among current, transformation strain, motor correction, correlated scale noise, irregular feedback cadence, and the four policy shapes. It contains no Qt, serial, PSU, scale, or Tic imports and performs no hardware I/O. The comparison used five scenarios, four policies, and 12 paired deterministic seeds (240 runs total).
+
+The policies were:
+
+1. `baseline`: current hold/resume policy shape;
+2. `evidence`: dual-timescale diagnostics plus bounded resume evidence;
+3. `evidence_probation`: evidence plus explicit bidirectional reduced-rate probation;
+4. `proposed`: evidence, probation, and the one-sided noise/trend current-rate limiter.
+
+All 240 runs completed without a simulated stress-safety stop, and no policy exceeded the requested 0.4 mA/s recipe rate. Median changes versus each scenario's baseline were:
+
+| Scenario | Policy | Elapsed | Hold | p95 true stress error |
+|---|---|---:|---:|---:|
+| Prague-like volatile | Evidence | -23.28% | -22.26% | +2.53% |
+| Prague-like volatile | Evidence + probation | -7.47% | -5.86% | -1.00% |
+| Prague-like volatile | Full proposed | +2.24% | +3.39% | -3.54% |
+| Calm | Evidence | -1.66% | +19.44% | +6.84% |
+| Coherent transformation | Evidence | -3.18% | +11.06% | +9.56% |
+| Sparse feedback | Evidence | -24.82% | -23.99% | +14.20% |
+| Heavy-tail noise | Evidence | -21.51% | -19.56% | +2.30% |
+
+Evidence-only is the sole materially faster Prague-like candidate, but it misses the 25% hold-time target and exceeds the +5% p95 stress-error gate in the calm, coherent-transformation, and sparse-feedback hold-outs. Evidence plus probation removes most of the speed benefit. The full stack generally improves stress error, but it is slower in four of five scenarios.
+
+A separate screen tested 18 stricter coherent-motion evidence combinations. None passed both the cross-scenario p95 error gate and the no-increase-in-time-outside-pause gate. Extra fixed confirmation during coherent motion is therefore rejected as a remedy.
+
+The Prague-like simulator baseline has p95 measured absolute stress error of about 21.6 MPa, close to the audited run's roughly 20.3 MPa, but only about 69.7% simulated hold fraction versus 88.4% recorded. It therefore understates the real hold bottleneck and is a policy-shape model, not a calibrated digital twin.
+
+**Decision:** no simulated candidate is ready for controller implementation. The next iteration should first prove event-level parity with the recorded baseline, fit loop-local plant/residual models, and redesign evidence so stationary noise can be distinguished from coherent transformation without adding a fixed confirmation burden.
+
 ## Implementation sequence after design approval
 
 1. Extract a pure hold/resume supervisor and baseline parity tests.
