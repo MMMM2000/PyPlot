@@ -1,4 +1,4 @@
-﻿"""Validate a TMA optimization campaign before live hardware work."""
+"""Validate a TMA optimization campaign before live hardware work."""
 
 from __future__ import annotations
 

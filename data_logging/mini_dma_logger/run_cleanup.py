@@ -1,4 +1,4 @@
-﻿"""Safe TMA sibling-run cleanup helpers."""
+"""Safe TMA sibling-run cleanup helpers."""
 
 from __future__ import annotations
 

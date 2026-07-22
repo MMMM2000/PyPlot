@@ -1,4 +1,4 @@
-﻿# TMA Optimization Campaigns
+# TMA Optimization Campaigns
 
 TMA optimization runs must be treated as campaigns, not one-off hardware attempts. The goal is repeatability: a future worker should be able to inspect the campaign folder, branch, manifest, reports, and run artifacts without needing chat memory.
 
@@ -62,7 +62,7 @@ A worker must not start live TMA optimization if any of these are unknown:
 - maximum stress and travel safety limits
 - report output path
 
-The checker is intentionally conservative. If the manifest does not say what â€œlatest approved control logicâ€ means, the worker should stop and ask the master coordination thread to update the campaign rather than guessing.
+The checker is intentionally conservative. If the manifest does not say what “latest approved control logic” means, the worker should stop and ask the master coordination thread to update the campaign rather than guessing.
 
 ## Optimization Objective
 

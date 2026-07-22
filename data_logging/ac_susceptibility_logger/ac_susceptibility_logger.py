@@ -4414,11 +4414,6 @@ class MainWindow(CurrentAnnealingWindow):
                 baudrate = int(baud_combo.currentText())
             except Exception:
                 pass
-        voltage_limit_v = float(config.voltage_limit_v) if config is not None else HMP4040_PROFILE.max_voltage_v
-        widget = getattr(self, "spinBox_ac_voltage_limit", None)
-        if config is None and isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
-            voltage_limit_v = float(widget.value())
-        current_limit_a = self._ac_shared_broker_current_limit_a(config)
         candidates = self._candidate_hmp_ports_for_broker()
         if not candidates:
             raise RuntimeError(
@@ -4438,8 +4433,8 @@ class MainWindow(CurrentAnnealingWindow):
                     channel=channel,
                     role=ROLE_AC_SUSCEPTIBILITY,
                     confirmed=True,
-                    voltage_limit_v=voltage_limit_v,
-                    current_limit_a=current_limit_a,
+                    voltage_limit_v=None,
+                    current_limit_a=None,
                 )
                 broker.confirm_profile(name="AC Susceptibility auto-started shared HMP broker")
                 server, thread = start_broker_server(broker, host=host, port=port)

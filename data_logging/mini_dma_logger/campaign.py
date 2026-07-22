@@ -90,7 +90,7 @@ def _minimal_yaml_load(text: str) -> dict[str, Any]:
 
 def load_campaign(path: Path | str) -> dict[str, Any]:
     manifest_path = Path(path)
-    text = manifest_path.read_text(encoding="utf-8")
+    text = manifest_path.read_text(encoding="utf-8-sig")
     if manifest_path.suffix.lower() == ".json":
         payload = json.loads(text)
     else:

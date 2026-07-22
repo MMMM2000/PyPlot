@@ -182,6 +182,45 @@ def test_broker_serializes_channel_selection_and_commands() -> None:
     ]
 
 
+def test_broker_profile_limits_block_over_limit_leased_owner_commands() -> None:
+    driver = _driver()
+    broker = SharedPowerSupplyBroker(driver, HMP4040_PROFILE)
+    broker.assign_role(
+        channel=4,
+        role=ROLE_MINI_DMA_CURRENT,
+        confirmed=True,
+        voltage_limit_v=1.0,
+        current_limit_a=0.001,
+    )
+    broker.confirm_profile()
+    lease = broker.lease(channel=4, owner="mini-dma", role=ROLE_MINI_DMA_CURRENT)
+
+    broker.configure_channel(
+        channel=4,
+        lease_id=lease.lease_id,
+        voltage_v=1.0,
+        current_a=0.0005,
+        output_on=True,
+    )
+    with pytest.raises(PermissionError, match="requested current exceeds CH4 limit"):
+        broker.set_current(channel=4, lease_id=lease.lease_id, current_mA=40.0)
+    with pytest.raises(PermissionError, match="requested voltage exceeds CH4 limit"):
+        broker.configure_channel(
+            channel=4,
+            lease_id=lease.lease_id,
+            voltage_v=12.0,
+            current_a=0.0005,
+            output_on=True,
+        )
+
+    assert driver.command_log() == [
+        "INST:NSEL 4",
+        "VOLT 1.000",
+        "CURR 0.0005",
+        "OUTP ON",
+    ]
+
+
 def test_broker_reports_channel_output_state() -> None:
     broker = SharedPowerSupplyBroker(_driver(), HMP4040_PROFILE)
     broker.assign_role(channel=3, role=ROLE_MINI_DMA_CURRENT, confirmed=True)

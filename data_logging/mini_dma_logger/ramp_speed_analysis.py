@@ -1,4 +1,4 @@
-﻿"""Compare TMA current-sweep ramp speeds from saved run folders."""
+"""Compare TMA current-sweep ramp speeds from saved run folders."""
 
 from __future__ import annotations
 

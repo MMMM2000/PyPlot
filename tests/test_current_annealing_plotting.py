@@ -339,6 +339,56 @@ def test_summarize_transition_currents_detects_real_local_heating_drop() -> None
     assert summary.mf_current_mA == pytest.approx(4.7, abs=0.8)
     assert summary.ms_current_mA < summary.af_current_mA
     assert summary.mf_current_mA < summary.af_current_mA
+class _LoadOnlyHost:
+    def __init__(self) -> None:
+        self._plugin_last_directories: dict[str, Path] = {}
+
+
+def _current_annealing_load_plugin() -> anneal_plugin_mod.CurrentAnnealingPlugin:
+    plugin = anneal_plugin_mod.CurrentAnnealingPlugin(_LoadOnlyHost(), "Current Annealing")
+    plugin._register_workbooks = lambda: None  # type: ignore[method-assign]
+    return plugin
+
+
+def _write_current_annealing_run_with_sidecar(root: Path) -> tuple[Path, Path]:
+    run_name = "Ni49Fe26Ga23Co2 3_6 100mA test1 2loops"
+    data_path = root / f"{run_name}.txt"
+    data_path.write_text("0.02 0.10 5\n0.05 0.25 5\n0.10 0.50 5\n")
+    sidecar_path = root / "metadata" / run_name / "metadata.json"
+    sidecar_path.parent.mkdir(parents=True)
+    sidecar_path.write_text('{"sample": "Ni49Fe26Ga23Co2", "max_current_mA": 100}\n')
+    return data_path, sidecar_path
+
+
+def test_current_annealing_plugin_folder_load_ignores_metadata_sidecar(
+    tmp_path: Path,
+) -> None:
+    data_path, sidecar_path = _write_current_annealing_run_with_sidecar(tmp_path)
+    plugin = _current_annealing_load_plugin()
+
+    loaded = plugin._load_data_from_paths([tmp_path], show_errors=False)  # noqa: SLF001
+    assert loaded is True
+
+    loaded_paths = [Path(path) for path in plugin._data_by_file]  # noqa: SLF001
+    assert loaded_paths == [data_path.resolve()]
+    assert sidecar_path.resolve() not in loaded_paths
+    frame = plugin._data_by_file[str(data_path.resolve())]  # noqa: SLF001
+    assert frame["I_mA"].tolist() == pytest.approx([20.0, 50.0, 100.0])
+
+
+def test_current_annealing_plugin_skips_sidecar_from_expanded_import_list(
+    tmp_path: Path,
+) -> None:
+    data_path, sidecar_path = _write_current_annealing_run_with_sidecar(tmp_path)
+    plugin = _current_annealing_load_plugin()
+
+    loaded = plugin._load_data_from_paths(  # noqa: SLF001
+        [sidecar_path, data_path],
+        show_errors=False,
+    )
+    assert loaded is True
+
+    assert list(plugin._data_by_file) == [str(data_path.resolve())]  # noqa: SLF001
 
 
 def test_plot_one_bridges_increasing_to_decreasing_segment() -> None:
@@ -684,6 +734,10 @@ def test_current_annealing_plugin_uses_shared_origin_export() -> None:
 def test_current_annealing_plugin_exposes_no_redundant_settings_widget() -> None:
     plugin = anneal_plugin_mod.CurrentAnnealingPlugin(object(), "Current Annealing")
     assert plugin.settings_widget() is None
+
+
+def test_current_annealing_plugin_owns_folder_imports() -> None:
+    assert anneal_plugin_mod.CurrentAnnealingPlugin.supports_import_folders is True
 
 
 def test_current_annealing_open_origin_delegates_to_shared_host_export() -> None:

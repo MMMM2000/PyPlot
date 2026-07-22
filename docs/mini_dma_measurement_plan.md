@@ -1,4 +1,4 @@
-﻿# TMA Measurement Plan
+# TMA Measurement Plan
 
 This note is the working plan for turning TMA from a manual bring-up logger into a practical measurement workflow for copper-wire tests and real microwires.
 

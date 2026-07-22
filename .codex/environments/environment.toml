@@ -81,3 +81,11 @@ command = '''
 C:\Windows\System32\cmd.exe /d /c "set PYPLOT_NO_PAUSE=1&& call .codex\run-pyplot.cmd"
 '''
 platform = "win32"
+
+[[actions]]
+name = "Sync Repo"
+icon = "download"
+command = '''
+C:\Windows\System32\cmd.exe /d /c "set PYPLOT_NO_PAUSE=1&& call .codex\sync-main.cmd"
+'''
+platform = "win32"

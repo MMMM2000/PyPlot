@@ -1,4 +1,4 @@
-﻿# TMA Presentation Slide Plan
+# TMA Presentation Slide Plan
 
 Prepared as a planning artifact before editing `mini_dma_presentation.pptx`.
 
@@ -60,7 +60,7 @@ Global decisions from the final review:
 - Do not say `validation remains experimental` in the closing. The final slide should hype the practical Codex/AI-assisted instrument-development story.
 - Do not use a made-up thermocamera plot. Only use the real thermal-camera frame if it is found; otherwise keep the thermal-camera slide as a next-step slide using real hardware.
 - Slide 3 should not mention `EDA`, because that label is not important for the talk. It should visually communicate that many preparation, geometry, temperature, stress, and strain parameters are being compared.
-- The cost comparison should make the approximate order-of-magnitude contrast obvious: `300â‚¬` versus `30000â‚¬`. The speaker can say "approximately" out loud.
+- The cost comparison should make the approximate order-of-magnitude contrast obvious: `300€` versus `30000€`. The speaker can say "approximately" out loud.
 
 ### Slide 1 - TMA for Microwire Screening
 
@@ -159,7 +159,7 @@ Current visual:
 
 Important hardware points:
 
-- Smallest motor step: about `10 Âµm`.
+- Smallest motor step: about `10 µm`.
 - Scale precision: `0.05 g` for this presentation framing.
 - Scale latency: about `200 ms`.
 - Power supply provides current heating.
@@ -230,7 +230,7 @@ Talk out loud:
 Current visual:
 
 - TMA graph and commercial DMA graph side by side.
-- Large price contrast underneath: `300â‚¬` and `30000â‚¬`.
+- Large price contrast underneath: `300€` and `30000€`.
 
 Talk out loud:
 

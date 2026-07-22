@@ -5,16 +5,21 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import csv
 import dataclasses
+import gc
 import importlib
 import json
 import math
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
+import uuid
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Mapping
 
 import pytest
 import pandas as pd
@@ -37,9 +42,61 @@ os.environ["MINI_DMA_QSETTINGS_INI_DIR"] = str(TEST_QSETTINGS_ROOT)
 mini_dma_mod = importlib.import_module(
     "data_logging.mini_dma_logger.mini_dma_logger"
 )
+kosice_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.kosice_import"
+)
 stiff_guard_mod = importlib.import_module(
     "data_logging.mini_dma_logger.stiff_sample_guard"
 )
+source_provenance_mod = importlib.import_module("data_logging.source_provenance")
+
+
+class _ControlledSourceProvenanceCache:
+    def __init__(self) -> None:
+        self.requests: list[tuple[Path, str]] = []
+        self.snapshots: dict[str, dict[str, object]] = {}
+        self.released: list[str] = []
+
+    def request(self, repo_root: Path, *, token: object | None = None) -> str:
+        capture_token = str(token or f"capture-{len(self.requests) + 1}")
+        self.requests.append((Path(repo_root), capture_token))
+        self.snapshots[capture_token] = source_provenance_mod.pending_source_provenance(repo_root)
+        return capture_token
+
+    def snapshot(self, token: object | None) -> dict[str, object] | None:
+        snapshot = self.snapshots.get(str(token)) if token is not None else None
+        return None if snapshot is None else dict(snapshot)
+
+    def release(self, token: object | None) -> None:
+        if token is None:
+            return
+        capture_token = str(token)
+        self.released.append(capture_token)
+        self.snapshots.pop(capture_token, None)
+
+    def complete(
+        self,
+        token: object,
+        *,
+        branch: str = "codex/test-branch",
+        commit: str = "abc123",
+        dirty: bool = True,
+    ) -> dict[str, object]:
+        snapshot = self.snapshots[str(token)]
+        snapshot.update(
+            branch=branch,
+            commit=commit,
+            is_dirty=dirty,
+            status_short="M changed.py" if dirty else "",
+            remote_url="https://example.test/repo.git",
+            capture_state="complete",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            dirty_state="dirty" if dirty else "clean",
+            head_state="attached",
+            remote_state="configured",
+            capture_error=None,
+        )
+        return dict(snapshot)
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +107,12 @@ def _block_real_tic_usb_backend(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("real Tic USB access is disabled in tests")
 
     monkeypatch.setattr(mini_dma_mod, "_load_pyusb_backend", _blocked_backend)
+
+
+@pytest.fixture(autouse=True)
+def _block_real_serial_port_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must not enumerate or claim the machine's serial devices."""
+    monkeypatch.setattr(mini_dma_mod, "list_ports", SimpleNamespace(comports=lambda: []))
 
 
 def _test_settings() -> QtCore.QSettings:
@@ -142,7 +205,11 @@ def test_automation_control_loop_pause_resume_and_stop() -> None:
         loop.stop()
 
 
-def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_events(tmp_path: Path, qtbot) -> None:
+def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
     window = _build_window(tmp_path, qtbot)
     main_thread_id = threading.get_ident()
     tick_thread_ids: list[int] = []
@@ -154,6 +221,7 @@ def test_main_window_automation_control_loop_ticks_off_ui_thread_without_qt_even
 
     try:
         window._run_automation_control_tick = fake_tick  # type: ignore[method-assign]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
         window._start_automation_control_loop(20)
         deadline = time.monotonic() + 0.5
         while len(tick_thread_ids) < 3 and time.monotonic() < deadline:
@@ -346,6 +414,9 @@ def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path,
         window.check_max_load.setChecked(True)
         window.spin_max_load_g.setValue(30.0)
         window.spin_raw_scale_limit_g.setValue(45.0)
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
 
         window._start_auto_ramp()
         assert window._active_control_config is not None
@@ -370,6 +441,10 @@ def test_recipe_start_freezes_control_config_before_worker_ticks(tmp_path: Path,
         assert config.current_sweep_hold_noise_sigma == pytest.approx(4.0)
         assert config.max_load_g == pytest.approx(30.0)
         assert config.raw_scale_limit_g == pytest.approx(45.0)
+        assert config.scale_baudrate == 256000
+        assert config.scale_request_command == mini_dma_mod.KERN_KCP_SCALE_REQUEST
+        assert config.scale_terminator == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
+        assert config.scale_readability_g == pytest.approx(0.01)
         assert window._raw_scale_display_limit_g() == pytest.approx(45.0)
         assert window._motor_step_mm() == pytest.approx(1.0 / 800.0)
         assert window._setup_motion_speed_cap_mm_s() == pytest.approx(0.75)
@@ -386,6 +461,7 @@ def _build_window(
     qtbot,
     *,
     preserve_settings: bool = False,
+    enable_first_overheating_preflight: bool = False,
 ) -> mini_dma_mod.MainWindow:
     _ensure_app()
     snapshot = _snapshot_settings() if preserve_settings else {}
@@ -399,6 +475,8 @@ def _build_window(
     window.check_zero_position_on_start.setChecked(False)
     window.check_tare_on_start.setChecked(False)
     window.spin_zero_load_scale_g.setValue(0.0)
+    if not enable_first_overheating_preflight:
+        window._has_previous_tma_measurement = lambda _identity: True  # type: ignore[method-assign]
     return window
 
 
@@ -408,6 +486,1353 @@ def _close_test_window(window: mini_dma_mod.MainWindow) -> None:
     _ensure_app().processEvents()
     if isinstance(snapshot, dict):
         _restore_settings(snapshot)
+
+
+def _guard_widget_access_to_gui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    window: mini_dma_mod.MainWindow,
+) -> None:
+    gui_thread = window.thread()
+    guarded_methods = (
+        (QtWidgets.QDoubleSpinBox, "value"),
+        (QtWidgets.QSpinBox, "value"),
+        (QtWidgets.QCheckBox, "isChecked"),
+        (QtWidgets.QComboBox, "currentData"),
+        (QtWidgets.QComboBox, "currentText"),
+        (QtWidgets.QLineEdit, "text"),
+        (QtWidgets.QTextEdit, "toPlainText"),
+        (QtWidgets.QPlainTextEdit, "toPlainText"),
+        (QtWidgets.QDoubleSpinBox, "setValue"),
+        (QtWidgets.QSpinBox, "setValue"),
+        (QtWidgets.QCheckBox, "setChecked"),
+        (QtWidgets.QComboBox, "setCurrentIndex"),
+        (QtWidgets.QLineEdit, "setText"),
+        (QtWidgets.QTextEdit, "setPlainText"),
+        (QtWidgets.QPlainTextEdit, "setPlainText"),
+        (QtWidgets.QWidget, "isHidden"),
+        (QtWidgets.QWidget, "isVisible"),
+        (QtWidgets.QWidget, "isEnabled"),
+        (QtWidgets.QWidget, "property"),
+        (QtWidgets.QWidget, "setEnabled"),
+        (QtWidgets.QWidget, "setVisible"),
+        (QtWidgets.QWidget, "setHidden"),
+        (QtWidgets.QWidget, "setProperty"),
+        (QtCore.QObject, "thread"),
+        (QtCore.QTimer, "start"),
+        (QtCore.QTimer, "stop"),
+        (QtCore.QTimer, "setInterval"),
+        (QtCore.QTimer, "isActive"),
+    )
+    for widget_type, method_name in guarded_methods:
+        original = getattr(widget_type, method_name)
+
+        def _guarded(widget, *args, _original=original, _method_name=method_name, **kwargs):
+            assert QtCore.QThread.currentThread() is gui_thread, (
+                f"{type(widget).__name__}.{_method_name} was called outside the GUI thread"
+            )
+            return _original(widget, *args, **kwargs)
+
+        monkeypatch.setattr(widget_type, method_name, _guarded)
+
+
+def _install_recording_tic_controller(
+    monkeypatch: pytest.MonkeyPatch,
+    created: list[tuple[str, str, bool, int]],
+) -> None:
+    class _RecordingTicController:
+        def __init__(
+            self,
+            command_path: str,
+            device_serial: str,
+            *,
+            prefer_native_usb: bool = False,
+            allow_ticcmd_fallback: bool = True,
+            transport_logger: object | None = None,
+        ) -> None:
+            created.append(
+                (
+                    command_path,
+                    device_serial,
+                    bool(prefer_native_usb),
+                    threading.get_ident(),
+                )
+            )
+
+        def halt_and_hold(self) -> None:
+            return None
+
+    monkeypatch.setattr(mini_dma_mod, "TicController", _RecordingTicController)
+
+
+def _wait_for_serial_port_scan(window: mini_dma_mod.MainWindow, qtbot) -> None:
+    qtbot.waitUntil(lambda: window._serial_port_scan_task is None, timeout=3000)
+
+
+@pytest.mark.parametrize("section_key", ["mini_dma", "tma"])
+def test_first_overheating_history_finds_exact_pydpj_tma_match(section_key: str) -> None:
+    identity = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12_2", "segment A")
+    payload = {
+        "sections": {
+            section_key: {
+                "rows": [
+                    {
+                        "Composition": " ni50-fe27 ga23 ",
+                        "Microwire": "12/2",
+                        "Specimen": "Segment-A",
+                        "TMA": ["run01"],
+                    }
+                ]
+            }
+        }
+    }
+
+    assert mini_dma_mod._project_has_previous_tma_measurement(payload, identity) is True
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/3", "segment A"),
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("current_specimen", "previous_specimen", "expected"),
+    [
+        ("", "", True),
+        ("segment A", "segment-a", True),
+        ("", "segment A", False),
+        ("segment A", "", False),
+        ("segment A", "segment B", False),
+    ],
+)
+def test_first_overheating_history_requires_exact_specimen_presence(
+    current_specimen: str,
+    previous_specimen: str,
+    expected: bool,
+) -> None:
+    current = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2", current_specimen)
+    previous = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12_2", previous_specimen)
+
+    assert mini_dma_mod._tma_identities_match(current, previous) is expected
+
+
+def test_first_overheating_history_accepts_actual_builder_tma_row_without_guessing_specimen(
+    tmp_path: Path,
+) -> None:
+    builder_core = importlib.import_module("microwire_data_builder.core")
+    builder_ui = importlib.import_module("microwire_data_builder.ui")
+    record = builder_core.MiniDmaRecord(
+        path=tmp_path / "Ni50Fe27Ga23 12_2 tma_run01",
+        sample="Ni50Fe27Ga23 12_2 display segment A",
+        data=pd.DataFrame({"current_mA": [20.0]}),
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label="tma_run01",
+    )
+    row = builder_ui._mini_dma_records_to_frame([record]).iloc[0].to_dict()
+    payload = {"sections": {"mini_dma": {"rows": [row]}}}
+
+    assert set(("_sample", "Composition", "Microwire", "TMA graphs", "_sources")) <= set(row)
+    assert "Specimen" not in row
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is True
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        payload,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2", "segment A"),
+    ) is False
+
+
+def test_first_overheating_history_accepts_finalized_fault_run_and_rejects_active_run(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "wire_run01"
+    run_dir.mkdir()
+    (run_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "point_count": 3,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "stop": {"reason": "wire_break_or_contact_loss", "category": "fault"},
+                "name_fields": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/2",
+                    "specimen": "segment A",
+                    "condition": "interrupted",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    active_run = tmp_path / "wire_active_run"
+    active_run.mkdir()
+    (active_run / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "running",
+                "point_count": 1,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "name_fields": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/2",
+                    "specimen": "segment A",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    setup_only = tmp_path / "wire_setup_only"
+    setup_only.mkdir()
+    (setup_only / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_state": "finished",
+                "point_count": 0,
+                "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                "name_fields": {
+                    "composition": "Ni50Fe27Ga23",
+                    "microwire": "12/3",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    records = mini_dma_mod._scan_tma_history_metadata(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].identity == mini_dma_mod.TmaSampleIdentity(
+        "Ni50Fe27Ga23", "12/2", "segment A"
+    )
+    assert "wire_run01" in records[0].source
+
+
+def test_tma_history_metadata_scan_cancels_between_files(tmp_path: Path) -> None:
+    for index in range(3):
+        run_dir = tmp_path / f"wire_run{index + 1:02d}"
+        run_dir.mkdir()
+        (run_dir / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "session_state": "finished",
+                    "point_count": 3,
+                    "recipe_mode": mini_dma_mod.CURRENT_SWEEP_STRESS,
+                    "name_fields": {
+                        "composition": "Ni50Fe27Ga23",
+                        "microwire": f"12/{index + 1}",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    cancellation_checks = 0
+
+    def _cancel_after_first_file() -> bool:
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return cancellation_checks >= 3
+
+    records = mini_dma_mod._scan_tma_history_metadata(
+        tmp_path,
+        cancelled=_cancel_after_first_file,
+    )
+
+    assert len(records) == 1
+    assert cancellation_checks == 3
+
+
+def test_tma_history_daemon_task_does_not_retain_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def _blocked_scan(
+        _root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scan_started.set()
+        release_scan.wait(timeout=5.0)
+        return ()
+
+    monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _blocked_scan)
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    task = mini_dma_mod.TmaHistoryScanTask(tmp_path)
+    owner.scan_task = task
+    owner_ref = weakref.ref(owner)
+    task.start()
+    assert scan_started.wait(timeout=2.0)
+
+    del owner
+    gc.collect()
+
+    assert owner_ref() is None
+    assert task.thread.daemon is True
+    assert getattr(task.thread, "_target", None).__self__ is task
+
+    task.cancel()
+    release_scan.set()
+    task.thread.join(timeout=3.0)
+    assert task.done_event.is_set()
+
+
+def test_tma_history_blocked_daemon_task_does_not_block_process_exit() -> None:
+    code = """
+import threading
+from pathlib import Path
+from data_logging.mini_dma_logger import mini_dma_logger as module
+
+blocked = threading.Event()
+
+def blocked_scan(_root, *, cancelled=None):
+    blocked.wait()
+    return ()
+
+module._scan_tma_history_metadata = blocked_scan
+task = module.TmaHistoryScanTask(Path("synthetic-output"))
+task.start()
+assert task.thread.daemon
+print("daemon-started", flush=True)
+"""
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env.setdefault("MPLBACKEND", "Agg")
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "daemon-started" in result.stdout
+
+
+def test_tma_history_scan_keeps_only_latest_pending_root(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
+    first_root = tmp_path / "first"
+    latest_root = tmp_path / "latest"
+    first_root.mkdir()
+    latest_root.mkdir()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    scanned_roots: list[Path] = []
+    latest_record = mini_dma_mod.TmaHistoryRecord(
+        identity=mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+        source="latest synthetic metadata",
+    )
+
+    def _scan(
+        root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scanned_roots.append(root)
+        if root == first_root:
+            first_started.set()
+            release_first.wait(timeout=5.0)
+            return ()
+        return (latest_record,)
+
+    monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _scan)
+    try:
+        window._tma_history_scan_pending_root = first_root
+        window._start_pending_tma_history_scan()
+        first_task = window._tma_history_scan_task
+        assert first_task is not None
+        window._tma_history_scan_poll_timer.stop()
+        assert first_started.wait(timeout=2.0)
+
+        with QtCore.QSignalBlocker(window.edit_log_dir):
+            window.edit_log_dir.setText(str(latest_root))
+        window._tma_history_scan_pending_root = latest_root
+        window._start_pending_tma_history_scan()
+
+        assert first_task.cancel_event.is_set()
+        assert window._tma_history_scan_pending_root == latest_root
+        release_first.set()
+        qtbot.waitUntil(first_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+        window._tma_history_scan_poll_timer.stop()
+
+        latest_task = window._tma_history_scan_task
+        assert latest_task is not None
+        assert latest_task.root == latest_root
+        qtbot.waitUntil(latest_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+
+        assert scanned_roots == [first_root, latest_root]
+        assert window._tma_history_root == latest_root
+        assert window._tma_history_records == (latest_record,)
+    finally:
+        release_first.set()
+        _close_test_window(window)
+
+
+def test_tma_history_blocked_scan_close_is_nonblocking_and_qthread_free(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
+    if window._tma_history_scan_task is not None:
+        qtbot.waitUntil(window._tma_history_scan_task.done_event.is_set, timeout=3000)
+        window._poll_tma_history_scan_task()
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    qt_messages: list[str] = []
+
+    def _blocked_scan(
+        _root: Path,
+        *,
+        cancelled=None,
+    ) -> tuple[mini_dma_mod.TmaHistoryRecord, ...]:
+        scan_started.set()
+        release_scan.wait(timeout=5.0)
+        assert cancelled is not None and cancelled()
+        return ()
+
+    previous_message_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    task = None
+    try:
+        monkeypatch.setattr(mini_dma_mod, "_scan_tma_history_metadata", _blocked_scan)
+        window._tma_history_scan_pending_root = tmp_path
+        window._start_pending_tma_history_scan()
+        assert scan_started.wait(timeout=2.0)
+        task = window._tma_history_scan_task
+        assert task is not None
+        assert task.thread.daemon is True
+
+        close_started = time.perf_counter()
+        window.close()
+        close_elapsed_s = time.perf_counter() - close_started
+
+        assert close_elapsed_s < 0.75
+        assert task.thread.is_alive()
+        assert task.cancel_event.is_set()
+        assert window._tma_history_scan_task is None
+        assert all(value is not window for value in vars(task).values())
+        assert getattr(task.thread, "_target", None).__self__ is task
+
+        release_scan.set()
+        task.thread.join(timeout=3.0)
+        assert task.done_event.is_set()
+        assert not task.thread.is_alive()
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release_scan.set()
+        if task is not None:
+            task.cancel()
+            task.thread.join(timeout=3.0)
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_message_handler)
+        _close_test_window(window)
+
+
+def test_run_summary_generation_keeps_one_active_and_latest_pending(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    started: list[Path] = []
+    releases = [threading.Event(), threading.Event()]
+
+    def _blocked_generate(run_dir: Path) -> dict[str, Path]:
+        index = len(started)
+        started.append(Path(run_dir))
+        assert releases[index].wait(timeout=5.0)
+        return {
+            "image_path": Path(run_dir) / "summary.png",
+            "detail_image_path": Path(run_dir) / "summary_detail.png",
+        }
+
+    plot_module = importlib.import_module("data_logging.mini_dma_logger.run_core_plot")
+    monkeypatch.setattr(plot_module, "generate_core_run_plot", _blocked_generate)
+    run_dirs = [tmp_path / f"run-{index}" for index in range(6)]
+    try:
+        for run_dir in run_dirs:
+            window._start_run_summary_generation(run_dir)
+
+        qtbot.waitUntil(lambda: started == [run_dirs[0]], timeout=2000)
+        assert window._run_summary_task is not None
+        assert window._run_summary_task.request == (run_dirs[0], False)
+        assert window._run_summary_pending == (run_dirs[-1], False)
+
+        releases[0].set()
+        qtbot.waitUntil(lambda: started == [run_dirs[0], run_dirs[-1]], timeout=3000)
+        assert window._run_summary_task is not None
+        assert window._run_summary_task.request == (run_dirs[-1], False)
+        assert window._run_summary_pending is None
+
+        releases[1].set()
+        qtbot.waitUntil(lambda: window._run_summary_task is None, timeout=3000)
+        assert started == [run_dirs[0], run_dirs[-1]]
+    finally:
+        for release in releases:
+            release.set()
+        _close_test_window(window)
+
+
+def test_run_summary_poll_timer_is_gui_affine_and_rejects_stale_or_closed_tasks(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = [threading.Event(), threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event(), threading.Event()]
+    generated: list[Path] = []
+    finish_threads: list[object] = []
+    finish_calls: list[tuple[Path, bool]] = []
+
+    def _blocked_generate(run_dir: Path) -> dict[str, Path]:
+        index = len(generated)
+        generated.append(Path(run_dir))
+        started[index].set()
+        assert releases[index].wait(timeout=5.0)
+        return {
+            "image_path": Path(run_dir) / "summary.png",
+            "detail_image_path": Path(run_dir) / "summary_detail.png",
+        }
+
+    plot_module = importlib.import_module("data_logging.mini_dma_logger.run_core_plot")
+    monkeypatch.setattr(plot_module, "generate_core_run_plot", _blocked_generate)
+    window = _build_window(tmp_path, qtbot)
+    original_finish = window._finish_run_summary_generation
+
+    def _record_finish(request, summary, error) -> None:
+        finish_threads.append(QtCore.QThread.currentThread())
+        finish_calls.append(request)
+        original_finish(request, summary, error)
+
+    window._finish_run_summary_generation = _record_finish  # type: ignore[method-assign]
+    gui_thread = window.thread()
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+    closed_task = None
+    try:
+        first = (tmp_path / "summary-current", False)
+        window._start_run_summary_generation(first[0])
+        assert started[0].wait(timeout=2.0)
+        releases[0].set()
+        qtbot.waitUntil(lambda: window._run_summary_task is None, timeout=3000)
+        assert finish_calls == [first]
+        assert finish_threads == [gui_thread]
+
+        stale = (tmp_path / "summary-stale", False)
+        window._start_run_summary_generation(stale[0])
+        assert started[1].wait(timeout=2.0)
+        stale_task = window._run_summary_task
+        assert stale_task is not None
+        window._run_summary_task = None
+        window._run_summary_poll_timer.stop()
+        releases[1].set()
+        assert stale_task.done_event.wait(timeout=3.0)
+        _ensure_app().processEvents()
+        assert finish_calls == [first]
+
+        window._run_summary_pending = None
+        window._start_run_summary_generation(tmp_path / "summary-close")
+        assert started[2].wait(timeout=2.0)
+        closed_task = window._run_summary_task
+        assert closed_task is not None
+        close_started = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - close_started < 0.75
+        assert closed_task.thread.is_alive()
+        assert getattr(closed_task.thread, "_target", None).__self__ is closed_task
+        assert all(value is not window for value in vars(closed_task).values())
+
+        releases[2].set()
+        assert closed_task.done_event.wait(timeout=3.0)
+        _ensure_app().processEvents()
+        assert finish_calls == [first]
+    finally:
+        for release in releases:
+            release.set()
+        if closed_task is not None:
+            closed_task.thread.join(timeout=3.0)
+        _close_test_window(window)
+
+
+def test_first_overheating_history_does_not_count_annealing_only_project() -> None:
+    identity = mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2")
+    payload = {
+        "sections": {
+            "current_annealing": {
+                "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]
+            },
+            "fabrication": {
+                "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]
+            },
+        }
+    }
+
+    assert mini_dma_mod._project_has_previous_tma_measurement(payload, identity) is False
+
+
+def test_first_overheating_history_rejects_ambiguous_or_malformed_tma_evidence() -> None:
+    ambiguous = {
+        "sections": {
+            "mini_dma": {
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Specimen": "segment A",
+                        "TMA graphs": ["run01"],
+                    },
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "12/2",
+                        "Specimen": "segment B",
+                        "TMA graphs": ["run02"],
+                    },
+                ]
+            }
+        }
+    }
+
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        ambiguous,
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is False
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        {"sections": {"mini_dma": {"rows": "unreadable"}}},
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is False
+    assert mini_dma_mod._project_has_previous_tma_measurement(
+        {
+            "sections": {
+                "mini_dma": {
+                    "rows": [{"Composition": "Ni50Fe27Ga23", "Microwire": "12/2"}]
+                }
+            }
+        },
+        mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12/2"),
+    ) is False
+
+
+def test_first_overheating_history_uses_loaded_pydpj_cache_without_ui_thread_read(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    project_path = tmp_path / "synthetic.pydpj"
+    cache_entry = mini_dma_mod.BuilderProjectCacheEntry(
+        payload={
+            "sections": {
+                "mini_dma": {
+                    "rows": [
+                        {
+                            "Composition": "Ni50Fe27Ga23",
+                            "Microwire": "12/2",
+                            "Specimen": "segment A",
+                            "_sources": ["synthetic/run01/measurement.csv"],
+                        }
+                    ]
+                }
+            }
+        },
+        suggestions={},
+    )
+    try:
+        window.edit_project_path.setText(str(project_path))
+        mini_dma_mod._BUILDER_PROJECT_CACHE_BY_REQUEST_PATH[str(project_path)] = cache_entry
+        monkeypatch.setattr(
+            mini_dma_mod,
+            "_read_builder_project_cache_entry",
+            lambda _path: pytest.fail("history lookup read the project on the UI thread"),
+        )
+
+        assert window._has_previous_tma_measurement(
+            mini_dma_mod.TmaSampleIdentity("Ni50Fe27Ga23", "12_2", "segment-a")
+        ) is True
+    finally:
+        mini_dma_mod._BUILDER_PROJECT_CACHE_BY_REQUEST_PATH.pop(str(project_path), None)
+        _close_test_window(window)
+
+
+def _prepare_first_overheating_preflight_window(
+    tmp_path: Path,
+    qtbot,
+) -> mini_dma_mod.MainWindow:
+    window = _build_window(
+        tmp_path,
+        qtbot,
+        enable_first_overheating_preflight=True,
+    )
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert mode_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    window.edit_name_composition.setText("Ni50Fe27Ga23")
+    window.edit_name_wire.setText("12/2")
+    window.edit_name_specimen.setText("segment A")
+    window.check_current_sweep_first_overheating.setChecked(False)
+    window._tma_history_root = window._current_tma_history_root()
+    window._tma_history_records = ()
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic current sweep",
+        100,
+    )
+    return window
+
+
+def test_first_overheating_preflight_configure_returns_idle_before_hardware(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    side_effects: list[str] = []
+    try:
+        window.show()
+        qtbot.waitExposed(window)
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: mini_dma_mod.FIRST_OVERHEATING_CONFIGURE
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("hardware_preflight") or True
+        )
+        window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("continuity_current") or True
+        )
+        window._start_session = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("session_start")
+        )
+
+        window._start_auto_ramp()
+        qtbot.wait(1)
+
+        assert side_effects == []
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert window.check_current_sweep_first_overheating.isChecked() is True
+        assert window.row_current_sweep_first_overheating_target.isHidden() is False
+        assert window.control_tabs.currentWidget() is window.experiment_tab
+        assert window.spin_current_sweep_first_overheating_target_mpa.hasFocus() is True
+    finally:
+        _close_test_window(window)
+
+
+def test_first_overheating_preflight_cancel_keeps_settings_and_avoids_hardware(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    side_effects: list[str] = []
+    original_target = window.spin_current_sweep_first_overheating_target_mpa.value()
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: mini_dma_mod.FIRST_OVERHEATING_CANCEL
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("hardware_preflight") or True
+        )
+        window._start_session = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: side_effects.append("session_start")
+        )
+
+        window._start_auto_ramp()
+
+        assert side_effects == []
+        assert window._automation_active is False
+        assert window._session_active is False
+        assert window.check_current_sweep_first_overheating.isChecked() is False
+        assert window.spin_current_sweep_first_overheating_target_mpa.value() == pytest.approx(
+            original_target
+        )
+        assert window._first_overheating_preflight_decision is None
+    finally:
+        _close_test_window(window)
+
+
+def test_first_overheating_preflight_continue_is_logged_and_recorded(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    events: list[str] = []
+    traces: list[dict[str, object]] = []
+    metadata_writes: list[dict[str, object] | None] = []
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: mini_dma_mod.FIRST_OVERHEATING_CONTINUE
+        )
+        window._preflight_recipe_hardware = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: events.append("hardware_preflight") or True
+        )
+        window._prepare_continuity_current_for_recipe = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: events.append("continuity_current") or True
+        )
+
+        def _fake_start_session(*_args: object, **_kwargs: object) -> None:
+            events.append("session_start")
+            window._session_active = True
+
+        window._start_session = _fake_start_session  # type: ignore[method-assign]
+        window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+        window._write_control_trace = lambda **kwargs: traces.append(kwargs)  # type: ignore[method-assign]
+        window._write_session_metadata = lambda **_kwargs: metadata_writes.append(  # type: ignore[method-assign]
+            window._first_overheating_preflight_decision
+        )
+
+        window._start_auto_ramp()
+
+        assert events == ["hardware_preflight", "continuity_current", "session_start"]
+        assert window._automation_active is True
+        assert window.check_current_sweep_first_overheating.isChecked() is False
+        decision = window._first_overheating_preflight_decision
+        assert decision is not None
+        assert decision["decision"] == "operator_explicitly_skipped_first_overheating"
+        assert decision["reason"] == "no_previous_tma_measurement_found"
+        assert metadata_writes[-1] == decision
+        assert traces == [
+            {
+                "decision": "first_overheating_preflight",
+                "result": "continue_without_it",
+                "reason": "operator_explicitly_skipped_no_previous_tma_measurement_found",
+                "task_text": "First overheating explicitly skipped",
+            }
+        ]
+        window._flush_pending_run_log_lines()
+        assert "operator explicitly skipped first overheating" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        window._session_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_preflight_skips_prompt_when_enabled_or_history_exists(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _prepare_first_overheating_preflight_window(tmp_path, qtbot)
+    prompts: list[str] = []
+    try:
+        window._ask_first_overheating_preflight_action = (  # type: ignore[method-assign]
+            lambda: prompts.append("prompt") or mini_dma_mod.FIRST_OVERHEATING_CANCEL
+        )
+        window.check_current_sweep_first_overheating.setChecked(True)
+        assert window._first_overheating_preflight_allows_start() is True
+        assert prompts == []
+
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window._tma_history_records = (
+            mini_dma_mod.TmaHistoryRecord(
+                identity=mini_dma_mod.TmaSampleIdentity(
+                    "Ni50Fe27Ga23", "12_2", "segment-a"
+                ),
+                source="synthetic metadata",
+            ),
+        )
+        assert window._first_overheating_preflight_allows_start() is True
+        assert prompts == []
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_bands_are_bounded_processed_signal_multipliers() -> None:
+    assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_NOISE_CAP_TOLERANCE_FACTOR == pytest.approx(3.0)
+    assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ENTRY_TOLERANCE_FACTOR == pytest.approx(3.0)
+    assert mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_LARGE_ERROR_FACTOR == pytest.approx(4.0)
+
+
+def test_kern_scale_quantization_sets_worsening_evidence_floor(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window.spin_diameter.setValue(0.0182)
+
+        one_count_mpa = window._scale_quantization_band_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        floor = window._current_sweep_worsening_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            tolerance=0.171,
+            filtered_signal=None,
+        )
+
+        assert one_count_mpa == pytest.approx(0.3769537067)
+        assert one_count_mpa < floor
+        assert one_count_mpa * 2.0 > floor
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_scale_uses_conservative_fast_feedback_hold_caps(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert window._current_sweep_hold_base_command_strain_pct() == pytest.approx(0.24)
+        assert window._current_sweep_hold_adaptive_max_command_strain_pct() == pytest.approx(0.35)
+
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+
+        assert window._current_sweep_hold_base_command_strain_pct() == pytest.approx(0.08)
+        assert window._current_sweep_hold_adaptive_max_command_strain_pct() == pytest.approx(0.10)
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_hold_earned_resume_band_is_capped_by_noise_independent_pause_band(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        step = mini_dma_mod.AutomationStep(
+            "current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+
+        band = window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=4.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=signal,
+        )
+
+        expected_cap = window._current_sweep_hold_noise_independent_pause_band(
+            step,
+            window._automation_tolerance_for_step(step),
+        ) * mini_dma_mod.KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_MAX_PAUSE_FRACTION
+        assert band == pytest.approx(expected_cap)
+        assert band < 20.0 * mini_dma_mod.KERN_CURRENT_SWEEP_HOLD_EARNED_RESUME_ENTRY_FRACTION
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_hold_earned_resume_requires_improvement_and_non_away_slope(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        step = mini_dma_mod.AutomationStep(
+            "current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+        improving_signal = mini_dma_mod.ScaleControlSignal(
+            value=58.0,
+            latest_value=58.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+        away_signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+
+        not_improved_enough = window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=8.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=improving_signal,
+        )
+        moving_away = window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=4.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=away_signal,
+        )
+
+        assert not_improved_enough == pytest.approx(1.0)
+        assert moving_away == pytest.approx(1.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_scale_ignores_kern_earned_resume_band(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText("P")
+        window.edit_scale_terminator.setText("\\r\\n")
+        step = mini_dma_mod.AutomationStep(
+            "current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=12.0,
+        )
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+
+        assert window._current_sweep_hold_earned_resume_band(
+            step,
+            signed_error=4.0,
+            resume_band=1.0,
+            pause_band=8.0,
+            filtered_signal=signal,
+        ) == pytest.approx(1.0)
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_held_recovery_uses_earned_resume_band_before_exact_seek(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_started_s = 90.0
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+        window._current_sweep_ramp_hold_entry_pause_band = 8.0
+        window._current_sweep_ramp_hold_in_band_since_s = 100.0
+        monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 101.0)
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=51.2,
+            latest_value=51.2,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=101.0,
+        )
+        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (1.2, 1.2, 0.2, 0.2)
+        )
+        window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+        window._seek_distribution_target = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("exact seek should not run"))
+        )
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        assert window._handle_current_sweep_held_recovery(
+            step,
+            plateau_index=1,
+            tolerance=1.0,
+        ) is False
+
+        assert resumed
+        assert "adaptive resume band" in resumed[-1]
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_earned_resume_band_ignores_noise_inflated_pause_band(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_started_s = 90.0
+        window._current_sweep_ramp_hold_entry_abs_error = 200.0
+        window._current_sweep_ramp_hold_entry_pause_band = 80.0
+        window._current_sweep_ramp_hold_in_band_since_s = 100.0
+        monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 101.0)
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=60.0,
+            latest_value=60.0,
+            noise=30.0,
+            slope_per_s=0.0,
+            sample_count=6,
+            timestamp_s=101.0,
+        )
+        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (10.0, 10.0, 1.0, 30.0)
+        )
+        window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+        window._seek_distribution_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        assert window._handle_current_sweep_held_recovery(
+            step,
+            plateau_index=1,
+            tolerance=1.0,
+        ) is False
+
+        assert not resumed
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_held_recovery_preserves_base_resume_confirmation(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_started_s = 90.0
+        window._current_sweep_ramp_hold_entry_abs_error = None
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            current_start_mA=1.0,
+            current_end_mA=60.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=50.8,
+            latest_value=50.8,
+            noise=0.05,
+            slope_per_s=0.0,
+            sample_count=8,
+            timestamp_s=100.0,
+        )
+        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (0.8, 0.8, 0.25, 0.05)
+        )
+        window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        assert window._update_current_sweep_ramp_hold(step, 1, now_s=100.0) == (True, False)
+        assert window._current_sweep_ramp_hold_in_band_since_s == pytest.approx(100.0)
+
+        assert window._maybe_resume_current_sweep_held_recovery_from_adaptive_band(
+            step,
+            now_s=100.0,
+        ) is False
+        assert window._current_sweep_ramp_hold_in_band_since_s == pytest.approx(100.0)
+
+        assert window._update_current_sweep_ramp_hold(step, 1, now_s=100.6) == (False, False)
+
+        assert resumed
+        assert "resume band" in resumed[-1]
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_held_recovery_ignores_kern_earned_resume_shortcut(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumed: list[str] = []
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText("P")
+        window.edit_scale_terminator.setText("\\r\\n")
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._current_sweep_ramp_hold_step_index = 1
+        window._current_sweep_ramp_hold_started_s = 90.0
+        window._current_sweep_ramp_hold_entry_abs_error = 20.0
+        window._current_sweep_ramp_hold_entry_pause_band = 8.0
+        window._current_sweep_ramp_hold_in_band_since_s = 100.0
+        step = mini_dma_mod.AutomationStep(
+            "sweep_current",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            current_hold_enabled=True,
+            current_hold_resume_stable_s=0.5,
+        )
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=54.0,
+            latest_value=54.0,
+            noise=0.2,
+            slope_per_s=-2.0,
+            sample_count=6,
+            timestamp_s=101.0,
+        )
+        window._current_sweep_target_error_and_tolerance = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: (4.0, 4.0, 1.0, 0.2)
+        )
+        window._scale_control_signal_for_basis = lambda *_args, **_kwargs: signal  # type: ignore[method-assign]
+        window._current_sweep_filtered_window_spans_target = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+        window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+            lambda **kwargs: resumed.append(str(kwargs["reason"]))
+        )
+
+        assert window._maybe_resume_current_sweep_held_recovery_from_adaptive_band(
+            step,
+            now_s=101.0,
+        ) is False
+
+        assert resumed == []
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_scale_waits_for_filter_window_when_filtered_signal_lags(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("256000")
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+        window.spin_diameter.setValue(0.0182)
+        seek_key = (mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0)
+        window._seek_last_filtered_value_by_key[seek_key] = 50.0
+        window._seek_last_latest_signal_value_by_key[seek_key] = 50.0
+        window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = 10.0
+        window._latest_scale_timestamp = 10.05
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=50.05,
+            latest_value=50.7,
+            noise=0.1,
+            slope_per_s=0.0,
+            sample_count=4,
+            timestamp_s=10.05,
+        )
+
+        assert not window._filtered_signal_changed_after_last_correction(
+            seek_key,
+            signal,
+            effective_tolerance=1.0,
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_prague_scale_waits_for_filter_window_when_filtered_signal_lags(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.combo_scale_baud.setCurrentText("9600")
+        window.edit_scale_request.setText("P")
+        window.edit_scale_terminator.setText("\\r\\n")
+        seek_key = (mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0)
+        window._seek_last_filtered_value_by_key[seek_key] = 50.0
+        window._seek_last_latest_signal_value_by_key[seek_key] = 50.0
+        window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = 10.0
+        window._latest_scale_timestamp = 10.05
+        signal = mini_dma_mod.ScaleControlSignal(
+            value=50.05,
+            latest_value=50.5,
+            noise=0.1,
+            slope_per_s=0.0,
+            sample_count=4,
+            timestamp_s=10.05,
+        )
+
+        assert not window._filtered_signal_changed_after_last_correction(
+            seek_key,
+            signal,
+            effective_tolerance=1.0,
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_load_stress_control_disables_cruise_feedback(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_phase = "current"
+        window._automation_step_note = "1"
+
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_STRESS_MPA) is False
+        assert window._seek_supports_cruise_feedback(mini_dma_mod.HSW_BASIS_LOAD_G) is False
+    finally:
+        _close_test_window(window)
 
 
 def _wait_for_tic_commands(window: mini_dma_mod.MainWindow) -> None:
@@ -1470,12 +2895,22 @@ def test_setup_zero_plateau_fallback_rejects_loaded_baseline_drift(
         _close_test_window(window)
 
 
-def test_current_sweep_target_ramp_stops_on_mechanical_load_loss_after_l0(
+def test_current_sweep_target_ramp_continues_through_near_zero_load_after_l0(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    window._move_to_position_mm = pytest.fail  # type: ignore[method-assign]
+    moves: list[float] = []
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append(target_mm)
+        window._current_position_mm = target_mm
+        effective = kwargs.get("effective_target_mm")
+        if effective is not None:
+            window._effective_position_mm = float(effective)
+        return True
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_zero_load_scale_g.setValue(0.0)
@@ -1514,11 +2949,11 @@ def test_current_sweep_target_ramp_stops_on_mechanical_load_loss_after_l0(
         )
 
         assert reached is False
-        assert window._automation_active is False
-        assert window._session_stop_reason == "mechanical_load_loss"
+        assert window._automation_active is True
+        assert window._session_stop_reason is None
+        assert moves
         log_text = window.log_output.toPlainText().lower()
-        assert "mechanical load loss detected" in log_text
-        assert "current may still be flowing" in log_text
+        assert "mechanical load loss detected" not in log_text
     finally:
         _close_test_window(window)
 
@@ -1581,7 +3016,6 @@ def test_bench_current_sweep_can_take_up_mechanical_slack_after_l0(
         assert window._automation_active is True
         assert moves
         log_text = window.log_output.toPlainText().lower()
-        assert "continuing tensile take-up" in log_text
         assert "mechanical load loss detected" not in log_text
     finally:
         _close_test_window(window)
@@ -2561,6 +3995,1221 @@ def test_scale_measurement_updates_freshness_off_ui_thread(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+@pytest.mark.parametrize("callback_kind", ["scale", "ir_sample", "ir_frame"])
+def test_sensor_disconnect_wins_for_callback_blocked_before_state_lock(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    callback_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    token = object()
+    attempting = threading.Event()
+    completed = threading.Event()
+    raw_writes: list[object] = []
+
+    initial_ir_sample = mini_dma_mod.IrTemperatureSample(
+        timestamp_s=1.0,
+        raw_text="initial",
+        sequence=1,
+        device_elapsed_ms=10,
+        read_us=20,
+        ambient_c=21.0,
+        object_c_apparent=30.0,
+        raw_ambient=100,
+        raw_object=200,
+        flags=0,
+    )
+    stale_ir_sample = dataclasses.replace(
+        initial_ir_sample,
+        timestamp_s=2.0,
+        raw_text="stale",
+        sequence=2,
+        object_c_apparent=99.0,
+    )
+    initial_frame = object()
+    stale_frame = object()
+
+    if callback_kind == "scale":
+        lock = window._scale_state_lock
+        window._scale_connection_token = token
+        monkeypatch.setattr(window, "_write_raw_scale_sample", raw_writes.append)
+
+        def _deliver() -> None:
+            attempting.set()
+            window._record_scale_measurement_from_worker(
+                token,
+                window._session_raw_scale_target,
+                17.0,
+                "stale-scale",
+                2.0,
+            )
+            completed.set()
+
+        disconnect = window._disconnect_scale
+    else:
+        lock = window._ir_state_lock
+        window._ir_connection_token = token
+        if callback_kind == "ir_sample":
+            window._latest_ir_sample = initial_ir_sample
+            window._ir_temperature_buffer.add_sample(initial_ir_sample)
+            monkeypatch.setattr(window, "_write_ir_temperature_sample", raw_writes.append)
+
+            def _deliver() -> None:
+                attempting.set()
+                window._record_ir_sample_from_worker(
+                    token,
+                    window._session_ir_temperature_target,
+                    stale_ir_sample,
+                )
+                completed.set()
+
+        else:
+            window._latest_ir_frame = initial_frame
+
+            def _deliver() -> None:
+                attempting.set()
+                window._record_ir_frame_from_worker(token, stale_frame)
+                completed.set()
+
+        disconnect = window._disconnect_ir_thermometer
+
+    delivery_thread = threading.Thread(target=_deliver)
+    try:
+        with lock:
+            delivery_thread.start()
+            assert attempting.wait(timeout=2.0)
+            disconnect(timeout_ms=0)
+            assert not completed.is_set()
+        delivery_thread.join(timeout=2.0)
+        assert not delivery_thread.is_alive()
+        assert completed.is_set()
+
+        if callback_kind == "scale":
+            assert window._latest_scale_timestamp is None
+            assert window._scale_signal_buffer.latest() is None
+        elif callback_kind == "ir_sample":
+            assert window._latest_ir_sample is initial_ir_sample
+            assert window._ir_temperature_buffer.latest() is initial_ir_sample
+        else:
+            assert window._latest_ir_frame is initial_frame
+        assert raw_writes == []
+    finally:
+        delivery_thread.join(timeout=2.0)
+        _close_test_window(window)
+
+
+def test_first_real_scale_signal_repairs_cached_zero_before_state_and_raw_log(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = threading.Event()
+
+    def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+        worker.measurement_received.emit(17.325, "17.325 g", 1000.1)
+        emitted.set()
+        worker.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: 1000.0)
+    window.edit_log_name.setText("first_real_scale_sample")
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.combo_scale_port.clear()
+    window.combo_scale_port.addItem("COM-first-real", "COM-first-real")
+    window._start_session(enable_logging=False, record_initial_point=False)
+    raw_scale_path = window._session_raw_scale_path
+    assert raw_scale_path is not None
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+    try:
+        assert window._connect_scale(show_errors=False)
+        assert emitted.wait(timeout=2.0)
+
+        latest = window._scale_signal_buffer.latest()
+        assert latest is not None
+        assert latest.raw_g == pytest.approx(17.325)
+        assert latest.applied_load_g == pytest.approx(3.875)
+        assert window._latest_scale_value_g == pytest.approx(17.325)
+        assert window._cached_zero_load_scale_g == pytest.approx(
+            mini_dma_mod.DEFAULT_ZERO_LOAD_SCALE_G
+        )
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(0.0)
+        raw_rows = list(csv.DictReader(raw_scale_path.open(encoding="utf-8", newline="")))
+        assert raw_rows == [
+            {
+                "elapsed_s": "0.100000",
+                "timestamp_utc": mini_dma_mod._utc_timestamp_from_epoch(1000.1),
+                "sample_index": "1",
+                "host_interval_ms": "",
+                "raw_load_g": "17.325000",
+                "applied_load_g": "3.875000",
+                "raw_text": "17.325 g",
+            }
+        ]
+
+        qtbot.waitUntil(
+            lambda: window.spin_zero_load_scale_g.value()
+            == pytest.approx(mini_dma_mod.DEFAULT_ZERO_LOAD_SCALE_G),
+            timeout=2000,
+        )
+        qtbot.waitUntil(lambda: window._scale_thread is None, timeout=3000)
+    finally:
+        if window._session_active:
+            window._stop_session()
+        _close_test_window(window)
+
+
+class _BlockingSensorHandle:
+    def __init__(self, *, fail_after_release: bool = False) -> None:
+        self.fail_after_release = fail_after_release
+        self.flush_entered = threading.Event()
+        self.release_flush = threading.Event()
+        self.in_flush = threading.Event()
+        self.closed_event = threading.Event()
+        self.flush_calls = 0
+        self.close_calls = 0
+        self.closed_during_flush = False
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+        if self.flush_calls != 1:
+            return
+        self.in_flush.set()
+        self.flush_entered.set()
+        self.release_flush.wait()
+        self.in_flush.clear()
+        if self.fail_after_release:
+            raise OSError("synthetic late sensor flush failure")
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.closed_during_flush = self.in_flush.is_set()
+        self.closed_event.set()
+
+
+class _RecordingSensorWriter:
+    def __init__(self, handle: _BlockingSensorHandle) -> None:
+        self.handle = handle
+        self.rows: list[dict[str, object]] = []
+        self.write_after_close = False
+
+    def writerow(self, row: Mapping[str, object]) -> None:
+        if self.handle.closed_event.is_set():
+            self.write_after_close = True
+            raise ValueError("write after close")
+        self.rows.append(dict(row))
+
+
+def _install_blocking_sensor_target(
+    window: mini_dma_mod.MainWindow,
+    sensor_kind: str,
+) -> tuple[
+    mini_dma_mod.SessionSensorCsvTarget,
+    _BlockingSensorHandle,
+    _RecordingSensorWriter,
+]:
+    handle = _BlockingSensorHandle()
+    writer = _RecordingSensorWriter(handle)
+    target = _replace_session_sensor_target(window, sensor_kind, handle, writer)
+    return target, handle, writer
+
+
+def _replace_session_sensor_target(
+    window: mini_dma_mod.MainWindow,
+    sensor_kind: str,
+    handle: object,
+    writer: object,
+) -> mini_dma_mod.SessionSensorCsvTarget:
+    target = mini_dma_mod.SessionSensorCsvTarget(
+        handle,
+        writer,
+        name="raw_scale" if sensor_kind == "scale" else "ir_temperature",
+        metadata_path=window._session_json_path,
+        session_identity=window._session_identity,
+        metadata_lock=window._session_metadata_write_lock,
+    )
+    if sensor_kind == "scale":
+        lock = window._scale_state_lock
+        target_attr = "_session_raw_scale_target"
+        handle_attr = "_session_raw_scale_handle"
+        writer_attr = "_session_raw_scale_writer"
+    else:
+        lock = window._ir_state_lock
+        target_attr = "_session_ir_temperature_target"
+        handle_attr = "_session_ir_temperature_handle"
+        writer_attr = "_session_ir_temperature_writer"
+    with lock:
+        previous_target = getattr(window, target_attr)
+        setattr(window, target_attr, target)
+        setattr(window, handle_attr, handle)
+        setattr(window, writer_attr, writer)
+    assert previous_target is not None
+    previous_target.detach_and_close()
+    assert previous_target.wait_closed(2.0)
+    return target
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_session_stop_detaches_sensor_target_during_inflight_file_io(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = threading.Event()
+    ir_sample = mini_dma_mod.IrTemperatureSample(
+        timestamp_s=1000.1,
+        raw_text="ir-first",
+        sequence=1,
+        device_elapsed_ms=10,
+        read_us=20,
+        ambient_c=21.0,
+        object_c_apparent=31.0,
+        raw_ambient=100,
+        raw_object=200,
+        flags=0,
+    )
+
+    if sensor_kind == "scale":
+        def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+            emitted.set()
+            worker.measurement_received.emit(17.0, "17.0 g", 1000.1)
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-blocked-log", "COM-blocked-log")
+    else:
+        def _run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+            emitted.set()
+            worker.sample_received.emit(ir_sample)
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _run)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-blocked-ir-log", "COM-blocked-ir-log")
+
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: 1000.0)
+    window.edit_log_name.setText(f"blocked_{sensor_kind}_log")
+    window._start_session(enable_logging=False, record_initial_point=False)
+    metadata_path = window._session_json_path
+    assert metadata_path is not None
+    if sensor_kind == "ir":
+        window._session_logging_enabled = True
+        window._session_ir_temperature_count = 9
+    target, handle, writer = _install_blocking_sensor_target(window, sensor_kind)
+
+    try:
+        if sensor_kind == "scale":
+            assert window._connect_scale(show_errors=False)
+            worker = window._scale_worker
+        else:
+            assert window._connect_ir_thermometer(show_errors=False)
+            worker = window._ir_worker
+        assert worker is not None
+        assert emitted.wait(timeout=2.0)
+        assert handle.flush_entered.wait(timeout=2.0)
+        assert len(writer.rows) == 1
+
+        started_s = time.perf_counter()
+        window._stop_session(reason="manual_session_stop")
+        elapsed_s = time.perf_counter() - started_s
+
+        assert elapsed_s < 0.6
+        assert not target.closed_event.is_set()
+        assert handle.close_calls == 0
+        sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert metadata["logging"]["sensor_sidecars"][sidecar_name] == {
+            "session_identity": target.session_identity,
+            "target_identity": target.target_identity,
+            "status": "incomplete",
+            "complete": False,
+            "accepted_rows": 1,
+            "written_rows": 0,
+            "lost_rows": 0,
+            "pending_rows": 1,
+            "reason": "close_timeout",
+        }
+        assert "close_timeout" in window.statusBar().currentMessage()
+        accepted_count = (
+            window._session_raw_scale_count
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_count
+        )
+        if sensor_kind == "scale":
+            relay = window._scale_thread_lifetime.relay
+            relay.record_scale_measurement(16.0, "late-scale", 1000.2)
+            assert window._session_raw_scale_target is None
+        else:
+            relay = window._ir_thread_lifetime.relay
+            relay.record_ir_sample(
+                dataclasses.replace(ir_sample, sequence=2, raw_text="late-ir")
+            )
+            assert window._session_ir_temperature_target is None
+        assert len(writer.rows) == 1
+        assert (
+            window._session_raw_scale_count
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_count
+        ) == accepted_count
+
+        handle.release_flush.set()
+        assert target.wait_closed(2.0)
+        assert target.failure_reason is None
+        assert handle.close_calls == 1
+        assert not handle.closed_during_flush
+        assert not writer.write_after_close
+        assert len(writer.rows) == 1
+    finally:
+        handle.release_flush.set()
+        target.wait_closed(2.0)
+        _close_test_window(window)
+
+
+def test_tma_close_is_bounded_while_sensor_file_flush_remains_blocked(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = threading.Event()
+
+    def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+        emitted.set()
+        worker.measurement_received.emit(17.0, "17.0 g", 1000.1)
+        worker.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+    monkeypatch.setattr(mini_dma_mod.time, "time", lambda: 1000.0)
+    window.edit_log_name.setText("permanently_blocked_scale_flush")
+    window.combo_scale_port.clear()
+    window.combo_scale_port.addItem("COM-permanent-log", "COM-permanent-log")
+    window._start_session(enable_logging=False, record_initial_point=False)
+    target, handle, writer = _install_blocking_sensor_target(window, "scale")
+
+    try:
+        assert window._connect_scale(show_errors=False)
+        assert emitted.wait(timeout=2.0)
+        assert handle.flush_entered.wait(timeout=2.0)
+
+        started_s = time.perf_counter()
+        window.close()
+        elapsed_s = time.perf_counter() - started_s
+
+        assert elapsed_s < 1.2
+        assert not target.closed_event.is_set()
+        assert handle.close_calls == 0
+        assert len(writer.rows) == 1
+        assert window._session_raw_scale_target is None
+    finally:
+        handle.release_flush.set()
+        assert target.wait_closed(2.0)
+        assert target.failure_reason is None
+        assert handle.close_calls == 1
+        assert not handle.closed_during_flush
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("late_result", ["success", "failure"])
+def test_timed_out_sensor_write_reconciles_only_original_session(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    late_result: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    worker_done = threading.Event()
+
+    def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+        worker.measurement_received.emit(17.0, "session-a", time.time())
+        worker_done.set()
+        worker.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+    monkeypatch.setattr(window, "_request_session_source_provenance", lambda: None)
+    window.combo_scale_port.clear()
+    window.combo_scale_port.addItem("COM-reconcile-scale", "COM-reconcile-scale")
+    window.edit_log_name.setText(f"reconcile_a_{late_result}")
+    window._start_session(enable_logging=True, record_initial_point=False)
+    session_a_identity = window._session_identity
+    metadata_a = window._session_json_path
+    run_log_a = window._session_run_log_path
+    assert session_a_identity is not None and metadata_a is not None and run_log_a is not None
+    handle = _BlockingSensorHandle(fail_after_release=late_result == "failure")
+    writer = _RecordingSensorWriter(handle)
+    target = _replace_session_sensor_target(window, "scale", handle, writer)
+
+    try:
+        assert window._connect_scale(show_errors=False)
+        assert handle.flush_entered.wait(timeout=2.0)
+        window._stop_session(reason="manual_session_stop")
+
+        pending_a = json.loads(metadata_a.read_text(encoding="utf-8"))
+        assert pending_a["logging"]["sensor_sidecars"]["raw_scale"] == {
+            "session_identity": session_a_identity,
+            "target_identity": target.target_identity,
+            "status": "incomplete",
+            "complete": False,
+            "accepted_rows": 1,
+            "written_rows": 0,
+            "lost_rows": 0,
+            "pending_rows": 1,
+            "reason": "close_timeout",
+        }
+
+        window.edit_log_name.setText(f"reconcile_b_{late_result}")
+        window._start_session(enable_logging=True, record_initial_point=False)
+        session_b_identity = window._session_identity
+        metadata_b = window._session_json_path
+        run_log_b = window._session_run_log_path
+        target_b = window._session_raw_scale_target
+        assert (
+            session_b_identity is not None
+            and session_b_identity != session_a_identity
+            and metadata_b is not None
+            and metadata_b != metadata_a
+            and run_log_b is not None
+            and target_b is not None
+        )
+        b_sidecar_before = json.loads(metadata_b.read_text(encoding="utf-8"))["logging"][
+            "sensor_sidecars"
+        ]["raw_scale"]
+        assert window._session_sensor_log_outcomes == {}
+
+        late_log_messages: list[str] = []
+        original_log = window._log
+
+        def _track_late_log(message: str) -> None:
+            late_log_messages.append(message)
+            original_log(message)
+
+        monkeypatch.setattr(window, "_log", _track_late_log)
+        handle.release_flush.set()
+        assert worker_done.wait(timeout=2.0)
+        qtbot.waitUntil(lambda: target.reconciliation_result is not None, timeout=3000)
+        qtbot.wait(50)
+
+        reconciled_a = json.loads(metadata_a.read_text(encoding="utf-8"))
+        outcome_a = reconciled_a["logging"]["sensor_sidecars"]["raw_scale"]
+        assert outcome_a["session_identity"] == session_a_identity
+        assert outcome_a["target_identity"] == target.target_identity
+        assert outcome_a["accepted_rows"] == 1
+        assert outcome_a["pending_rows"] == 0
+        if late_result == "success":
+            assert outcome_a["status"] == "complete"
+            assert outcome_a["complete"] is True
+            assert outcome_a["written_rows"] == 1
+            assert outcome_a["lost_rows"] == 0
+            assert outcome_a["reason"] is None
+        else:
+            assert outcome_a["status"] == "incomplete"
+            assert outcome_a["complete"] is False
+            assert outcome_a["written_rows"] == 0
+            assert outcome_a["lost_rows"] == 1
+            assert outcome_a["reason"].startswith("flush_failed:")
+
+        current_b = json.loads(metadata_b.read_text(encoding="utf-8"))
+        assert current_b["session_identity"] == session_b_identity
+        assert current_b["logging"]["sensor_sidecars"]["raw_scale"] == b_sidecar_before
+        assert window._session_sensor_log_outcomes == {}
+        assert target_b.outcome()["accepted_rows"] == 0
+        assert not any(
+            "Earlier session" in message
+            or "flush_failed" in message
+            or "close_timeout" in message
+            for message in late_log_messages
+        )
+        if run_log_b.exists():
+            run_log_b_text = run_log_b.read_text(encoding="utf-8")
+            assert "Earlier session" not in run_log_b_text
+            assert "synthetic late sensor flush failure" not in run_log_b_text
+        assert target.reconciliation_attempts == 1
+        assert target.request_reconciliation() is False
+    finally:
+        handle.release_flush.set()
+        if window._session_active:
+            window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("broken_metadata", ["missing", "malformed"])
+def test_sensor_reconciliation_is_once_and_never_recreates_invalid_metadata(
+    tmp_path: Path,
+    broken_metadata: str,
+) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    session_identity = uuid.uuid4().hex
+    handle = _BlockingSensorHandle()
+    writer = _RecordingSensorWriter(handle)
+    target = mini_dma_mod.SessionSensorCsvTarget(
+        handle,
+        writer,
+        name="raw_scale",
+        metadata_path=metadata_path,
+        session_identity=session_identity,
+    )
+    write = target.reserve({"row": 1}, flush=True)
+    assert write is not None
+    write_thread = threading.Thread(target=write.perform, daemon=True)
+    write_thread.start()
+    assert handle.flush_entered.wait(timeout=2.0)
+    target.detach_and_close()
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "session_identity": session_identity,
+                "logging": {
+                    "sensor_sidecars": {
+                        "raw_scale": target.outcome(close_timed_out=True),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert target.request_reconciliation()
+    assert target.request_reconciliation() is False
+    if broken_metadata == "missing":
+        metadata_path.unlink()
+    else:
+        metadata_path.write_text("{malformed", encoding="utf-8")
+
+    handle.release_flush.set()
+    assert target.wait_closed(2.0)
+    deadline = time.monotonic() + 2.0
+    while target.reconciliation_result is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    write_thread.join(timeout=2.0)
+
+    assert target.reconciliation_attempts == 1
+    assert target.reconciliation_result is not None
+    assert target.reconciliation_result.startswith("reconcile_failed:")
+    if broken_metadata == "missing":
+        assert not metadata_path.exists()
+    else:
+        assert metadata_path.read_text(encoding="utf-8") == "{malformed"
+
+
+class _FailingSensorHandle:
+    def __init__(self, *, fail_first_flush: bool) -> None:
+        self.fail_first_flush = fail_first_flush
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+        if self.fail_first_flush and self.flush_calls == 1:
+            raise OSError("synthetic sensor flush failure")
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _FailingSensorWriter:
+    def __init__(self, *, fail_first_write: bool) -> None:
+        self.fail_first_write = fail_first_write
+        self.calls = 0
+        self.rows: list[dict[str, object]] = []
+
+    def writerow(self, row: Mapping[str, object]) -> None:
+        self.calls += 1
+        if self.fail_first_write and self.calls == 1:
+            raise OSError("synthetic sensor writerow failure")
+        self.rows.append(dict(row))
+
+
+@pytest.mark.parametrize(
+    ("sensor_kind", "failure_stage"),
+    [("scale", "writerow"), ("ir", "flush")],
+)
+def test_sensor_sidecar_failure_stops_acceptance_warns_on_gui_and_finalizes_metadata(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+    failure_stage: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    worker_done = threading.Event()
+    warning_threads: list[object] = []
+    warning_reasons: list[str] = []
+    original_warning = window._handle_session_sensor_log_failure
+
+    def _record_warning(
+        target: mini_dma_mod.SessionSensorCsvTarget,
+        reason: str,
+    ) -> None:
+        warning_threads.append(QtCore.QThread.currentThread())
+        warning_reasons.append(reason)
+        original_warning(target, reason)
+
+    monkeypatch.setattr(window, "_handle_session_sensor_log_failure", _record_warning)
+    ir_samples = [
+        mini_dma_mod.IrTemperatureSample(
+            timestamp_s=time.time() + index * 0.01,
+            raw_text=f"ir-{index}",
+            sequence=index,
+            device_elapsed_ms=index * 10,
+            read_us=20,
+            ambient_c=21.0,
+            object_c_apparent=31.0 + index,
+            raw_ambient=100,
+            raw_object=200,
+            flags=0,
+        )
+        for index in (1, 2)
+    ]
+
+    if sensor_kind == "scale":
+        def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+            worker.measurement_received.emit(17.0, "first", time.time())
+            worker.measurement_received.emit(18.0, "rejected", time.time())
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-failing-scale", "COM-failing-scale")
+    else:
+        def _run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+            for sample in ir_samples:
+                worker.sample_received.emit(sample)
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _run)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-failing-ir", "COM-failing-ir")
+
+    window.edit_log_name.setText(f"{sensor_kind}_{failure_stage}_failure")
+    window._start_session(enable_logging=True, record_initial_point=False)
+    metadata_path = window._session_json_path
+    assert metadata_path is not None
+    if sensor_kind == "ir":
+        window._session_ir_temperature_count = 9
+    handle = _FailingSensorHandle(fail_first_flush=failure_stage == "flush")
+    writer = _FailingSensorWriter(fail_first_write=failure_stage == "writerow")
+    target = _replace_session_sensor_target(window, sensor_kind, handle, writer)
+
+    try:
+        if sensor_kind == "scale":
+            assert window._connect_scale(show_errors=False)
+        else:
+            assert window._connect_ir_thermometer(show_errors=False)
+        assert worker_done.wait(timeout=2.0)
+        qtbot.waitUntil(lambda: len(warning_reasons) == 1, timeout=2000)
+
+        outcome = target.outcome()
+        assert outcome["accepted_rows"] == 1
+        assert outcome["written_rows"] == 0
+        assert outcome["lost_rows"] == 1
+        assert str(outcome["reason"]).startswith(f"{failure_stage}_failed:")
+        assert writer.calls == 1
+        assert warning_threads == [window.thread()]
+        assert str(outcome["reason"]) in warning_reasons[0]
+        assert (
+            window._session_raw_scale_count
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_count
+        ) == (1 if sensor_kind == "scale" else 10)
+
+        window._stop_session(reason="manual_session_stop")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
+        finalized = metadata["logging"]["sensor_sidecars"][sidecar_name]
+        assert finalized == {
+            "session_identity": target.session_identity,
+            "target_identity": target.target_identity,
+            "status": "incomplete",
+            "complete": False,
+            "accepted_rows": 1,
+            "written_rows": 0,
+            "lost_rows": 1,
+            "pending_rows": 0,
+            "reason": outcome["reason"],
+        }
+        assert handle.close_calls == 1
+        assert len(warning_reasons) == 1
+    finally:
+        if window._session_active:
+            window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_pre_restart_sensor_callback_cannot_mutate_replacement_session(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    callback_entered = threading.Event()
+    release_callback = threading.Event()
+    worker_done = threading.Event()
+    stale_ir_sample = mini_dma_mod.IrTemperatureSample(
+        timestamp_s=time.time(),
+        raw_text="stale-ir",
+        sequence=22,
+        device_elapsed_ms=20,
+        read_us=20,
+        ambient_c=21.0,
+        object_c_apparent=99.0,
+        raw_ambient=100,
+        raw_object=200,
+        flags=0,
+    )
+
+    window.edit_log_name.setText(f"session_a_{sensor_kind}")
+    window._start_session(enable_logging=True, record_initial_point=False)
+    if sensor_kind == "scale":
+        session_a_target = window._session_raw_scale_target
+        original_record = window._record_scale_measurement_from_worker
+
+        def _blocked_record(token, session_target, value_g, raw_text, timestamp_s):
+            assert session_target is session_a_target
+            callback_entered.set()
+            assert release_callback.wait(timeout=5.0)
+            return original_record(token, session_target, value_g, raw_text, timestamp_s)
+
+        def _run(worker: mini_dma_mod.ScaleWorker) -> None:
+            worker.measurement_received.emit(77.0, "stale-scale", time.time())
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(window, "_record_scale_measurement_from_worker", _blocked_record)
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _run)
+        window._latest_scale_value_g = 12.0
+        window._latest_scale_text = "sentinel-scale"
+        window._latest_scale_timestamp = 123.0
+        sentinel_scale = window._scale_signal_buffer.add_sample(
+            timestamp_s=123.0,
+            raw_g=12.0,
+            applied_load_g=3.0,
+            raw_text="sentinel-scale",
+        )
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-restart-scale", "COM-restart-scale")
+        connect = window._connect_scale
+    else:
+        session_a_target = window._session_ir_temperature_target
+        original_record = window._record_ir_sample_from_worker
+
+        def _blocked_record(token, session_target, sample):
+            assert session_target is session_a_target
+            callback_entered.set()
+            assert release_callback.wait(timeout=5.0)
+            return original_record(token, session_target, sample)
+
+        def _run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+            worker.sample_received.emit(stale_ir_sample)
+            worker_done.set()
+            worker.finished.emit()
+
+        monkeypatch.setattr(window, "_record_ir_sample_from_worker", _blocked_record)
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _run)
+        sentinel_ir = dataclasses.replace(stale_ir_sample, raw_text="sentinel-ir", object_c_apparent=31.0)
+        window._latest_ir_sample = sentinel_ir
+        window._ir_temperature_buffer.add_sample(sentinel_ir)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-restart-ir", "COM-restart-ir")
+        connect = window._connect_ir_thermometer
+
+    try:
+        assert connect(show_errors=False)
+        assert callback_entered.wait(timeout=2.0)
+        window._stop_session(reason="manual_session_stop")
+
+        window.edit_log_name.setText(f"session_b_{sensor_kind}")
+        window._start_session(enable_logging=True, record_initial_point=False)
+        metadata_path = window._session_json_path
+        sidecar_path = (
+            window._session_raw_scale_path
+            if sensor_kind == "scale"
+            else window._session_ir_temperature_path
+        )
+        assert metadata_path is not None and sidecar_path is not None
+
+        release_callback.set()
+        assert worker_done.wait(timeout=2.0)
+        qtbot.waitUntil(
+            lambda: (window._scale_thread if sensor_kind == "scale" else window._ir_thread) is None,
+            timeout=3000,
+        )
+
+        assert window._session_raw_scale_count == 0
+        assert window._session_ir_temperature_count == 0
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == pytest.approx(12.0)
+            assert window._latest_scale_text == "sentinel-scale"
+            assert window._latest_scale_timestamp == pytest.approx(123.0)
+            assert window._scale_signal_buffer.latest() == sentinel_scale
+        else:
+            assert window._latest_ir_sample == sentinel_ir
+            assert window._ir_temperature_buffer.latest() == sentinel_ir
+
+        window._stop_session(reason="manual_session_stop")
+        assert list(csv.DictReader(sidecar_path.open(encoding="utf-8", newline=""))) == []
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        sidecar_name = "raw_scale" if sensor_kind == "scale" else "ir_temperature"
+        assert metadata["logging"]["sensor_sidecars"][sidecar_name]["accepted_rows"] == 0
+    finally:
+        release_callback.set()
+        if window._session_active:
+            window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_sensor_worker_signals_queue_ui_and_reject_stale_finished_connections(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    emitted = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    source_threads: list[object] = []
+    ui_threads: list[object] = []
+    cleanup_threads: list[object] = []
+    delivered_messages: list[str] = []
+    samples: list[mini_dma_mod.IrTemperatureSample] = []
+    frames = [object(), object(), object()]
+
+    def _sample(value: float) -> mini_dma_mod.IrTemperatureSample:
+        return mini_dma_mod.IrTemperatureSample(
+            timestamp_s=time.time(),
+            raw_text=f"synthetic-{value}",
+            sequence=int(value),
+            device_elapsed_ms=10,
+            read_us=20,
+            ambient_c=21.0,
+            object_c_apparent=value,
+            raw_ambient=100,
+            raw_object=200,
+            flags=0,
+        )
+
+    def _scale_run(worker: mini_dma_mod.ScaleWorker) -> None:
+        index = len(source_threads)
+        source_threads.append(QtCore.QThread.currentThread())
+        worker.status_changed.emit(f"scale status {index}")
+        worker.error_occurred.emit(f"scale error {index}")
+        worker.measurement_received.emit(12.5 + 10.0 * index, f"scale-{index}", time.time())
+        emitted[index].set()
+        if index == 0:
+            worker.finished.emit()
+            return
+        assert releases[index].wait(timeout=5.0)
+        if index == 1:
+            worker.measurement_received.emit(99.0, "stale-scale", time.time())
+            worker.error_occurred.emit("stale scale error")
+        worker.finished.emit()
+
+    def _ir_run(worker: mini_dma_mod.Mlx90614Worker) -> None:
+        index = len(source_threads)
+        source_threads.append(QtCore.QThread.currentThread())
+        sample = _sample(40.0 + index)
+        samples.append(sample)
+        worker.status_changed.emit(f"ir status {index}")
+        worker.error_occurred.emit(f"ir error {index}")
+        worker.sample_received.emit(sample)
+        worker.frame_received.emit(frames[index])
+        emitted[index].set()
+        if index == 0:
+            worker.finished.emit()
+            return
+        assert releases[index].wait(timeout=5.0)
+        if index == 1:
+            worker.sample_received.emit(_sample(99.0))
+            worker.frame_received.emit(frames[2])
+            worker.error_occurred.emit("stale ir error")
+        worker.finished.emit()
+
+    if sensor_kind == "scale":
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _scale_run)
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM-test-scale", "COM-test-scale")
+        original_ui_update = window._handle_scale_measurement_ui_update
+
+        def _record_ui_update(value_g: float | None = None) -> None:
+            ui_threads.append(QtCore.QThread.currentThread())
+            original_ui_update(value_g)
+
+        window._handle_scale_measurement_ui_update = _record_ui_update  # type: ignore[method-assign]
+        original_status = window._handle_scale_status
+        original_error = window._handle_scale_error
+
+        def _record_status(message: str) -> None:
+            delivered_messages.append(message)
+            original_status(message)
+
+        def _record_error(message: str) -> None:
+            delivered_messages.append(message)
+            original_error(message)
+
+        window._handle_scale_status = _record_status  # type: ignore[method-assign]
+        window._handle_scale_error = _record_error  # type: ignore[method-assign]
+        original_cleanup = window._handle_sensor_thread_finished
+
+        def _record_cleanup(kind: str, token: object) -> None:
+            cleanup_threads.append(QtCore.QThread.currentThread())
+            original_cleanup(kind, token)
+
+        window._handle_sensor_thread_finished = _record_cleanup  # type: ignore[method-assign]
+        connect = window._connect_scale
+        disconnect = window._disconnect_scale
+    else:
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _ir_run)
+        window.check_ir_enabled.setChecked(True)
+        window.combo_ir_port.clear()
+        window.combo_ir_port.addItem("COM-test-ir", "COM-test-ir")
+        original_ui_update = window._handle_ir_camera_frame_ui
+
+        def _record_ui_update(frame: object) -> None:
+            ui_threads.append(QtCore.QThread.currentThread())
+            original_ui_update(frame)
+
+        window._handle_ir_camera_frame_ui = _record_ui_update  # type: ignore[method-assign]
+        original_status = window._handle_ir_status
+        original_error = window._handle_ir_error
+
+        def _record_status(message: str) -> None:
+            delivered_messages.append(message)
+            original_status(message)
+
+        def _record_error(message: str) -> None:
+            delivered_messages.append(message)
+            original_error(message)
+
+        window._handle_ir_status = _record_status  # type: ignore[method-assign]
+        window._handle_ir_error = _record_error  # type: ignore[method-assign]
+        original_cleanup = window._handle_sensor_thread_finished
+
+        def _record_cleanup(kind: str, token: object) -> None:
+            cleanup_threads.append(QtCore.QThread.currentThread())
+            original_cleanup(kind, token)
+
+        window._handle_sensor_thread_finished = _record_cleanup  # type: ignore[method-assign]
+        connect = window._connect_ir_thermometer
+        disconnect = window._disconnect_ir_thermometer
+    gui_thread = window.thread()
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+    try:
+        assert connect(show_errors=False) is True
+        assert emitted[0].wait(timeout=2.0)
+        assert source_threads[0] is not gui_thread
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == pytest.approx(12.5)
+        else:
+            assert window._latest_ir_sample is samples[0]
+            assert window._latest_ir_frame is frames[0]
+        qtbot.waitUntil(lambda: bool(ui_threads), timeout=2000)
+        assert all(thread is gui_thread for thread in ui_threads)
+        assert f"{sensor_kind} status 0" in delivered_messages
+        assert f"{sensor_kind} error 0" in delivered_messages
+
+        releases[0].set()
+        if sensor_kind == "scale":
+            qtbot.waitUntil(lambda: window._scale_thread is None, timeout=3000)
+        else:
+            qtbot.waitUntil(lambda: window._ir_thread is None, timeout=3000)
+        assert cleanup_threads and all(thread is gui_thread for thread in cleanup_threads)
+
+        assert connect(show_errors=False) is True
+        assert emitted[1].wait(timeout=2.0)
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == pytest.approx(22.5)
+            stale_thread = window._scale_thread
+            lifetime = window._scale_thread_lifetime
+            current_value = window._latest_scale_value_g
+            replacement_worker = mini_dma_mod.ScaleWorker(
+                port_name="replacement-scale",
+                baudrate=9600,
+                poll_interval_ms=100,
+                request_command="",
+                request_terminator="",
+            )
+            replacement_thread = QtCore.QThread()
+            window._scale_worker = replacement_worker
+            window._scale_thread = replacement_thread
+            window._scale_thread_lifetime = None
+            window._scale_connection_token = object()
+        else:
+            assert window._latest_ir_sample is samples[1]
+            stale_thread = window._ir_thread
+            lifetime = window._ir_thread_lifetime
+            current_value = window._latest_ir_sample
+            replacement_worker = mini_dma_mod.Mlx90614Worker(
+                port_name="replacement-ir",
+                baudrate=115200,
+                interval_code=7,
+            )
+            replacement_thread = QtCore.QThread()
+            window._ir_worker = replacement_worker
+            window._ir_thread = replacement_thread
+            window._ir_thread_lifetime = None
+            window._ir_connection_token = object()
+        assert stale_thread is not None and lifetime is not None
+
+        releases[1].set()
+        qtbot.waitUntil(lifetime.done_event.is_set, timeout=3000)
+        _ensure_app().processEvents()
+        if sensor_kind == "scale":
+            assert window._latest_scale_value_g == current_value
+            assert window._scale_thread is replacement_thread
+            assert window._scale_worker is replacement_worker
+        else:
+            assert window._latest_ir_sample is current_value
+            assert window._latest_ir_frame is frames[1]
+            assert window._ir_thread is replacement_thread
+            assert window._ir_worker is replacement_worker
+        assert len(cleanup_threads) == 1
+        assert all(thread is gui_thread for thread in cleanup_threads)
+        assert f"stale {sensor_kind} error" not in delivered_messages
+    finally:
+        for release in releases:
+            release.set()
+        disconnect(timeout_ms=1000)
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("sensor_kind", ["scale", "ir"])
+def test_blocked_sensor_qthread_close_is_bounded_and_does_not_retain_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sensor_kind: str,
+) -> None:
+    _ensure_app()
+    settings_snapshot = _snapshot_settings()
+    started = threading.Event()
+    release = threading.Event()
+    qt_messages: list[str] = []
+
+    def _blocked_run(worker: object) -> None:
+        started.set()
+        release.wait(timeout=10.0)
+        getattr(worker, "finished").emit()
+
+    if sensor_kind == "scale":
+        monkeypatch.setattr(mini_dma_mod.ScaleWorker, "run", _blocked_run)
+    else:
+        monkeypatch.setattr(mini_dma_mod.Mlx90614Worker, "run", _blocked_run)
+
+    previous_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    lifetime = None
+    thread = None
+    owner_ref = weakref.ref(window)
+    try:
+        if sensor_kind == "scale":
+            window.combo_scale_port.clear()
+            window.combo_scale_port.addItem("COM-blocked-scale", "COM-blocked-scale")
+            assert window._connect_scale(show_errors=False) is True
+            lifetime = window._scale_thread_lifetime
+            thread = window._scale_thread
+        else:
+            window.check_ir_enabled.setChecked(True)
+            window.combo_ir_port.clear()
+            window.combo_ir_port.addItem("COM-blocked-ir", "COM-blocked-ir")
+            assert window._connect_ir_thermometer(show_errors=False) is True
+            lifetime = window._ir_thread_lifetime
+            thread = window._ir_thread
+        assert started.wait(timeout=2.0)
+        assert lifetime is not None and thread is not None
+
+        close_started = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - close_started < 0.75
+        assert thread.isRunning()
+        assert lifetime in mini_dma_mod._RETAINED_SENSOR_THREAD_LIFETIMES
+        assert all(value is not window for value in vars(lifetime).values())
+
+        window.deleteLater()
+        _ensure_app().processEvents()
+        del window
+        gc.collect()
+        assert owner_ref() is None
+
+        release.set()
+        assert thread.wait(3000)
+        _ensure_app().processEvents()
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release.set()
+        if thread is not None:
+            try:
+                thread.quit()
+                thread.wait(3000)
+            except RuntimeError:
+                pass
+        remaining_owner = owner_ref()
+        if remaining_owner is not None:
+            remaining_owner.close()
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_handler)
+        _restore_settings(settings_snapshot)
+
+
+def test_tma_close_stops_all_periodic_timers_and_releases_windows_retention(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.main(log_dir=str(tmp_path), persist_settings=False)
+    assert isinstance(window, mini_dma_mod.MainWindow)
+    qtbot.addWidget(window)
+    timer_names = (
+        "_source_provenance_poll_timer",
+        "_filesystem_worker_poll_timer",
+        "_builder_project_import_timer",
+        "_run_summary_poll_timer",
+        "_tma_history_scan_timer",
+        "_tma_history_scan_poll_timer",
+        "_settings_save_timer",
+        "_fabrication_composition_load_timer",
+        "_serial_port_scan_poll_timer",
+        "_manual_jog_timer",
+        "_tic_keepalive_timer",
+        "_status_timer",
+        "_ui_refresh_timer",
+        "_ui_heartbeat_timer",
+        "_auto_ramp_timer",
+        "_run_log_flush_timer",
+        "_scale_hint_timer",
+    )
+    timers = {name: getattr(window, name) for name in timer_names}
+    fired: list[str] = []
+    for name, timer in timers.items():
+        timer.timeout.connect(lambda name=name: fired.append(name))
+        timer.start(20)
+    assert window in mini_dma_mod.WINDOWS
+
+    try:
+        window.close()
+
+        assert window not in mini_dma_mod.WINDOWS
+        assert all(not timer.isActive() for timer in timers.values())
+        qtbot.wait(60)
+        assert fired == []
+        assert all(not timer.isActive() for timer in timers.values())
+    finally:
+        if window in mini_dma_mod.WINDOWS:
+            mini_dma_mod.WINDOWS.remove(window)
+        window.close()
+
+
 def _calibration_point(
     *,
     position_mm: float,
@@ -2962,7 +5611,7 @@ def test_move_command_keeps_confirmed_position_until_status_refresh(tmp_path: Pa
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._current_position_mm = 1.25
     window._current_position_steps = 125
     window.spin_steps_per_mm.setValue(100.0)
@@ -2998,7 +5647,7 @@ def test_calibration_relative_moves_chain_from_commanded_targets(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._automation_active = True
     window._automation_name = mini_dma_mod.CALIBRATION
@@ -3105,7 +5754,7 @@ def test_move_command_rejects_sub_step_targets(tmp_path: Path, qtbot) -> None:
             self.called = True
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
@@ -3138,7 +5787,7 @@ def test_manual_jog_repeats_from_last_commanded_target(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
@@ -3178,7 +5827,7 @@ def test_manual_jog_press_resyncs_stale_previous_target(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._refresh_tic_status = lambda: None  # type: ignore[method-assign]
     window.spin_steps_per_mm.setValue(100.0)
@@ -3265,7 +5914,7 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window._current_position_steps = 0
     window._current_position_mm = 0.0
@@ -3288,7 +5937,7 @@ def test_held_manual_jog_advances_by_configured_linear_speed(
         _close_test_window(window)
 
 
-def test_held_manual_jog_keeps_speed_when_timer_tick_is_delayed(
+def test_held_manual_jog_caps_delayed_timer_tick(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -3305,7 +5954,7 @@ def test_held_manual_jog_keeps_speed_when_timer_tick_is_delayed(
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.spin_steps_per_mm.setValue(100.0)
     window.spin_jog_mm.setValue(0.01)
     window.spin_motion_speed_mm_s.setValue(1.0)
@@ -3316,7 +5965,43 @@ def test_held_manual_jog_keeps_speed_when_timer_tick_is_delayed(
         window._handle_manual_jog_timer()
         _wait_for_tic_commands(window)
 
-        assert controller.targets == [-80]
+        assert controller.targets == [-7]
+    finally:
+        window._manual_jog_timer.stop()
+        _close_test_window(window)
+
+
+def test_manual_jog_delayed_timer_does_not_batch_large_move(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    clock = {"now": 10.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.targets: list[int] = []
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            self.targets.append(position_steps)
+
+    controller = _FakeController()
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
+    _use_immediate_tic_dispatcher(window, controller)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_jog_mm.setValue(0.00625)
+    window.spin_motion_speed_mm_s.setValue(0.1)
+
+    try:
+        window._start_manual_jog(1.0)
+        clock["now"] = 20.0
+        window._handle_manual_jog_timer()
+        _wait_for_tic_commands(window)
+
+        assert controller.targets == [6]
+        assert "1000.00 um" not in window.log_output.toPlainText()
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)
@@ -3373,6 +6058,7 @@ def test_manual_auto_connect_button_runs_manual_preflight(tmp_path: Path, qtbot)
     window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -3396,6 +6082,7 @@ def test_manual_auto_connect_button_disables_while_queued(tmp_path: Path, qtbot)
     window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -3430,6 +6117,69 @@ def test_manual_auto_connect_enables_motor_supply_before_tic_status(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_direct_hmp_manual_auto_connect_applies_ch2_motor_defaults_before_tic_status(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._enable_motor_supply_output = lambda: called.append("motor") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+
+    try:
+        profile_index = window.combo_supply_profile.findData("hmp4030")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(0)
+        )
+        window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(0))
+        window.check_motor_supply_power.setChecked(False)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert window.combo_current_sweep_supply_channel.currentData() == 3
+        assert window.combo_motor_supply_channel.currentData() == 2
+        assert window.check_motor_supply_power.isChecked()
+        assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
+        assert "Direct HMP TMA bench defaults applied for Tic preflight" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_preserves_live_stress_conversion(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+    window.check_tension_load_positive.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(21.2)
+    window.spin_diameter.setValue(0.01)
+    window._latest_scale_value_g = 21.155
+    window._latest_scale_text = "21.155 g"
+    window._latest_scale_timestamp = time.time()
+
+    try:
+        expected_stress = mini_dma_mod.stress_mpa_from_load_g(0.045, 0.01)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert expected_stress == pytest.approx(5.617, rel=5e-4)
+        assert called == ["scale", "supply", "current", "tic"]
+        assert window.spin_zero_load_scale_g.value() == pytest.approx(21.2)
+        assert window.spin_diameter.value() == pytest.approx(0.01)
+        assert window._dashboard_value_labels["load_g"].text() == "0.045 g"
+        assert window._dashboard_value_labels["stress_mpa"].text() == "5.6 MPa"
+    finally:
+        _close_test_window(window)
+
+
 def test_manual_auto_connect_connects_selected_ir_without_hardware_steal(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     called: list[str] = []
@@ -3438,6 +6188,7 @@ def test_manual_auto_connect_connects_selected_ir_without_hardware_steal(tmp_pat
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         window.combo_ir_port.addItem("Synthetic IR", "COM_IR")
@@ -3461,6 +6212,7 @@ def test_manual_auto_connect_skips_disabled_optional_ir(tmp_path: Path, qtbot) -
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         window.combo_ir_port.addItem("Synthetic IR", "COM_IR")
@@ -3483,6 +6235,7 @@ def test_manual_auto_connect_leaves_active_ir_connection_alone(tmp_path: Path, q
     window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: called.append("tic") or True  # type: ignore[method-assign]
     window._connect_ir_thermometer = lambda **_kwargs: called.append("ir") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         window._ir_thread = QtCore.QThread(window)
@@ -3495,7 +6248,7 @@ def test_manual_auto_connect_leaves_active_ir_connection_alone(tmp_path: Path, q
         _close_test_window(window)
 
 
-def test_shared_broker_manual_auto_connect_applies_ch3_ch4_defaults_before_tic_status(
+def test_shared_broker_manual_auto_connect_applies_kosice_ch2_ch3_defaults_before_tic_status(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -3517,11 +6270,58 @@ def test_shared_broker_manual_auto_connect_applies_ch3_ch4_defaults_before_tic_s
 
         window._run_manual_auto_connect_hardware()
 
-        assert window.combo_current_sweep_supply_channel.currentData() == 4
-        assert window.combo_motor_supply_channel.currentData() == 3
+        assert window.combo_current_sweep_supply_channel.currentData() == 3
+        assert window.combo_motor_supply_channel.currentData() == 2
         assert window.check_motor_supply_power.isChecked()
         assert called == ["scale", "supply", "current", "supply", "motor", "tic"]
         assert "Shared HMP TMA bench defaults applied for Tic preflight" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_applies_tic_settings_after_status(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[str] = []
+    window._ensure_scale_ready_for_recipe = lambda: called.append("scale") or True  # type: ignore[method-assign]
+    window._ensure_supply_ready_for_recipe = lambda: called.append("supply") or True  # type: ignore[method-assign]
+    window._prepare_current_sweep_supply_channel = lambda: called.append("current") or True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+
+    def _tic_ready() -> bool:
+        called.append("tic")
+        window._tic_status_text = "\n".join(
+            [
+                "VIN voltage: 12.00 V",
+                "Step mode: 1/8 step",
+                "Max speed: 10000000",
+                "Max acceleration: 100000",
+                "Max deceleration: 100000",
+                "Current limit: 343 mA",
+                "Errors currently stopping the motor: None",
+            ]
+        )
+        return True
+
+    window._ensure_tic_ready_for_recipe = _tic_ready  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = (  # type: ignore[method-assign]
+        lambda: called.append("step") or (True, "PASS: Tic step mode 1/8 step")
+    )
+    window._apply_tic_current_limit = (  # type: ignore[method-assign]
+        lambda: called.append("current_limit") or (True, "PASS: Tic current limit 343 mA.")
+    )
+    window._apply_tic_motion_limits = (  # type: ignore[method-assign]
+        lambda: called.append("motion")
+        or (True, "PASS: Tic motion limits speed 10000000, accel 100000, decel 100000.")
+    )
+
+    try:
+        window._run_manual_auto_connect_hardware()
+
+        assert called == ["scale", "supply", "current", "tic", "step", "current_limit", "motion"]
+        log_text = window.log_output.toPlainText()
+        assert "Manual hardware auto-connect: PASS: Tic step mode 1/8 step" in log_text
+        assert "Manual hardware auto-connect: PASS: Tic current limit 343 mA." in log_text
+        assert "Manual hardware auto-connect: PASS: Tic motion limits speed 10000000" in log_text
     finally:
         _close_test_window(window)
 
@@ -3532,6 +6332,7 @@ def test_manual_auto_connect_shows_progress_dialog_while_queued(tmp_path: Path, 
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._prepare_current_sweep_supply_channel = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
 
     try:
         button = window.findChild(QtWidgets.QPushButton, "manual_auto_connect_button")
@@ -3574,7 +6375,10 @@ def test_recipe_preflight_shows_auto_connect_progress_when_requested(
     )
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = _fail_scale  # type: ignore[method-assign]
     window._tic_motor_power_ok = None
     window._scale_thread = None
@@ -3609,7 +6413,10 @@ def test_recipe_preflight_does_not_show_auto_connect_progress_by_default(
     window._show_manual_auto_connect_progress = lambda: shown.append(True)  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
 
     try:
@@ -3654,6 +6461,7 @@ def test_manual_auto_connect_prepares_current_sweep_channel_without_enabling_out
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
     window._supply_controller = _FakeSupply()  # type: ignore[assignment]
     window.combo_supply_profile.setCurrentIndex(window.combo_supply_profile.findData("hmp4040"))
     window.combo_current_sweep_supply_channel.setCurrentIndex(
@@ -3686,6 +6494,7 @@ def test_manual_auto_connect_warns_when_a_step_fails(tmp_path: Path, qtbot) -> N
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_supply_ready_for_recipe = lambda: False  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
         original_warning = QtWidgets.QMessageBox.warning
         QtWidgets.QMessageBox.warning = (  # type: ignore[method-assign]
             lambda _parent, _title, message: warnings.append(str(message))
@@ -3750,7 +6559,7 @@ def test_recipe_stop_resets_manual_jog_base_to_confirmed_position(tmp_path: Path
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._automation_active = True
     window._automation_steps = [mini_dma_mod.AutomationStep("move", target_mm=5.0)]
     window._automation_index = 0
@@ -4982,6 +7791,137 @@ def test_recipe_current_command_clamps_zero_to_continuity_floor(tmp_path: Path, 
         _close_test_window(window)
 
 
+def test_recipe_current_command_uses_active_recipe_limit_not_visible_edits(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.1}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            raise PermissionError(f"Cannot change CH4 role while it is leased ({value}).")
+
+        def initialize_output(self, *, current_mA: float, reset_on_start: bool) -> None:
+            self.commands.append(current_mA)
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=0.4,
+        note="first_overheating",
+    )
+
+    supply = _FakeSupply()
+    try:
+        window._supply_controller = supply  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._current_sweep_channel_limit_checked = (4, 40.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._supply_output_enabled = True
+
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(35.0)
+
+        assert window._set_recipe_current_mA(28.0) is True
+
+        assert supply.commands == pytest.approx([28.0])
+        assert window._automation_active is True
+        assert window._current_sweep_channel_limit_checked == (4, 40.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_recipe_current_command_accepts_higher_checked_limit_after_runtime_lowering(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        profile = {"reset_on_start": False, "current_resolution_mA": 0.1}
+
+        def __init__(self) -> None:
+            self.commands: list[float] = []
+
+        def is_connected(self) -> bool:
+            return True
+
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            raise PermissionError(f"Cannot change CH4 role while it is leased ({value}).")
+
+        def set_current_mA(self, current_mA: float) -> None:
+            self.commands.append(current_mA)
+
+        def disconnect(self) -> None:
+            return None
+
+    lowered_first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=35.0,
+        current_ramp_rate_mA_s=0.4,
+        note="first_overheating",
+    )
+
+    supply = _FakeSupply()
+    try:
+        window._supply_controller = supply  # type: ignore[assignment]
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._current_sweep_channel_limit_checked = (4, 40.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [lowered_first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._supply_output_enabled = True
+
+        assert window._set_recipe_current_mA(30.0) is True
+
+        assert supply.commands == pytest.approx([30.0])
+        assert window._current_sweep_channel_limit_checked == (4, 40.0)
+        assert "Current-sweep channel limit update failed" not in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_recipe_current_command_retries_when_current_output_readback_is_off(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -5033,7 +7973,7 @@ def test_recipe_current_command_retries_when_current_output_readback_is_off(tmp_
         _close_test_window(window)
 
 
-def test_recipe_current_command_refreshes_current_sweep_limit_before_setting_ch4(
+def test_recipe_current_command_uses_active_sweep_limit_before_setting_ch4(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -5070,6 +8010,14 @@ def test_recipe_current_command_refreshes_current_sweep_limit_before_setting_ch4
     window.spin_current_sweep_end_mA.setValue(85.0)
     window._supply_output_enabled = True
     window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            current_start_mA=1.0,
+            current_end_mA=85.0,
+        )
+    ]
 
     try:
         assert window._set_recipe_current_mA(50.0) is True
@@ -5081,10 +8029,9 @@ def test_recipe_current_command_refreshes_current_sweep_limit_before_setting_ch4
             "limit",
             "current",
             "current",
-            "limit",
             "current",
         ]
-        assert [value for _name, value in supply.commands] == pytest.approx([85.0, 50.0, 51.0, 90.0, 52.0])
+        assert [value for _name, value in supply.commands] == pytest.approx([85.0, 50.0, 51.0, 52.0])
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -5362,6 +8309,56 @@ def test_status_bar_is_hidden_so_run_log_is_not_duplicated(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_background_ui_callback_is_dropped_after_window_closes(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[bool] = []
+    errors: list[BaseException] = []
+    _close_test_window(window)
+
+    def _invoke_after_close() -> None:
+        try:
+            window._run_on_ui_thread(lambda: called.append(True))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_invoke_after_close)
+    thread.start()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert called == []
+    assert errors == []
+
+
+def test_control_ui_signal_queued_before_close_is_dropped_after_close(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    called: list[object] = []
+    errors: list[BaseException] = []
+    gui_thread = window.thread()
+
+    def _callback() -> None:
+        called.append(QtCore.QThread.currentThread())
+
+    def _queue_from_worker() -> None:
+        try:
+            window._run_on_ui_thread(_callback)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=_queue_from_worker, name="test-control-ui-post-close")
+    worker.start()
+    worker.join(timeout=1.0)
+    assert not worker.is_alive()
+    assert called == []
+
+    window.close()
+    _ensure_app().processEvents()
+
+    assert called == []
+    assert errors == []
+    assert gui_thread is not None
+
+
 def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
     mirror_path = tmp_path / "mini_dma_run_log.txt"
@@ -5372,8 +8369,371 @@ def test_developer_run_log_mirror_writes_log_lines(tmp_path: Path, qtbot) -> Non
 
         window._log("mirror probe")
 
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         assert "mirror probe" in mirror_path.read_text(encoding="utf-8")
     finally:
+        _close_test_window(window)
+
+
+def test_pending_run_log_display_history_keeps_recent_lines(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        for index in range(mini_dma_mod.RUN_LOG_PENDING_MAX_LINES + 25):
+            window._queue_run_log_display_line(f"line-{index}")
+
+        assert len(window._pending_run_log_lines) == mini_dma_mod.RUN_LOG_PENDING_MAX_LINES
+        assert window._pending_run_log_lines[0] == "line-25"
+        assert window._pending_run_log_lines[-1].endswith(
+            str(mini_dma_mod.RUN_LOG_PENDING_MAX_LINES + 24)
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_async_run_log_writer_bounds_queue_and_drops_optional_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[tuple[Path, str]] = []
+    warnings: list[str] = []
+
+    def _blocked_append(path: Path, text: str) -> None:
+        writes.append((Path(path), text))
+        if len(writes) == 1:
+            started.set()
+            assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=2,
+        max_bytes=64,
+    )
+    developer_path = tmp_path / "developer.log"
+    session_path = tmp_path / "session.log"
+    try:
+        assert writer.enqueue("developer", developer_path, "in-flight\n")
+        assert started.wait(timeout=2.0)
+        assert writer.enqueue("developer", developer_path, "optional\n")
+        assert writer.enqueue("session", session_path, "session-1\n")
+        assert writer.enqueue("session", session_path, "session-2\n")
+
+        assert writer.queued_request_count <= 2
+        assert writer.queued_bytes <= 64
+        with writer._condition:
+            retained = list(writer._queue)
+        assert [request.channel for request in retained] == ["session", "session"]
+        assert [request.text for request in retained] == ["session-1\n", "session-2\n"]
+        assert len(warnings) == 1
+    finally:
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        writer.stop(timeout_s=1.0)
+
+    assert writes[1:] == [
+        (session_path, "session-1\n"),
+        (session_path, "session-2\n"),
+    ]
+
+
+def test_async_run_log_writer_stop_discards_queued_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[str] = []
+    warnings: list[str] = []
+
+    def _blocked_append(_path: Path, text: str) -> None:
+        writes.append(text)
+        started.set()
+        assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=8,
+        max_bytes=1024,
+    )
+    path = tmp_path / "session.log"
+    assert writer.enqueue("session", path, "in-flight\n")
+    assert started.wait(timeout=2.0)
+    assert writer.enqueue("session", path, "queued-1\nqueued-2\n")
+    assert writer.enqueue("developer", tmp_path / "developer.log", "queued-2\n")
+
+    assert writer.stop(timeout_s=0.05) is False
+    assert writer.queued_request_count == 0
+    assert writer.queued_bytes == 0
+    assert writer.last_stop_discarded_session_requests == 1
+    assert writer.last_stop_discarded_session_bytes == len("queued-1\nqueued-2\n")
+    assert writer.last_stop_discarded_session_lines == 2
+    assert len(warnings) == 1
+    assert "metadata marks the run log incomplete" in warnings[0]
+    assert writer.enqueue("session", path, "after-stop\n") is False
+    release.set()
+    writer._thread.join(timeout=3.0)
+
+    assert writes == ["in-flight\n"]
+
+
+def test_async_run_log_writer_failure_counts_failed_purged_and_coalesced_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    failures: list[tuple[str, Path, int, BaseException]] = []
+
+    def _blocked_failure(_path: Path, _text: str) -> None:
+        started.set()
+        assert release.wait(timeout=5.0)
+        raise OSError("synthetic session append failure")
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda channel, path, generation, error: failures.append(
+            (channel, path, generation, error)
+        ),
+        max_requests=2,
+        max_bytes=1024,
+    )
+    path = tmp_path / "session.log"
+    try:
+        assert writer.enqueue("session", path, "in-flight\n")
+        assert started.wait(timeout=2.0)
+        assert writer.enqueue("session", path, "queued-1\n")
+        assert writer.enqueue("session", path, "queued-2\n")
+        assert writer.enqueue("session", path, "coalesced-1\ncoalesced-2\n")
+
+        with writer._condition:
+            assert len(writer._queue) == 2
+            assert writer._queue[-1].line_count == 3
+
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        failure = writer.take_target_failure("session", path)
+
+        assert failure is not None
+        assert failure.lost_line_count == 5
+        assert len(failures) == 1
+        assert writer.queued_request_count == 0
+    finally:
+        release.set()
+        writer.stop(timeout_s=1.0)
+
+
+def test_async_run_log_writer_reset_purges_stale_queue_and_reclaims_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    writes: list[str] = []
+    warnings: list[str] = []
+
+    def _blocked_first_append(_path: Path, text: str) -> None:
+        writes.append(text)
+        if len(writes) == 1:
+            started.set()
+            assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_first_append)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        lambda *_args: None,
+        warnings.append,
+        max_requests=3,
+        max_bytes=128,
+    )
+    path = tmp_path / "reused-session.log"
+    old_generation = writer.reset_target("session", path)
+    try:
+        assert writer.enqueue(
+            "session",
+            path,
+            "old-in-flight\n",
+            generation=old_generation,
+        )
+        assert started.wait(timeout=2.0)
+        for index in range(3):
+            assert writer.enqueue(
+                "session",
+                path,
+                f"old-queued-{index}\n",
+                generation=old_generation,
+            )
+        assert writer.queued_request_count == 3
+        assert warnings == []
+        assert writer.queued_bytes > 0
+
+        replacement_generation = writer.reset_target("session", path)
+
+        assert replacement_generation > old_generation
+        assert writer.queued_request_count == 0
+        assert writer.queued_bytes == 0
+        for index in range(3):
+            assert writer.enqueue(
+                "session",
+                path,
+                f"replacement-{index}\n",
+                generation=replacement_generation,
+            )
+        assert writer.queued_request_count == 3
+
+        release.set()
+        assert writer.wait_until_idle(timeout_s=3.0)
+        assert writes == [
+            "old-in-flight\n",
+            "replacement-0\n",
+            "replacement-1\n",
+            "replacement-2\n",
+        ]
+        assert not writer.target_is_disabled(
+            "session",
+            path,
+            generation=replacement_generation,
+        )
+    finally:
+        release.set()
+        writer.stop(timeout_s=1.0)
+
+
+def test_blocked_run_log_mirror_write_does_not_block_ui(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "blocked_run_log.txt"
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_append(path: Path, text: str) -> None:
+        assert Path(path) == mirror_path
+        assert "blocked mirror probe" in text
+        started.set()
+        assert release.wait(timeout=5.0)
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+        window._run_log_mirror_path = mirror_path
+        window._run_log_mirror_enabled = True
+        window._run_log_mirror_generation = window._async_run_log_writer.reset_target(
+            "developer",
+            mirror_path,
+        )
+
+        window._log("blocked mirror probe")
+
+        assert started.wait(timeout=1.0)
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: heartbeat == [True], timeout=1000)
+        assert "blocked mirror probe" in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        _close_test_window(window)
+
+
+def test_run_log_mirror_failure_is_persistent_and_disables_target(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "failed_run_log.txt"
+    attempts: list[Path] = []
+
+    def _failed_append(path: Path, _text: str) -> None:
+        attempts.append(Path(path))
+        raise OSError("synthetic synced-drive failure")
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _failed_append)
+        window._run_log_mirror_path = mirror_path
+        window._run_log_mirror_enabled = True
+        window._run_log_mirror_generation = window._async_run_log_writer.reset_target(
+            "developer",
+            mirror_path,
+        )
+
+        window._log("first failure")
+        window._log("queued after failure")
+
+        qtbot.waitUntil(lambda: not window._run_log_mirror_enabled, timeout=3000)
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        assert attempts == [mirror_path]
+        assert "synthetic synced-drive failure" in window.statusBar().currentMessage()
+        qtbot.waitUntil(
+            lambda: "Run-log file mirror disabled" in window.log_output.toPlainText(),
+            timeout=1000,
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_old_developer_mirror_failure_cannot_disable_reenabled_generation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mirror_path = tmp_path / "reused_developer_mirror.log"
+    started = threading.Event()
+    release = threading.Event()
+    successful_writes: list[str] = []
+    first_append = True
+
+    def _old_blocks_then_fails(_path: Path, text: str) -> None:
+        nonlocal first_append
+        if first_append:
+            first_append = False
+            started.set()
+            assert release.wait(timeout=5.0)
+            raise OSError("stale developer mirror failure")
+        successful_writes.append(text)
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_fails)
+        window._run_log_mirror_path = mirror_path
+        window._set_run_log_mirror_enabled(True)
+        old_generation = window._run_log_mirror_generation
+        assert old_generation is not None
+        assert started.wait(timeout=2.0)
+
+        window._set_run_log_mirror_enabled(False)
+        window._set_run_log_mirror_enabled(True)
+        replacement_generation = window._run_log_mirror_generation
+        assert replacement_generation is not None
+        assert replacement_generation > old_generation
+        window._log("replacement developer mirror line")
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: any("replacement developer mirror line" in text for text in successful_writes),
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+
+        assert window._run_log_mirror_enabled is True
+        assert window._run_log_mirror_generation == replacement_generation
+        assert not window._async_run_log_writer.target_is_disabled(
+            "developer",
+            mirror_path,
+            generation=replacement_generation,
+        )
+        assert "Run-log file mirror enabled" in successful_writes[0]
+        assert "replacement developer mirror line" in successful_writes[1]
+        assert "stale developer mirror failure" not in window.statusBar().currentMessage()
+        assert "Run-log file mirror disabled because writing" not in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
         _close_test_window(window)
 
 
@@ -5419,6 +8779,22 @@ def test_naming_fields_always_autofill_sample_and_filename(tmp_path: Path, qtbot
 
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/2 calibration"
         assert window.edit_log_name.text() == "Ni50Fe27Ga23 12_2 calibration"
+    finally:
+        _close_test_window(window)
+
+
+def test_stale_split_wire_sample_name_updates_from_naming_fields(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_sample_name.setText("Ni50Mn25Ga25 4 2 demo")
+        window.edit_name_composition.setText("Ni49Fe26Ga23Co2")
+        window.edit_name_wire.setText("3/6")
+        window.edit_name_condition.setText("Kosice test")
+
+        assert window.edit_sample_name.text() == "Ni49Fe26Ga23Co2 3/6 Kosice test"
+        assert window.label_recipe_sample.text().startswith("Sample: Ni49Fe26Ga23Co2 3/6 Kosice test")
+        assert window.edit_log_name.text() == "Ni49Fe26Ga23Co2 3_6 Kosice test"
     finally:
         _close_test_window(window)
 
@@ -5564,6 +8940,218 @@ def test_loading_fabrication_folder_indexes_workbooks_without_blocking_ui(
         _close_test_window(window)
 
 
+def test_tma_filesystem_workers_close_bounded_and_remain_owned(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    release = threading.Event()
+    started = {
+        worker_type: threading.Event()
+        for worker_type in (
+            mini_dma_mod.FabricationSuggestionWorker,
+            mini_dma_mod.AnnealingFolderScanWorker,
+            mini_dma_mod.BuilderProjectImportWorker,
+        )
+    }
+    cancelled: list[type[object]] = []
+
+    def _blocked_run(self: object) -> None:
+        started[type(self)].set()
+        assert release.wait(timeout=5.0)
+        cancel_event = getattr(self, "_cancel_event")
+        if cancel_event.is_set():
+            cancelled.append(type(self))
+        getattr(self, "finished").emit()
+
+    for worker_type in started:
+        monkeypatch.setattr(worker_type, "run", _blocked_run)
+
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    project = tmp_path / "project.pydpj"
+    project.write_text("{}", encoding="utf-8")
+    qt_messages: list[str] = []
+    previous_handler = QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    tasks: list[mini_dma_mod.DaemonFilesystemTask] = []
+    try:
+        window._start_fabrication_folder_load(root, composition="Ni50Fe27Ga23")
+        window._start_annealing_folder_scan("kosice", root)
+        assert window._start_saved_builder_project_auto_import(project)
+        for event in started.values():
+            assert event.wait(timeout=2.0)
+        tasks = list(window._filesystem_worker_tasks.values())
+        assert len(tasks) >= 3
+
+        close_started = time.perf_counter()
+        window.close()
+        close_elapsed_s = time.perf_counter() - close_started
+
+        assert close_elapsed_s < 0.9
+        assert all(task.isRunning() and task.thread.daemon for task in tasks)
+        assert len(window._filesystem_worker_tasks) >= 3
+        assert window._builder_project_import_thread is not None
+        assert window._fabrication_thread is not None
+        assert window._annealing_folder_scan_threads
+
+        release.set()
+        qtbot.waitUntil(
+            lambda: all(task.done_event.is_set() for task in tasks),
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert set(cancelled) == set(started)
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release.set()
+        for task in tasks:
+            task.wait(3000)
+        _ensure_app().processEvents()
+        QtCore.qInstallMessageHandler(previous_handler)
+        _close_test_window(window)
+
+
+def test_blocked_daemon_filesystem_task_does_not_retain_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_run(self: mini_dma_mod.FabricationSuggestionWorker) -> None:
+        started.set()
+        release.wait()
+        self.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.FabricationSuggestionWorker, "run", _blocked_run)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    worker = mini_dma_mod.FabricationSuggestionWorker(
+        root,
+        composition="Ni50Fe27Ga23",
+    )
+    task = mini_dma_mod.DaemonFilesystemTask(worker, kind="fabrication")
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    owner.task = task
+    owner_ref = weakref.ref(owner)
+    task.start()
+    assert started.wait(timeout=2.0)
+
+    del owner
+    gc.collect()
+
+    try:
+        assert owner_ref() is None
+        assert task.thread.daemon is True
+        assert task.isRunning()
+        assert getattr(task.thread, "_target", None).__self__ is task
+    finally:
+        release.set()
+        task.thread.join(timeout=3.0)
+
+
+def test_blocked_daemon_filesystem_tasks_do_not_abort_subprocess_exit() -> None:
+    code = """
+import threading
+from pathlib import Path
+from PyQt6 import QtWidgets
+from data_logging.mini_dma_logger import mini_dma_logger as tma
+from data_logging.current_annealing_logger import current_annealing_logger as current
+
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+blocked = threading.Event()
+tma_worker = tma.FabricationSuggestionWorker(Path('synthetic-tma'), composition='sample')
+tma_worker.run = lambda: blocked.wait()
+tma_task = tma.DaemonFilesystemTask(tma_worker, kind='fabrication')
+tma_task.start()
+current_worker = current.FabricationFolderLoadWorker(Path('synthetic-current'))
+current_worker.run = lambda: blocked.wait()
+current_task = current.DaemonFabricationTask(current_worker)
+current_task.start()
+assert tma_task.thread.daemon and current_task.thread.daemon
+print('daemon-filesystem-tasks-started', flush=True)
+"""
+    env = os.environ.copy()
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env.setdefault("MPLBACKEND", "Agg")
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20.0,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "daemon-filesystem-tasks-started" in result.stdout
+    assert "QThread: Destroyed while thread is still running" not in result.stderr
+    assert "Aborted" not in result.stderr
+
+
+def test_superseded_fabrication_worker_is_retained_and_stale_result_ignored(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+    old_started = threading.Event()
+    release_old = threading.Event()
+    handled_roots: list[Path] = []
+
+    def _run(self: mini_dma_mod.FabricationSuggestionWorker) -> None:
+        if self.root == old_root:
+            old_started.set()
+            assert release_old.wait(timeout=5.0)
+        self.succeeded.emit(self.root, {}, 0, self.composition)
+        self.finished.emit()
+
+    monkeypatch.setattr(mini_dma_mod.FabricationSuggestionWorker, "run", _run)
+    window._handle_fabrication_load_success = (  # type: ignore[method-assign]
+        lambda root_obj, *_args: handled_roots.append(Path(root_obj))
+    )
+    try:
+        window._start_fabrication_folder_load(old_root, composition="old")
+        old_thread = window._fabrication_thread
+        assert old_thread is not None
+        assert old_started.wait(timeout=2.0)
+
+        window._start_fabrication_folder_load(new_root, composition="new")
+        new_thread = window._fabrication_thread
+        assert new_thread is not None and new_thread is not old_thread
+        assert id(old_thread) in window._filesystem_worker_tasks
+        qtbot.waitUntil(
+            lambda: id(new_thread) not in window._filesystem_worker_tasks,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert handled_roots == [new_root]
+
+        release_old.set()
+        qtbot.waitUntil(
+            lambda: id(old_thread) not in window._filesystem_worker_tasks,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+        assert handled_roots == [new_root]
+    finally:
+        release_old.set()
+        _close_test_window(window)
+
+
 def test_fabrication_worker_indexes_real_builder_workbooks(qtbot) -> None:
     root = Path("sample_data/database_builder/microwire data/Ni50Fe27Ga23")
     if not root.exists():
@@ -5674,8 +9262,8 @@ def test_project_auto_import_skips_condition_only_name_changes(
         window.edit_name_wire.setText("12/3")
         qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
         qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
-        state_key = window._builder_project_last_auto_import_state_key
-        assert state_key is not None
+        request_key = window._builder_project_last_auto_import_request_key
+        assert request_key is not None
         assert "#16a34a" in window.spin_diameter.styleSheet()
 
         window.edit_name_condition.setText("temperature test")
@@ -5683,9 +9271,156 @@ def test_project_auto_import_skips_condition_only_name_changes(
         assert window.edit_sample_name.text() == "Ni50Fe27Ga23 12/3 temperature test"
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "#16a34a" in window.spin_diameter.styleSheet()
-        assert window._builder_project_last_auto_import_state_key == state_key
+        assert window._builder_project_last_auto_import_request_key == request_key
         assert window._builder_project_import_thread is None
         assert not window._builder_project_import_timer.isActive()
+    finally:
+        _close_test_window(window)
+
+
+def test_builder_project_startup_import_never_probes_saved_path_on_gui_thread(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "microscope": {
+                        "rows": [
+                            {
+                                "Composition": "Ni50Fe27Ga23",
+                                "Microwire": "12/3",
+                                "d (um)": 19.1,
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    window = _build_window(tmp_path, qtbot)
+    original_exists = Path.exists
+    original_stat = Path.stat
+    original_resolve = Path.resolve
+
+    def assert_worker_thread(path: Path) -> None:
+        if path == project_path:
+            assert mini_dma_mod.QtCore.QThread.currentThread() is not window.thread()
+
+    def guarded_exists(path: Path) -> bool:
+        assert_worker_thread(path)
+        return original_exists(path)
+
+    def guarded_stat(path: Path, *args, **kwargs):
+        assert_worker_thread(path)
+        return original_stat(path, *args, **kwargs)
+
+    def guarded_resolve(path: Path, *args, **kwargs) -> Path:
+        assert_worker_thread(path)
+        return original_resolve(path, *args, **kwargs)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        monkeypatch.setattr(Path, "exists", guarded_exists)
+        monkeypatch.setattr(Path, "stat", guarded_stat)
+        monkeypatch.setattr(Path, "resolve", guarded_resolve)
+
+        window.edit_project_path.setText(str(project_path))
+        started = window._auto_import_builder_project_if_possible(async_load=True)
+
+        assert started is True
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        assert "Imported" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_builder_project_explicit_reload_refreshes_replaced_file_in_background(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+
+    def write_project(diameter_um: float) -> None:
+        project_path.write_text(
+            json.dumps(
+                {
+                    "sections": {
+                        "microscope": {
+                            "rows": [
+                                {
+                                    "Composition": "Ni50Fe27Ga23",
+                                    "Microwire": "12/3",
+                                    "d (um)": diameter_um,
+                                }
+                            ]
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_project(19.1)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/3")
+        window.edit_project_path.setText(str(project_path))
+        assert window._auto_import_builder_project_if_possible(async_load=True) is True
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.0191), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+
+        write_project(21.35)
+        assert window._auto_import_builder_project_if_possible(async_load=True, force_reload=True) is True
+
+        qtbot.waitUntil(lambda: window.spin_diameter.value() == pytest.approx(0.02135), timeout=3000)
+        qtbot.waitUntil(lambda: window._builder_project_import_thread is None, timeout=3000)
+        assert "diameter 21.35 um" in window.label_project_status.text()
+    finally:
+        _close_test_window(window)
+
+
+def test_choose_builder_project_starts_forced_background_reload(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    project_path = tmp_path / "microwire_project.pydpj"
+    project_path.write_text("{}", encoding="utf-8")
+    window = _build_window(tmp_path, qtbot)
+    calls: list[dict[str, object]] = []
+
+    try:
+        monkeypatch.setattr(
+            mini_dma_mod.QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *_args, **_kwargs: (str(project_path), "Microwire Project"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_auto_import_builder_project_if_possible",
+            lambda **kwargs: calls.append(kwargs) or True,
+        )
+
+        window._choose_builder_project()
+
+        assert window.edit_project_path.text() == str(project_path)
+        assert calls == [
+            {
+                "update_identity": False,
+                "quiet": True,
+                "async_load": True,
+                "force_reload": True,
+            }
+        ]
     finally:
         _close_test_window(window)
 
@@ -6031,6 +9766,8 @@ def test_fabrication_completer_activation_applies_sample_without_rebuilding_popu
     window = _build_window(tmp_path, qtbot)
 
     try:
+        window.show()
+        qtbot.wait(20)
         window._fabrication_records_by_composition = {
             "Ni50Fe27Ga23": [
                 mini_dma_mod.FabricationSampleRecord(
@@ -6055,10 +9792,16 @@ def test_fabrication_completer_activation_applies_sample_without_rebuilding_popu
 
         assert composition_completer is not None
         assert wire_completer is not None
+        popup = wire_completer.popup()
+        assert popup is not None
 
         composition_completer.activated.emit("Ni50Fe27Ga23")
         assert window.edit_name_composition.text() == "Ni50Fe27Ga23"
         assert window.edit_name_wire.completer() is wire_completer
+
+        window.edit_name_wire._show_available_completions()
+        qtbot.wait(20)
+        assert popup.isVisible()
 
         wire_completer.activated.emit("10/4")
         qtbot.wait(20)
@@ -6068,6 +9811,52 @@ def test_fabrication_completer_activation_applies_sample_without_rebuilding_popu
         assert window.spin_diameter.value() == pytest.approx(0.0136)
         assert "fabrication diameter 13.6 um" in window.label_fabrication_status.text()
         assert window.edit_name_wire.completer() is wire_completer
+        assert not popup.isVisible()
+
+        window.edit_name_wire._show_available_completions()
+        qtbot.wait(20)
+        assert not popup.isVisible()
+    finally:
+        _close_test_window(window)
+
+
+def test_fabrication_completer_popup_hides_when_application_deactivates(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.show()
+        qtbot.wait(20)
+        window._fabrication_records_by_composition = {
+            "Ni51Fe25Ga24": [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition="Ni51Fe25Ga24",
+                    draw=1,
+                    piece=1,
+                    label="1/1",
+                    diameter_mm=0.0112,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_name_composition.setText("Ni51Fe25Ga24")
+        wire_completer = window.edit_name_wire.completer()
+        assert wire_completer is not None
+        popup = wire_completer.popup()
+        assert popup is not None
+
+        window.edit_name_wire._show_available_completions()
+        qtbot.wait(20)
+        assert popup.isVisible()
+
+        app = QtWidgets.QApplication.instance()
+        assert app is not None
+        app.sendEvent(app, QtCore.QEvent(QtCore.QEvent.Type.ApplicationDeactivate))
+        qtbot.wait(20)
+
+        assert not popup.isVisible()
     finally:
         _close_test_window(window)
 
@@ -6389,7 +10178,7 @@ def test_stopping_builder_project_import_clears_retry_state(tmp_path: Path, qtbo
         assert window._builder_import_in_progress is False
         assert window._builder_project_import_retry_pending is False
         assert thread.quit_called is True
-        assert thread.wait_timeout == 1500
+        assert thread.wait_timeout == 250
     finally:
         _close_test_window(window)
 
@@ -6585,6 +10374,329 @@ def test_wire_diameter_is_marked_until_imported_but_manual_edits_still_work(tmp_
 
         assert window.spin_diameter.value() == pytest.approx(0.0191)
         assert "border" in window.spin_diameter.styleSheet()
+    finally:
+        _close_test_window(window)
+
+
+def _write_kosice_fixture(root: Path, filename: str) -> Path:
+    annealing = root / "Current Annealing"
+    annealing.mkdir(parents=True, exist_ok=True)
+    path = annealing / filename
+    path.write_text(
+        "# Current (mA)\tVoltage (V)\tResistance (Ohm)\n"
+        "1\t0.1\t100\n"
+        "2\t0.22\t110\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _kosice_index_with_diameter(
+    root: Path,
+    *,
+    composition: str,
+    wire: str,
+    diameter_mm: float,
+) -> object:
+    draw, piece = (int(value) for value in wire.split("/"))
+    workbook_path = root / "microwire_database.xlsx"
+    return kosice_mod.AnnealingFolderIndex(
+        root=root,
+        source_label="Košice folder",
+        records=(),
+        data_directories=(),
+        sample_records=(
+            kosice_mod.KosiceSampleRecord(
+                workbook_path=workbook_path,
+                sheet_name="Sheet1",
+                row_number=3,
+                composition=composition,
+                draw=draw,
+                piece=piece,
+                diameter_mm=diameter_mm,
+            ),
+        ),
+        sample_workbook=workbook_path,
+    )
+
+
+def test_kosice_diameter_is_second_priority_between_project_and_fabrication(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    composition = "Ni50Fe27Ga23"
+    wire = "19/8"
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._fabrication_records_by_composition = {
+            composition: [
+                mini_dma_mod.FabricationSampleRecord(
+                    composition=composition,
+                    draw=19,
+                    piece=8,
+                    label=wire,
+                    diameter_mm=0.014,
+                )
+            ]
+        }
+        window._refresh_fabrication_completers()
+        window.edit_name_composition.setText(composition)
+        window.edit_name_wire.setText(wire)
+        assert window.spin_diameter.value() == pytest.approx(0.014)
+        assert window._diameter_import_source == "fabrication"
+
+        window._kosice_index = _kosice_index_with_diameter(
+            tmp_path,
+            composition=composition,
+            wire=wire,
+            diameter_mm=0.0102,
+        )
+        assert window._apply_kosice_sample_if_possible() is True
+        assert window.spin_diameter.value() == pytest.approx(0.0102)
+        assert window._diameter_import_source == "kosice"
+
+        project_match = mini_dma_mod.ProjectImportResult(
+            path=tmp_path / "microwire_database_latest.pydpj",
+            section="microscope",
+            diameter_mm=0.0137,
+            current_mA=None,
+            matched_row={"Composition": composition, "Microwire": wire, "d (um)": 13.7},
+        )
+        window._apply_project_match(project_match, update_identity=False, quiet=True)
+        assert window.spin_diameter.value() == pytest.approx(0.0137)
+        assert window._diameter_import_source == "project"
+        assert window._apply_kosice_sample_if_possible() is False
+        assert window.spin_diameter.value() == pytest.approx(0.0137)
+        comparison = window.label_diameter_source_comparison.text()
+        assert ".pydpj 13.7 um (priority 1, selected)" in comparison
+        assert "Košice 10.2 um (priority 2)" in comparison
+        assert "fabrication 14 um (priority 3)" in comparison
+        assert "Mismatch: exact source values differ by up to 3.8 um." in comparison
+
+        project_match_without_diameter = dataclasses.replace(
+            project_match,
+            diameter_mm=None,
+            matched_row={"Composition": composition, "Microwire": wire},
+        )
+        window._apply_project_match(
+            project_match_without_diameter,
+            update_identity=False,
+            quiet=True,
+        )
+        assert window.spin_diameter.value() == pytest.approx(0.0102)
+        assert window._diameter_import_source == "kosice"
+        comparison = window.label_diameter_source_comparison.text()
+        assert ".pydpj" not in comparison
+        assert "Košice 10.2 um (priority 2, selected)" in comparison
+        assert "fabrication 14 um (priority 3)" in comparison
+    finally:
+        _close_test_window(window)
+
+
+def test_kosice_folder_preview_uses_milliamps_for_legacy_amp_values(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    root = tmp_path / "Kosice"
+    path = root / "Current Annealing" / "Ni46Fe27Ga23Cu2Co2-2_1-No1.dat"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "ID\n"
+        "Iset(mA) Ireal (mA) Ureal (mA) R(ohm)\n"
+        "0.001 0.0013 0.413 317.692307692308\n"
+        "0.002 0.0022 0.772 350.909090909091\n",
+        encoding="utf-8",
+    )
+    record = kosice_mod.parse_annealing_filename(path)
+    assert record is not None
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        series, failed_sources = window._load_folder_annealing_preview_series([record])
+
+        assert failed_sources == []
+        assert len(series) == 1
+        assert list(series[0]["currents"]) == pytest.approx([1.3, 2.2])
+        assert series[0]["frame"]["I_A"].tolist() == pytest.approx([0.0013, 0.0022])
+    finally:
+        _close_test_window(window)
+
+
+def test_kosice_folder_path_is_restored_and_scanned_asynchronously(tmp_path: Path, qtbot) -> None:
+    root = tmp_path / "Kosice"
+    _write_kosice_fixture(root, "Ni44Fe27Ga23Cu3Co3 1_7 s2 100mA cycle2.txt")
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("kosice_folder_path", str(root))
+    settings.setValue("name_composition", "Ni44Fe27Ga23Cu3Co3")
+    settings.setValue("name_wire", "1/7")
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    qtbot.addWidget(window)
+
+    try:
+        qtbot.waitUntil(lambda: window._kosice_index is not None, timeout=3000)
+
+        assert window.edit_kosice_folder.text() == str(root)
+        assert "Košice match" in window.label_kosice_status.text()
+        assert window._kosice_sample_suggestions == {"Ni44Fe27Ga23Cu3Co3": ("1/7",)}
+    finally:
+        window.close()
+        _ensure_app().processEvents()
+        _restore_settings(snapshot)
+
+
+def test_kosice_scan_is_non_blocking_and_can_be_cancelled(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Kosice"
+    _write_kosice_fixture(root, "Ni44Fe27Ga23Cu3Co3 1_7 s2 100mA.txt")
+    original_build = mini_dma_mod.build_annealing_folder_index
+    started = threading.Event()
+
+    def _slow_build(*args, cancelled, **kwargs):
+        started.set()
+        while not cancelled():
+            time.sleep(0.01)
+        raise InterruptedError("Annealing folder scan cancelled.")
+
+    monkeypatch.setattr(mini_dma_mod, "build_annealing_folder_index", _slow_build)
+    window = _build_window(tmp_path, qtbot)
+    event_loop_tick = {"seen": False}
+
+    try:
+        window.edit_kosice_folder.setText(str(root))
+        window._load_kosice_folder_from_ui()
+        assert started.wait(timeout=1.0)
+        QtCore.QTimer.singleShot(0, lambda: event_loop_tick.__setitem__("seen", True))
+        qtbot.waitUntil(lambda: event_loop_tick["seen"], timeout=1000)
+
+        window._handle_kosice_scan_button()
+        qtbot.waitUntil(lambda: "cancelled" in window.label_kosice_status.text().lower(), timeout=3000)
+
+        assert event_loop_tick["seen"] is True
+        assert window._kosice_index is None
+    finally:
+        monkeypatch.setattr(mini_dma_mod, "build_annealing_folder_index", original_build)
+        _close_test_window(window)
+
+
+def test_kosice_scan_error_is_visible_and_does_not_keep_stale_index(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    missing = tmp_path / "missing-kosice-folder"
+
+    try:
+        window.edit_kosice_folder.setText(str(missing))
+        window._load_kosice_folder_from_ui()
+        qtbot.waitUntil(
+            lambda: "Failed to scan Košice folder" in window.label_kosice_status.text(),
+            timeout=3000,
+        )
+
+        assert "Folder was not found" in window.label_kosice_status.text()
+        assert window._kosice_index is None
+        assert window.button_scan_kosice.text() == "Scan"
+    finally:
+        _close_test_window(window)
+
+
+def test_show_annealing_uses_project_then_kosice_then_fabrication_precedence(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    composition = "Ni44Fe27Ga23Cu3Co3"
+    wire = "1/7"
+    project_curve = tmp_path / "Ni44Fe27Ga23Cu3Co3 1_7 100mA.txt"
+    project_curve.write_text("0.001\t0.1\t100\n0.002\t0.22\t110\n", encoding="utf-8")
+    project_path = tmp_path / "project.pydpj"
+    project_path.write_text(
+        json.dumps(
+            {
+                "sections": {
+                    "annealing": {
+                        "rows": [
+                            {
+                                "Composition": composition,
+                                "Microwire": wire,
+                                "_sources": [str(project_curve)],
+                            }
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    kosice_root = tmp_path / "Kosice"
+    _write_kosice_fixture(kosice_root, f"{composition} 1_7 s2 100mA cycle2.txt")
+    fabrication_root = tmp_path / "fabrication database"
+    _write_kosice_fixture(fabrication_root, f"{composition} 1_7 s1 80mA.txt")
+    kosice_index = kosice_mod.build_annealing_folder_index(
+        kosice_root,
+        source_label="Košice folder",
+    )
+    fabrication_index = kosice_mod.build_annealing_folder_index(
+        fabrication_root,
+        source_label="fabrication folder",
+    )
+    window = _build_window(tmp_path, qtbot)
+    opened: list[str] = []
+
+    try:
+        window.edit_name_composition.setText(composition)
+        window.edit_name_wire.setText(wire)
+        window.edit_project_path.setText(str(project_path))
+        window._kosice_index = kosice_index
+        window._fabrication_annealing_index = fabrication_index
+        window._open_annealing_preview = (  # type: ignore[method-assign]
+            lambda *, title, series, source_label: opened.append(source_label)
+        )
+
+        window.show_project_annealing_graphs()
+        assert opened[-1].startswith("Builder project (.pydpj)")
+
+        window.edit_project_path.clear()
+        window.show_project_annealing_graphs()
+        assert opened[-1].startswith("Košice folder:")
+
+        window._kosice_index = None
+        window.show_project_annealing_graphs()
+        assert opened[-1].startswith("fabrication folder:")
+    finally:
+        _close_test_window(window)
+
+
+def test_show_annealing_reports_no_matching_source(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "Kosice"
+    _write_kosice_fixture(root, "Ni44Fe27Ga23Cu3Co3 1_7 s2 100mA.txt")
+    window = _build_window(tmp_path, qtbot)
+    window._kosice_index = kosice_mod.build_annealing_folder_index(
+        root,
+        source_label="Košice folder",
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *args: warnings.append(str(args[-1])),
+    )
+
+    try:
+        window.edit_name_composition.setText("Ni50Fe27Ga23")
+        window.edit_name_wire.setText("12/2")
+        window.show_project_annealing_graphs()
+
+        assert warnings
+        assert "No matching annealing preview" in warnings[-1]
+        assert "No Košice folder annealing files match" in warnings[-1]
     finally:
         _close_test_window(window)
 
@@ -6924,7 +11036,7 @@ def test_setup_preload_slack_takeup_uses_slack_strain_speed(tmp_path: Path, qtbo
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_zero_load_scale_g.setValue(21.17)
@@ -8196,6 +12308,199 @@ def test_scale_worker_request_mode_uses_response_timeout() -> None:
     assert worker._request_poll_delay_s(started_s=10.0, finished_s=10.06) == pytest.approx(0.0)
 
 
+def _install_timing_preset_fakes(window: object, fake_spin_type: type) -> dict[str, object]:
+    spinners = {
+        "control": fake_spin_type(),
+        "log": fake_spin_type(),
+        "ui": fake_spin_type(),
+        "graph": fake_spin_type(),
+        "scale": fake_spin_type(),
+        "tic_status": fake_spin_type(),
+        "tic_keepalive": fake_spin_type(),
+        "supply": fake_spin_type(),
+    }
+    window.spin_control_interval = spinners["control"]
+    window.spin_log_interval = spinners["log"]
+    window.spin_ui_interval = spinners["ui"]
+    window.spin_graph_interval = spinners["graph"]
+    window.spin_scale_interval = spinners["scale"]
+    window.spin_tic_status_interval = spinners["tic_status"]
+    window.spin_tic_keepalive_interval = spinners["tic_keepalive"]
+    window.spin_supply_read_interval = spinners["supply"]
+    window._apply_ui_refresh_interval = lambda: None
+    window._apply_hardware_timer_intervals = lambda: None
+    window._update_recipe_mode_ui = lambda: None
+    return spinners
+
+
+def test_kern_kcp_scale_preset_uses_standard_request() -> None:
+    class _FakeCombo:
+        def __init__(self) -> None:
+            self.current_text = ""
+
+        def findText(self, text: str) -> int:  # noqa: N802 - Qt-style test double
+            return 0 if text == "256000" else -1
+
+        def setCurrentText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.current_text = text
+
+    class _FakeEdit:
+        def __init__(self) -> None:
+            self.text_value = ""
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.text_value = text
+
+    class _FakeSpin:
+        def __init__(self) -> None:
+            self.value_set = 0
+
+        def setValue(self, value: int) -> None:  # noqa: N802 - Qt-style test double
+            self.value_set = int(value)
+
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+    window.combo_scale_baud = _FakeCombo()
+    window.edit_scale_request = _FakeEdit()
+    window.edit_scale_terminator = _FakeEdit()
+    spinners = _install_timing_preset_fakes(window, _FakeSpin)
+    messages: list[str] = []
+    window._log = messages.append  # type: ignore[method-assign]
+
+    window._apply_kern_kcp_scale_preset()
+
+    assert window.combo_scale_baud.current_text == "256000"
+    assert window.edit_scale_request.text_value == mini_dma_mod.KERN_KCP_SCALE_REQUEST
+    assert window.edit_scale_terminator.text_value == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
+    assert spinners["control"].value_set == 50
+    assert spinners["scale"].value_set == 50
+    assert "SI immediate request" in messages[-1]
+    assert "Košice KERN KCP" in messages[-1]
+
+
+def test_gng_scale_preset_preserves_prague_cadence() -> None:
+    class _FakeCombo:
+        def __init__(self) -> None:
+            self.current_text = ""
+
+        def findText(self, text: str) -> int:  # noqa: N802 - Qt-style test double
+            return 0 if text == "9600" else -1
+
+        def setCurrentText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.current_text = text
+
+    class _FakeEdit:
+        def __init__(self) -> None:
+            self.text_value = ""
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt-style test double
+            self.text_value = text
+
+    class _FakeSpin:
+        def __init__(self) -> None:
+            self.value_set = 0
+
+        def setValue(self, value: int) -> None:  # noqa: N802 - Qt-style test double
+            self.value_set = int(value)
+
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+    window.combo_scale_baud = _FakeCombo()
+    window.edit_scale_request = _FakeEdit()
+    window.edit_scale_terminator = _FakeEdit()
+    spinners = _install_timing_preset_fakes(window, _FakeSpin)
+    messages: list[str] = []
+    window._log = messages.append  # type: ignore[method-assign]
+
+    window._apply_gng_scale_preset()
+
+    assert window.combo_scale_baud.current_text == "9600"
+    assert window.edit_scale_request.text_value == "\\x1bp"
+    assert window.edit_scale_terminator.text_value == ""
+    assert spinners["control"].value_set == 250
+    assert spinners["scale"].value_set == 250
+    assert "Prague G&G" in messages[-1]
+
+
+def test_scale_auto_detect_accepts_kern_kcp_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, bytes]] = []
+
+    def _fake_read_serial_bytes(
+        port_name: str,
+        *,
+        baudrate: int,
+        payload: bytes = b"",
+        total_wait_s: float = 0.8,
+        **_kwargs: object,
+    ) -> bytes:
+        del port_name, total_wait_s
+        calls.append((baudrate, payload))
+        if payload == b"SI\r\n" and baudrate == 256000:
+            return b"S S +12.34 g\r\n"
+        return b""
+
+    monkeypatch.setattr(mini_dma_mod, "_read_serial_bytes", _fake_read_serial_bytes)
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+
+    match = window._probe_scale_candidate("COM4")
+
+    assert match == {
+        "port": "COM4",
+        "baudrate": 256000,
+        "request_command": mini_dma_mod.KERN_KCP_SCALE_REQUEST,
+        "terminator": mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
+        "raw_text": "S S +12.34 g",
+    }
+    assert calls[0] == (256000, b"SI\r\n")
+
+
+def test_kern_stable_probe_match_is_normalized_to_immediate_runtime_request() -> None:
+    match = {
+        "port": "COM9",
+        "baudrate": 256000,
+        "request_command": "S",
+        "terminator": mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
+        "raw_text": "S S      57.13 g",
+    }
+
+    normalized = mini_dma_mod._normalize_scale_match_for_runtime(match)
+
+    assert normalized["request_command"] == mini_dma_mod.KERN_KCP_SCALE_REQUEST
+    assert normalized["terminator"] == mini_dma_mod.KERN_KCP_SCALE_TERMINATOR
+    assert mini_dma_mod._scale_interval_ms_for_probe_match(match) == mini_dma_mod.DEFAULT_SCALE_REQUEST_INTERVAL_MS
+    assert mini_dma_mod._scale_interval_ms_for_probe_match(normalized) == mini_dma_mod.KERN_KCP_SCALE_INTERVAL_MS
+
+
+def test_scale_auto_detect_falls_back_to_gng_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, bytes]] = []
+
+    def _fake_read_serial_bytes(
+        port_name: str,
+        *,
+        baudrate: int,
+        payload: bytes = b"",
+        total_wait_s: float = 0.8,
+        **_kwargs: object,
+    ) -> bytes:
+        del port_name, total_wait_s
+        calls.append((baudrate, payload))
+        if payload == b"\x1bp" and baudrate == 9600:
+            return b"   +12.34 g\r\n"
+        return b""
+
+    monkeypatch.setattr(mini_dma_mod, "_read_serial_bytes", _fake_read_serial_bytes)
+    window = mini_dma_mod.MainWindow.__new__(mini_dma_mod.MainWindow)
+
+    match = window._probe_scale_candidate("COM4")
+
+    assert match == {
+        "port": "COM4",
+        "baudrate": 9600,
+        "request_command": "\\x1bp",
+        "terminator": "",
+        "raw_text": "+12.34 g",
+    }
+    assert calls[:3] == [(256000, b"SI\r\n"), (256000, b"S\r\n"), (9600, b"\x1bp")]
+
+
 def test_supply_scientific_notation_current_reply_is_parsed_as_amps() -> None:
     assert mini_dma_mod._parse_first_float("2.150E-2") == pytest.approx(0.0215)
     assert mini_dma_mod._parse_first_float("+1.00e-3 A") == pytest.approx(0.001)
@@ -8280,11 +12585,13 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
             lambda: [SimpleNamespace(device="COM7", description="Rohde supply")],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_supply(port_name: str):
             assert port_name == "COM7"
@@ -8307,6 +12614,196 @@ def test_auto_detect_supply_port_identifies_hmp4040(tmp_path: Path, qtbot, monke
         assert window.combo_current_sweep_supply_channel.currentData() == 0
         assert window.combo_motor_supply_channel.currentData() == 0
     finally:
+        _close_test_window(window)
+
+
+def test_startup_serial_port_enumeration_is_single_pass_and_nonblocking(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    scan_thread_ids: list[int] = []
+
+    def _blocking_comports() -> list[SimpleNamespace]:
+        scan_thread_ids.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=5.0)
+        return [SimpleNamespace(device="COM8", description="Synthetic serial port")]
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _blocking_comports)
+    main_thread_id = threading.get_ident()
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        assert started.wait(timeout=1.0)
+        heartbeat: list[bool] = []
+        QtCore.QTimer.singleShot(0, lambda: heartbeat.append(True))
+        qtbot.waitUntil(lambda: heartbeat == [True], timeout=1000)
+        assert len(scan_thread_ids) == 1
+        assert scan_thread_ids[0] != main_thread_id
+        assert "background" in window.statusBar().currentMessage().lower()
+
+        release.set()
+
+        qtbot.waitUntil(lambda: window.combo_supply_port.findData("COM8") >= 0, timeout=3000)
+        assert window.combo_scale_port.findData("COM8") >= 0
+        assert window.combo_ir_port.findData("COM8") >= 0
+        assert len(scan_thread_ids) == 1
+    finally:
+        release.set()
+        _close_test_window(window)
+
+
+def test_startup_serial_port_enumeration_failure_is_persistent(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _failed_comports() -> list[SimpleNamespace]:
+        raise RuntimeError("synthetic SetupAPI failure")
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _failed_comports)
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        qtbot.waitUntil(
+            lambda: "synthetic SetupAPI failure" in window.statusBar().currentMessage(),
+            timeout=3000,
+        )
+        assert window.combo_supply_port.currentText() == "Serial-port scan failed"
+        assert window.combo_scale_port.currentText() == "Serial-port scan failed"
+        assert window.combo_ir_port.currentText() == "Serial-port scan failed"
+        assert "Serial-port scan failed: synthetic SetupAPI failure" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_empty_background_serial_scan_preserves_saved_port_settings(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    settings = _test_settings()
+    settings.setValue("supply_port", "COM21")
+    settings.setValue("scale_port", "COM22")
+    settings.setValue("ir_port", "COM23")
+    settings.sync()
+    window = _build_window(tmp_path, qtbot, preserve_settings=True)
+
+    try:
+        _wait_for_serial_port_scan(window, qtbot)
+        assert window.combo_supply_port.currentData() == "COM21"
+        assert window.combo_scale_port.currentData() == "COM22"
+        assert window.combo_ir_port.currentData() == "COM23"
+        assert "not detected" in window.combo_supply_port.currentText()
+        assert "not detected" in window.combo_scale_port.currentText()
+        assert "not detected" in window.combo_ir_port.currentText()
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("scan_fails", [False, True], ids=["success", "failure"])
+def test_serial_port_poll_timer_mutates_widgets_only_on_gui_thread(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    scan_fails: bool,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    handler_threads: list[object] = []
+
+    def _blocked_comports() -> list[SimpleNamespace]:
+        started.set()
+        assert release.wait(timeout=5.0)
+        if scan_fails:
+            raise RuntimeError("synthetic affinity scan failure")
+        return [SimpleNamespace(device="COM31", description="Affinity probe")]
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _blocked_comports)
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert started.wait(timeout=1.0)
+        gui_thread = window.thread()
+        if scan_fails:
+            original_handler = window._handle_serial_port_enumeration_failure
+
+            def _record_handler(generation: int, message: str) -> None:
+                handler_threads.append(QtCore.QThread.currentThread())
+                original_handler(generation, message)
+
+            window._handle_serial_port_enumeration_failure = _record_handler  # type: ignore[method-assign]
+        else:
+            original_handler = window._handle_serial_port_enumeration_success
+
+            def _record_handler(generation: int, descriptors: object) -> None:
+                handler_threads.append(QtCore.QThread.currentThread())
+                original_handler(generation, descriptors)
+
+            window._handle_serial_port_enumeration_success = _record_handler  # type: ignore[method-assign]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        release.set()
+
+        if scan_fails:
+            qtbot.waitUntil(
+                lambda: "synthetic affinity scan failure" in window.statusBar().currentMessage(),
+                timeout=3000,
+            )
+        else:
+            qtbot.waitUntil(lambda: window.combo_supply_port.findData("COM31") >= 0, timeout=3000)
+
+        assert handler_threads == [gui_thread]
+    finally:
+        release.set()
+        _close_test_window(window)
+
+
+def test_serial_port_poll_timer_rejects_stale_and_post_close_results(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    calls = 0
+
+    def _blocked_comports() -> list[SimpleNamespace]:
+        nonlocal calls
+        index = calls
+        calls += 1
+        started[index].set()
+        assert releases[index].wait(timeout=5.0)
+        return [SimpleNamespace(device=f"COM4{index}", description="Stale probe")]
+
+    monkeypatch.setattr(mini_dma_mod.list_ports, "comports", _blocked_comports)
+    window = _build_window(tmp_path, qtbot)
+    second_task = None
+    try:
+        assert started[0].wait(timeout=1.0)
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        window._serial_port_scan_generation += 1
+        releases[0].set()
+        qtbot.waitUntil(lambda: window._serial_port_scan_task is None, timeout=3000)
+        assert window.combo_supply_port.findData("COM40") < 0
+
+        assert window._start_serial_port_enumeration() is True
+        assert started[1].wait(timeout=1.0)
+        second_task = window._serial_port_scan_task
+        assert second_task is not None
+
+        close_started = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - close_started < 0.75
+        releases[1].set()
+        assert second_task.done_event.wait(timeout=3.0)
+        _ensure_app().processEvents()
+        assert window.combo_supply_port.findData("COM41") < 0
+    finally:
+        for release in releases:
+            release.set()
+        if second_task is not None:
+            second_task.thread.join(timeout=3.0)
         _close_test_window(window)
 
 
@@ -8903,7 +13400,7 @@ def test_length_setup_dialog_has_local_pause_stop_and_progress(tmp_path: Path, q
             self.halt_count += 1
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._disable_supply_output = lambda: None  # type: ignore[method-assign]
     window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
     window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
@@ -9262,6 +13759,9 @@ def test_technical_hardware_details_are_hidden_by_default(tmp_path: Path, qtbot)
         assert window.button_start_recipe.text() == "Start recipe"
         assert window.button_start_recipe.parent() is window.recipe_action_footer
         assert window.recipe_progress.parent() is window.recipe_action_footer
+        fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        assert window.recipe_progress.font().family() != fixed_font.family()
+        assert "padding-left" not in window.recipe_progress.styleSheet()
         assert window.label_current_task.parent() is window.recipe_action_footer
         assert window.label_current_task.isVisible() is False
         assert window.label_recipe_estimate.isVisible() is False
@@ -9410,7 +13910,10 @@ def test_recipe_preflight_restores_real_gram_zero_load_reference_before_setup(tm
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+        window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
 
         ok = window._preflight_recipe_hardware(
             [
@@ -9443,7 +13946,7 @@ def test_tic_status_warns_when_motor_power_vin_is_low(tmp_path: Path, qtbot) -> 
                 ]
             )
 
-    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
 
     try:
         assert window._refresh_tic_status() is True
@@ -9488,7 +13991,7 @@ def test_tic_status_missing_vin_uses_recent_good_power_briefly(
 
     controller = _FakeController()
     monkeypatch.setattr(mini_dma_mod.time, "time", lambda: now_s)
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
 
     try:
         assert window._refresh_tic_status() is True
@@ -9538,7 +14041,7 @@ def test_tic_status_missing_vin_blocks_after_recent_good_power_expires(
 
     controller = _FakeController()
     monkeypatch.setattr(mini_dma_mod.time, "time", lambda: now_s)
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
 
     try:
         assert window._refresh_tic_status() is True
@@ -9571,7 +14074,7 @@ def test_recipe_preflight_blocks_when_tic_motor_power_is_low(
                 ]
             )
 
-    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._enable_motor_supply_output = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -9603,7 +14106,7 @@ def test_recipe_preflight_reports_tic_status_read_failure(
         def get_status(self) -> str:
             raise RuntimeError("Access denied")
 
-    window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._enable_motor_supply_output = lambda: True  # type: ignore[method-assign]
     monkeypatch.setattr(
@@ -10895,7 +15398,7 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         plateau_index=1,
     )
     seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
-    window._seek_last_value_by_key[seek_key] = 50.0
+    window._seek_last_value_by_key[seek_key] = 40.0
     window._seek_last_effective_position_by_key[seek_key] = 0.0
     window._current_position_mm = 0.1
     window._effective_position_mm = 0.1
@@ -10904,7 +15407,7 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         window._update_current_sweep_hold_response_stiffness(
             seek_key,
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            40.0,
+            35.0,
         )
 
         assert seek_key not in window._current_sweep_hold_response_stiffness_by_key
@@ -10913,10 +15416,42 @@ def test_current_sweep_hold_response_stiffness_ignores_opposite_direction_respon
         window._update_current_sweep_hold_response_stiffness(
             seek_key,
             mini_dma_mod.HSW_BASIS_STRESS_MPA,
-            60.0,
+            45.0,
         )
 
         assert window._current_sweep_hold_response_count_by_key[seek_key] == 1
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_response_stiffness_requires_target_improvement(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_value_by_key[seek_key] = 55.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.0
+    window._current_position_mm = 0.1
+    window._effective_position_mm = 0.1
+
+    try:
+        window._update_current_sweep_hold_response_stiffness(
+            seek_key,
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            60.0,
+        )
+
+        assert seek_key not in window._current_sweep_hold_response_stiffness_by_key
+        assert window._current_sweep_hold_response_count_by_key.get(seek_key, 0) == 0
     finally:
         _close_test_window(window)
 
@@ -11285,7 +15820,174 @@ def test_current_sweep_settle_advances_after_timed_recovery_even_if_target_is_no
         _close_test_window(window)
 
 
-def test_setup_preload_settle_requires_continuous_target_stability_in_current_sweep(
+def test_iso_current_settle_advances_after_timed_recovery_even_if_target_is_noisy(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    attempts = {"count": 0}
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+
+    def _fake_seek(*_args: object, **_kwargs: object) -> bool:
+        attempts["count"] += 1
+        return False
+
+    window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=10.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            duration_s=1.0,
+            note="1:transition_settle",
+        )
+    ]
+    window._automation_total_steps = 1
+    window._automation_index = 0
+
+    try:
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 0
+        assert window._active_timed_step_index == 0
+
+        now_s[0] = 101.2
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 1
+        assert window._active_timed_step_index is None
+        assert attempts["count"] == 2
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_kern_iso_current_settle_uses_processed_window_instead_of_latest_spike(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **_kwargs: object) -> bool:
+        moves.append(target_mm)
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.combo_scale_baud.setCurrentText("256000")
+    window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+    window.spin_diameter.setValue(0.0182)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CONSTANT_CURRENT_STRAIN_SWEEP
+    window._set_automation_context(
+        phase="settle",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=10.0,
+    )
+    for index, stress_mpa in enumerate((9.8, 10.0, 10.1, 10.2, 65.0)):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s + index * 0.05
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=10.0,
+            tolerance=0.3,
+        )
+
+        assert reached is True
+        assert moves == []
+        assert trace_rows[-1]["decision"] == "accept"
+        assert trace_rows[-1]["current_value"] == pytest.approx(10.1)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_setup_preload_settle_locks_motor_instead_of_chasing_target(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = [100.0]
+    seek_calls: list[tuple[object, ...]] = []
+
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+    window.combo_scale_baud.setCurrentText("256000")
+    window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+
+    def _fake_seek(*_args: object, **_kwargs: object) -> bool:
+        seek_calls.append(_args)
+        raise AssertionError("setup preload settle must not send correction moves")
+
+    window._seek_distribution_target = _fake_seek  # type: ignore[method-assign]
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._automation_steps = [
+        mini_dma_mod.AutomationStep(
+            "settle",
+            target_value=20.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            duration_s=3.0,
+            note="setup_preload",
+        )
+    ]
+    window._automation_total_steps = 1
+    window._automation_index = 0
+
+    try:
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_active is True
+        assert window._automation_index == 0
+        assert window._active_timed_step_index == 0
+        assert seek_calls == []
+        assert len(window._length_setup_points) == 1
+
+        now_s[0] = 101.0
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 0
+        assert window._active_timed_step_index == 0
+        assert seek_calls == []
+        assert len(window._length_setup_points) == 2
+
+        now_s[0] = 104.1
+        window._handle_auto_ramp_tick()
+
+        assert window._automation_index == 1
+        assert window._active_timed_step_index is None
+        assert seek_calls == []
+        assert len(window._length_setup_points) == 3
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_prague_setup_preload_settle_keeps_target_stability_requirement(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -11295,6 +15997,9 @@ def test_setup_preload_settle_requires_continuous_target_stability_in_current_sw
     seek_results = [False, True, True]
 
     monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: now_s[0])
+    window.combo_scale_baud.setCurrentText("9600")
+    window.edit_scale_request.setText(mini_dma_mod.GNG_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.GNG_SCALE_TERMINATOR)
 
     def _fake_seek(*_args: object, **_kwargs: object) -> bool:
         return seek_results.pop(0)
@@ -11332,6 +16037,7 @@ def test_setup_preload_settle_requires_continuous_target_stability_in_current_sw
 
         assert window._automation_index == 1
         assert window._active_timed_step_index is None
+        assert seek_results == []
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -11900,7 +16606,7 @@ def test_voltage_limit_unwind_open_circuit_stops_before_mechanical_seek(
     trace_rows: list[dict[str, object]] = []
     seek_calls: list[tuple[object, ...]] = []
     window._ask_wire_break_recovery_after_stop = recovery_prompts.append  # type: ignore[method-assign]
-    window._maybe_offer_run_cleanup_after_wire_break = lambda: None  # type: ignore[method-assign]
+    window._maybe_offer_run_cleanup = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     window._supply_controller = supply  # type: ignore[assignment]
     window._supply_output_enabled = True
     window._supply_last_setpoint_mA = 25.4
@@ -12407,7 +17113,7 @@ def test_shared_broker_supply_controller_leases_current_and_motor_channels(
     ]
 
 
-def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
+def test_shared_broker_supply_controller_does_not_rewrite_confirmed_channel_limits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeBrokerClient:
@@ -12457,6 +17163,67 @@ def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
     controller.set_current_limit_mA(60.0)
 
     assign_calls = [call for call in clients[0].calls if call[0] == "assign_role"]
+    assert assign_calls == []
+    assert controller.current_limit_a == pytest.approx(0.06)
+
+
+def test_shared_broker_supply_controller_clears_confirmed_current_channel_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "snapshot":
+                return {
+                    "ok": True,
+                    "snapshot": {
+                        "model": "hmp4040",
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.06,
+                                }
+                            }
+                        },
+                    },
+                }
+            return {"ok": True}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": "lease-4"}
+
+        def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
+            self.calls.append(
+                ("set_current", {"channel": channel, "lease_id": lease_id, "current_mA": current_mA})
+            )
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=None,
+    )
+
+    controller.connect()
+    controller.set_current_mA(80.0)
+
+    assign_calls = [call for call in clients[0].calls if call[0] == "assign_role"]
     assert assign_calls == [
         (
             "assign_role",
@@ -12465,10 +17232,114 @@ def test_shared_broker_supply_controller_refreshes_confirmed_channel_limits(
                 "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
                 "confirmed": True,
                 "voltage_limit_v": 32.05,
-                "current_limit_a": 0.06,
+                "current_limit_a": None,
             },
         )
     ]
+    assert ("set_current", {"channel": 4, "lease_id": "lease-4", "current_mA": 80.0}) in clients[0].calls
+
+
+def test_shared_broker_supply_controller_rolls_back_refused_current_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            if action == "snapshot":
+                return {
+                    "snapshot": {
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.03,
+                                }
+                            }
+                        }
+                    }
+                }
+            if action == "assign_role":
+                raise PermissionError("Cannot change CH4 role while it is leased.")
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "BrokerJsonClient",
+        lambda *, host, port: _FakeBrokerClient(),
+    )
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=0.03,
+    )
+
+    controller.connect()
+    controller.set_current_limit_mA(32.0)
+
+    assert controller.current_limit_a == pytest.approx(0.032)
+
+
+def test_shared_broker_supply_controller_does_not_lower_limit_while_leased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "snapshot":
+                return {
+                    "snapshot": {
+                        "bench_profile": {
+                            "channels": {
+                                "4": {
+                                    "role": mini_dma_mod.ROLE_MINI_DMA_CURRENT,
+                                    "confirmed": True,
+                                    "voltage_limit_v": 32.05,
+                                    "current_limit_a": 0.04,
+                                }
+                            }
+                        }
+                    }
+                }
+            if action == "assign_role":
+                raise PermissionError("Cannot change CH4 role while it is leased.")
+            return {"ok": True}
+
+        def lease(self, *, channel: int, owner: str, role: str) -> dict[str, object]:
+            self.calls.append(("lease", {"channel": channel, "owner": owner, "role": role}))
+            return {"lease_id": "lease-4"}
+
+        def configure_channel(self, **payload: object) -> dict[str, object]:
+            self.calls.append(("configure_channel", dict(payload)))
+            return {"ok": True}
+
+    clients: list[_FakeBrokerClient] = []
+
+    def _client_factory(*, host: str, port: int) -> _FakeBrokerClient:
+        client = _FakeBrokerClient(host=host, port=port)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _client_factory)
+    controller = mini_dma_mod.SharedBrokerSupplyController(
+        host="127.0.0.1",
+        port=8765,
+        max_voltage_v=32.05,
+        current_channel=4,
+        current_limit_a=0.04,
+    )
+
+    controller.connect()
+    controller.configure_channel(channel=4, voltage_v=32.05, current_a=0.001, output_on=True)
+    controller.set_current_limit_mA(35.0)
+
+    assert controller.current_limit_a == pytest.approx(0.035)
+    assert [call for call in clients[0].calls if call[0] == "assign_role"] == []
 
 
 def test_shared_broker_supply_controller_retries_after_stale_current_lease(
@@ -12568,6 +17439,7 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
         assert profile_index >= 0
         window.combo_supply_profile.setCurrentIndex(profile_index)
@@ -12577,6 +17449,10 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
             window.combo_current_sweep_supply_channel.findData(4)
         )
         window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(3))
+        window.spin_supply_voltage_limit.setValue(30.0)
+        window.spin_current_sweep_end_mA.setValue(60.0)
+        window.spin_motor_supply_voltage.setValue(12.0)
+        window.spin_motor_supply_current_limit.setValue(0.5)
 
         controller = window._build_supply_controller()
 
@@ -12585,6 +17461,10 @@ def test_shared_broker_profile_builds_broker_supply_controller(tmp_path: Path, q
         assert controller.port == 9999
         assert controller.selected_channel() == 4
         assert controller.motor_channel == 3
+        assert controller.max_voltage_v == pytest.approx(30.0)
+        assert controller.current_limit_a is None
+        assert controller.motor_voltage_limit_v == pytest.approx(12.0)
+        assert controller.motor_current_limit_a == pytest.approx(0.5)
     finally:
         _close_test_window(window)
 
@@ -12691,6 +17571,9 @@ def test_motor_supply_enable_fails_when_output_readback_stays_off(tmp_path: Path
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -12859,6 +17742,11 @@ def test_shared_broker_auto_connect_starts_local_broker_when_endpoint_is_down(
         assert started["host"] == "127.0.0.1"
         assert started["port"] == 8765
         assert getattr(started["broker"], "driver").identify_calls == 2
+        broker_profile = getattr(started["broker"], "bench_profile")
+        assert broker_profile.channels[4].voltage_limit_v == pytest.approx(1.0)
+        assert broker_profile.channels[4].current_limit_a is None
+        assert broker_profile.channels[3].voltage_limit_v == pytest.approx(12.0)
+        assert broker_profile.channels[3].current_limit_a == pytest.approx(0.4)
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
         assert "Started shared HMP broker" in window.log_output.toPlainText()
         assert "Supply connected through shared HMP broker" in window.log_output.toPlainText()
@@ -12896,6 +17784,125 @@ def test_shared_broker_preflight_connects_without_serial_auto_detect(
 
         assert calls == []
         assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+    finally:
+        _close_test_window(window)
+
+
+def test_auto_connect_prefers_running_broker_over_saved_direct_com_profile(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    snapshot = _snapshot_settings()
+    settings = _test_settings()
+    settings.clear()
+    settings.setValue("supply_profile", "hmp4030")
+    settings.setValue("supply_port", "COM3")
+    settings.sync()
+    window = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    window._test_settings_snapshot = snapshot  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    broker_requests: list[tuple[str, int, float, str]] = []
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int, timeout_s: float = 8.0) -> None:
+            self.host = host
+            self.port = port
+            self.timeout_s = timeout_s
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            broker_requests.append((self.host, self.port, self.timeout_s, action))
+            return {"ok": True, "snapshot": {"model": "hmp4030"}}
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        monkeypatch.setattr(
+            window,
+            "_auto_detect_supply_port",
+            lambda: pytest.fail("auto-connect must not scan serial supplies when the broker is running"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_start_owned_shared_broker",
+            lambda: pytest.fail("auto-connect must join the running broker instead of opening COM3"),
+        )
+
+        assert window.combo_supply_profile.currentData() == "hmp4030"
+        assert window._ensure_supply_ready_for_recipe() is True
+        assert window._ensure_supply_ready_for_recipe() is True
+
+        assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+        assert broker_requests == [
+            (
+                "127.0.0.1",
+                mini_dma_mod.DEFAULT_SHARED_BROKER_PORT,
+                mini_dma_mod.SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S,
+                "snapshot",
+            ),
+            (
+                "127.0.0.1",
+                mini_dma_mod.DEFAULT_SHARED_BROKER_PORT,
+                8.0,
+                "snapshot",
+            ),
+        ]
+        log_text = window.log_output.toPlainText()
+        assert "using it instead of saved direct profile hmp4030" in log_text
+        assert "COM3" not in log_text
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_auto_connect_keeps_current_and_motor_supply_on_running_broker(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.combo_supply_profile.setCurrentIndex(window.combo_supply_profile.findData("hmp4030"))
+    window.combo_supply_port.addItem("COM3", "COM3")
+    window.combo_supply_port.setCurrentIndex(window.combo_supply_port.findData("COM3"))
+    broker_requests: list[str] = []
+
+    class _FakeBrokerClient:
+        def __init__(self, *, host: str, port: int, timeout_s: float = 8.0) -> None:
+            assert host == mini_dma_mod.DEFAULT_SHARED_BROKER_HOST
+            assert port == mini_dma_mod.DEFAULT_SHARED_BROKER_PORT
+            assert timeout_s in {mini_dma_mod.SHARED_BROKER_AUTOCONNECT_PROBE_TIMEOUT_S, 8.0}
+
+        def request(self, action: str, **_payload: object) -> dict[str, object]:
+            broker_requests.append(action)
+            return {"ok": True, "snapshot": {"model": "hmp4030"}}
+
+    try:
+        monkeypatch.setattr(mini_dma_mod, "BrokerJsonClient", _FakeBrokerClient)
+        monkeypatch.setattr(
+            window,
+            "_auto_detect_supply_port",
+            lambda: pytest.fail("manual auto-connect must not scan COM3 while the broker is running"),
+        )
+        monkeypatch.setattr(
+            window,
+            "_start_owned_shared_broker",
+            lambda: pytest.fail("manual auto-connect must not take the broker-owned serial port"),
+        )
+        monkeypatch.setattr(window, "_ensure_scale_ready_for_recipe", lambda: True)
+        monkeypatch.setattr(window, "_prepare_current_sweep_supply_channel", lambda: True)
+        monkeypatch.setattr(window, "_enable_motor_supply_output", lambda: True)
+        monkeypatch.setattr(window, "_ensure_tic_ready_for_recipe", lambda: True)
+        monkeypatch.setattr(window, "_apply_manual_auto_connect_tic_settings", lambda: (True, []))
+        monkeypatch.setattr(window, "_manual_auto_connect_should_connect_ir", lambda: False)
+
+        window._run_manual_auto_connect_hardware()
+
+        assert window.combo_supply_profile.currentData() == "shared_hmp_broker"
+        assert isinstance(window._supply_controller, mini_dma_mod.SharedBrokerSupplyController)
+        assert broker_requests == ["snapshot", "snapshot"]
+        log_text = window.log_output.toPlainText()
+        assert "Manual hardware auto-connect completed." in log_text
+        assert "could not open port 'COM3'" not in log_text
     finally:
         _close_test_window(window)
 
@@ -13068,6 +18075,7 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
             "list_ports",
             SimpleNamespace(comports=lambda: [SimpleNamespace(device="COM7", description="HMP")]),
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
         monkeypatch.setattr(
             window,
             "_probe_supply_candidate",
@@ -13097,7 +18105,7 @@ def test_shared_broker_owned_start_auto_detects_hmp_port_without_leaving_shared_
         _close_test_window(window)
 
 
-def test_recipe_preflight_refreshes_existing_shared_broker_current_limit(
+def test_recipe_preflight_does_not_rewrite_shared_broker_current_limit(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -13116,6 +18124,9 @@ def test_recipe_preflight_refreshes_existing_shared_broker_current_limit(
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13130,13 +18141,13 @@ def test_recipe_preflight_refreshes_existing_shared_broker_current_limit(
         steps = [mini_dma_mod.AutomationStep("sweep_current", current_start_mA=1.0, current_end_mA=85.0)]
         assert window._preflight_recipe_hardware(steps) is True
 
-        assert limits == pytest.approx([85.0])
-        assert "CH4 limit checked" in window.log_output.toPlainText()
+        assert limits == []
+        assert "limit checked" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
 
-def test_recipe_preflight_limit_includes_independent_first_overheating_current(
+def test_recipe_preflight_does_not_push_independent_first_overheating_limit_to_broker(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -13155,6 +18166,9 @@ def test_recipe_preflight_limit_includes_independent_first_overheating_current(
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13174,13 +18188,70 @@ def test_recipe_preflight_limit_includes_independent_first_overheating_current(
         ]
         assert window._preflight_recipe_hardware(steps) is True
 
-        assert limits == pytest.approx([60.0])
-        assert "60 mA recipe maximum" in window.log_output.toPlainText()
+        assert limits == []
+        assert "recipe maximum" not in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
 
-def test_prepare_current_sweep_channel_refreshes_broker_limit_before_configure(
+def test_recipe_preflight_ignores_stale_shared_broker_limit_lease_error(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    limit_attempts: list[float] = []
+
+    class _FakeSupply:
+        current_limit_a = 0.04
+
+        def is_connected(self) -> bool:
+            return True
+
+        def set_current_limit_mA(self, current_limit_mA: float) -> None:
+            limit_attempts.append(current_limit_mA)
+            raise PermissionError("Cannot change CH4 role while it is leased.")
+
+        def disconnect(self) -> None:
+            return None
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(40.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(60.0)
+        window._automation_active = False
+        window._supply_output_enabled = False
+        window._recipe_requires_tic = lambda _steps: False  # type: ignore[method-assign]
+        window._recipe_requires_scale = lambda _steps: False  # type: ignore[method-assign]
+        window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._restore_default_zero_load_reference_if_real_grams = lambda _value: None  # type: ignore[method-assign]
+
+        steps = [
+            mini_dma_mod.AutomationStep("sweep_current", current_start_mA=1.0, current_end_mA=60.0)
+        ]
+        assert window._preflight_recipe_hardware(steps) is True
+
+        assert limit_attempts == []
+        assert window._current_sweep_channel_limit_checked is not None
+        assert window._current_sweep_channel_limit_checked[0] == 4
+        assert math.isinf(window._current_sweep_channel_limit_checked[1])
+        log_text = window.log_output.toPlainText()
+        assert "Current-sweep channel limit update failed" not in log_text
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_prepare_current_sweep_channel_does_not_rewrite_shared_broker_limit_before_configure(
     tmp_path: Path,
     qtbot,
 ) -> None:
@@ -13205,6 +18276,9 @@ def test_prepare_current_sweep_channel_refreshes_broker_limit_before_configure(
 
     try:
         window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
         window.combo_current_sweep_supply_channel.setCurrentIndex(
             window.combo_current_sweep_supply_channel.findData(4)
         )
@@ -13214,7 +18288,7 @@ def test_prepare_current_sweep_channel_refreshes_broker_limit_before_configure(
 
         assert window._prepare_current_sweep_supply_channel() is True
 
-        assert calls[:2] == [("limit", pytest.approx(85.0)), ("configure", pytest.approx(1.0))]
+        assert calls[:2] == [("configure", pytest.approx(1.0)), ("select", None)]
     finally:
         _close_test_window(window)
 
@@ -13322,6 +18396,39 @@ def test_tic_controller_sets_step_mode_with_ticcmd(monkeypatch: pytest.MonkeyPat
     controller.set_step_mode("4")
 
     assert calls == [["ticcmd.exe", "-d", "00501366", "--step-mode", "4"]]
+
+
+def test_tic_controller_sets_motion_limits_with_ticcmd(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(args: list[str], **_kwargs: object) -> _Completed:
+        calls.append(args)
+        return _Completed()
+
+    controller = mini_dma_mod.TicController(command_path="ticcmd", device_serial="00501366")
+    monkeypatch.setattr(controller, "executable", lambda: "ticcmd.exe")
+    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+
+    controller.set_motion_limits(max_speed=10_000_000, max_accel=100_000, max_decel=100_000)
+
+    assert calls == [
+        [
+            "ticcmd.exe",
+            "-d",
+            "00501366",
+            "--max-speed",
+            "10000000",
+            "--max-accel",
+            "100000",
+            "--max-decel",
+            "100000",
+        ]
+    ]
 
 
 def test_tic_controller_run_hides_ticcmd_console_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -13465,7 +18572,9 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
     controller.set_target_position(-42, max_speed=12345)
     controller.set_target_velocity(250)
     controller.set_current_position(0)
+    controller.set_step_mode("8")
     controller.set_current_limit_mA(500)
+    controller.set_motion_limits(max_speed=10_000_000, max_accel=100_000, max_decel=100_000)
     controller.halt_and_hold()
 
     assert transfers == [
@@ -13479,7 +18588,11 @@ def test_native_tic_usb_controller_sends_control_transfers(monkeypatch: pytest.M
         (0x40, 0x83, 0, 0, None),
         (0x40, 0xE3, 250, 0, None),
         (0x40, 0xEC, 0, 0, None),
+        (0x40, 0x94, 3, 0, None),
         (0x40, 0x91, 4, 0, None),
+        (0x40, 0xE6, 0x9680, 0x0098, None),
+        (0x40, 0xEA, 0x86A0, 0x0001, None),
+        (0x40, 0xE9, 0x86A0, 0x0001, None),
         (0x40, 0x89, 0, 0, None),
     ]
 
@@ -13500,12 +18613,17 @@ def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatc
             *,
             timeout: int | None = None,
         ) -> bytes:
-            assert (request_type, request, value, index, data_or_wLength) == (0xC0, 0xA1, 0, 0, 0x35)
-            data = bytearray(0x35)
+            assert (request_type, request, value, index, data_or_wLength) == (0xC0, 0xA1, 0, 0, 0x4B)
+            data = bytearray(0x4B)
             data[0x00] = 10
             data[0x02:0x04] = (0).to_bytes(2, "little")
+            data[0x16:0x1A] = (8_000_000).to_bytes(4, "little")
+            data[0x1A:0x1E] = (80_000).to_bytes(4, "little")
+            data[0x1E:0x22] = (90_000).to_bytes(4, "little")
             data[0x22:0x26] = (-42).to_bytes(4, "little", signed=True)
             data[0x33:0x35] = (12345).to_bytes(2, "little")
+            data[0x49] = 3
+            data[0x4A] = 3
             return bytes(data)
 
     device = _FakeDevice()
@@ -13531,6 +18649,11 @@ def test_native_tic_usb_controller_formats_status(monkeypatch: pytest.MonkeyPatc
     assert "Operation state: Normal" in status
     assert "Current position: -42" in status
     assert "VIN voltage: 12.35 V" in status
+    assert "Max speed: 8000000" in status
+    assert "Max acceleration: 90000" in status
+    assert "Max deceleration: 80000" in status
+    assert "Step mode: 1/8 step" in status
+    assert "Current limit: 343 mA" in status
     assert "Errors currently stopping the motor: None" in status
 
 
@@ -14146,9 +19269,10 @@ def test_tic_keepalive_resets_command_timeout_during_active_recipe(tmp_path: Pat
             self.keepalive_count += 1
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window._tic_motor_power_ok = True
     window._automation_active = True
+    window._automatic_tic_settings_snapshot = window._manual_tic_settings()
     window.spin_steps_per_mm.setValue(100.0)
 
     try:
@@ -14582,8 +19706,49 @@ def test_session_control_trace_accepts_row_local_task_text(tmp_path: Path, qtbot
         _close_test_window(window)
 
 
+def test_control_trace_write_failure_disables_trace_without_stopping(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    rows: list[dict[str, object]] = []
+
+    class _FailingTraceWriter:
+        def writerow(self, row: dict[str, object]) -> None:
+            rows.append(row)
+
+    class _FailingTraceHandle:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def flush(self) -> None:
+            raise OSError(22, "Invalid argument")
+
+        def close(self) -> None:
+            self.closed = True
+
+    handle = _FailingTraceHandle()
+
+    try:
+        window._session_active = True
+        window._session_start_monotonic = time.monotonic()
+        window._session_control_trace_writer = _FailingTraceWriter()  # type: ignore[assignment]
+        window._session_control_trace_handle = handle
+
+        window._write_control_trace(decision="wait", basis=mini_dma_mod.HSW_BASIS_STRESS_MPA)
+        window._write_control_trace(decision="wait", basis=mini_dma_mod.HSW_BASIS_STRESS_MPA)
+
+        assert len(rows) == 1
+        assert handle.closed is True
+        assert window._session_control_trace_writer is None
+        assert window._session_control_trace_handle is None
+        assert window._session_active is True
+        assert "Control trace disabled after write failure" in window.log_output.toPlainText()
+    finally:
+        window._session_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
@@ -14647,6 +19812,10 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
 
     try:
         window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_metadata_snapshot is not None
+        launch_sweep_metadata = window._run_metadata_snapshot.launch_metadata()[
+            "controlled_current_sweep"
+        ]
         window._automation_active = True
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
         window._automation_steps = [active_sweep, future_set_current, future_ramp, future_sweep, future_reverse]
@@ -14669,6 +19838,23 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         window.check_current_sweep_hold_on_error.setChecked(False)
 
         assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        worker_errors: list[BaseException] = []
+
+        def _write_effective_metadata() -> None:
+            try:
+                window._write_session_metadata()
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        metadata_worker = threading.Thread(
+            target=_write_effective_metadata,
+            name="test-tma-runtime-effective-metadata",
+        )
+        metadata_worker.start()
+        metadata_worker.join(timeout=5.0)
+        assert metadata_worker.is_alive() is False
+        assert worker_errors == []
 
         assert window._automation_steps[0] is not active_sweep
         assert window._automation_steps[0].current_start_mA == pytest.approx(1.0)
@@ -14689,6 +19875,13 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         assert window._automation_steps[4].current_start_mA == pytest.approx(80.0)
         assert window._automation_steps[4].current_end_mA == pytest.approx(2.0)
         assert window._current_sweep_recipe_overrides
+        assert window._run_metadata_snapshot is not None
+        assert window._run_metadata_snapshot.launch_metadata()["controlled_current_sweep"] == (
+            launch_sweep_metadata
+        )
+        assert window._run_metadata_snapshot.effective_metadata()["controlled_current_sweep"][
+            "current_end_mA"
+        ] == pytest.approx(80.0)
 
         window._stop_session()
         rows = list(
@@ -14706,6 +19899,10 @@ def test_current_sweep_runtime_update_extends_active_step_and_logs_trace(
         overrides = metadata["controlled_current_sweep"]["runtime_overrides"]
         assert overrides[0]["active_step_updated"] is True
         assert overrides[0]["changed_step_count"] == 5
+        assert metadata["controlled_current_sweep"]["current_end_mA"] == pytest.approx(80.0)
+        assert metadata["controlled_current_sweep"]["current_ramp_rate_mA_s"] == pytest.approx(0.6)
+        assert metadata["controlled_current_sweep"]["current_ramp_hold_on_error"] is False
+        assert window._run_metadata_snapshot is None
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -14955,6 +20152,383 @@ def test_current_sweep_runtime_update_leaves_active_step_when_setpoint_beyond_ne
         assert override["active_step_updated"] is False
         assert "already beyond" in override["active_step_message"]
         assert override["changed_step_count"] == 1
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_changes_active_ramp_before_old_max(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_firstheat_update")
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        current_hold_enabled=False,
+        note="first_overheating",
+    )
+    first_reverse = dataclasses.replace(first_sweep, current_start_mA=40.0, current_end_mA=1.0)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep, first_reverse]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+        window._automation_target_value = 20.0
+        window._active_current_sweep_last_setpoint_mA = 25.0
+        window._automation_interval_ms = 250
+
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(55.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0].current_end_mA == pytest.approx(55.0)
+        assert window._automation_steps[0].note == "first_overheating"
+        assert window._automation_steps[1].current_start_mA == pytest.approx(55.0)
+        assert window._automation_steps[1].current_end_mA == pytest.approx(1.0)
+
+        window._stop_session()
+        metadata = json.loads((tmp_path / "runtime_firstheat_update" / "metadata.json").read_text(encoding="utf-8"))
+        override = metadata["controlled_current_sweep"]["runtime_overrides"][0]
+        assert override["active_step_updated"] is True
+        assert override["visible_values"]["first_overheating_current_end_mA"] == pytest.approx(55.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_rejects_after_preheat_ramp(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_firstheat_too_late")
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+    normal_start = mini_dma_mod.AutomationStep(
+        "set_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_mA=1.0,
+        note="1",
+    )
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep, normal_start]
+        window._automation_index = 1
+        window._active_current_sweep_step_index = None
+        window._active_current_sweep_last_setpoint_mA = 10.0
+        window._automation_interval_ms = 250
+
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(55.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is False
+        assert window._automation_steps[0].current_end_mA == pytest.approx(40.0)
+        assert "can only be changed before" in window.log_output.toPlainText()
+
+        window._stop_session()
+        rows = list(
+            csv.DictReader((tmp_path / "runtime_firstheat_too_late" / "control_trace.csv").open(encoding="utf-8", newline=""))
+        )
+        assert rows[0]["result"] == "rejected"
+        assert rows[0]["task_text"] == "Rejected first-overheating max-current update"
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_rejects_lowering_below_active_setpoint(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("runtime_firstheat_lower_reject")
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=60.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 56.0
+        window._automation_interval_ms = 250
+
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(80.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(55.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is False
+
+        assert window._automation_steps[0] is first_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(60.0)
+        assert "was not lowered" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_refreshes_channel_limit_for_raise(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    limits: list[float] = []
+
+    class _FakeSupply:
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            limits.append(value)
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 25.0
+
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(60.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert limits == pytest.approx([60.0])
+        assert window._automation_steps[0].current_end_mA == pytest.approx(60.0)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_lowers_without_refreshing_leased_limit(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            raise PermissionError(f"Cannot change CH4 role while it is leased ({value}).")
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=40.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+    first_reverse = dataclasses.replace(first_sweep, current_start_mA=40.0, current_end_mA=1.0)
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        profile_index = window.combo_supply_profile.findData("shared_hmp_broker")
+        assert profile_index >= 0
+        window.combo_supply_profile.setCurrentIndex(profile_index)
+        window.combo_current_sweep_supply_channel.setCurrentIndex(
+            window.combo_current_sweep_supply_channel.findData(4)
+        )
+        window._current_sweep_channel_limit_checked = (4, 40.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep, first_reverse]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 25.0
+
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(35.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0].current_end_mA == pytest.approx(35.0)
+        assert window._automation_steps[1].current_start_mA == pytest.approx(35.0)
+        assert window._current_sweep_channel_limit_checked == (4, 40.0)
+        assert "Current-sweep channel limit update failed" not in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_first_overheating_runtime_update_rejects_limit_failure_without_stopping(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeSupply:
+        def __init__(self) -> None:
+            self.current_limit_mA = 30.0
+
+        def current_resolution_mA(self) -> float:
+            return 0.1
+
+        def set_current_limit_mA(self, value: float) -> None:
+            self.current_limit_mA = value
+            raise PermissionError("Cannot change CH4 role while it is leased.")
+
+        def disconnect(self) -> None:
+            return None
+
+    first_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=20.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=30.0,
+        current_ramp_rate_mA_s=1.0,
+        note="first_overheating",
+    )
+
+    try:
+        window._supply_controller = _FakeSupply()  # type: ignore[assignment]
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [first_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 20.0
+
+        window.spin_supply_manual_current.setValue(1.0)
+        window.spin_current_sweep_target_start.setValue(20.0)
+        window.spin_current_sweep_target_end.setValue(20.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(30.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(32.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is False
+
+        assert window._automation_active is True
+        assert window._automation_steps[0] is first_sweep
+        assert window._automation_steps[0].current_end_mA == pytest.approx(30.0)
+        assert window._current_sweep_recipe_overrides[-1]["result"] == "rejected"
+        assert "Current-sweep channel limit update failed" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_normal_current_sweep_runtime_update_ignores_independent_first_overheating_max(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    active_sweep = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=80.0,
+        current_ramp_rate_mA_s=1.0,
+        note="1",
+    )
+
+    try:
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [active_sweep]
+        window._automation_index = 0
+        window._active_current_sweep_step_index = 0
+        window._active_current_sweep_last_setpoint_mA = 40.0
+
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(50.0)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(90.0)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.check_current_sweep_first_overheating_use_normal_end.setChecked(False)
+        window.spin_current_sweep_first_overheating_end_mA.setValue(30.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        assert window._automation_steps[0].note == "1"
+        assert window._automation_steps[0].current_end_mA == pytest.approx(90.0)
     finally:
         window._automation_active = False
         _close_test_window(window)
@@ -15341,7 +20915,6 @@ def test_setup_raw_scale_samples_are_logged_before_main_measurement_starts(
                 raw_text="21.190 g",
             )
         )
-
         rows = list(csv.DictReader(window._session_raw_scale_path.open(encoding="utf-8", newline="")))
         assert len(rows) == 1
         assert rows[0]["raw_load_g"] == "21.190000"
@@ -15379,7 +20952,6 @@ def test_raw_scale_elapsed_stays_continuous_when_measurement_logging_starts(
                 raw_text="21.180 g",
             )
         )
-
         rows = list(csv.DictReader(window._session_raw_scale_path.open(encoding="utf-8", newline="")))
         assert [row["elapsed_s"] for row in rows] == ["1.000000", "2.000000"]
     finally:
@@ -15606,7 +21178,7 @@ def test_emergency_stop_turns_off_current_halts_tic_and_stops_session(tmp_path: 
     window._supply_controller = supply  # type: ignore[assignment]
     window._supply_output_enabled = True
     window._supply_last_setpoint_mA = 12.5
-    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
     window.combo_motor_supply_channel.setCurrentIndex(window.combo_motor_supply_channel.findData(2))
 
     try:
@@ -15672,7 +21244,7 @@ def test_recipe_seek_does_not_stack_corrections_ahead_of_confirmed_position(tmp_
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(False)
@@ -15718,7 +21290,7 @@ def test_load_seek_continues_from_commanded_target_after_fresh_feedback_without_
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_value_g = 0.0
@@ -15814,7 +21386,7 @@ def test_load_seek_accepts_near_target_crossing_without_reverse_hunt(tmp_path: P
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_steps_per_mm.setValue(100.0)
@@ -15865,7 +21437,7 @@ def test_seek_direction_reversal_applies_backlash_takeup(tmp_path: Path, qtbot) 
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_timestamp = time.time()
@@ -15915,7 +21487,7 @@ def test_calibration_seek_ignores_existing_backlash_compensation(tmp_path: Path,
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._automation_active = True
@@ -15963,7 +21535,7 @@ def test_backlash_takeup_is_not_logged_as_tensile_displacement(tmp_path: Path, q
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.check_zero_on_preload.setChecked(False)
@@ -16023,7 +21595,7 @@ def test_seek_uses_calibrated_length_scaled_sensitivity_for_correction_distance(
             self.target_steps = position_steps
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_steps_per_mm.setValue(1000.0)
@@ -16246,7 +21818,7 @@ def test_setup_preload_tiny_baseline_load_uses_stiffness_capped_slack_takeup(
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_steps_per_mm.setValue(10000.0)
@@ -16288,6 +21860,48 @@ def test_setup_preload_tiny_baseline_load_uses_stiffness_capped_slack_takeup(
             50.0 / stiffness_mpa_per_mm
         ) + window._motor_step_mm()
         assert controller.max_speed == 20_000_000
+    finally:
+        _close_test_window(window)
+
+
+def test_setup_preload_fast_scale_quantization_does_not_collapse_to_single_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window.spin_steps_per_mm.setValue(800.0)
+        window.spin_diameter.setValue(0.0182)
+        window.spin_scale_interval.setValue(50)
+        window.spin_motion_speed_mm_s.setValue(0.1)
+        window.spin_setup_slack_step_cap_stress_mpa.setValue(50.0)
+        window._automation_interval_ms = 50
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="target_ramp",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=20.0,
+            note="setup_preload",
+        )
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 20.0)
+        apparent_sensitivity_mpa_per_mm = 520.0
+        apparent_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+            apparent_sensitivity_mpa_per_mm,
+            window.spin_diameter.value(),
+        )
+        assert apparent_stiffness_g_per_mm is not None
+        window._seek_live_stiffness_by_key[seek_key] = apparent_stiffness_g_per_mm
+
+        correction_mm = window._predictive_seek_step_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            error_value=4.0,
+            tolerance=window._auto_requested_tolerance_for_basis(mini_dma_mod.HSW_BASIS_STRESS_MPA),
+            seek_key=seek_key,
+        )
+
+        assert correction_mm == pytest.approx(4.0 / apparent_sensitivity_mpa_per_mm * 0.75)
+        assert correction_mm > window._motor_step_mm() * 3.0
     finally:
         _close_test_window(window)
 
@@ -16638,7 +22252,7 @@ def test_current_sweep_reverse_correction_uses_fine_step_instead_of_predictive_b
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(False)
     window.check_positive_motion_is_tension.setChecked(True)
     window.spin_steps_per_mm.setValue(1000.0)
@@ -17369,6 +22983,210 @@ def test_current_sweep_hold_volatile_response_keeps_waiting_while_still_rising(
         assert reached is False
         assert not moves
         assert trace_rows[-1]["reason"] == "volatile_response_unsettled"
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_current_sweep_hold_runaway_drift_bypasses_volatile_wait(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.combo_scale_baud.setCurrentText("256000")
+    window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0182)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(37.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        300.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = -20.0
+    window._seek_last_value_by_key[seek_key] = 70.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 1.0
+    window._seek_last_filtered_value_by_key[seek_key] = 70.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.05
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = now_s - 1.0
+    window._seek_post_move_sample_count_by_key[seek_key] = (
+        mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
+    )
+    window._seek_out_of_band_sign_by_key[seek_key] = -1.0
+    window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
+    window._current_position_mm = 0.07
+    window._effective_position_mm = 0.07
+    window._last_move_target_mm = 0.07
+    window._last_effective_move_target_mm = 0.07
+    window._last_motion_command_time_s = now_s - 1.5
+    window._last_motion_expected_complete_time_s = now_s - 1.4
+    for index, stress_mpa in enumerate([70.0, 72.0, 74.0, 76.0, 78.0]):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s - 1.0 + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    window._seek_filtered_control_signal = (  # type: ignore[method-assign]
+        lambda _basis: mini_dma_mod.ScaleControlSignal(
+            value=74.0,
+            latest_value=78.0,
+            noise=0.5,
+            slope_per_s=4.0,
+            sample_count=5,
+            timestamp_s=now_s,
+        )
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert moves, trace_rows
+        assert "current_hold_drift_recovery" in str(trace_rows[-1]["reason"])
+        commanded_mm = abs(float(trace_rows[-1]["correction_mm"]))
+        assert commanded_mm > window._motor_step_mm()
+    finally:
+        _close_test_window(window)
+
+
+def test_kern_current_sweep_hold_high_noise_runaway_escapes_single_step(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[tuple[float, float | None]] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+
+    def _capture_move(target_mm: float, **kwargs: object) -> bool:
+        moves.append((target_mm, kwargs.get("effective_position_mm")))  # type: ignore[arg-type]
+        return True
+
+    def _capture_trace(**kwargs: object) -> None:
+        trace_rows.append(dict(kwargs))
+
+    window._move_to_position_mm = _capture_move  # type: ignore[method-assign]
+    window._write_control_trace = _capture_trace  # type: ignore[method-assign]
+    window.combo_scale_baud.setCurrentText("256000")
+    window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+    window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+    window.check_tension_load_positive.setChecked(False)
+    window.check_positive_motion_is_tension.setChecked(True)
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0182)
+    window.spin_steps_per_mm.setValue(800.0)
+    window.spin_initial_length.setValue(37.0)
+    window.spin_backlash_mm.setValue(0.0)
+    window.spin_current_sweep_target_speed_mm_s.setValue(5.0)
+    window.spin_current_sweep_correction_rate_pct_s.setValue(15.0)
+    window.spin_current_sweep_hold_correction_stress_mpa.setValue(30.0)
+    window._calibrated_stiffness_g_per_mm = mini_dma_mod.load_g_from_stress_mpa(
+        300.0,
+        window.spin_diameter.value(),
+    )
+    window._calibrated_stiffness_length_mm = float(window.spin_initial_length.value())
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+    window._seek_last_error_by_key[seek_key] = 18.0
+    window._seek_last_value_by_key[seek_key] = 32.0
+    window._seek_last_time_by_key[seek_key] = time.monotonic() - 0.4
+    window._seek_last_filtered_value_by_key[seek_key] = 35.0
+    window._seek_last_effective_position_by_key[seek_key] = 0.02
+    window._seek_last_scale_timestamp_by_clock[(seek_key[0], seek_key[1])] = now_s - 1.0
+    window._seek_post_move_sample_count_by_key[seek_key] = (
+        mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_VOLATILE_EXTRA_SAMPLES
+    )
+    window._seek_out_of_band_sign_by_key[seek_key] = 1.0
+    window._seek_out_of_band_since_by_key[seek_key] = now_s - 2.0
+    for _ in range(mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_UNSTABLE_LEVEL):
+        window._note_current_sweep_hold_instability(seek_key)
+    window._current_position_mm = 0.04
+    window._effective_position_mm = 0.04
+    window._last_move_target_mm = 0.04
+    window._last_effective_move_target_mm = 0.04
+    window._last_motion_command_time_s = now_s - 1.5
+    window._last_motion_expected_complete_time_s = now_s - 1.4
+    for index, stress_mpa in enumerate([34.0, 32.0, 30.0, 29.0, 28.0]):
+        load_g = mini_dma_mod.load_g_from_stress_mpa(stress_mpa, window.spin_diameter.value())
+        assert load_g is not None
+        timestamp_s = now_s - 1.0 + index * 0.25
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+    window._seek_filtered_control_signal = (  # type: ignore[method-assign]
+        lambda _basis: mini_dma_mod.ScaleControlSignal(
+            value=29.0,
+            latest_value=28.0,
+            noise=9.0,
+            slope_per_s=-14.0,
+            sample_count=30,
+            timestamp_s=now_s,
+        )
+    )
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.4,
+        )
+
+        assert reached is False
+        assert moves, trace_rows
+        assert "current_hold_unstable_drift_recovery" in str(trace_rows[-1]["reason"])
+        commanded_mm = abs(float(trace_rows[-1]["correction_mm"]))
+        assert commanded_mm > window._motor_step_mm()
     finally:
         _close_test_window(window)
 
@@ -18231,8 +24049,8 @@ def test_current_sweep_hold_volatile_containment_clamps_improving_recovery(
         assert effective_mm is not None
         correction_mm = abs(float(effective_mm) - current_position_mm)
         assert correction_mm == pytest.approx(window._motor_step_mm())
-        assert trace_rows[-1]["reason"] == "gated;current_hold_volatile_single_step"
-        assert "containing recovery to one motor step" in window.log_output.toPlainText()
+        assert trace_rows[-1]["reason"] == "gated;current_hold_volatile_capped"
+        assert "capping the next correction" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -19176,7 +24994,83 @@ def test_current_sweep_hold_uses_smooth_dynamic_stress_cap(tmp_path: Path, qtbot
         )
 
         assert correction_mm is not None
-        assert correction_mm * 200.0 == pytest.approx(20.64, abs=0.01)
+        assert correction_mm == pytest.approx(window._current_sweep_hold_base_command_cap_mm())
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_large_error_without_response_uses_geometry_base_cap(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window.spin_initial_length.setValue(58.0)
+        window.spin_current_sweep_max_correction_strain_pct.setValue(5.0)
+        window.spin_current_sweep_hold_correction_stress_mpa.setValue(100.0)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._set_automation_context(
+            phase="current_hold",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            plateau_index=1,
+        )
+        seek_key = window._seek_error_key(mini_dma_mod.HSW_BASIS_STRESS_MPA, 50.0)
+
+        correction_mm = window._current_sweep_max_stress_correction_mm(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            sensitivity_per_mm=10.0,
+            error_value=80.0,
+            seek_key=seek_key,
+        )
+
+        assert correction_mm is not None
+        assert correction_mm == pytest.approx(
+            58.0 * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_BASE_COMMAND_STRAIN_PCT / 100.0
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_hold_adaptive_large_error_floor_scales_with_band_target_and_quantization(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        window._scale_quantization_band_for_basis = lambda _basis: 0.0  # type: ignore[method-assign]
+        floor_50_mpa = window._current_sweep_hold_adaptive_large_error_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            2.0,
+            seek_key=(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0),
+        )
+        floor_500_mpa = window._current_sweep_hold_adaptive_large_error_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            2.0,
+            seek_key=(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 500.0),
+        )
+
+        assert floor_50_mpa == pytest.approx(
+            2.0 * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR
+        )
+        assert floor_500_mpa == pytest.approx(
+            500.0 * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_TARGET_FRACTION
+        )
+
+        window._scale_quantization_band_for_basis = lambda _basis: 4.0  # type: ignore[method-assign]
+        quantized_floor = window._current_sweep_hold_adaptive_large_error_floor_for_basis(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            2.0,
+            seek_key=(mini_dma_mod.HSW_BASIS_STRESS_MPA, 1, 50.0),
+        )
+        assert quantized_floor == pytest.approx(
+            4.0
+            * mini_dma_mod.SCALE_QUANTIZATION_WORSENING_FACTOR
+            * mini_dma_mod.SERVO_CURRENT_SWEEP_HOLD_ADAPTIVE_LARGE_ERROR_BAND_FACTOR
+        )
     finally:
         _close_test_window(window)
 
@@ -19213,7 +25107,7 @@ def test_current_sweep_hold_uses_adaptive_response_stiffness_for_large_errors(
         )
 
         assert correction_mm is not None
-        assert correction_mm == pytest.approx(0.059, rel=0.08)
+        assert correction_mm == pytest.approx(0.064, rel=0.05)
         assert correction_mm < (20.0 / 300.0)
     finally:
         _close_test_window(window)
@@ -19803,7 +25697,7 @@ def test_current_sweep_seek_uses_target_stage_speed_for_dynamic_balance(tmp_path
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_value_g = 0.0
@@ -19849,7 +25743,7 @@ def test_current_sweep_load_target_ramp_uses_target_stage_speed(tmp_path: Path, 
             self.max_speed = max_speed
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window._latest_scale_value_g = 0.0
@@ -20097,7 +25991,7 @@ def test_iso_current_stress_ramp_target_uses_larger_dynamic_step_cap(
         )
 
         assert correction_mm > window.spin_current_sweep_nudge_mm.value()
-        assert correction_mm == pytest.approx(50.0 * 0.0008)
+        assert correction_mm == pytest.approx(50.0 * 0.0012)
     finally:
         _close_test_window(window)
 
@@ -20591,6 +26485,7 @@ def test_recovery_position_start_restarts_ui_refresh_timer(tmp_path: Path, qtbot
 
         assert window._automation_active is True
         assert window._automation_name == mini_dma_mod.RECOVERY_POSITION
+        assert [step.action for step in window._automation_steps] == ["move"]
         assert window._ui_refresh_timer.isActive() is True
     finally:
         _close_test_window(window)
@@ -20843,7 +26738,9 @@ def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: P
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+    window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
     window._apply_tic_current_limit = lambda: (True, "PASS")  # type: ignore[method-assign]
+    window._apply_tic_motion_limits = lambda: (True, "PASS")  # type: ignore[method-assign]
 
     try:
         ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
@@ -20872,6 +26769,11 @@ def test_hmp4030_defaults_keep_safe_voltage_and_require_manual_channel_selection
         assert window.spin_tic_current_limit_mA.value() == 343
     finally:
         _close_test_window(window)
+
+
+def test_shared_broker_defaults_match_current_kosice_hmp4030_wiring() -> None:
+    assert mini_dma_mod.SUPPLY_PROFILES["shared_hmp_broker"]["channel_select"] == 3
+    assert mini_dma_mod.SUPPLY_PROFILES["shared_hmp_broker"]["motor_supply_channel"] == 2
 
 
 def test_tic_current_limit_keeps_cool_bench_default() -> None:
@@ -21223,6 +27125,10 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         def __init__(self) -> None:
             self.current_limits: list[float] = []
             self.step_modes: list[str] = []
+            self.max_speed = 800_000
+            self.max_accel = 40_000
+            self.max_decel = 40_000
+            self.motion_limit_calls: list[tuple[str, ...]] = []
 
         def set_step_mode(self, step_mode: str) -> None:
             self.step_modes.append(step_mode)
@@ -21230,6 +27136,11 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         def run(self, *args: str, timeout_s: float = 5.0) -> str:
             if args and args[0] == "--current":
                 self.current_limits.append(float(args[1]))
+            if args and args[0] == "--max-speed":
+                self.motion_limit_calls.append(tuple(args))
+                self.max_speed = int(args[1])
+                self.max_accel = int(args[3])
+                self.max_decel = int(args[5])
             return ""
 
         def get_status(self) -> str:
@@ -21237,6 +27148,9 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
                 [
                     "VIN voltage: 12.00 V",
                     "Step mode: 1/8 step",
+                    f"Max speed: {self.max_speed}",
+                    f"Max acceleration: {self.max_accel}",
+                    f"Max deceleration: {self.max_decel}",
                     "Current limit: 343 mA",
                     "Errors currently stopping the motor: None",
                 ]
@@ -21245,7 +27159,7 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
     supply = _FakeSupply()
     tic = _FakeTic()
     window._supply_controller = supply  # type: ignore[assignment]
-    window._build_tic_controller = lambda: tic  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
     window._refresh_tic_status = lambda: setattr(window, "_tic_status_text", tic.get_status()) or True  # type: ignore[method-assign]
     window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
     window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
@@ -21261,9 +27175,76 @@ def test_provision_bench_configures_supply_tic_and_reports_status(tmp_path: Path
         assert ok is True
         assert supply.configured == [(2, 12.0, 0.5, True)]
         assert supply.selected == 3
+        assert tic.step_modes == ["8"]
         assert tic.current_limits == [343.0]
+        assert tic.motion_limit_calls == [
+            ("--max-speed", "10000000", "--max-accel", "100000", "--max-decel", "100000")
+        ]
         assert "PASS: Motor supply CH2" in window.label_hardware_provisioning_status.text()
+        assert "PASS: Tic step mode" in window.label_hardware_provisioning_status.text()
         assert "PASS: Tic current limit 343 mA" in window.label_hardware_provisioning_status.text()
+        assert "PASS: Tic motion limits speed 10000000, accel 100000, decel 100000" in (
+            window.label_hardware_provisioning_status.text()
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_restore_idle_tic_motion_limits_refreshes_after_dynamic_move(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeTic:
+        def __init__(self) -> None:
+            self.max_speed = 1_156_981
+            self.max_accel = 100_000
+            self.max_decel = 100_000
+            self.calls: list[tuple[int, int, int]] = []
+
+        def set_motion_limits(
+            self,
+            *,
+            max_speed: int | None = None,
+            max_accel: int | None = None,
+            max_decel: int | None = None,
+        ) -> None:
+            self.max_speed = int(max_speed if max_speed is not None else self.max_speed)
+            self.max_accel = int(max_accel if max_accel is not None else self.max_accel)
+            self.max_decel = int(max_decel if max_decel is not None else self.max_decel)
+            self.calls.append((self.max_speed, self.max_accel, self.max_decel))
+
+        def get_status(self) -> str:
+            return "\n".join(
+                [
+                    "VIN voltage: 12.00 V",
+                    "Step mode: 1/8 step",
+                    f"Max speed: {self.max_speed}",
+                    f"Max acceleration: {self.max_accel}",
+                    f"Max deceleration: {self.max_decel}",
+                    "Current limit: 343 mA",
+                    "Errors currently stopping the motor: None",
+                ]
+            )
+
+    tic = _FakeTic()
+    window._tic_status_text = "\n".join(
+        [
+            "VIN voltage: 12.00 V",
+            "Step mode: 1/8 step",
+            "Max speed: 10000000",
+            "Max acceleration: 100000",
+            "Max deceleration: 100000",
+            "Current limit: 343 mA",
+            "Errors currently stopping the motor: None",
+        ]
+    )
+    window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
+    window._refresh_tic_status = lambda: setattr(window, "_tic_status_text", tic.get_status()) or True  # type: ignore[method-assign]
+
+    try:
+        window._restore_idle_tic_motion_limits()
+
+        assert tic.calls == [(10_000_000, 100_000, 100_000)]
+        assert "Restored Tic idle motion limits" in window.log_output.toPlainText()
     finally:
         _close_test_window(window)
 
@@ -21285,6 +27266,8 @@ def test_recipe_preflight_blocks_start_when_tic_current_limit_fails(
         window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
         window._apply_tic_current_limit = lambda: (False, "FAIL: Tic current limit could not be set.")  # type: ignore[method-assign]
 
         ok = window._preflight_recipe_hardware([mini_dma_mod.AutomationStep("move", target_mm=0.0)])
@@ -21320,11 +27303,16 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
         window._ensure_supply_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_tic_ready_for_recipe = lambda: True  # type: ignore[method-assign]
         window._ensure_scale_ready_for_recipe = lambda: True  # type: ignore[method-assign]
-        window._build_tic_controller = lambda: _BusyTic()  # type: ignore[method-assign]
+        window._apply_direct_hmp_bench_defaults_for_tic_preflight = lambda: None  # type: ignore[method-assign]
+        window._apply_tic_configured_step_mode = lambda: (True, "PASS")  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: _BusyTic()  # type: ignore[method-assign]
         window._tic_status_text = "\n".join(
             [
                 "VIN voltage: 12.00 V",
                 "Step mode: 1/8 step",
+                "Max speed: 10000000",
+                "Max acceleration: 100000",
+                "Max deceleration: 100000",
                 "Current limit: 343 mA",
                 "Errors currently stopping the motor: None",
             ]
@@ -21335,6 +27323,39 @@ def test_recipe_preflight_allows_existing_tic_current_limit_when_write_handle_is
         assert ok is True
         assert not warnings
         assert "Tic current limit already 343 mA" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_apply_tic_configured_step_mode_writes_selected_mode(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    class _FakeTic:
+        def __init__(self) -> None:
+            self.step_modes: list[str] = []
+            self.current_limits: list[float] = []
+
+        def set_step_mode(self, step_mode: str) -> None:
+            self.step_modes.append(step_mode)
+
+        def set_current_limit_mA(self, target_mA: float) -> int:
+            self.current_limits.append(target_mA)
+            return mini_dma_mod.DEFAULT_TIC_CURRENT_LIMIT_MA
+
+    tic = _FakeTic()
+    try:
+        window._build_tic_controller = lambda _settings=None: tic  # type: ignore[method-assign]
+        window._tic_status_text = "VIN voltage: 12.00 V\nErrors currently stopping the motor: None"
+        window.spin_full_steps_per_mm.setValue(100.0)
+        window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
+
+        ok, message = window._apply_tic_configured_step_mode()
+
+        assert ok is True
+        assert "Tic step mode 1/8 step" in message
+        assert tic.step_modes == ["8"]
+        assert tic.current_limits == []
+        assert window.spin_steps_per_mm.value() == pytest.approx(800.0)
     finally:
         _close_test_window(window)
 
@@ -21350,7 +27371,7 @@ def test_max_load_limit_allows_relaxing_manual_move(tmp_path: Path, qtbot) -> No
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_tension_load_positive.setChecked(True)
     window.check_positive_motion_is_tension.setChecked(False)
     window.check_max_load.setChecked(True)
@@ -21420,7 +27441,7 @@ def test_raw_scale_display_limit_blocks_standard_moves_when_exceeded(tmp_path: P
             self.targets.append(position_steps)
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     window.check_positive_motion_is_tension.setChecked(False)
     window.spin_raw_scale_limit_g.setValue(30.0)
     window._latest_scale_value_g = 30.05
@@ -21747,43 +27768,707 @@ def test_session_metadata_keeps_original_created_timestamp(
         _close_test_window(window)
 
 
-def test_session_metadata_records_source_control_snapshot(
+def test_worker_metadata_and_scheduled_record_use_frozen_gui_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    window.edit_log_name.setText("metadata_git")
-    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+    window.edit_log_name.setText("worker_metadata_snapshot")
+    window.edit_sample_name.setText("launch sample")
+    window.edit_run_notes.setPlainText("launch notes")
+    window.spin_log_interval.setValue(5000)
+    window.spin_supply_voltage_limit.setValue(7.5)
+    recipe_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    assert recipe_index >= 0
+    window.combo_recipe_mode.setCurrentIndex(recipe_index)
 
-    replies = {
-        ("branch", "--show-current"): "codex/test-branch\n",
-        ("rev-parse", "HEAD"): "abc123\n",
-        ("status", "--short"): " M data_logging/mini_dma_logger/mini_dma_logger.py\n",
-        ("config", "--get", "remote.origin.url"): "https://example.test/repo.git\n",
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_metadata_snapshot is not None
+        launch = window._run_metadata_snapshot.launch_metadata()
+        window._active_control_config = window._freeze_control_config()
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = [mini_dma_mod.AutomationStep("record", note="worker-metadata")]
+        window._automation_index = 0
+        window._session_logging_enabled = True
+        window._last_session_log_timestamp_s = time.time()
+        window._latest_scale_timestamp = time.time()
+        window._latest_scale_value_g = 0.0
+        window._length_setup_start_monotonic = time.monotonic()
+
+        window.edit_sample_name.setText("unapproved operator change")
+        window.edit_run_notes.setPlainText("unapproved notes")
+        window.spin_log_interval.setValue(250)
+        window.spin_supply_voltage_limit.setValue(2.0)
+        window.combo_recipe_mode.setCurrentIndex(window.combo_recipe_mode.findData("cycle"))
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                assert window._build_tic_dispatcher() is not None
+                window._automation_controller.execute_next_tick()
+                assert window._record_length_setup_point() is True
+                for _ in range(5):
+                    window._last_session_metadata_write_s -= (
+                        mini_dma_mod.SESSION_METADATA_WRITE_INTERVAL_S + 0.1
+                    )
+                    window._write_session_metadata(throttle=True)
+                assert window._maybe_record_scheduled_point() is True
+                window._write_control_trace(decision="snapshot_probe", result="ok")
+                window._supply_output_enabled = True
+                window._supply_last_setpoint_mA = 10.0
+                window._supply_snapshot = {
+                    "current_mA": 0.0,
+                    "voltage_V": 7.5,
+                    "resistance_ohm": None,
+                    "power_W": 0.0,
+                }
+                assert window._wire_break_detected() is True
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_worker, name="test-tma-metadata-worker")
+        worker.start()
+        worker.join(timeout=5.0)
+
+        assert worker.is_alive() is False
+        assert errors == []
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["sample_name"] == "launch sample"
+        assert payload["notes"] == "launch notes"
+        assert payload["recipe_mode"] == mini_dma_mod.CURRENT_SWEEP_STRESS
+        assert payload["logging"]["log_interval_ms"] == 5000
+        assert payload["heating"]["voltage_limit_v"] == pytest.approx(7.5)
+        assert payload["sample_name"] == launch["sample_name"]
+    finally:
+        window._automation_active = False
+        window._stop_session()
+        _close_test_window(window)
+
+
+def test_manual_tic_dispatcher_before_session_uses_gui_published_plain_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_ticcmd_path.setText("manual-ticcmd")
+    window.edit_tic_serial.setText("manual-serial")
+    window.check_tic_native_usb.setChecked(False)
+    gui_thread_id = threading.get_ident()
+    created: list[tuple[str, str, bool, int]] = []
+    _install_recording_tic_controller(monkeypatch, created)
+    _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+    try:
+        assert window._session_active is False
+        assert window._run_metadata_snapshot is None
+        dispatcher = window._build_tic_dispatcher()
+        dispatcher.halt_and_hold()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+        assert [(path, serial, native) for path, serial, native, _thread in created] == [
+            ("manual-ticcmd", "manual-serial", False)
+        ]
+        assert created[0][3] != gui_thread_id
+    finally:
+        _close_test_window(window)
+
+
+def test_manual_tic_dispatcher_after_finished_run_uses_new_gui_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tic_finished_run")
+    window.edit_ticcmd_path.setText("run-ticcmd")
+    window.edit_tic_serial.setText("run-serial")
+    window.check_tic_native_usb.setChecked(True)
+    created: list[tuple[str, str, bool, int]] = []
+    _install_recording_tic_controller(monkeypatch, created)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._stop_session()
+        assert window._run_metadata_snapshot is None
+        assert window._recovery_tic_settings_snapshot == mini_dma_mod.TicConnectionSettings(
+            command_path="run-ticcmd",
+            device_serial="run-serial",
+            prefer_native_usb=True,
+        )
+
+        window.edit_ticcmd_path.setText("manual-new-ticcmd")
+        window.edit_tic_serial.setText("manual-new-serial")
+        window.check_tic_native_usb.setChecked(False)
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        dispatcher = window._build_tic_dispatcher()
+        dispatcher.halt_and_hold()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+        assert [(path, serial, native) for path, serial, native, _thread in created] == [
+            ("manual-new-ticcmd", "manual-new-serial", False)
+        ]
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("recovery_kind", ["displacement", "load"])
+def test_post_stop_recovery_uses_captured_run_tic_settings_without_run_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+    recovery_kind: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText(f"tic_{recovery_kind}_recovery")
+    window.edit_ticcmd_path.setText("recovery-run-ticcmd")
+    window.edit_tic_serial.setText("recovery-run-serial")
+    window.check_tic_native_usb.setChecked(True)
+    created: list[tuple[str, str, bool, int]] = []
+    _install_recording_tic_controller(monkeypatch, created)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._stop_session()
+        assert window._run_metadata_snapshot is None
+        window._current_position_mm = 1.0
+        window._position_reference_mm = 0.0
+
+        window.edit_ticcmd_path.setText("changed-manual-ticcmd")
+        window.edit_tic_serial.setText("changed-manual-serial")
+        window.check_tic_native_usb.setChecked(False)
+
+        def _probe_recovery_sync() -> None:
+            dispatcher = window._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            assert dispatcher.wait_until_idle(timeout_s=2.0)
+
+        window._sync_manual_motion_base_from_current_position = _probe_recovery_sync  # type: ignore[method-assign]
+
+        def _probe_recovery_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            dispatcher = window._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            assert dispatcher.wait_until_idle(timeout_s=2.0)
+            return False
+
+        window._preflight_recipe_hardware = _probe_recovery_preflight  # type: ignore[method-assign]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+
+        if recovery_kind == "displacement":
+            window._start_recovery_displacement_zero()
+        else:
+            window._start_recovery_load_zero()
+
+        assert [(path, serial, native) for path, serial, native, _thread in created] == [
+            ("recovery-run-ticcmd", "recovery-run-serial", True)
+        ]
+        assert window._run_metadata_snapshot is None
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot is not None
+    finally:
+        _close_test_window(window)
+
+
+def test_active_bench_recovery_keeps_run_tic_settings_before_and_after_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tic_active_bench_recovery_a")
+    window.edit_ticcmd_path.setText("ticcmd-a")
+    window.edit_tic_serial.setText("serial-a")
+    window.check_tic_native_usb.setChecked(True)
+    window.spin_steps_per_mm.setValue(100.0)
+    settings_a = mini_dma_mod.TicConnectionSettings("ticcmd-a", "serial-a", True)
+    settings_c = mini_dma_mod.TicConnectionSettings("ticcmd-c", "serial-c", True)
+    controller_creations: list[tuple[mini_dma_mod.TicConnectionSettings, int]] = []
+    motion_commands: list[tuple[int, int | None, int]] = []
+
+    class _RecordingController:
+        def __init__(
+            self,
+            command_path: str,
+            device_serial: str,
+            *,
+            prefer_native_usb: bool = False,
+            allow_ticcmd_fallback: bool = True,
+            transport_logger: object | None = None,
+        ) -> None:
+            controller_creations.append(
+                (
+                    mini_dma_mod.TicConnectionSettings(
+                        command_path,
+                        device_serial,
+                        bool(prefer_native_usb),
+                    ),
+                    threading.get_ident(),
+                )
+            )
+
+        def halt_and_hold(self) -> None:
+            return None
+
+        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
+            motion_commands.append((position_steps, max_speed, threading.get_ident()))
+
+    monkeypatch.setattr(mini_dma_mod, "TicController", _RecordingController)
+    window._show_recovery_plot_dialog = lambda _title: None  # type: ignore[method-assign]
+    window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    observed: dict[str, list[mini_dma_mod.TicConnectionSettings]] = {
+        "status": [],
+        "failed_preflight": [],
+        "preflight": [],
+        "motion": [],
+        "post_run": [],
     }
 
-    def _fake_run(args: list[str], **_kwargs: object) -> object:
-        class Result:
-            returncode = 0
-            stdout = replies[tuple(args[3:])]
+    def _probe_status_sync() -> bool:
+        observed["status"].append(window._tic_settings_for_current_command())
+        dispatcher = window._build_tic_dispatcher()
+        dispatcher.halt_and_hold()
+        assert dispatcher.wait_until_idle(timeout_s=2.0)
+        return True
 
-        return Result()
+    def _accept_bench_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+        observed["preflight"].append(window._tic_settings_for_current_command())
+        return True
 
-    monkeypatch.setattr(mini_dma_mod.subprocess, "run", _fake_run)
+    window._refresh_tic_status = _probe_status_sync  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = _accept_bench_preflight  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window.edit_ticcmd_path.setText("ticcmd-b")
+        window.edit_tic_serial.setText("serial-b")
+        window.check_tic_native_usb.setChecked(False)
+        assert window._manual_tic_settings() == mini_dma_mod.TicConnectionSettings(
+            "ticcmd-b",
+            "serial-b",
+            False,
+        )
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        gui_thread_id = threading.get_ident()
+
+        def _reject_active_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            observed["failed_preflight"].append(window._tic_settings_for_current_command())
+            return False
+
+        window._preflight_recipe_hardware = _reject_active_preflight  # type: ignore[method-assign]
+        assert window.start_bench_stress_recovery(50.0, reason="synthetic failed preflight") is False
+        assert observed["failed_preflight"] == [settings_a]
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window._preflight_recipe_hardware = _accept_bench_preflight  # type: ignore[method-assign]
+        assert window.start_bench_stress_recovery(50.0, reason="synthetic active-session guard") is True
+        assert observed["status"] == [settings_a, settings_a]
+        assert observed["preflight"] == [settings_a]
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        worker_errors: list[BaseException] = []
+
+        def _recovery_motion_worker() -> None:
+            try:
+                observed["motion"].append(window._tic_settings_for_current_command())
+                assert window._move_to_position_mm(0.5, speed_mm_s=1.0) is True
+            except BaseException as exc:
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=_recovery_motion_worker, name="test-bench-recovery-motion")
+        worker.start()
+        worker.join(timeout=5.0)
+        assert worker.is_alive() is False
+        assert window._build_tic_dispatcher().wait_until_idle(timeout_s=2.0)
+        assert worker_errors == []
+        assert observed["motion"] == [settings_a]
+        assert len(controller_creations) == 1
+        assert controller_creations[0][0] == settings_a
+        assert controller_creations[0][1] != gui_thread_id
+        assert len(motion_commands) == 1
+        assert motion_commands[0][2] != gui_thread_id
+        assert window._run_tic_settings_snapshot == settings_a
+        assert window._automatic_tic_settings_snapshot == settings_a
+
+        window._automation_active = False
+        window._active_control_config = None
+        window._stop_session(reason="bench_recovery_complete")
+        assert window._run_metadata_snapshot is None
+        assert window._run_tic_settings_snapshot is None
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot == settings_a
+
+        window._current_position_mm = 1.0
+        window._position_reference_mm = 0.0
+
+        def _reject_post_run_preflight(_steps: list[mini_dma_mod.AutomationStep]) -> bool:
+            observed["post_run"].append(window._tic_settings_for_current_command())
+            dispatcher = window._build_tic_dispatcher()
+            dispatcher.halt_and_hold()
+            assert dispatcher.wait_until_idle(timeout_s=2.0)
+            return False
+
+        window._preflight_recipe_hardware = _reject_post_run_preflight  # type: ignore[method-assign]
+        window._start_recovery_displacement_zero()
+        assert observed["post_run"] == [settings_a]
+        assert window._automatic_tic_settings_snapshot is None
+        assert window._recovery_tic_settings_snapshot == settings_a
+
+        window.edit_log_name.setText("tic_new_session_c")
+        window.edit_ticcmd_path.setText("ticcmd-c")
+        window.edit_tic_serial.setText("serial-c")
+        window.check_tic_native_usb.setChecked(True)
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._run_tic_settings_snapshot == settings_c
+        assert window._automatic_tic_settings_snapshot == settings_c
+        assert window._recovery_tic_settings_snapshot is None
+    finally:
+        window._automation_active = False
+        window._stop_session()
+        _close_test_window(window)
+
+
+def test_new_session_replaces_finished_run_tic_snapshots(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("tic_previous_session")
+    window.edit_ticcmd_path.setText("previous-ticcmd")
+    window.edit_tic_serial.setText("previous-serial")
+    window.check_tic_native_usb.setChecked(True)
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        previous_snapshot = window._run_metadata_snapshot
+        assert previous_snapshot is not None
+        window._stop_session()
+
+        window.edit_log_name.setText("tic_new_session")
+        window.edit_ticcmd_path.setText("new-ticcmd")
+        window.edit_tic_serial.setText("new-serial")
+        window.check_tic_native_usb.setChecked(False)
+        window._start_session(enable_logging=False, record_initial_point=False)
+
+        current_snapshot = window._run_metadata_snapshot
+        assert current_snapshot is not None
+        assert current_snapshot is not previous_snapshot
+        assert current_snapshot.tic_settings() == mini_dma_mod.TicConnectionSettings(
+            command_path="new-ticcmd",
+            device_serial="new-serial",
+            prefer_native_usb=False,
+        )
+        assert window._automatic_tic_settings_snapshot == current_snapshot.tic_settings()
+        assert window._recovery_tic_settings_snapshot is None
+    finally:
+        window._stop_session()
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "manual_session_stop",
+        "recipe_control_worker_error",
+        "wire_break_or_contact_loss",
+    ],
+)
+def test_worker_stop_fault_and_wire_break_finalize_without_widget_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+    reason: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._source_provenance_cache = _ControlledSourceProvenanceCache()
+    window.edit_log_name.setText(f"worker_finalize_{reason}")
+    window._record_current_point = lambda **_kwargs: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        assert window._run_metadata_snapshot is not None
+        launch_sample_name = window._run_metadata_snapshot.launch_metadata()["sample_name"]
+        _guard_widget_access_to_gui_thread(monkeypatch, window)
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                window._stop_session(reason=reason, detail=f"Synthetic {reason} finalization.")
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_worker, name=f"test-tma-{reason}")
+        worker.start()
+        qtbot.waitUntil(lambda: not worker.is_alive(), timeout=5000)
+        worker.join(timeout=0.1)
+
+        assert errors == []
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == reason
+        assert payload["stop"]["detail"] == f"Synthetic {reason} finalization."
+        assert window._run_metadata_snapshot is None
+        assert payload["sample_name"] == launch_sample_name
+    finally:
+        _close_test_window(window)
+
+
+def test_session_metadata_records_source_control_snapshot(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+    patch_threads: list[object] = []
+    original_patch = mini_dma_mod.patch_source_control_metadata
+
+    def _recording_patch(path: Path, snapshot: Mapping[str, object]) -> None:
+        patch_threads.append(QtCore.QThread.currentThread())
+        original_patch(path, snapshot)
+
+    monkeypatch.setattr(mini_dma_mod, "patch_source_control_metadata", _recording_patch)
 
     try:
         window._start_session()
         assert window._session_json_path is not None
+        pending = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        token = window._session_source_provenance_token
+        assert pending["source_control"]["capture_state"] == "pending"
+        assert pending["source_control"]["dirty_state"] == "unknown"
+        assert pending["source_control"]["is_dirty"] is False
+
+        expected_snapshot = cache.complete(token)
+        qtbot.waitUntil(
+            lambda: json.loads(window._session_json_path.read_text(encoding="utf-8"))[
+                "source_control"
+            ]["capture_state"]
+            == "complete",
+            timeout=2000,
+        )
         payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
 
         assert payload["source_control"]["branch"] == "codex/test-branch"
         assert payload["source_control"]["commit"] == "abc123"
         assert payload["source_control"]["is_dirty"] is True
         assert payload["source_control"]["remote_url"] == "https://example.test/repo.git"
+        assert payload["source_control"]["dirty_state"] == "dirty"
+        assert patch_threads == [window.thread()]
+
+        window.edit_run_notes.setPlainText("operator changed notes after capture")
+        for _ in range(5):
+            window._last_session_metadata_write_s = 0.0
+            window._write_session_metadata(throttle=True)
+        window._write_session_metadata()
+        rewritten = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert rewritten["source_control"] == expected_snapshot
+        assert len(cache.requests) == 1
     finally:
         window._stop_session()
         _close_test_window(window)
+
+
+def test_session_source_provenance_stale_completion_is_ignored(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window.edit_log_name.setText("old_output")
+        window._start_session()
+        old_token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        old_metadata_path = window._session_json_path
+        stale_snapshot = dict(cache.snapshots[str(old_token)])
+        window._stop_session()
+
+        window.edit_log_name.setText("new_output")
+        window._start_session()
+        new_token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        new_metadata_path = window._session_json_path
+        assert old_token != new_token
+        assert str(old_token) in cache.released
+
+        stale_snapshot.update(
+            capture_state="complete",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            branch="codex/stale",
+            commit="stale",
+        )
+        cache.snapshots[str(old_token)] = stale_snapshot
+        window._write_session_source_provenance_completion(old_metadata_path, old_token)
+        assert json.loads(old_metadata_path.read_text(encoding="utf-8"))["source_control"][
+            "capture_state"
+        ] == "pending"
+        assert json.loads(new_metadata_path.read_text(encoding="utf-8"))["source_control"][
+            "capture_state"
+        ] == "pending"
+
+        unavailable = cache.snapshots[str(new_token)]
+        unavailable.update(
+            capture_state="unavailable",
+            capture_completed_utc="2026-07-15T10:00:02.000Z",
+            dirty_state="unknown",
+            capture_error="status:timeout",
+        )
+        window._poll_source_provenance_capture()
+        current = json.loads(new_metadata_path.read_text(encoding="utf-8"))["source_control"]
+        assert current["capture_state"] == "unavailable"
+        assert current["dirty_state"] == "unknown"
+        assert current["capture_error"] == "status:timeout"
+        assert len(cache.requests) == 2
+    finally:
+        window._stop_session()
+        _close_test_window(window)
+
+
+def test_late_session_source_provenance_patches_only_final_source_control(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("late_metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window._start_session()
+        token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        window._session_run_log_complete = False
+        window._session_run_log_incomplete_lines = 3
+        window._session_run_log_incomplete_reason = "synthetic_incomplete_log"
+
+        window._stop_session(reason="manual_session_stop", detail="Synthetic finalization.")
+        finalized = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert finalized["finished_utc"]
+        assert finalized["stop"]["reason"] == "manual_session_stop"
+        assert finalized["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+        assert finalized["logging"]["run_log_complete"] is False
+        assert finalized["logging"]["run_log_incomplete_lines"] == 3
+        assert finalized["logging"]["run_log_incomplete_reason"] == "synthetic_incomplete_log"
+
+        expected_source = cache.complete(token, branch="codex/final", commit="final123")
+        window._poll_source_provenance_capture()
+        patched = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        finalized_without_source = dict(finalized)
+        patched_without_source = dict(patched)
+        finalized_without_source.pop("source_control")
+        patched_without_source.pop("source_control")
+        assert patched_without_source == finalized_without_source
+        assert patched["source_control"] == expected_source
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("broken_metadata", [None, "{malformed"])
+def test_late_session_source_provenance_never_recreates_missing_or_malformed_metadata(
+    tmp_path: Path,
+    qtbot,
+    broken_metadata: str | None,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("broken_late_metadata_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    try:
+        window._start_session()
+        token = window._session_source_provenance_token
+        assert window._session_json_path is not None
+        metadata_path = window._session_json_path
+        window._stop_session(reason="manual_session_stop")
+        cache.complete(token)
+        if broken_metadata is None:
+            metadata_path.unlink()
+        else:
+            metadata_path.write_text(broken_metadata, encoding="utf-8")
+
+        window._poll_source_provenance_capture()
+
+        if broken_metadata is None:
+            assert not metadata_path.exists()
+        else:
+            assert metadata_path.read_text(encoding="utf-8") == broken_metadata
+        assert "Source provenance metadata update failed" in window.log_output.toPlainText()
+    finally:
+        _close_test_window(window)
+
+
+def test_blocked_source_provenance_does_not_delay_session_or_control_metadata_tick(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("blocked_git")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_collector(repo_root: Path, *, requested_utc: str) -> dict[str, object]:
+        entered.set()
+        assert release.wait(timeout=5.0)
+        snapshot = source_provenance_mod.pending_source_provenance(
+            repo_root,
+            requested_utc=requested_utc,
+        )
+        snapshot.update(
+            capture_state="unavailable",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            capture_error="test_blocked",
+        )
+        return snapshot
+
+    provenance_cache = source_provenance_mod.SourceProvenanceCache(_blocked_collector)
+    window._source_provenance_cache = provenance_cache
+
+    try:
+        started = time.monotonic()
+        window._start_session()
+        assert time.monotonic() - started < 0.25
+        assert entered.wait(timeout=1.0)
+        token = window._session_source_provenance_token
+
+        tick = threading.Thread(target=window._write_session_metadata, daemon=True)
+        tick.start()
+        tick.join(timeout=0.25)
+        assert not tick.is_alive()
+
+        close_started = time.monotonic()
+        window.close()
+        assert time.monotonic() - close_started < 1.5
+        assert provenance_cache.snapshot(token) is None
+    finally:
+        release.set()
+        _ensure_app().processEvents()
 
 
 def test_session_metadata_records_control_logic_version_and_fingerprint(
@@ -21802,18 +28487,23 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "adaptive-current-hold-recovery"
+        assert first_logic["profile"] == "processed-center-response-gated-hold"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
         assert "current_hold_automatic_entry_gate" in first_logic["features"]
-        assert "current_sweep_mechanical_load_loss_guard" in first_logic["features"]
+        assert "current_sweep_mechanical_load_loss_guard" not in first_logic["features"]
         assert "current_hold_recovery_tolerance_band" in first_logic["features"]
         assert "current_hold_retry_after_filter_window" in first_logic["features"]
         assert "conservative_current_hold_response_stiffness" in first_logic["features"]
         assert "current_hold_unstable_response_damps_to_single_motor_steps" in first_logic["features"]
         assert "current_hold_improving_recovery_scales_cautiously" in first_logic["features"]
+        assert "current_hold_large_error_uses_geometry_base_cap_before_response" in first_logic["features"]
+        assert "current_hold_response_stiffness_requires_error_improvement" in first_logic["features"]
+        assert "current_hold_adaptive_cap_growth_is_response_earned" in first_logic["features"]
+        assert "current_hold_adaptive_large_error_floor_scales_with_band" in first_logic["features"]
         assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
+        assert "control_constants" in first_logic["fingerprint_fields"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
 
         old_fingerprint = first_logic["fingerprint"]
@@ -21823,7 +28513,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         window._write_session_metadata()
         second_payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
 
-        assert second_payload["control_logic"]["fingerprint"] != old_fingerprint
+        assert second_payload["control_logic"]["fingerprint"] == old_fingerprint
     finally:
         window._stop_session()
         _close_test_window(window)
@@ -21877,16 +28567,560 @@ def test_stop_session_schedules_run_summary_generation(tmp_path: Path, qtbot) ->
     window = _build_window(tmp_path, qtbot)
     window.edit_log_name.setText("metadata_summary_generation")
     window._record_current_point = lambda: None  # type: ignore[method-assign]
-    requested: list[Path] = []
-    window._start_run_summary_generation = lambda run_dir: requested.append(run_dir)  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
 
     try:
         window._start_session()
         window._stop_session(reason="recipe_completed", detail="Recipe completed.")
 
         assert window._session_base_path is not None
-        assert requested == [window._session_base_path.parent]
+        assert requested == [(window._session_base_path.parent, True)]
     finally:
+        _close_test_window(window)
+
+
+def test_control_worker_error_finalizes_session_and_summary(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_worker_error")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._run_on_ui_thread = lambda callback: callback()  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("record", note="test")]
+        window._automation_index = 0
+
+        window._handle_automation_control_loop_error(OSError(22, "Invalid argument"))
+
+        assert window._automation_active is False
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_control_worker_error"
+        assert payload["stop"]["category"] == "fault"
+        assert "Invalid argument" in payload["stop"]["detail"]
+        assert window._session_base_path is not None
+        assert requested == [(window._session_base_path.parent, False)]
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_worker_thread_stop_auto_ramp_marshals_to_ui_thread(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_worker_thread_stop")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._ask_recovery_after_stop = lambda: None  # type: ignore[method-assign]
+    requested: list[tuple[Path, bool]] = []
+    window._start_run_summary_generation = (  # type: ignore[method-assign]
+        lambda run_dir, *, offer_cleanup=False: requested.append((run_dir, offer_cleanup))
+    )
+    callbacks: list[object] = []
+    original_ui_thread_id = window._ui_thread_id
+    original_run_on_ui_thread = window._run_on_ui_thread
+
+    try:
+        window._start_session()
+        window._automation_active = True
+        window._automation_steps = [mini_dma_mod.AutomationStep("sweep_current", note="test")]
+        window._automation_index = 0
+
+        window._ui_thread_id = -1
+        window._run_on_ui_thread = lambda callback: callbacks.append(callback)  # type: ignore[method-assign]
+        window._stop_auto_ramp(
+            log_completion=False,
+            offer_recovery=True,
+            stop_reason="recipe_control_stop",
+            stop_detail="Scale feedback was stale during current hold.",
+        )
+
+        assert window._automation_paused is True
+        assert window._automation_active is True
+        assert len(callbacks) == 1
+
+        window._ui_thread_id = original_ui_thread_id
+        window._run_on_ui_thread = original_run_on_ui_thread  # type: ignore[method-assign]
+        callback = callbacks.pop()
+        assert callable(callback)
+        callback()
+
+        assert window._automation_active is False
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["session_state"] == "finished"
+        assert payload["stop"]["reason"] == "recipe_control_stop"
+        assert payload["stop"]["detail"] == "Scale feedback was stale during current hold."
+        assert window._session_base_path is not None
+        assert requested == [(window._session_base_path.parent, False)]
+    finally:
+        window._ui_thread_id = original_ui_thread_id
+        window._run_on_ui_thread = original_run_on_ui_thread  # type: ignore[method-assign]
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_session_writes_run_log_into_run_folder(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("metadata_run_log")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+
+    try:
+        window._start_session()
+        window._log("diagnostic line for shared run folder")
+        now_s = time.time()
+        window._handle_scale_measurement(57.10, "S S      57.10 g", now_s)
+        window._handle_scale_measurement(57.09, "S S      57.09 g", now_s + 0.05)
+        window._write_control_trace(
+            decision="wait",
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            result="waiting",
+            reason="test_remote_debug",
+        )
+        window._write_ui_telemetry_sample(
+            started_s=time.monotonic(),
+            finished_s=time.monotonic(),
+            previous_ui_s=None,
+            scale_sample_changed=True,
+            dialog_sample_recorded=False,
+            live_plot_sample_recorded=True,
+            dashboard_plot_refreshed=False,
+        )
+        run_log_path = window._session_run_log_path
+        raw_scale_path = window._session_raw_scale_path
+        control_trace_path = window._session_control_trace_path
+        ui_telemetry_path = window._session_ui_telemetry_path
+        window._stop_session(reason="recipe_completed", detail="Recipe completed.")
+
+        assert run_log_path is not None
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        assert run_log_path.name == mini_dma_mod.SESSION_RUN_LOG_TXT
+        text = run_log_path.read_text(encoding="utf-8")
+        assert "Session started" in text
+        assert "Remote debug logging active" in text
+        assert "Scale debug config" in text
+        assert "Remote debug health" in text
+        assert "diagnostic line for shared run folder" in text
+        assert "Session stopped" in text
+        assert raw_scale_path is not None
+        raw_rows = list(csv.DictReader(raw_scale_path.open("r", encoding="utf-8")))
+        assert raw_rows[-1]["sample_index"] == "2"
+        assert float(raw_rows[-1]["host_interval_ms"]) == pytest.approx(50.0, abs=0.01)
+        assert control_trace_path is not None
+        trace_rows = list(csv.DictReader(control_trace_path.open("r", encoding="utf-8")))
+        assert trace_rows[-1]["latest_scale_age_s"] != ""
+        assert "scale_recent_rate_hz" in trace_rows[-1]
+        assert trace_rows[-1]["raw_scale_sample_count"] == "2"
+        assert ui_telemetry_path is not None
+        telemetry_rows = list(csv.DictReader(ui_telemetry_path.open("r", encoding="utf-8")))
+        assert "scale_recent_rate_hz" in telemetry_rows[-1]
+        assert telemetry_rows[-1]["raw_scale_sample_count"] == "2"
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+        assert payload["logging"]["run_log_txt"] == mini_dma_mod.SESSION_RUN_LOG_TXT
+        assert payload["logging"]["run_log_complete"] is True
+        assert payload["logging"]["run_log_incomplete_lines"] == 0
+        assert payload["logging"]["raw_scale_max_gap_s"] == pytest.approx(0.05)
+        assert "remote_debugging_observability" in payload["control_logic"]["features"]
+    finally:
+        _close_test_window(window)
+
+
+def test_saturated_session_log_queue_persists_incomplete_metadata(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("saturated_session_log")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    window._async_run_log_writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=1,
+        max_bytes=16,
+    )
+
+    try:
+        window._start_session()
+        assert window._session_json_path is not None
+        payload = json.loads(window._session_json_path.read_text(encoding="utf-8"))
+
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_lines"] >= 1
+        assert payload["logging"]["run_log_incomplete_reason"] == "queue_saturated"
+        assert "metadata records any session-log incompleteness" in window.statusBar().currentMessage()
+    finally:
+        if window._session_active:
+            window._stop_session(reason="manual_session_stop")
+        _close_test_window(window)
+
+
+def test_blocked_session_log_close_persists_final_flush_timeout(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("blocked_session_log_close")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_append(_path: Path, _text: str) -> None:
+        started.set()
+        release.wait()
+
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_append)
+    window._async_run_log_writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=32,
+        max_bytes=64 * 1024,
+    )
+    try:
+        window._start_session()
+        assert started.wait(timeout=2.0)
+        metadata_path = window._session_json_path
+        assert metadata_path is not None
+
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Synthetic blocked session log.")
+        stop_elapsed_s = time.perf_counter() - stop_started
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        assert stop_elapsed_s < 0.75
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_lines"] >= 1
+        assert payload["logging"]["run_log_incomplete_reason"] == "close_flush_timeout"
+        assert "run_log_complete=false" in window.log_output.toPlainText()
+    finally:
+        release.set()
+        window._async_run_log_writer._thread.join(timeout=3.0)
+        _close_test_window(window)
+
+
+def test_session_log_failure_during_stop_flush_is_accounted_before_final_metadata(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("failed_during_stop_flush")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    append_started = threading.Event()
+    release_failure = threading.Event()
+    accepted_session_lines = 0
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    def _blocked_failure(_path: Path, _text: str) -> None:
+        append_started.set()
+        assert release_failure.wait(timeout=5.0)
+        raise OSError("synthetic failure during final flush")
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _blocked_failure)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=64,
+        max_bytes=128 * 1024,
+    )
+    original_enqueue = writer.enqueue
+
+    def _tracked_enqueue(
+        channel: str,
+        path: Path,
+        text: str,
+        *,
+        generation: int | None = None,
+    ) -> bool:
+        nonlocal accepted_session_lines
+        accepted = original_enqueue(channel, path, text, generation=generation)
+        if accepted and channel == "session":
+            accepted_session_lines += writer._text_line_count(text)
+        return accepted
+
+    writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+    window._async_run_log_writer = writer
+    timer: threading.Timer | None = None
+    try:
+        window._start_session(record_initial_point=False)
+        assert append_started.wait(timeout=2.0)
+        metadata_path = window._session_json_path
+        assert metadata_path is not None
+
+        timer = threading.Timer(0.05, release_failure.set)
+        timer.start()
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Synthetic stop-time failure.")
+        stop_elapsed_s = time.perf_counter() - stop_started
+        timer.join(timeout=1.0)
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        assert stop_elapsed_s < 1.0
+        assert payload["logging"]["run_log_complete"] is False
+        assert payload["logging"]["run_log_incomplete_reason"] == "write_failed"
+        assert payload["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+        assert accepted_session_lines > 1
+
+        _ensure_app().processEvents()
+        payload_after_callback = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload_after_callback["logging"]["run_log_incomplete_lines"] == accepted_session_lines
+    finally:
+        release_failure.set()
+        if timer is not None:
+            timer.join(timeout=1.0)
+        writer.wait_until_idle(timeout_s=1.0)
+        _close_test_window(window)
+
+
+def test_session_log_final_metadata_follows_sleep_guard_and_closes_enqueue_boundary(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("final_enqueue_boundary")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    events: list[tuple[str, str]] = []
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            events.append(("guard", "acquire"))
+
+        def release(self) -> None:
+            events.append(("guard", "release"))
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    try:
+        window._start_session(record_initial_point=False)
+        assert window._async_run_log_writer.wait_until_idle(timeout_s=2.0)
+        original_enqueue = window._async_run_log_writer.enqueue
+        original_write_metadata = window._write_session_metadata
+
+        def _tracked_enqueue(
+            channel: str,
+            path: Path,
+            text: str,
+            *,
+            generation: int | None = None,
+        ) -> bool:
+            if channel == "session":
+                events.append(("session_enqueue", text))
+            return original_enqueue(channel, path, text, generation=generation)
+
+        def _tracked_write_metadata(*args: object, **kwargs: object) -> None:
+            if kwargs.get("finished_utc") is not None:
+                events.append(("metadata", "final"))
+            original_write_metadata(*args, **kwargs)
+
+        window._async_run_log_writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+        window._write_session_metadata = _tracked_write_metadata  # type: ignore[method-assign]
+
+        window._stop_session(reason="manual_session_stop")
+        final_metadata_index = events.index(("metadata", "final"))
+        session_enqueues = [
+            (index, text)
+            for index, (kind, text) in enumerate(events)
+            if kind == "session_enqueue"
+        ]
+
+        assert events.index(("guard", "release")) < final_metadata_index
+        assert any("Sleep prevention released." in text for _index, text in session_enqueues)
+        assert any("Session stopped" in text for _index, text in session_enqueues)
+        assert all(index < final_metadata_index for index, _text in session_enqueues)
+        assert window._session_run_log_accepting is False
+
+        session_enqueue_count = len(session_enqueues)
+        window._log("post-finalization diagnostic")
+        assert sum(kind == "session_enqueue" for kind, _text in events) == session_enqueue_count
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize("old_append_fails", [False, True], ids=["success", "failure"])
+def test_old_session_completion_cannot_contaminate_same_path_replacement_generation(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    old_append_fails: bool,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText("old_generation")
+    window._record_current_point = lambda: None  # type: ignore[method-assign]
+    window._start_run_summary_generation = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    window._schedule_tma_history_scan = lambda: None  # type: ignore[method-assign]
+    window._async_run_log_writer.stop(timeout_s=1.0)
+    old_append_started = threading.Event()
+    release_old_append = threading.Event()
+    successful_writes: list[tuple[Path, str]] = []
+    accepted_lines: dict[tuple[str, int], int] = {}
+
+    class _FakeSleepGuard:
+        def acquire(self) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    first_append = True
+
+    def _old_blocks_then_completes(path: Path, text: str) -> None:
+        nonlocal first_append
+        if first_append:
+            first_append = False
+            old_append_started.set()
+            assert release_old_append.wait(timeout=5.0)
+            if old_append_fails:
+                raise OSError("old generation failed after replacement started")
+        successful_writes.append((Path(path), text))
+
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "create_experiment_sleep_guard",
+        lambda _reason: _FakeSleepGuard(),
+    )
+    monkeypatch.setattr(mini_dma_mod, "append_text_with_rotation", _old_blocks_then_completes)
+    writer = mini_dma_mod.AsyncRunLogWriter(
+        window._handle_async_run_log_write_failure,
+        window._handle_async_run_log_overload,
+        max_requests=128,
+        max_bytes=256 * 1024,
+    )
+    original_enqueue = writer.enqueue
+
+    def _tracked_enqueue(
+        channel: str,
+        path: Path,
+        text: str,
+        *,
+        generation: int | None = None,
+    ) -> bool:
+        accepted = original_enqueue(channel, path, text, generation=generation)
+        if accepted and channel == "session" and generation is not None:
+            key = (str(path), generation)
+            accepted_lines[key] = accepted_lines.get(key, 0) + writer._text_line_count(text)
+        return accepted
+
+    writer.enqueue = _tracked_enqueue  # type: ignore[method-assign]
+    window._async_run_log_writer = writer
+    try:
+        window._start_session(record_initial_point=False)
+        assert old_append_started.wait(timeout=2.0)
+        old_run_log_path = window._session_run_log_path
+        old_generation = window._session_run_log_generation
+        old_metadata_path = window._session_json_path
+        assert old_run_log_path is not None
+        assert old_generation is not None
+        assert old_metadata_path is not None
+
+        stop_started = time.perf_counter()
+        window._stop_session(reason="app_closed", detail="Old generation blocked on close.")
+        assert time.perf_counter() - stop_started < 0.75
+        old_payload = json.loads(old_metadata_path.read_text(encoding="utf-8"))
+        old_expected_lines = accepted_lines[(str(old_run_log_path), old_generation)]
+        assert old_payload["logging"]["run_log_complete"] is False
+        assert old_payload["logging"]["run_log_incomplete_reason"] == "close_flush_timeout"
+        assert old_payload["logging"]["run_log_incomplete_lines"] == old_expected_lines
+
+        window.edit_log_name.setText("replacement_generation")
+        window._start_session(record_initial_point=False)
+        window._ui_refresh_timer.stop()
+        replacement_metadata_path = window._session_json_path
+        assert replacement_metadata_path is not None
+        with writer._condition:
+            stale_old_texts = [
+                request.text
+                for request in writer._queue
+                if request.channel == "session"
+                and request.path == old_run_log_path
+                and request.generation == old_generation
+            ]
+        assert stale_old_texts
+        replacement_generation = writer.reset_target("session", old_run_log_path)
+        assert replacement_generation > old_generation
+        window._session_run_log_path = old_run_log_path
+        window._session_run_log_generation = replacement_generation
+        window._log("replacement same-path line 1")
+        window._log("replacement same-path line 2")
+
+        release_old_append.set()
+        qtbot.waitUntil(
+            lambda: sum(
+                Path(path) == old_run_log_path
+                and "replacement same-path line" in text
+                for path, text in successful_writes
+            )
+            == 2,
+            timeout=3000,
+        )
+        _ensure_app().processEvents()
+
+        assert not writer.target_is_disabled(
+            "session",
+            old_run_log_path,
+            generation=replacement_generation,
+        )
+        shared_path_texts = [
+            text
+            for path, text in successful_writes
+            if Path(path) == old_run_log_path
+        ]
+        replacement_texts = [
+            text for text in shared_path_texts if "replacement same-path line" in text
+        ]
+        assert ["line 1" in text for text in replacement_texts] == [True, False]
+        assert ["line 2" in text for text in replacement_texts] == [False, True]
+        if old_append_fails:
+            post_old_in_flight_texts = shared_path_texts
+        else:
+            assert shared_path_texts[0] not in stale_old_texts
+            assert "replacement same-path line" not in shared_path_texts[0]
+            post_old_in_flight_texts = shared_path_texts[1:]
+        assert post_old_in_flight_texts[:2] == replacement_texts
+        assert not any(text in stale_old_texts for text in post_old_in_flight_texts)
+        assert window._session_run_log_complete is True
+        assert window._session_run_log_incomplete_lines == 0
+
+        old_payload_after_failure = json.loads(old_metadata_path.read_text(encoding="utf-8"))
+        assert old_payload_after_failure["logging"] == old_payload["logging"]
+
+        window._stop_session(reason="manual_session_stop")
+        replacement_payload = json.loads(
+            replacement_metadata_path.read_text(encoding="utf-8")
+        )
+        assert replacement_payload["logging"]["run_log_complete"] is True
+        assert replacement_payload["logging"]["run_log_incomplete_lines"] == 0
+        assert replacement_payload["logging"]["run_log_incomplete_reason"] is None
+    finally:
+        release_old_append.set()
+        writer.wait_until_idle(timeout_s=2.0)
         _close_test_window(window)
 
 
@@ -22492,6 +29726,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -22500,6 +29735,7 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
                 SimpleNamespace(device="COM3", description="USB Serial B"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_scale(port_name: str):
             if port_name == "COM6":
@@ -22522,6 +29758,56 @@ def test_auto_detect_scale_port_applies_detected_settings(tmp_path: Path, qtbot,
         assert window.combo_scale_baud.currentText() == "9600"
         assert window.edit_scale_request.text() == "\\x1bp"
         assert window.edit_scale_terminator.text() == ""
+        assert window.spin_scale_interval.value() == 250
+    finally:
+        _close_test_window(window)
+
+
+def test_fast_scale_auto_connect_prefers_ch340_scale_over_saved_prolific_port(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+
+    try:
+        _wait_for_serial_port_scan(window, qtbot)
+        monkeypatch.setattr(
+            mini_dma_mod.list_ports,
+            "comports",
+            lambda: [
+                SimpleNamespace(device="COM4", description="Prolific PL2303GT USB Serial COM Port"),
+                SimpleNamespace(device="COM5", description="USB-SERIAL CH340"),
+            ],
+        )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
+        window.combo_scale_port.clear()
+        window.combo_scale_port.addItem("COM4 - Prolific", "COM4")
+        window.combo_scale_port.addItem("COM5 - CH340", "COM5")
+        window.combo_scale_port.setCurrentIndex(window.combo_scale_port.findData("COM4"))
+        probes: list[str] = []
+
+        def _probe(port_name: str):
+            probes.append(port_name)
+            if port_name == "COM5":
+                return {
+                    "port": "COM5",
+                    "baudrate": 256000,
+                    "request_command": mini_dma_mod.KERN_KCP_SCALE_REQUEST,
+                    "terminator": mini_dma_mod.KERN_KCP_SCALE_TERMINATOR,
+                    "raw_text": "S S      57.13 g",
+                }
+            return None
+
+        monkeypatch.setattr(window, "_fast_probe_scale_candidate", _probe)
+
+        detected = window._fast_auto_detect_scale_port()
+
+        assert detected is True
+        assert probes == ["COM4", "COM5"]
+        assert window.combo_scale_port.currentData() == "COM5"
+        assert window.combo_scale_baud.currentText() == "256000"
+        assert window.spin_scale_interval.value() == 50
     finally:
         _close_test_window(window)
 
@@ -22530,6 +29816,7 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
     window = _build_window(tmp_path, qtbot)
 
     try:
+        _wait_for_serial_port_scan(window, qtbot)
         monkeypatch.setattr(
             mini_dma_mod.list_ports,
             "comports",
@@ -22538,6 +29825,7 @@ def test_auto_detect_supply_port_applies_detected_settings(tmp_path: Path, qtbot
                 SimpleNamespace(device="COM3", description="USB Serial B"),
             ],
         )
+        window._serial_port_descriptors = mini_dma_mod._enumerate_serial_port_descriptors()
 
         def _probe_supply(port_name: str):
             if port_name == "COM3":
@@ -22791,7 +30079,7 @@ def test_apply_tic_step_mode_preserves_physical_mm_position(tmp_path: Path, qtbo
 
         controller = _FakeController()
         _use_immediate_tic_dispatcher(window, controller)
-        window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
         window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
         window.spin_full_steps_per_mm.setValue(100.0)
         window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
@@ -22843,7 +30131,7 @@ def test_apply_tic_step_mode_keeps_requested_mode_after_status_refresh(
 
         controller = _FakeController()
         _use_immediate_tic_dispatcher(window, controller)
-        window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
         monkeypatch.setattr(
             mini_dma_mod.QtWidgets.QMessageBox,
             "question",
@@ -22897,7 +30185,7 @@ def test_refresh_tic_status_updates_step_mode_and_tic_units(tmp_path: Path, qtbo
                     ]
                 )
 
-        window._build_tic_controller = lambda: _FakeController()  # type: ignore[method-assign]
+        window._build_tic_controller = lambda _settings=None: _FakeController()  # type: ignore[method-assign]
         window.spin_full_steps_per_mm.setValue(100.0)
         window.combo_tic_step_mode.setCurrentIndex(window.combo_tic_step_mode.findData("8"))
         window.spin_steps_per_mm.setValue(800.0)
@@ -23140,7 +30428,7 @@ def test_motor_step_calibration_move_uses_raw_tic_steps_not_current_calibration(
             self.targets.append((position_steps, max_speed))
 
     controller = _FakeController()
-    window._build_tic_controller = lambda: controller  # type: ignore[method-assign]
+    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
     _use_immediate_tic_dispatcher(window, controller)
     window.spin_steps_per_mm.setValue(1000.0)
     window._current_position_steps = 1200

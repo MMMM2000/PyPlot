@@ -1,4 +1,4 @@
-﻿# TMA Presentation Context
+# TMA Presentation Context
 
 Prepared for a presentation on Wednesday, 2026-05-13.
 

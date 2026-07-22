@@ -1,4 +1,4 @@
-﻿"""Offline TMA stiff-sample recovery guard."""
+"""Offline TMA stiff-sample recovery guard."""
 
 from __future__ import annotations
 

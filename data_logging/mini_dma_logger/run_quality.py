@@ -1,4 +1,4 @@
-﻿"""TMA per-run quality metrics.
+"""TMA per-run quality metrics.
 
 The output is a derived cache. Raw run CSV/JSON files remain the source of truth.
 """

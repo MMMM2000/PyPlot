@@ -1,4 +1,4 @@
-﻿# Shared HMP Power Supply Broker
+# Shared HMP Power Supply Broker
 
 The shared HMP broker is the foundation for running multiple bench tools against one multi-channel HMP supply without letting independent programs write to the same serial command stream. It supports HMP4030 and HMP4040 supplies through the same HMP40xx model layer.
 
@@ -34,16 +34,15 @@ Open **Shared HMP PSU Setup** from the launcher to review a bench profile. The u
 
 Saved profiles are bench memory, not silent defaults. Loading a profile can pre-fill known wiring, but the setup utility requires review when the model, port identity, or confirmation state changes before output enable is allowed.
 
-## Current HMP4040 Bench Example
+## Current HMP4030 Bench Example
 
-The current physical setup can be saved as a named bench profile, for example `Kosice HMP4040 bench`:
+The current physical setup can be saved as a named bench profile, for example `Kosice HMP4030 bench`:
 
 | Channel | Role |
 | --- | --- |
 | CH1 | Available for current annealing |
-| CH2 | Available or spare |
-| CH3 | TMA motor supply |
-| CH4 | TMA current sweep |
+| CH2 | TMA motor supply |
+| CH3 | TMA current sweep |
 
 This profile should still be reviewed at the bench before enabling outputs, especially after rewiring, changing COM ports, or swapping between HMP4030 and HMP4040.
 
@@ -61,11 +60,11 @@ The broker API is intentionally channel-scoped. Logger integrations replace dire
 
 Current Annealing Logger exposes **Shared HMP broker** as an optional supply profile. In that mode it leases the selected channel with the `Current annealing` role, configures only that channel on start, reads broker voltage/current snapshots, sends current setpoints through the broker, and turns off/releases only the leased channel on stop. Its raw serial command box is disabled in broker mode.
 
-TMA Logger exposes **Shared HMP broker** as an optional current-annealing supply profile. In that mode it connects to the localhost broker instead of opening the HMP serial port directly, leases the configured current-sweep channel with the `TMA current sweep` role, and leases the motor-supply channel with the `TMA motor supply` role only when that channel is configured. Direct HMP4030/HMP4040 serial profiles remain available for non-shared benches.
+TMA Logger exposes **Shared HMP broker** as a supply profile. In that mode it connects to the localhost broker instead of opening the HMP serial port directly, leases the configured current-sweep channel with the `TMA current sweep` role, and leases the motor-supply channel with the `TMA motor supply` role only when that channel is configured. Direct HMP4030/HMP4040 serial profiles remain available for non-shared benches.
 
-TMA does not use profile-default output channels. The current-sweep and motor-supply channel selectors start at **Select channel...**, and changing or auto-detecting a supply profile clears the channel selectors. Operators must choose the real wired channels before preparing current output or enabling motor power.
+TMA does not use profile-default output channels for direct HMP profiles. The current-sweep and motor-supply channel selectors start at **Select channel...**, and changing or auto-detecting a direct supply profile clears the channel selectors. In shared-broker mode, manual auto-connect and recipe preflight may fill the current Košice bench default of CH3 current sweep and CH2 motor supply before checking Tic VIN, but operators should still review those channels after any rewiring.
 
-Shared-broker TMA connect performs a broker `snapshot` request before reporting the supply connected. If the broker is not responding and the operator selected an HMP COM port plus explicit TMA channels, TMA starts a local broker for those confirmed channels and then connects through it. This catches genuinely blocked brokers at connect time while still letting the normal manual auto-connect path bring up the shared broker.
+Shared-broker TMA connect performs a broker `snapshot` request before reporting the supply connected. Automatic hardware preflight also checks the standard localhost endpoint before scanning serial supplies; when a broker is already running, TMA adopts it even if an older saved setting names a direct HMP profile. This prevents TMA and Current Annealing from competing for the broker-owned COM port. The explicit direct supply connect action remains available for non-shared benches. If the broker is not responding and the operator selected an HMP COM port plus explicit TMA channels, TMA can start a local broker for those confirmed channels and then connects through it.
 
 TMA manual hardware auto-connect powers the selected HMP motor-supply channel before checking Tic VIN. That keeps the hardware-card result aligned with benches where the Tic motor rail is supplied by the same HMP channel that auto-connect is responsible for enabling.
 
@@ -75,4 +74,4 @@ When TMA must use `ticcmd`, it launches it without a visible Windows console. Re
 
 For quick regression checks during shared-HMP/Mini-DMA work, run `scripts/run_mini_dma_shared_hmp_checks.ps1`. It uses a workspace temp root and covers the explicit-channel guardrails, broker controller path, motor-supply-before-Tic ordering, native USB backend, manual jog status freshness, and the Current Annealing shared-broker smoke tests without running the full TMA test file.
 
-For end-to-end bench checks, use `docs/shared_hmp_bench_validation.md`. It captures the current CH1/CH3/CH4 wiring, low-current/no-wire test limits, motor-supply checks, small-motion smoke, connected-current smoke, and final HMP safety readback.
+For end-to-end bench checks, use `docs/shared_hmp_bench_validation.md`. It captures the current CH1/CH2/CH3 wiring, low-current/no-wire test limits, motor-supply checks, small-motion smoke, connected-current smoke, and final HMP safety readback.

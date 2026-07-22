@@ -109,6 +109,23 @@ def test_mini_dma_bench_plan_dry_run_validates_recipe_paths(tmp_path: Path) -> N
     assert summary_path.exists()
 
 
+def test_mini_dma_bench_plan_accepts_utf8_bom(tmp_path: Path) -> None:
+    recipe_path = tmp_path / "iso-strain.recipe.json"
+    _write_recipe(recipe_path)
+    plan_path = tmp_path / "bench-plan.json"
+    payload = {
+        "schema_version": 1,
+        "kind": "mini_dma_bench_sequence",
+        "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
+    }
+    plan_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
+
+    summary = bench_automation.run_mini_dma_bench_plan(plan_path)
+
+    assert summary["mode"] == "dry_run"
+    assert summary["runs"][0]["status"] == "validated"
+
+
 def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
@@ -120,13 +137,26 @@ def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) 
                 "kind": "mini_dma_bench_sequence",
                 "hardware": {
                     "supply_profile": "shared_hmp_broker",
+                    "supply_port": "COM4",
+                    "supply_baud": 115200,
                     "shared_broker_host": "127.0.0.1",
                     "shared_broker_port": 8765,
+                    "scale_port": "COM5",
+                    "scale_baud": 256000,
+                    "scale_request_command": "SI",
+                    "scale_line_ending": "\\r\\n",
+                    "scale_poll_interval_ms": 50,
                     "current_sweep_channel": 4,
                     "motor_supply_enabled": True,
                     "motor_supply_channel": 3,
                     "motor_supply_voltage_v": 12.0,
                     "motor_supply_current_limit_a": 0.5,
+                    "tic_full_steps_per_mm": 100.0,
+                    "tic_step_mode": "8",
+                    "tic_current_limit_mA": 343,
+                    "tic_max_speed": 10000000,
+                    "tic_max_accel": 100000,
+                    "tic_max_decel": 100000,
                     "supply_voltage_limit_v": 32.05,
                     "manual_current_mA": 1.0,
                 },
@@ -140,13 +170,26 @@ def test_mini_dma_bench_plan_dry_run_reports_hardware_overrides(tmp_path: Path) 
 
     assert summary["hardware"] == {
         "supply_profile": "shared_hmp_broker",
+        "supply_port": "COM4",
+        "supply_baud": 115200,
         "shared_broker_host": "127.0.0.1",
         "shared_broker_port": 8765,
+        "scale_port": "COM5",
+        "scale_baud": 256000,
+        "scale_request_command": "SI",
+        "scale_line_ending": "\\r\\n",
+        "scale_poll_interval_ms": 50,
         "current_sweep_channel": 4,
         "motor_supply_enabled": True,
         "motor_supply_channel": 3,
         "motor_supply_voltage_v": 12.0,
         "motor_supply_current_limit_a": 0.5,
+        "tic_full_steps_per_mm": 100.0,
+        "tic_step_mode": "8",
+        "tic_current_limit_mA": 343,
+        "tic_max_speed": 10000000,
+        "tic_max_accel": 100000,
+        "tic_max_decel": 100000,
         "supply_voltage_limit_v": 32.05,
         "manual_current_mA": 1.0,
     }
@@ -228,6 +271,9 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
         def set_bench_mechanical_slack_takeup(self, *, allow: bool, max_seek_mm: float | None) -> None:
             events.append(("slack_takeup", (allow, max_seek_mm)))
 
+        def _start_session(self, *, enable_logging: bool, record_initial_point: bool) -> None:
+            events.append(("session", (enable_logging, record_initial_point)))
+
         def _start_auto_ramp(self) -> None:
             events.append(("start", None))
 
@@ -246,6 +292,8 @@ def test_mini_dma_bench_plan_executes_runs_with_automated_setup_lengths(tmp_path
     assert ("lengths", (20.0, 20.4)) in events
     assert ("recipe", "iso-strain.recipe.json") in events
     assert ("slack_takeup", (True, 10.0)) in events
+    assert ("session", (True, False)) in events
+    assert events.index(("session", (True, False))) < events.index(("start", None))
     assert ("start", None) in events
 
 
@@ -363,13 +411,26 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
                 },
                 "hardware": {
                     "supply_profile": "shared_hmp_broker",
+                    "supply_port": "COM4",
+                    "supply_baud": 115200,
                     "shared_broker_host": "127.0.0.1",
                     "shared_broker_port": 8765,
+                    "scale_port": "COM5",
+                    "scale_baud": 256000,
+                    "scale_request_command": "SI",
+                    "scale_line_ending": "\\r\\n",
+                    "scale_poll_interval_ms": 50,
                     "current_sweep_channel": 4,
                     "motor_supply_enabled": True,
                     "motor_supply_channel": 3,
                     "motor_supply_voltage_v": 12.0,
                     "motor_supply_current_limit_a": 0.5,
+                    "tic_full_steps_per_mm": 100.0,
+                    "tic_step_mode": "8",
+                    "tic_current_limit_mA": 343,
+                    "tic_max_speed": 10000000,
+                    "tic_max_accel": 100000,
+                    "tic_max_decel": 100000,
                     "supply_voltage_limit_v": 32.05,
                     "manual_current_mA": 1.0,
                 },
@@ -388,6 +449,12 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
         def findData(self, value: object) -> int:
             try:
                 return self.values.index(value)
+            except ValueError:
+                return -1
+
+        def findText(self, value: str) -> int:
+            try:
+                return [str(item) for item in self.values].index(str(value))
             except ValueError:
                 return -1
 
@@ -429,15 +496,31 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
             self._session_active = False
             self._session_json_path = tmp_path / "logs" / "run01" / "metadata.json"
             self.combo_supply_profile = _FakeCombo(["hmp4040", "shared_hmp_broker"])
+            self.combo_supply_port = _FakeCombo(["COM3", "COM4"])
+            self.combo_supply_baud = _FakeCombo(["9600", "115200"])
             self.edit_shared_broker_host = _FakeLineEdit()
             self.spin_shared_broker_port = _FakeSpin()
+            self.combo_scale_port = _FakeCombo(["COM5", "COM6"])
+            self.combo_scale_baud = _FakeCombo(["9600", "256000"])
+            self.edit_scale_request = _FakeLineEdit()
+            self.edit_scale_terminator = _FakeLineEdit()
+            self.spin_scale_interval = _FakeSpin()
             self.combo_current_sweep_supply_channel = _FakeCombo([0, 1, 2, 3, 4])
             self.check_motor_supply_power = _FakeCheck()
             self.combo_motor_supply_channel = _FakeCombo([0, 1, 2, 3, 4])
             self.spin_motor_supply_voltage = _FakeSpin()
             self.spin_motor_supply_current_limit = _FakeSpin()
+            self.spin_full_steps_per_mm = _FakeSpin()
+            self.combo_tic_step_mode = _FakeCombo(["full", "2", "4", "8"])
+            self.spin_tic_current_limit_mA = _FakeSpin()
+            self.spin_tic_max_speed = _FakeSpin()
+            self.spin_tic_max_accel = _FakeSpin()
+            self.spin_tic_max_decel = _FakeSpin()
             self.spin_supply_voltage_limit = _FakeSpin()
             self.spin_supply_manual_current = _FakeSpin()
+
+        def _sync_tic_units_per_mm_from_full_steps(self, *, persist: bool = True) -> None:
+            events.append(("sync_tic_units", persist))
 
         def _persist_settings_if_enabled(self) -> None:
             events.append(("persist", None))
@@ -468,12 +551,25 @@ def test_mini_dma_bench_plan_applies_hardware_overrides_before_start(tmp_path: P
 
     assert summary["runs"][0]["status"] == "completed"
     assert events.index(("combo", "shared_hmp_broker")) < events.index(("start", None))
+    assert ("combo", "COM4") in events
+    assert ("combo", "115200") in events
     assert ("text", "127.0.0.1") in events
+    assert ("combo", "COM5") in events
+    assert ("combo", "256000") in events
+    assert ("text", "SI") in events
+    assert ("text", "\\r\\n") in events
+    assert ("spin", 50) in events
     assert ("combo", 4) in events
     assert ("check", True) in events
     assert ("combo", 3) in events
     assert ("spin", 12.0) in events
     assert ("spin", 0.5) in events
+    assert ("spin", 100.0) in events
+    assert ("combo", "8") in events
+    assert ("sync_tic_units", False) in events
+    assert ("spin", 343) in events
+    assert ("spin", 10000000) in events
+    assert events.count(("spin", 100000)) >= 2
 
 
 def test_mini_dma_bench_plan_records_startup_log_when_not_started(tmp_path: Path) -> None:

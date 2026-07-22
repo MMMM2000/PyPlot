@@ -234,6 +234,27 @@ class SharedPowerSupplyBroker:
             raise PermissionError(f"CH{channel} lease role {lease.role} no longer matches {config.role}.")
         return config
 
+    def _check_limits(
+        self,
+        *,
+        channel: int,
+        config: BenchChannel,
+        voltage_v: float | None = None,
+        current_a: float | None = None,
+    ) -> None:
+        if voltage_v is not None and config.voltage_limit_v is not None:
+            if float(voltage_v) > float(config.voltage_limit_v) + 1e-9:
+                raise PermissionError(
+                    f"requested voltage exceeds CH{channel} limit "
+                    f"({float(voltage_v):.6g} V > {float(config.voltage_limit_v):.6g} V)"
+                )
+        if current_a is not None and config.current_limit_a is not None:
+            if float(current_a) > float(config.current_limit_a) + 1e-12:
+                raise PermissionError(
+                    f"requested current exceeds CH{channel} limit "
+                    f"({float(current_a):.6g} A > {float(config.current_limit_a):.6g} A)"
+                )
+
     def configure_channel(
         self,
         *,
@@ -245,10 +266,12 @@ class SharedPowerSupplyBroker:
     ) -> None:
         with self._lock:
             config = self._require_lease(channel=channel, lease_id=lease_id)
-            if config.voltage_limit_v is not None and voltage_v > config.voltage_limit_v:
-                raise ValueError(f"Requested voltage exceeds CH{channel} limit.")
-            if config.current_limit_a is not None and current_a > config.current_limit_a:
-                raise ValueError(f"Requested current exceeds CH{channel} limit.")
+            self._check_limits(
+                channel=channel,
+                config=config,
+                voltage_v=voltage_v,
+                current_a=current_a,
+            )
             self.driver.configure_channel(
                 channel=channel,
                 voltage_v=voltage_v,
@@ -259,8 +282,11 @@ class SharedPowerSupplyBroker:
     def set_current(self, *, channel: int, lease_id: str, current_mA: float) -> None:
         with self._lock:
             config = self._require_lease(channel=channel, lease_id=lease_id)
-            if config.current_limit_a is not None and current_mA / 1000.0 > config.current_limit_a:
-                raise ValueError(f"Requested current exceeds CH{channel} limit.")
+            self._check_limits(
+                channel=channel,
+                config=config,
+                current_a=float(current_mA) / 1000.0,
+            )
             self.driver.set_current_mA(channel=channel, current_mA=current_mA)
 
     def set_output(self, *, channel: int, lease_id: str, output_on: bool) -> None:

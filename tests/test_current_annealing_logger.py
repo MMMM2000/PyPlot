@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import gc
 import json
 import sys
+import threading
+import time
 import types
+import weakref
 
 import pytest
 
@@ -11,6 +15,54 @@ pytest.importorskip("PyQt6.QtWidgets", reason="Qt widgets backend is unavailable
 
 
 logger_mod = importlib.import_module("data_logging.current_annealing_logger.current_annealing_logger")
+source_provenance_mod = importlib.import_module("data_logging.source_provenance")
+
+
+class _ControlledSourceProvenanceCache:
+    def __init__(self) -> None:
+        self.requests: list[tuple[object, str]] = []
+        self.snapshots: dict[str, dict[str, object]] = {}
+        self.released: list[str] = []
+
+    def request(self, repo_root: object, *, token: object | None = None) -> str:
+        capture_token = str(token or f"capture-{len(self.requests) + 1}")
+        self.requests.append((repo_root, capture_token))
+        self.snapshots[capture_token] = source_provenance_mod.pending_source_provenance(repo_root)
+        return capture_token
+
+    def snapshot(self, token: object | None) -> dict[str, object] | None:
+        snapshot = self.snapshots.get(str(token)) if token is not None else None
+        return None if snapshot is None else dict(snapshot)
+
+    def release(self, token: object | None) -> None:
+        if token is None:
+            return
+        capture_token = str(token)
+        self.released.append(capture_token)
+        self.snapshots.pop(capture_token, None)
+
+    def complete(
+        self,
+        token: object,
+        *,
+        branch: str = "codex/current-annealing-pyqtgraph",
+        commit: str = "abc123",
+    ) -> dict[str, object]:
+        snapshot = self.snapshots[str(token)]
+        snapshot.update(
+            branch=branch,
+            commit=commit,
+            is_dirty=True,
+            status_short="M changed.py",
+            remote_url="https://example.test/repo.git",
+            capture_state="complete",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            dirty_state="dirty",
+            head_state="attached",
+            remote_state="configured",
+            capture_error=None,
+        )
+        return dict(snapshot)
 
 
 def _wheel_event(delta_y: int = -120) -> object:
@@ -523,6 +575,33 @@ def test_current_annealing_progress_is_pinned_above_run_buttons(qtbot) -> None:
     assert progress_top < button_top
 
 
+@pytest.mark.parametrize("size", [(1600, 1000), (1366, 768)])
+def test_current_annealing_operator_state_layout_has_no_overlap_or_crop(qtbot, size) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.resize(*size)
+    window._set_process_state("failed", "Measurement file write failed; output stopped safely.")
+    window.show()
+    qtbot.wait(20)
+
+    def _rect(widget):
+        return logger_mod.QtCore.QRect(widget.mapTo(window, logger_mod.QtCore.QPoint(0, 0)), widget.size())
+
+    state_rect = _rect(window.ui.label_process_state)
+    progress_rect = _rect(window.ui.progressBar_process)
+    assert not state_rect.intersects(progress_rect)
+    buttons = [
+        window.ui.pushButton_start_process,
+        window.ui.pushButton_show_history,
+        window.ui.pushButton_reverse_now,
+    ]
+    button_rects = [_rect(button) for button in buttons]
+    assert not button_rects[0].intersects(button_rects[1])
+    assert not button_rects[1].intersects(button_rects[2])
+    assert all(button.width() >= button.minimumSizeHint().width() for button in buttons)
+    assert window.ui.left_scroll.horizontalScrollBar().maximum() == 0
+
+
 def test_current_annealing_imports_project_diameter_and_autocomplete(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
@@ -624,8 +703,13 @@ def test_current_annealing_fabrication_load_keeps_ui_responsive(
 
     worker_thread: list[object] = []
 
-    def _slow_build_fabrication_index(files: list[object]) -> _FabricationIndex:
+    def _slow_build_fabrication_index(
+        files: list[object],
+        *,
+        cancel_callback=None,
+    ) -> _FabricationIndex:
         assert len(files) == 40
+        assert callable(cancel_callback)
         worker_thread.append(logger_mod.QtCore.QThread.currentThread())
         logger_mod.time.sleep(0.25)
         return _FabricationIndex()
@@ -652,7 +736,7 @@ def test_current_annealing_fabrication_load_keeps_ui_responsive(
     qtbot.waitUntil(lambda: len(ticks) >= 3, timeout=1000)
     assert window._fabrication_load_active()
 
-    qtbot.waitUntil(lambda: not window._fabrication_load_active(), timeout=5000)
+    qtbot.waitUntil(lambda: window.ui.pushButton_load_fabrication.text() == "Load", timeout=5000)
     timer.stop()
 
     assert worker_thread
@@ -662,6 +746,372 @@ def test_current_annealing_fabrication_load_keeps_ui_responsive(
     assert "Loaded 1 microwire suggestion(s) from 40 fabrication workbook(s)." in (
         window.ui.label_microwire_metadata_status.text()
     )
+
+
+def test_current_annealing_fabrication_timer_delivers_all_results_on_gui_thread(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_threads: list[object] = []
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        @logger_mod.QtCore.pyqtSlot()
+        def _poll_fabrication_tasks(self) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._poll_fabrication_tasks()
+
+        def _set_metadata_status(self, text: str) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._set_metadata_status(text)
+
+    success_root = tmp_path / "success"
+    success_root.mkdir()
+    (success_root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+
+    class _Index:
+        piece_level = {("Ni50Fe27Ga23", 12, 2): {"d (um)": 19.2}}
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = lambda _files, *, cancel_callback: _Index()
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    callback_threads.clear()
+    window.ui.lineEdit_fabrication_folder.setText(str(success_root))
+    assert window._load_fabrication_folder_from_ui()
+    qtbot.waitUntil(
+        lambda: "Loaded 1 microwire suggestion" in window.ui.label_microwire_metadata_status.text(),
+        timeout=3000,
+    )
+
+    failure_root = tmp_path / "failure"
+    failure_root.mkdir()
+    callback_threads.clear()
+    window.ui.lineEdit_fabrication_folder.setText(str(failure_root))
+    assert window._load_fabrication_folder_from_ui()
+    qtbot.waitUntil(
+        lambda: window.ui.label_microwire_metadata_status.text()
+        == "No fabrication Excel workbooks were found.",
+        timeout=3000,
+    )
+
+    assert callback_threads
+    assert all(thread is window.thread() for thread in callback_threads)
+
+
+def test_current_annealing_fabrication_cancel_button_delivers_on_gui_thread(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    callback_threads: list[object] = []
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        @logger_mod.QtCore.pyqtSlot()
+        def _poll_fabrication_tasks(self) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._poll_fabrication_tasks()
+
+        def _handle_fabrication_load_cancelled(self, root_obj: object) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._handle_fabrication_load_cancelled(root_obj)
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        started.set()
+        while not cancel_callback():
+            time.sleep(0.005)
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_fabrication_folder.setText(str(root))
+    assert window._load_fabrication_folder_from_ui()
+    assert started.wait(timeout=2.0)
+    qtbot.mouseClick(
+        window.ui.pushButton_load_fabrication,
+        logger_mod.QtCore.Qt.MouseButton.LeftButton,
+    )
+    qtbot.waitUntil(
+        lambda: window.ui.label_microwire_metadata_status.text()
+        == "Fabrication folder load cancelled.",
+        timeout=3000,
+    )
+
+    assert callback_threads
+    assert all(thread is window.thread() for thread in callback_threads)
+
+
+def test_current_annealing_fabrication_worker_observes_cancel_callback(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+    started = threading.Event()
+    callback_seen = threading.Event()
+    cancelled: list[object] = []
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        started.set()
+        while not cancel_callback():
+            time.sleep(0.005)
+        callback_seen.set()
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    worker = logger_mod.FabricationFolderLoadWorker(root)
+    worker.cancelled.connect(
+        cancelled.append,
+        logger_mod.QtCore.Qt.ConnectionType.DirectConnection,
+    )
+    thread = threading.Thread(target=worker.run)
+    thread.start()
+    assert started.wait(timeout=2.0)
+
+    worker.cancel()
+    thread.join(timeout=3.0)
+
+    assert not thread.is_alive()
+    assert callback_seen.is_set()
+    assert cancelled == [root]
+
+
+def test_current_annealing_blocked_fabrication_close_is_bounded_and_retained(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+    callbacks: list[object] = []
+    qt_messages: list[str] = []
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        callbacks.append(cancel_callback)
+        started.set()
+        assert release.wait(timeout=5.0)
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    previous_handler = logger_mod.QtCore.qInstallMessageHandler(
+        lambda _kind, _context, message: qt_messages.append(message)
+    )
+    thread = None
+    try:
+        window.ui.lineEdit_fabrication_folder.setText(str(root))
+        assert window._load_fabrication_folder_from_ui()
+        assert started.wait(timeout=2.0)
+        thread = window._fabrication_thread
+        assert thread is not None
+
+        close_started = time.perf_counter()
+        window.close()
+        elapsed_s = time.perf_counter() - close_started
+
+        assert elapsed_s < 0.5
+        assert thread.isRunning()
+        assert id(thread) in window._fabrication_tasks
+        assert callbacks and callbacks[0]() is True
+
+        release.set()
+        qtbot.waitUntil(thread.done_event.is_set, timeout=3000)
+        logger_mod.QtWidgets.QApplication.processEvents()
+        assert not any("QThread: Destroyed while thread is still running" in msg for msg in qt_messages)
+    finally:
+        release.set()
+        if thread is not None:
+            try:
+                thread.wait(3000)
+            except RuntimeError:
+                pass
+        logger_mod.QtWidgets.QApplication.processEvents()
+        logger_mod.QtCore.qInstallMessageHandler(previous_handler)
+        window.close()
+
+
+def test_blocked_fabrication_task_does_not_retain_owner(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocked_run(self: logger_mod.FabricationFolderLoadWorker) -> None:
+        started.set()
+        release.wait()
+
+    monkeypatch.setattr(logger_mod.FabricationFolderLoadWorker, "run", _blocked_run)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    worker = logger_mod.FabricationFolderLoadWorker(root)
+    task = logger_mod.DaemonFabricationTask(worker)
+
+    class _Owner:
+        pass
+
+    owner = _Owner()
+    owner.task = task
+    owner_ref = weakref.ref(owner)
+    task.start()
+    assert started.wait(timeout=2.0)
+
+    del owner
+    gc.collect()
+
+    try:
+        assert owner_ref() is None
+        assert task.thread.daemon is True
+        assert task.isRunning()
+        assert task in logger_mod._RETAINED_FABRICATION_TASKS
+    finally:
+        release.set()
+        task.thread.join(timeout=3.0)
+
+
+def test_closed_current_annealing_window_is_not_retained_by_blocked_fabrication_callback(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def _build(_files: list[object], *, cancel_callback) -> object:
+        started.set()
+        assert release.wait(timeout=5.0)
+        raise InterruptedError("cancelled")
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    root = tmp_path / "fabrication"
+    root.mkdir()
+    (root / "sample.xlsx").write_text("placeholder", encoding="utf-8")
+
+    window = logger_mod.MainWindow()
+    window.setAttribute(logger_mod.QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    window.ui.lineEdit_fabrication_folder.setText(str(root))
+    assert window._load_fabrication_folder_from_ui()
+    assert started.wait(timeout=2.0)
+    task = window._fabrication_thread
+    assert task is not None
+    window_ref = weakref.ref(window)
+
+    try:
+        started_at = time.perf_counter()
+        window.close()
+        assert time.perf_counter() - started_at < 0.5
+        from PyQt6 import sip
+
+        if not sip.isdeleted(window):
+            sip.delete(window)
+        window.__dict__.clear()
+        del window
+        logger_mod.QtWidgets.QApplication.processEvents()
+        gc.collect()
+        qtbot.waitUntil(lambda: window_ref() is None, timeout=1000)
+        assert task.isRunning()
+    finally:
+        release.set()
+        task.wait(3000)
+
+
+def test_current_annealing_replacement_retains_old_worker_and_ignores_stale_result(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+    (old_root / "old.xlsx").write_text("placeholder", encoding="utf-8")
+    (new_root / "new.xlsx").write_text("placeholder", encoding="utf-8")
+    old_started = threading.Event()
+    release_old = threading.Event()
+    old_cancel_callbacks: list[object] = []
+    handled_roots: list[object] = []
+
+    class _Index:
+        piece_level: dict[object, object] = {}
+
+    def _build(files: list[object], *, cancel_callback) -> object:
+        root = logger_mod.Path(files[0]).parent
+        if root == old_root:
+            old_cancel_callbacks.append(cancel_callback)
+            old_started.set()
+            assert release_old.wait(timeout=5.0)
+        return _Index()
+
+    fake_package = types.ModuleType("microwire_data_builder")
+    fake_core = types.ModuleType("microwire_data_builder.core")
+    fake_core.build_fabrication_index = _build
+    fake_package.core = fake_core
+    monkeypatch.setitem(sys.modules, "microwire_data_builder", fake_package)
+    monkeypatch.setitem(sys.modules, "microwire_data_builder.core", fake_core)
+    window._handle_fabrication_load_success = (  # type: ignore[method-assign]
+        lambda root_obj, *_args: handled_roots.append(root_obj)
+    )
+    try:
+        window.ui.lineEdit_fabrication_folder.setText(str(old_root))
+        assert window._load_fabrication_folder_from_ui()
+        old_thread = window._fabrication_thread
+        assert old_thread is not None
+        assert old_started.wait(timeout=2.0)
+
+        window.ui.lineEdit_fabrication_folder.setText(str(new_root))
+        assert window._load_fabrication_folder_from_ui()
+        new_thread = window._fabrication_thread
+        assert new_thread is not None and new_thread is not old_thread
+        assert id(old_thread) in window._fabrication_tasks
+        assert old_cancel_callbacks and old_cancel_callbacks[0]() is True
+        qtbot.waitUntil(lambda: handled_roots == [new_root], timeout=3000)
+        assert handled_roots == [new_root]
+
+        release_old.set()
+        qtbot.waitUntil(lambda: not old_thread.isRunning(), timeout=3000)
+        qtbot.wait(100)
+        assert handled_roots == [new_root]
+    finally:
+        release_old.set()
+        window.close()
 
 
 def test_current_annealing_microwire_field_displays_slashes(qtbot) -> None:
@@ -799,54 +1249,33 @@ def test_current_annealing_planned_time_has_no_hidden_hold_duration(qtbot) -> No
     assert window.compute_planned_seconds() == 4
 
 
-def test_current_annealing_runtime_recipe_fields_stay_editable(qtbot) -> None:
+def test_current_annealing_runtime_recipe_fields_are_locked(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
 
     window._set_process_controls_enabled(False)
 
-    assert window.ui.spinBox_max_current.isEnabled()
-    assert window.ui.spinBox_step_mA.isEnabled()
-    assert window.ui.spinBox_start_current.isEnabled()
-    assert window.ui.spinBox_loops.isEnabled()
-    assert window.ui.checkBox_infinite_loops.isEnabled()
-    assert window.ui.label_max_current.isEnabled()
+    assert not window.ui.spinBox_max_current.isEnabled()
+    assert not window.ui.spinBox_step_mA.isEnabled()
+    assert not window.ui.spinBox_start_current.isEnabled()
+    assert not window.ui.spinBox_loops.isEnabled()
+    assert not window.ui.checkBox_infinite_loops.isEnabled()
+    assert not window.ui.label_max_current.isEnabled()
     assert not window.ui.lineEdit_log_dir.isEnabled()
+    assert "locked for this run" in window.ui.spinBox_max_current.toolTip()
 
 
-def test_current_annealing_update_running_recipe_refreshes_live_plan(qtbot) -> None:
+def test_current_annealing_running_recipe_update_action_stays_unavailable(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
-    window.operation_mode = 2
     window.process_running = True
-    window.direction_ascending = True
-    window.current_current_set = 0.007
-    window.current_increment = 0.001
-    window.current_step_mA = 1.0
-    window.current_step_A = 0.001
-    window.loop_idx = 0
-    window.ui.spinBox_start_current.setValue(1)
-    window.ui.spinBox_max_current.setValue(10)
-    window.ui.spinBox_step_mA.setValue(1.0)
-    window.ui.spinBox_loops.setValue(2)
-    window._init_loop_tracking(window._planned_automatic_loop_steps(), 2, False)
+    window._set_process_controls_enabled(False)
 
-    window.ui.spinBox_max_current.setValue(6)
-    window.ui.spinBox_step_mA.setValue(0.2)
-    window.ui.spinBox_loops.setValue(3)
-    window.handle_update_running_recipe_clicked()
-
-    assert window.max_current_mA == 6
-    assert window.current_step_mA == pytest.approx(0.2)
-    assert window.current_step_A == pytest.approx(0.0002)
-    assert window.current_increment == pytest.approx(-0.0002)
-    assert window.direction_ascending is False
-    assert window.loop_target == 3
-    assert window._planned_loop_steps == 50
-    assert window.total_steps >= window.step_idx
+    assert window.ui.pushButton_update_running_recipe.isHidden()
+    assert not window.ui.pushButton_update_running_recipe.isEnabled()
 
 
-def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
+def test_current_annealing_reverses_at_max_without_hidden_hold(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     fake = _FakeScheduledBrokerClient()
@@ -867,6 +1296,7 @@ def test_current_annealing_reverses_at_max_without_hidden_hold(qtbot) -> None:
     window.current_current_set = 0.003
     window.current_increment = 0.001
     window.reverse_enabled = True
+    window.f_name = str(tmp_path / "annealing.tsv")
 
     window.handle_send_new_command()
 
@@ -914,7 +1344,7 @@ def test_current_annealing_shared_broker_clamps_overshoot_to_max_current(qtbot) 
     ) in fake.calls
 
 
-def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> None:
+def test_current_annealing_ignores_stale_confirmed_broker_current_limit(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     fake = _FakeScheduledBrokerClient()
@@ -929,13 +1359,13 @@ def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> No
 
     window._send_current_setpoint()
 
-    assert window.current_current_set == pytest.approx(0.002)
+    assert window.current_current_set == pytest.approx(0.0022)
     assert (
         "schedule_current_ramp",
         {
             "channel": 1,
             "lease_id": "lease-1",
-            "target_mA": 2.0,
+            "target_mA": 2.2,
             "rate_mA_s": 0.2,
             "max_step_mA": 0.2,
             "resolution_mA": 0.2,
@@ -943,7 +1373,7 @@ def test_current_annealing_clamps_to_confirmed_broker_current_limit(qtbot) -> No
     ) in fake.calls
 
 
-def test_current_annealing_preflight_blocks_stale_broker_current_limit(qtbot) -> None:
+def test_current_annealing_preflight_ignores_stale_broker_current_limit(qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     fake = _FakeScheduledBrokerClient()
@@ -968,7 +1398,7 @@ def test_current_annealing_preflight_blocks_stale_broker_current_limit(qtbot) ->
 
     errors = window._start_preflight_errors()
 
-    assert any("35" in error and "30" in error and "shared broker" in error for error in errors)
+    assert errors == []
 
 
 def test_current_annealing_shared_broker_zero_current_stops_after_startup_grace(
@@ -1003,7 +1433,7 @@ def test_current_annealing_shared_broker_zero_current_stops_after_startup_grace(
     assert "Measured current is zero" in warnings[-1][1]
 
 
-def test_current_annealing_broker_limit_clamp_reverses_instead_of_stalling(
+def test_current_annealing_stale_broker_limit_does_not_reverse_current_ramp(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1027,14 +1457,14 @@ def test_current_annealing_broker_limit_clamp_reverses_instead_of_stalling(
 
     window._send_current_setpoint()
 
-    assert window.current_current_set == pytest.approx(0.030)
-    assert window.current_increment == pytest.approx(-0.001)
-    assert window.direction_ascending is False
+    assert window.current_current_set == pytest.approx(0.031)
+    assert window.current_increment == pytest.approx(0.001)
+    assert window.direction_ascending is True
     ramp_calls = [payload for name, payload in fake.calls if name == "schedule_current_ramp"]
     assert ramp_calls
     assert ramp_calls[-1]["channel"] == 1
     assert ramp_calls[-1]["lease_id"] == "lease-1"
-    assert ramp_calls[-1]["target_mA"] == pytest.approx(30.0)
+    assert ramp_calls[-1]["target_mA"] == pytest.approx(31.0)
     assert ramp_calls[-1]["rate_mA_s"] == pytest.approx(1.0)
 
 
@@ -1100,23 +1530,19 @@ def test_current_annealing_start_auto_connects_selected_shared_broker(qtbot, mon
     qtbot.addWidget(window)
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 1
-    window.operation_mode = 0
     calls: list[str] = []
-    errors: list[list[str]] = []
 
     def _connect() -> None:
         calls.append("connect")
         window.is_connected = True
 
     monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
-    monkeypatch.setattr(window, "_start_preflight_errors", lambda **_kwargs: [])
-    monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: errors.append(payload))
 
-    window.handle_toggle_process_clicked()
+    connected = window._auto_connect_for_start()
 
+    assert connected is True
     assert calls == ["connect"]
-    assert errors == []
-    assert window.process_running is True
+    assert window.is_connected is True
 
 
 def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1124,7 +1550,6 @@ def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch:
     qtbot.addWidget(window)
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 1
-    window.operation_mode = 0
     progress_seen: list[str] = []
 
     def _connect() -> None:
@@ -1134,13 +1559,12 @@ def test_current_annealing_start_shows_auto_connect_progress(qtbot, monkeypatch:
         window.is_connected = True
 
     monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect)
-    monkeypatch.setattr(window, "_start_preflight_errors", lambda **_kwargs: [])
+    connected = window._auto_connect_for_start()
 
-    window.handle_toggle_process_clicked()
-
+    assert connected is True
     assert progress_seen == ["Connecting shared HMP broker..."]
     assert window._hardware_auto_connect_progress is None
-    assert window.process_running is True
+    assert window.is_connected is True
 
 
 def test_current_annealing_start_reports_auto_connect_failure_detail(
@@ -1151,7 +1575,6 @@ def test_current_annealing_start_reports_auto_connect_failure_detail(
     qtbot.addWidget(window)
     window._apply_supply_profile("shared_hmp_broker")
     window.channel_select = 1
-    window.operation_mode = 0
     warnings: list[tuple[str, str]] = []
     preflight: list[list[str]] = []
 
@@ -1164,12 +1587,10 @@ def test_current_annealing_start_reports_auto_connect_failure_detail(
         "warning",
         lambda _parent, title, message: warnings.append((str(title), str(message))),
     )
-    monkeypatch.setattr(window, "_show_start_preflight_errors", lambda payload: preflight.append(payload))
+    connected = window._auto_connect_for_start()
 
-    window.handle_toggle_process_clicked()
-
+    assert connected is False
     assert warnings == [("Hardware auto-connect failed", "Hardware auto-connect failed: broker is busy")]
-    assert preflight == [["Hardware auto-connect failed: broker is busy"]]
     assert window.process_running is False
 
 
@@ -1198,6 +1619,131 @@ def test_shared_broker_connect_preserves_confirmed_channel(qtbot) -> None:
 
     assert window.channel_select == 1
     assert window.ui.comboBox_channel.currentData() == 1
+
+
+def test_shared_broker_connect_assigns_unused_channel_on_existing_tma_broker(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    class _ExistingTmaBrokerClient(_FakeBrokerClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self._channel_1 = {
+                "role": "unused",
+                "confirmed": False,
+                "voltage_limit_v": None,
+                "current_limit_a": None,
+            }
+
+        def snapshot(self) -> dict[str, object]:
+            self.calls.append(("snapshot", {}))
+            return {
+                "profile": {"profile_id": "hmp4040", "channel_count": 4},
+                "bench_profile": {
+                    "channels": {
+                        "1": dict(self._channel_1),
+                        "3": {
+                            "role": "mini_dma_motor",
+                            "confirmed": True,
+                            "voltage_limit_v": 12.0,
+                            "current_limit_a": 0.5,
+                        },
+                        "4": {
+                            "role": "mini_dma_current_sweep",
+                            "confirmed": True,
+                            "voltage_limit_v": 32.05,
+                            "current_limit_a": None,
+                        },
+                    }
+                },
+            }
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "assign_role":
+                self._channel_1 = {
+                    "role": payload["role"],
+                    "confirmed": payload["confirmed"],
+                    "voltage_limit_v": payload["voltage_limit_v"],
+                    "current_limit_a": payload["current_limit_a"],
+                }
+            return {"ok": True}
+
+    fake = _ExistingTmaBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    window._connect_shared_broker_mode()
+    window._initialize_shared_broker_output()
+
+    assert window.is_connected is True
+    assert fake.calls[:4] == [
+        ("snapshot", {}),
+        (
+            "assign_role",
+            {
+                "channel": 1,
+                "role": "current_annealing",
+                "confirmed": True,
+                "voltage_limit_v": None,
+                "current_limit_a": None,
+            },
+        ),
+        ("snapshot", {}),
+        ("lease", {"channel": 1, "owner": "current_annealing_logger", "role": "current_annealing"}),
+    ]
+
+
+def test_shared_broker_connect_clears_stale_current_annealing_limit(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    class _StaleCurrentLimitBrokerClient(_FakeBrokerClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self._limit: float | None = 0.03
+
+        def snapshot(self) -> dict[str, object]:
+            self.calls.append(("snapshot", {}))
+            return {
+                "profile": {"profile_id": "hmp4040", "channel_count": 4},
+                "bench_profile": {
+                    "channels": {
+                        "1": {
+                            "role": "current_annealing",
+                            "confirmed": True,
+                            "voltage_limit_v": None,
+                            "current_limit_a": self._limit,
+                        }
+                    }
+                },
+            }
+
+        def request(self, action: str, **payload: object) -> dict[str, object]:
+            self.calls.append((action, dict(payload)))
+            if action == "assign_role":
+                self._limit = None
+            return {"ok": True}
+
+    fake = _StaleCurrentLimitBrokerClient()
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.ui.comboBox_channel.setCurrentIndex(window.ui.comboBox_channel.findData(1))
+
+    window._connect_shared_broker_mode()
+
+    assert window._shared_broker_current_limit_mA is None
+    assert (
+        "assign_role",
+        {
+            "channel": 1,
+            "role": "current_annealing",
+            "confirmed": True,
+            "voltage_limit_v": None,
+            "current_limit_a": None,
+        },
+    ) in fake.calls
 
 
 def test_shared_broker_connect_falls_back_to_standard_port(qtbot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1266,8 +1812,8 @@ def test_shared_broker_connect_starts_owned_broker_when_no_existing_broker(
                 "channel": 1,
                 "role": "current_annealing",
                 "confirmed": True,
-                "voltage_limit_v": pytest.approx(32.05),
-                "current_limit_a": pytest.approx(0.03),
+                "voltage_limit_v": None,
+                "current_limit_a": None,
             },
         ),
         ("confirm_profile", {"name": "Current Annealing auto-started shared HMP broker"}),
@@ -1618,39 +2164,168 @@ def test_current_annealing_metadata_preserves_decimal_ramp_rate(tmp_path, qtbot)
 def test_current_annealing_metadata_records_source_control_snapshot(
     tmp_path,
     qtbot,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     window.ui.lineEdit_log_dir.setText(str(tmp_path))
     window.ui.lineEdit_log_file.setText("metadata_git")
-
-    replies = {
-        ("branch", "--show-current"): "codex/current-annealing-pyqtgraph\n",
-        ("rev-parse", "HEAD"): "abc123\n",
-        ("status", "--short"): " M data_logging/current_annealing_logger/current_annealing_logger.py\n",
-        ("config", "--get", "remote.origin.url"): "https://example.test/repo.git\n",
-    }
-
-    def _fake_run(args: list[str], **_kwargs: object) -> object:
-        class Result:
-            returncode = 0
-            stdout = replies[tuple(args[3:])]
-
-        return Result()
-
-    monkeypatch.setattr(logger_mod.subprocess, "run", _fake_run)
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
 
     assert window.prepare_output_file() is True
 
     data_path = logger_mod.Path(window.f_name)
     metadata_path = data_path.parent / "metadata" / data_path.stem / "metadata.json"
+    pending = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    token = window._source_provenance_token
+    assert pending["source_control"]["capture_state"] == "pending"
+    assert pending["source_control"]["dirty_state"] == "unknown"
+    assert pending["source_control"]["is_dirty"] is False
+
+    cache.complete(token)
+    window._poll_source_provenance_capture()
     payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
     source_control = payload["source_control"]
     assert source_control["branch"] == "codex/current-annealing-pyqtgraph"
     assert source_control["commit"] == "abc123"
     assert source_control["is_dirty"] is True
     assert source_control["remote_url"] == "https://example.test/repo.git"
+    assert source_control["dirty_state"] == "dirty"
+    assert len(cache.requests) == 1
+    assert str(token) in cache.released
+
+
+def test_current_annealing_source_provenance_timer_completes_on_gui_thread(
+    tmp_path,
+    qtbot,
+) -> None:
+    callback_threads: list[object] = []
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        @logger_mod.QtCore.pyqtSlot()
+        def _poll_source_provenance_capture(self) -> None:
+            callback_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._poll_source_provenance_capture()
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("metadata_timer")
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    assert window.prepare_output_file()
+    token = window._source_provenance_token
+    metadata_path = window._metadata_path(str(window.f_name))
+    cache.complete(token)
+    qtbot.waitUntil(lambda: str(token) in cache.released, timeout=3000)
+
+    payload = logger_mod.json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert payload["source_control"]["capture_state"] == "complete"
+    assert callback_threads
+    assert all(thread is window.thread() for thread in callback_threads)
+
+
+def test_current_annealing_source_provenance_updates_only_current_prepared_output(
+    tmp_path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    cache = _ControlledSourceProvenanceCache()
+    window._source_provenance_cache = cache
+
+    window.ui.lineEdit_composition.setText("original composition")
+    window.ui.lineEdit_log_file.setText("old_output")
+    assert window.prepare_output_file() is True
+    old_token = window._source_provenance_token
+    old_path = logger_mod.Path(window.f_name)
+    old_metadata = window._metadata_path(str(old_path))
+    stale_snapshot = dict(cache.snapshots[str(old_token)])
+
+    window.ui.lineEdit_log_file.setText("new_output")
+    assert window.prepare_output_file() is True
+    new_token = window._source_provenance_token
+    new_path = logger_mod.Path(window.f_name)
+    new_metadata = window._metadata_path(str(new_path))
+    assert old_token != new_token
+    assert len(cache.requests) == 2
+    assert str(old_token) in cache.released
+
+    stale_snapshot.update(
+        capture_state="complete",
+        capture_completed_utc="2026-07-15T10:00:01.000Z",
+        branch="codex/stale",
+        commit="stale",
+    )
+    cache.snapshots[str(old_token)] = stale_snapshot
+    window._write_source_provenance_completion(str(old_path), old_token)
+    assert logger_mod.json.loads(old_metadata.read_text(encoding="utf-8"))["source_control"][
+        "capture_state"
+    ] == "pending"
+
+    window.ui.lineEdit_composition.setText("operator changed after prepare")
+    expected_snapshot = cache.complete(new_token, branch="codex/current", commit="current")
+    qtbot.waitUntil(lambda: str(new_token) in cache.released, timeout=3000)
+    completed_payload = logger_mod.json.loads(new_metadata.read_text(encoding="utf-8"))
+    assert completed_payload["source_control"] == expected_snapshot
+    assert completed_payload["composition"] == "original composition"
+    assert str(new_token) in cache.released
+
+
+def test_blocked_source_provenance_does_not_delay_prepare_gui_heartbeat_or_close(
+    tmp_path,
+    qtbot,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("blocked_git")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_collector(repo_root: object, *, requested_utc: str) -> dict[str, object]:
+        entered.set()
+        assert release.wait(timeout=5.0)
+        snapshot = source_provenance_mod.pending_source_provenance(
+            repo_root,
+            requested_utc=requested_utc,
+        )
+        snapshot.update(
+            capture_state="unavailable",
+            capture_completed_utc="2026-07-15T10:00:01.000Z",
+            capture_error="test_blocked",
+        )
+        return snapshot
+
+    provenance_cache = source_provenance_mod.SourceProvenanceCache(_blocked_collector)
+    window._source_provenance_cache = provenance_cache
+    heartbeat_count = 0
+
+    def _heartbeat() -> None:
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+
+    heartbeat = logger_mod.QtCore.QTimer(window)
+    heartbeat.setInterval(0)
+    heartbeat.timeout.connect(_heartbeat)
+    heartbeat.start()
+
+    try:
+        started = time.monotonic()
+        assert window.prepare_output_file() is True
+        assert time.monotonic() - started < 0.25
+        assert entered.wait(timeout=1.0)
+        token = window._source_provenance_token
+        qtbot.waitUntil(lambda: heartbeat_count > 0, timeout=500)
+
+        close_started = time.monotonic()
+        window.close()
+        assert time.monotonic() - close_started < 1.5
+        assert provenance_cache.snapshot(token) is None
+    finally:
+        release.set()
 
 
 def test_live_dashboard_uses_pyqtgraph_backend(qtbot) -> None:
@@ -1907,7 +2582,486 @@ def test_record_acquired_sample_writes_each_non_initial_sample_once(tmp_path, qt
     assert window._samples_resistance == [250.0, 200.0]
 
 
-def test_invalid_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:
+def test_measurement_write_failure_stops_without_plot_or_progress(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    output = tmp_path / "blocked" / "annealing.tsv"
+    window.f_name = str(output)
+    window.process_running = True
+    window.first_sample = False
+    window.step_idx = 4
+    window.current_current_read = 0.003
+    window.current_voltage = 0.6
+    window.current_resistance = 200.0
+    window.curr_value_x = 3.0
+    window.curr_value_y = 200.0
+    window._samples_current = [2.0]
+    window._samples_resistance = [250.0]
+    window._samples_voltage = [0.5]
+    safe_end: list[str] = []
+    progress_calls: list[str] = []
+    dialogs: list[str] = []
+
+    def _raise_open(*_args, **_kwargs):
+        raise OSError("disk is read-only")
+
+    monkeypatch.setattr(logger_mod, "open", _raise_open, raising=False)
+    monkeypatch.setattr(window, "send_serial_command", lambda: None)
+    monkeypatch.setattr(window, "simple_delay", lambda _ms: None)
+    monkeypatch.setattr(window, "send_safe_end_commands", lambda: safe_end.append("safe"))
+    monkeypatch.setattr(window, "_record_sample_progress", lambda: progress_calls.append("advanced"))
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    with caplog.at_level("ERROR"):
+        accepted = window._record_acquired_sample()
+
+    assert accepted is False
+    assert window.process_running is False
+    assert safe_end == ["safe"]
+    assert window._samples_current == [2.0]
+    assert window._samples_resistance == [250.0]
+    assert progress_calls == []
+    assert window._process_state == "failed"
+    assert window._last_stop_reason == window._last_run_error
+    assert str(output) in window.ui.label_process_state.text()
+    assert "disk is read-only" in window.statusBar().currentMessage()
+    assert "disk is read-only" in dialogs[0]
+    assert "Measurement file write failed" in caplog.text
+
+
+def test_measurement_write_error_after_open_stops_before_accepting_sample(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.f_name = str(tmp_path / "annealing.tsv")
+    window.process_running = True
+    window.first_sample = False
+    window.current_current_read = 0.003
+    window.current_voltage = 0.6
+    window.current_resistance = 200.0
+    window.curr_value_x = 3.0
+    window.curr_value_y = 200.0
+    dialogs: list[str] = []
+
+    class _FailingWriter:
+        def write(self, _line: str) -> None:
+            raise OSError("device ran out of space")
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    window.f_out = _FailingWriter()
+    monkeypatch.setattr(window, "send_serial_command", lambda: None)
+    monkeypatch.setattr(window, "simple_delay", lambda _ms: None)
+    monkeypatch.setattr(window, "send_safe_end_commands", lambda: None)
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    accepted = window._record_acquired_sample()
+
+    assert accepted is False
+    assert window.process_running is False
+    assert window._samples_current == []
+    assert window._process_state == "failed"
+    assert "device ran out of space" in dialogs[0]
+
+
+def test_metadata_sidecar_write_failure_aborts_start_and_is_persistent(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.ui.lineEdit_log_dir.setText(str(tmp_path))
+    window.ui.lineEdit_log_file.setText("metadata_failure")
+    dialogs: list[str] = []
+    real_write_text = logger_mod.Path.write_text
+
+    def _write_text(path, *args, **kwargs):
+        if path.name == "metadata.json":
+            raise OSError("sidecar directory denied")
+        return real_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(logger_mod.Path, "write_text", _write_text)
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    with caplog.at_level("ERROR"):
+        prepared = window.prepare_output_file()
+
+    assert prepared is False
+    assert window._process_state == "failed"
+    assert "sidecar directory denied" in window.ui.label_process_state.text()
+    assert "sidecar directory denied" in window.statusBar().currentMessage()
+    assert "Metadata sidecar write failed" in dialogs[0]
+    assert "Metadata sidecar write failed" in caplog.text
+
+
+def test_raw_vcp_is_explicit_manual_mode_and_recipe_start_is_guarded(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    window.is_connected = True
+
+    window.handle_mode_changed(0)
+    window.handle_toggle_process_clicked()
+
+    assert window.process_running is False
+    assert not window.ui.pushButton_start_process.isEnabled()
+    assert window.ui.pushButton_start_process.text() == "Recipe disabled (Raw VCP)"
+    assert "manual mode" in window.ui.label_process_state.text()
+    assert "manual serial-console mode" in window.statusBar().currentMessage()
+
+
+def test_process_state_text_distinguishes_run_lifecycle(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    expected = {
+        "idle": "Idle",
+        "connecting": "Connecting",
+        "finite-running": "Running — finite",
+        "infinite-running": "Running continuously",
+        "stopping": "Stopping safely",
+        "completed": "Completed",
+        "failed": "Failed",
+    }
+
+    for state, text in expected.items():
+        window._set_process_state(state, "write denied" if state == "failed" else None)
+        assert text in window.ui.label_process_state.text()
+        assert window.ui.progressBar_process.format()
+
+
+def test_direct_serial_open_failure_surfaces_error_string(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    dialogs: list[str] = []
+    window._apply_supply_profile("hmp4030")
+
+    class _Signal:
+        def connect(self, _callback) -> None:
+            pass
+
+        def disconnect(self, _callback) -> None:
+            pass
+
+    class _FailingSerialPort:
+        readyRead = _Signal()
+
+        def setPortName(self, _value) -> None:
+            pass
+
+        def setBaudRate(self, _value) -> None:
+            pass
+
+        def setFlowControl(self, _value) -> None:
+            pass
+
+        def setDataBits(self, _value) -> None:
+            pass
+
+        def setParity(self, _value) -> None:
+            pass
+
+        def setStopBits(self, _value) -> None:
+            pass
+
+        def open(self, _mode) -> bool:
+            return False
+
+        def errorString(self) -> str:
+            return "Access is denied by another process"
+
+        def isOpen(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            pass
+
+    window.ser_mcu = _FailingSerialPort()
+    window.port_name = "COM77"
+    monkeypatch.setattr(
+        logger_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: dialogs.append(message),
+    )
+
+    window.handle_connect_port_clicked()
+
+    assert window.is_connected is False
+    assert "COM77" in window.ui.label_hardware_status.text()
+    assert "Access is denied" in window.ui.label_hardware_status.text()
+    assert window._last_auto_connect_error == dialogs[0]
+    assert window.statusBar().currentMessage() == dialogs[0]
+
+
+def test_current_annealing_serial_and_timer_signals_run_on_gui_thread_and_teardown(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serial_threads: list[object] = []
+    response_timer_threads: list[object] = []
+    time_timer_threads: list[object] = []
+    command_timer_threads: list[object] = []
+    delay_threads: list[object] = []
+    port_threads: list[object] = []
+    setter_threads: list[object] = []
+
+    class _NoPorts:
+        @staticmethod
+        def availablePorts() -> list[object]:
+            return []
+
+    monkeypatch.setattr(logger_mod, "QSerialPortInfo", _NoPorts)
+
+    class _AffinityWindow(logger_mod.MainWindow):
+        def populate_ports(self) -> None:
+            port_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().populate_ports()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def handle_ser_mcu_readyRead(self) -> None:
+            serial_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().handle_ser_mcu_readyRead()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def handle_update_serial_response_label(self) -> None:
+            response_timer_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().handle_update_serial_response_label()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def update_time_estimate(self) -> None:
+            time_timer_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().update_time_estimate()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def handle_send_new_command(self) -> None:
+            command_timer_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super().handle_send_new_command()
+
+        @logger_mod.QtCore.pyqtSlot()
+        def _finish_simple_delay(self) -> None:
+            delay_threads.append(logger_mod.QtCore.QThread.currentThread())
+            super()._finish_simple_delay()
+
+    class _ReadableSerial(logger_mod.QtCore.QObject):
+        readyRead = logger_mod.QtCore.pyqtSignal()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.opened = False
+            self.response = b"12.5\n"
+            self.writes: list[bytes] = []
+
+        def setPortName(self, _value: object) -> None:
+            pass
+
+        def setBaudRate(self, _value: object) -> None:
+            pass
+
+        def setFlowControl(self, _value: object) -> None:
+            pass
+
+        def setDataBits(self, _value: object) -> None:
+            pass
+
+        def setParity(self, _value: object) -> None:
+            pass
+
+        def setStopBits(self, _value: object) -> None:
+            pass
+
+        def open(self, _mode: object) -> bool:
+            self.opened = True
+            return True
+
+        def clear(self) -> None:
+            pass
+
+        def isOpen(self) -> bool:
+            return self.opened
+
+        def close(self) -> None:
+            self.opened = False
+
+        def canReadLine(self) -> bool:
+            return True
+
+        def readLine(self) -> bytes:
+            return self.response
+
+        def write(self, value: bytes) -> None:
+            self.writes.append(value)
+
+    window = _AffinityWindow()
+    qtbot.addWidget(window)
+    port_threads.clear()
+    response_timer_threads.clear()
+    time_timer_threads.clear()
+    window.timer.stop()
+    window.time_timer.stop()
+
+    original_response_set_text = window.ui.label_serial_response.setText
+    original_time_set_text = window.ui.label_time_remaining.setText
+
+    def _set_response_text(text: str) -> None:
+        setter_threads.append(logger_mod.QtCore.QThread.currentThread())
+        original_response_set_text(text)
+
+    def _set_time_text(text: str) -> None:
+        setter_threads.append(logger_mod.QtCore.QThread.currentThread())
+        original_time_set_text(text)
+
+    monkeypatch.setattr(window.ui.label_serial_response, "setText", _set_response_text)
+    monkeypatch.setattr(window.ui.label_time_remaining, "setText", _set_time_text)
+
+    qtbot.mouseClick(
+        window.ui.pushButton_refresh_ports,
+        logger_mod.QtCore.Qt.MouseButton.LeftButton,
+    )
+    assert port_threads == [window.thread()]
+
+    serial = _ReadableSerial()
+    window._apply_supply_profile("hmp4030")
+    window.ser_mcu = serial
+    window.port_name = "COM-FAKE"
+    window.operation_mode = 0
+    qtbot.mouseClick(
+        window.ui.pushButton_connect_port,
+        logger_mod.QtCore.Qt.MouseButton.LeftButton,
+    )
+    assert window.is_connected
+    assert serial.opened
+    serial.readyRead.emit()
+    qtbot.waitUntil(lambda: bool(serial_threads), timeout=1000)
+
+    window.timer.setInterval(0)
+    window.timer.start()
+    qtbot.waitUntil(lambda: window.ui.label_serial_response.text().strip() == "12.5", timeout=1000)
+    window.timer.stop()
+
+    window.time_timer.setInterval(0)
+    window.time_timer.start()
+    qtbot.waitUntil(lambda: bool(time_timer_threads), timeout=1000)
+    window.time_timer.stop()
+
+    window.process_running = True
+    window.operation_mode = 99
+    window.timer_command.setInterval(0)
+    window.timer_command.start()
+    qtbot.waitUntil(lambda: window.command_number > 0, timeout=1000)
+    window.timer_command.stop()
+    window.process_running = False
+    window.simple_delay(5)
+
+    qtbot.wait(20)
+    all_threads = (
+        serial_threads
+        + response_timer_threads
+        + time_timer_threads
+        + command_timer_threads
+        + delay_threads
+        + port_threads
+        + setter_threads
+    )
+    assert all_threads
+    assert all(thread is window.thread() for thread in all_threads)
+
+    serial.close()
+    window.is_connected = False
+    window.close()
+    callback_counts = (
+        len(serial_threads),
+        len(response_timer_threads),
+        len(time_timer_threads),
+        len(command_timer_threads),
+    )
+    serial.readyRead.emit()
+    window.timer.timeout.emit()
+    window.time_timer.timeout.emit()
+    window.timer_command.timeout.emit()
+    logger_mod.QtWidgets.QApplication.processEvents()
+    assert callback_counts == (
+        len(serial_threads),
+        len(response_timer_threads),
+        len(time_timer_threads),
+        len(command_timer_threads),
+    )
+    assert window._callbacks_torn_down
+    assert not window.timer.isActive()
+    assert not window.time_timer.isActive()
+    assert not window.timer_command.isActive()
+
+
+def test_current_annealing_close_reentry_during_safe_end_runs_once(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    disconnect_calls: list[object] = []
+
+    class _OpenSerial:
+        @staticmethod
+        def isOpen() -> bool:
+            return True
+
+    def _disconnect_with_nested_close() -> None:
+        disconnect_calls.append(logger_mod.QtCore.QThread.currentThread())
+        logger_mod.QtCore.QTimer.singleShot(0, window.close)
+        window.simple_delay(10)
+
+    window.ser_mcu = _OpenSerial()
+    window.handle_connect_port_clicked = _disconnect_with_nested_close  # type: ignore[method-assign]
+
+    window.close()
+
+    assert disconnect_calls == [window.thread()]
+    assert window._callbacks_torn_down
+    assert not window._close_in_progress
+
+
+def test_current_annealing_main_releases_closed_windows(qtbot) -> None:
+    first = logger_mod.main()
+    qtbot.addWidget(first)
+    assert first in logger_mod.WINDOWS
+
+    first.close()
+    first.close()
+    assert first not in logger_mod.WINDOWS
+
+    second = logger_mod.main()
+    qtbot.addWidget(second)
+    assert second in logger_mod.WINDOWS
+    assert first not in logger_mod.WINDOWS
+
+    second.close()
+    assert second not in logger_mod.WINDOWS
+
+
+def test_invalid_near_zero_resistance_readback_does_not_consume_first_sample(tmp_path, qtbot) -> None:
     window = logger_mod.MainWindow()
     qtbot.addWidget(window)
     window.f_name = str(tmp_path / "annealing.tsv")
@@ -1916,10 +3070,10 @@ def test_invalid_zero_resistance_readback_does_not_consume_first_sample(tmp_path
     window._reset_sample_buffers()
 
     window.curr_value_x = 1.0
-    window.curr_value_y = 0.0
+    window.curr_value_y = 0.25
     window.current_current_read = 0.001
-    window.current_voltage = 0.0
-    window.current_resistance = 0.0
+    window.current_voltage = 0.00025
+    window.current_resistance = 0.25
     window._record_acquired_sample()
 
     window.curr_value_x = 1.0
@@ -1948,7 +3102,8 @@ def test_shared_broker_init_leases_and_configures_current_annealing_channel(qtbo
 
     window.send_init_commands()
 
-    assert fake.calls[:2] == [
+    assert fake.calls[:3] == [
+        ("snapshot", {}),
         ("lease", {"channel": 1, "owner": "current_annealing_logger", "role": "current_annealing"}),
         (
             "configure_channel",
@@ -1995,6 +3150,100 @@ def test_shared_broker_measurement_updates_live_values_without_raw_serial(qtbot)
     assert window.current_current_read == pytest.approx(0.010)
     assert window.current_resistance == pytest.approx(250.0)
     assert fake.calls == [("measure_channel", {"channel": 1})]
+
+
+def test_shared_broker_measurement_recovers_when_owner_broker_disappears(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+
+    class _DeadBrokerClient(_FakeBrokerClient):
+        def measure_channel(self, *, channel: int) -> dict[str, float]:
+            self.calls.append(("measure_channel", {"channel": channel}))
+            raise RuntimeError("broker missing")
+
+    dead = _DeadBrokerClient()
+    recovered = _FakeBrokerClient()
+    recovered.readbacks = [{"voltage_V": 3.75, "current_mA": 25.0}]
+    window._shared_broker_client = dead
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "dead-lease"
+    window.max_voltage = 30.0
+    window.current_current_set = 0.025
+    window.process_running = True
+
+    def _connect_recovered_broker() -> None:
+        window._shared_broker_client = recovered
+        window.is_connected = True
+
+    monkeypatch.setattr(window, "_connect_shared_broker_mode", _connect_recovered_broker)
+
+    assert window._read_shared_broker_sample() is True
+
+    assert dead.calls == [
+        ("measure_channel", {"channel": 1}),
+        ("measure_channel", {"channel": 1}),
+    ]
+    assert recovered.calls == [
+        ("snapshot", {}),
+        ("lease", {"channel": 1, "owner": "current_annealing_logger", "role": "current_annealing"}),
+        (
+            "configure_channel",
+            {
+                "channel": 1,
+                "lease_id": "lease-1",
+                "voltage_v": 30.0,
+                "current_a": 0.025,
+                "output_on": True,
+            },
+        ),
+        ("measure_channel", {"channel": 1}),
+    ]
+    assert window.process_running is True
+    assert window._shared_broker_lease_id == "lease-1"
+    assert window.current_voltage == pytest.approx(3.75)
+    assert window.current_current_read == pytest.approx(0.025)
+    assert window.current_resistance == pytest.approx(150.0)
+
+
+def test_current_annealing_rejects_first_sample_from_previous_setpoint(qtbot) -> None:
+    window = logger_mod.MainWindow()
+    qtbot.addWidget(window)
+    fake = _FakeScheduledBrokerClient()
+    fake.readbacks = [{"voltage_V": 4.8, "current_mA": 29.0}]
+    window._shared_broker_client = fake
+    window._apply_supply_profile("shared_hmp_broker")
+    window.channel_select = 1
+    window._shared_broker_lease_id = "lease-1"
+    window.operation_mode = 2
+    window.process_running = True
+    window.first_sample = True
+    window.current_step_mA = 1.0
+    window.current_step_A = 0.001
+    window.current_increment = 0.001
+    window.current_current_set = 0.001
+    window.max_current_mA = 100
+
+    window.handle_send_new_command()
+
+    assert window.first_sample is True
+    assert window.current_current_set == pytest.approx(0.001)
+    assert window._samples_current == []
+    assert window._samples_resistance == []
+    assert (
+        "schedule_current_ramp",
+        {
+            "channel": 1,
+            "lease_id": "lease-1",
+            "target_mA": 1.0,
+            "rate_mA_s": 1.0,
+            "max_step_mA": 0.2,
+            "resolution_mA": 0.2,
+        },
+    ) in fake.calls
 
 
 def test_shared_broker_measurement_prefers_cached_scheduler_readback(qtbot) -> None:

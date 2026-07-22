@@ -50,7 +50,7 @@ except Exception:
 
 import pandas as pd
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets, sip
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -7435,6 +7435,8 @@ class _AnnealingTransitionReviewDialog(QtWidgets.QDialog):
         self._display.clear("Loading selected annealing graph...")
 
         def _render_if_current() -> None:
+            if sip.isdeleted(self) or sip.isdeleted(self._display):
+                return
             if generation != self._render_generation:
                 return
             if self._current_record_id != entry.record_id:
@@ -40689,7 +40691,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
         finally:
             MiniDatabaseSection._project_load_batch_mode = False
             self._suppress_dirty = False
-            self._project_load_in_progress = False
             progress_dialog = state.get("progress_dialog")
             if isinstance(progress_dialog, QtWidgets.QProgressDialog):
                 progress_dialog.close()
@@ -40701,6 +40702,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.logger.exception("Failed to report project load failure")
         else:
             self._project_load_auto_open = False
+        self._project_load_in_progress = False
         self._update_project_actions()
 
     def _restore_project_sections_staged(

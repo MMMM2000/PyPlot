@@ -29,7 +29,9 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
     """Embed current annealing plotting inside PyPlot."""
 
     requires_imported_data = True
+    supports_import_folders = True
     auto_load_on_import = True
+    _DATA_SUFFIXES = {".txt", ".dat", ".csv", ".tsv"}
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -124,6 +126,49 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 return source
         return None
 
+    @classmethod
+    def _is_metadata_sidecar_path(cls, path: Path) -> bool:
+        if path.name.lower() != "metadata.json":
+            return False
+        return any(parent.name.lower() == "metadata" for parent in path.parents)
+
+    @classmethod
+    def _is_data_source_path(cls, path: Path) -> bool:
+        if cls._is_metadata_sidecar_path(path):
+            return False
+        return path.suffix.lower() in cls._DATA_SUFFIXES
+
+    def _candidate_data_paths(self, paths: list[Path]) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        def _push(candidate: Path) -> None:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            key = str(resolved)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(resolved)
+
+        for path in paths:
+            if not isinstance(path, Path):
+                continue
+            if path.is_dir():
+                try:
+                    children = sorted(path.rglob("*"), key=lambda item: str(item))
+                except Exception:
+                    children = []
+                for child in children:
+                    if child.is_file() and self._is_data_source_path(child):
+                        _push(child)
+                continue
+            if path.is_file() and self._is_data_source_path(path):
+                _push(path)
+        return candidates
+
     def _clear_plot_tabs(self) -> None:
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
@@ -144,9 +189,22 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         data_by_file: dict[str, pd.DataFrame] = {}
         errors: list[str] = []
         resolved_paths: list[Path] = []
-        for path in paths:
-            if not isinstance(path, Path):
-                continue
+        candidate_paths = self._candidate_data_paths(paths)
+        if not candidate_paths:
+            for path in paths:
+                if not isinstance(path, Path):
+                    continue
+                if self._is_metadata_sidecar_path(path):
+                    continue
+                try:
+                    exists = path.exists()
+                except Exception:
+                    exists = False
+                if exists:
+                    errors.append(f"{path.name}: not a current annealing data file")
+                else:
+                    errors.append(f"{path.name}: file not found")
+        for path in candidate_paths:
             try:
                 resolved = path.resolve()
             except Exception:

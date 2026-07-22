@@ -1,4 +1,4 @@
-﻿"""Command-line wrapper for TMA offline stiff-sample guard."""
+"""Command-line wrapper for TMA offline stiff-sample guard."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""Offline TMA fatigue/current-sweep learning summaries.
+"""Offline TMA fatigue/current-sweep learning summaries.
 
 This module deliberately does not feed values back into live control. It turns
 saved run folders into reviewable priors for future repeated iso-stress sweeps.

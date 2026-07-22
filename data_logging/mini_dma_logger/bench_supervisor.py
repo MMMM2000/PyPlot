@@ -15,7 +15,7 @@ from data_logging.shared_power_supply.driver import HmpSerialDriver
 from .bench_automation import MiniDmaBenchAutomationError, load_mini_dma_bench_plan
 
 
-DEFAULT_SAFE_CHANNEL = 4
+DEFAULT_SAFE_CHANNEL = None
 FINISHED_METADATA_CHILD_GRACE_S = 5.0
 SAFE_OFF_CONNECT_ATTEMPTS = 6
 SAFE_OFF_CONNECT_RETRY_S = 0.5
@@ -136,6 +136,34 @@ def _safe_channel_off(
     attempts: int = SAFE_OFF_CONNECT_ATTEMPTS,
     retry_s: float = SAFE_OFF_CONNECT_RETRY_S,
 ) -> dict[str, Any]:
+    result = _safe_channels_off(
+        channels=(channel,),
+        port_name=port_name,
+        baudrate=baudrate,
+        driver_factory=driver_factory,
+        attempts=attempts,
+        retry_s=retry_s,
+    )
+    result["channel"] = channel
+    return result
+
+
+def _safe_channels_off(
+    *,
+    channels: Sequence[int],
+    port_name: str,
+    baudrate: int,
+    driver_factory: Callable[..., HmpSerialDriver] = HmpSerialDriver,
+    attempts: int = SAFE_OFF_CONNECT_ATTEMPTS,
+    retry_s: float = SAFE_OFF_CONNECT_RETRY_S,
+) -> dict[str, Any]:
+    unique_channels = tuple(dict.fromkeys(int(channel) for channel in channels if int(channel) > 0))
+    if not unique_channels:
+        return {
+            "status": "skipped",
+            "reason": "no safe-off channels configured",
+            "channels": [],
+        }
     last_error: Exception | None = None
     attempts = max(1, int(attempts))
     for attempt in range(1, attempts + 1):
@@ -143,17 +171,19 @@ def _safe_channel_off(
         try:
             driver.connect()
             idn = identify_hmp_with_blank_retry(driver, attempts=6, delay_s=0.35)
-            driver.set_output(channel=channel, output_on=False)
+            for channel in unique_channels:
+                driver.set_output(channel=channel, output_on=False)
+            state_channels = tuple(dict.fromkeys((1, *unique_channels, 3)))
             states = {
                 str(ch): {
                     "output_on": driver.output_state(channel=ch),
                     "readback": driver.measure(channel=ch),
                 }
-                for ch in (1, 3, channel)
+                for ch in state_channels
             }
             return {
                 "status": "ok",
-                "channel": channel,
+                "channels": list(unique_channels),
                 "idn": idn,
                 "states": states,
                 "attempt": attempt,
@@ -179,10 +209,24 @@ def _safe_channel_off(
     assert last_error is not None
     return {
         "status": "error",
-        "channel": channel,
+        "channels": list(unique_channels),
         "error": f"{type(last_error).__name__}: {last_error}",
         "attempts": attempts,
     }
+
+
+def _plan_safe_off_channels(plan: Any, fallback_channel: int | None = None) -> tuple[int, ...]:
+    channels: list[int] = []
+    current_channel = getattr(plan.hardware, "current_sweep_channel", None)
+    if current_channel is not None:
+        channels.append(int(current_channel))
+    motor_enabled = getattr(plan.hardware, "motor_supply_enabled", None)
+    motor_channel = getattr(plan.hardware, "motor_supply_channel", None)
+    if motor_enabled is not False and motor_channel is not None:
+        channels.append(int(motor_channel))
+    if not channels and fallback_channel is not None:
+        channels.append(int(fallback_channel))
+    return tuple(dict.fromkeys(channel for channel in channels if channel > 0))
 
 
 def _finished_metadata_is_normal(supervisor_recovery: Mapping[str, Any] | None) -> bool:
@@ -269,12 +313,12 @@ def run_supervised_mini_dma_bench(
     stdout_path: str | Path | None = None,
     stderr_path: str | Path | None = None,
     poll_interval_s: float = 1.0,
-    safe_off_channel: int = DEFAULT_SAFE_CHANNEL,
+    safe_off_channel: int | None = DEFAULT_SAFE_CHANNEL,
     safe_off_port: str = "COM3",
     safe_off_baud: int = 115200,
     env_overrides: Mapping[str, str] | None = None,
     popen_factory: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
-    safe_off_fn: Callable[..., dict[str, Any]] = _safe_channel_off,
+    safe_off_fn: Callable[..., dict[str, Any]] = _safe_channels_off,
 ) -> dict[str, Any]:
     plan = load_mini_dma_bench_plan(plan_path)
     resolved_plan_path = Path(plan_path).expanduser().resolve()
@@ -374,10 +418,11 @@ def run_supervised_mini_dma_bench(
         finally:
             if interrupted:
                 child_returncode = _terminate_child_if_running(child)
+            safe_off_channels = _plan_safe_off_channels(plan, safe_off_channel)
             safe_off = safe_off_fn(
-                channel=int(safe_off_channel),
-                port_name=str(safe_off_port),
-                baudrate=int(safe_off_baud),
+                channels=safe_off_channels,
+                port_name=str(plan.hardware.supply_port or safe_off_port),
+                baudrate=int(plan.hardware.supply_baud or safe_off_baud),
             )
 
     state = "completed" if child_returncode == 0 else "failed"
@@ -407,7 +452,7 @@ def run_supervised_mini_dma_bench(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Supervise a TMA bench plan and leave CH4 safe on exit.")
+    parser = argparse.ArgumentParser(description="Supervise a TMA bench plan and leave configured HMP channels safe on exit.")
     parser.add_argument("plan_path", help="TMA bench plan JSON path.")
     parser.add_argument("--python", dest="python_executable", default=None, help="Python executable for launcher.py.")
     parser.add_argument("--launcher", default="launcher.py", help="Launcher entrypoint path.")
@@ -415,7 +460,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stdout-path", default=None, help="Child stdout log path.")
     parser.add_argument("--stderr-path", default=None, help="Child stderr log path.")
     parser.add_argument("--poll-seconds", type=float, default=1.0, help="Status refresh interval.")
-    parser.add_argument("--safe-off-channel", type=int, default=DEFAULT_SAFE_CHANNEL, help="HMP channel to turn off on exit.")
+    parser.add_argument(
+        "--safe-off-channel",
+        type=int,
+        default=DEFAULT_SAFE_CHANNEL,
+        help="Fallback HMP channel to turn off on exit when the plan does not specify current/motor channels.",
+    )
     parser.add_argument("--safe-off-port", default="COM3", help="HMP serial port for safe-off cleanup.")
     parser.add_argument("--safe-off-baud", type=int, default=115200, help="HMP baud rate for safe-off cleanup.")
     return parser

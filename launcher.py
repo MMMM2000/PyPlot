@@ -5369,7 +5369,7 @@ def _load_project_word_report_frame(
     mini_dma_candidates: list[Path] = []
     seen_mini_dma_paths: set[Path] = set()
     for root in rvt_search_roots:
-        for mini_root_name in ("mini DMA", "Mini DMA", "mini_dma"):
+        for mini_root_name in ("mini DMA", "TMA", "mini_dma"):
             mini_root = root / mini_root_name
             if not mini_root.exists():
                 continue

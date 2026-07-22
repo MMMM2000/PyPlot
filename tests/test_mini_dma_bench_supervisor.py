@@ -51,6 +51,13 @@ def _write_plan(plan_path: Path, recipe_path: Path, *, summary_path: Path | None
                     "owner": "test-owner",
                     "lock_path": "bench.lock",
                 },
+                "hardware": {
+                    "supply_port": "COM4",
+                    "supply_baud": 115200,
+                    "current_sweep_channel": 3,
+                    "motor_supply_enabled": True,
+                    "motor_supply_channel": 2,
+                },
                 "runs": [{"name": "trial", "recipe_path": str(recipe_path)}],
             }
         ),
@@ -117,8 +124,8 @@ def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, mo
         safe_off_calls.append(dict(kwargs))
         return {
             "status": "ok",
-            "channel": kwargs["channel"],
-            "states": {"4": {"output_on": False}},
+            "channels": list(kwargs["channels"]),
+            "states": {"2": {"output_on": False}, "3": {"output_on": False}},
         }
 
     monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
@@ -141,10 +148,11 @@ def test_supervised_mini_dma_bench_writes_status_and_safe_off(tmp_path: Path, mo
     assert result["child_returncode"] == 0
     assert result["summary"] == {"runs": [{"status": "completed"}]}
     assert result["safe_off"]["status"] == "ok"
-    assert safe_off_calls == [{"channel": 4, "port_name": "COM3", "baudrate": 115200}]
+    assert safe_off_calls == [{"channels": (3, 2), "port_name": "COM4", "baudrate": 115200}]
     saved = json.loads(status_path.read_text(encoding="utf-8"))
     assert saved["child_pid"] == 12345
-    assert saved["safe_off"]["states"]["4"]["output_on"] is False
+    assert saved["safe_off"]["states"]["2"]["output_on"] is False
+    assert saved["safe_off"]["states"]["3"]["output_on"] is False
     assert _FakePopen.instances[0].args[0][:3] == [
         "python-test",
         "launcher.py",
@@ -181,8 +189,8 @@ def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, mon
     def _fake_safe_off(**kwargs: Any) -> dict[str, Any]:
         return {
             "status": "ok",
-            "channel": kwargs["channel"],
-            "states": {"4": {"output_on": False}},
+            "channels": list(kwargs["channels"]),
+            "states": {"2": {"output_on": False}, "3": {"output_on": False}},
         }
 
     monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)
@@ -205,7 +213,8 @@ def test_supervisor_terminates_child_after_finished_metadata(tmp_path: Path, mon
     assert result["child_returncode"] == 1
     assert result["supervisor_recovery"]["reason"] == "finished_metadata_child_still_running"
     assert result["supervisor_recovery"]["stop"]["reason"] == "closed_loop_no_progress"
-    assert result["safe_off"]["states"]["4"]["output_on"] is False
+    assert result["safe_off"]["states"]["2"]["output_on"] is False
+    assert result["safe_off"]["states"]["3"]["output_on"] is False
     assert result["lock"] is None
     assert not lock_path.exists()
     assert isinstance(_FakePopen.instances[0], _NeverExitsPopen)
@@ -247,8 +256,8 @@ def test_supervisor_treats_finished_recipe_completed_metadata_as_completed(
     def _fake_safe_off(**kwargs: Any) -> dict[str, Any]:
         return {
             "status": "ok",
-            "channel": kwargs["channel"],
-            "states": {"4": {"output_on": False}},
+            "channels": list(kwargs["channels"]),
+            "states": {"2": {"output_on": False}, "3": {"output_on": False}},
         }
 
     monkeypatch.setattr(bench_supervisor.time, "sleep", lambda _seconds: None)

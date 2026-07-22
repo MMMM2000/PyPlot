@@ -1,4 +1,4 @@
-﻿# TMA Hardware Profile
+# TMA Hardware Profile
 
 This document is the canonical hardware reference for the current TMA bench. Keep product links, measured limits, and control implications here so future TMA software work starts from the same physical assumptions.
 
@@ -7,23 +7,29 @@ This document is the canonical hardware reference for the current TMA bench. Kee
 | Role | Hardware | Source | Key facts |
 | --- | --- | --- | --- |
 | Balance / load feedback | G&G E150Y-C / E150Y-3 laboratory balance | https://www.tronix.cz/sk/p/laboratorni-vaha-g-g-e150y-3-150g-x-0-005g and https://www.gandg.de/download/anleitungen/englisch/EY2015_english.pdf | 150 g range, 0.005 g readability, RS232, zero-load reference is handled in software. |
+| Balance / load feedback, Kosice bench | KERN TEWJ 600-2M/B precision balance | https://www.kern-sohn.com/shop/en/products/laboratory-balances/precision-balances/tewj-600-2m-b/ | 600 g range, 0.01 g readability, KERN KCP serial/USB protocol, verified with `SI` requests at 256000 baud and 50 ms poll interval. |
 | Linear actuator | StepperOnline 8C15S0504AC5-038RS NEMA 8 captive Acme linear stepper | https://www.omc-stepperonline.com/nema-8-captive-acme-linear-stepper-motor-0-5a-38-2mm-stack-screw-lead-2mm-0-07874-travel-38-1mm-8c15s0504ac5-038rs | 2 mm lead, 0.01 mm full-step travel, 38.1 mm stroke, 0.5 A/phase. |
 | Stepper controller | Pololu Tic T500 USB Multi-Interface Stepper Motor Controller, item 3134 | https://www.pololu.com/product/3134 | 4.5-35 V, about 1.5 A/phase without extra cooling, full to 1/8 microstepping, open-loop position/speed control. |
 
 ## Bench Provisioning Defaults
 
-TMA includes a bench-provisioning action for copying the setup to a second bench. The operator still has to connect the hardware correctly and choose/confirm ambiguous ports or channels, but the app should configure the normal KoÅ¡ice-style defaults from there:
+TMA includes a bench-provisioning action for copying the setup to a second bench. The operator still has to connect the hardware correctly and choose/confirm ambiguous ports or channels, but the app should configure the normal Košice-style defaults from there:
 
-- HMP4040 current-sweep channel on the current bench: `CH4`.
-- HMP4040 motor-supply channel on the current bench: `CH3`, `12 V`, `0.5 A` rail-current limit.
-- HMP4040 serial link on the current bench: `COM3` at `115200` baud.
+- HMP4030 current-sweep channel on the current Kosice bench: `CH3`.
+- HMP4030 motor-supply channel on the current Kosice bench: `CH2`, `12 V`, `0.5 A` rail-current limit.
+- HMP4030 serial link on the current Kosice bench: `COM4` at `115200` baud.
 - HMP current-sweep voltage limit: `32.05 V`, matching the observed maximum rather than the older rounded `30 V` value.
 - Tic motor current limit: default `343 mA`, matching the bench setting that has enough torque for current experiments while keeping motor heating lower. Treat `500 mA/phase` as the motor-rating ceiling, not the deployment default.
 - Tic step mode: `1/8 step`, with `100 full steps/mm` and `800 Tic units/mm`.
+- Tic runtime motion limits: default max speed `10000000`, max acceleration `100000`, and max deceleration `100000` in Tic units. TMA applies these temporary controller settings during manual auto-connect, recipe preflight, and provisioning so the bench does not depend on the Tic's stored profile.
+- Unattended bench plans can pin the same Tic values explicitly with `tic_full_steps_per_mm`, `tic_step_mode`, `tic_current_limit_mA`, `tic_max_speed`, `tic_max_accel`, and `tic_max_decel` so automation does not depend on saved GUI settings.
+- Shared HMP broker roles carry voltage/current limits for each leased channel; the broker rejects over-limit configure/current commands instead of relying only on the client recipe to stay inside limits.
 
 Keep the two current limits separate in UI, docs, and troubleshooting. The HMP motor-supply current limit protects the 12 V supply rail feeding the Tic; the current bench mostly ran at `0.4 A`, but one long sweep showed Tic VIN sag while CH2 was configured that way, so the copied-bench default is `0.5 A`. The Tic current limit controls the motor winding current and is the value that most directly affects motor heating and torque.
 
 ## Balance Details
+
+### Prague G&G Balance
 
 Known specifications:
 
@@ -52,6 +58,23 @@ Important control implication:
 - Faster force feedback would require a supported scale-side fast/streaming mode, lower filtering/stability averaging, or a different load sensor.
 - Keep the physical balance display in real grams. TMA should continue using the zero-load scale reference to calculate applied wire load.
 - Log raw balance readings alongside applied load so dynamic behavior can be audited after each run.
+
+### Kosice KERN KCP Balance
+
+Known and measured settings for the KERN TEWJ 600-2M/B bench balance:
+
+- Capacity: 600 g.
+- Readability `d`: 0.01 g.
+- Verified TMA profile: USB serial on Windows, `SI` request, CRLF line ending, `256000` baud, and `50 ms` poll interval.
+- The same KERN KCP profile also probes `S` requests and lower KERN-supported baud rates for auto-detect fallback, but the preferred bench setting is `256000` baud.
+- TMA can apply and auto-detect the PC-side serial preset, but the scale-side menu settings used for the fast stream/readout behavior, such as `prMode`, `triG`, `cont`, speed, zero, and stability filtering, are treated as persistent balance setup. Do not assume the app can rewrite those balance menu values unless a KERN-supported remote configuration command has been verified on this exact model.
+- The scale can provide much faster request/reply cadence than the Prague G&G balance. On the 2026-07-02 Kosice run, `scale_raw.csv` showed median reply spacing near `50 ms`, p95 near `101 ms`, and many repeated adjacent display values.
+- The 0.01 g readability is a meaningful control floor. For the mounted 18.2 um wire on 2026-07-02, one display count was about `0.377 MPa`.
+- TMA therefore treats KERN feedback as fast but quantized: the control loop can react sooner than with the Prague balance, but it must not classify a single display count as a confirmed worsened response.
+- KERN KCP fast-feedback runs use a smaller current-hold command cap than the Prague/G&G profile: `0.08%` base correction strain and a response-earned `1.25x` adaptive ceiling (`0.10%` strain). The older Prague/G&G caps remain `0.24%` and `0.35%`.
+- Current-hold adaptive large-error recovery is derived from the active hold band, scale readability, and target fraction, not a fixed MPa cutoff.
+- KERN current-hold resume is response-earned: the app can relax resume only as a fraction of the actual hold-entry error, and only after filtered feedback improves without drifting away from the target. Do not replace this with fixed MPa pause/resume values for one sample.
+- Raw scale sidecar logging remains important. Use `scale_raw.csv` to distinguish real load changes from repeated display-count values.
 
 ## Linear Actuator Details
 

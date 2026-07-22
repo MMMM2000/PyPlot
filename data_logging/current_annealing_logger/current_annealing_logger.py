@@ -13,7 +13,7 @@ import time
 import math
 import re
 import json
-import subprocess
+import logging
 import shutil
 import ctypes
 from ctypes import wintypes
@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from importlib import import_module
+from threading import Event, Lock, Thread
 from typing import Any, Deque, Dict, List, Mapping, Optional, SupportsBytes, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
@@ -41,12 +42,20 @@ from data_logging.shared_power_supply.protocol import (
     start_broker_server,
 )
 from plotting.shared.power_guard import create_experiment_sleep_guard
+from data_logging.source_provenance import (
+    CAPTURE_PENDING,
+    SourceProvenanceCache,
+    patch_source_control_metadata,
+    unavailable_source_provenance,
+)
 
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.figure import Figure
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -78,18 +87,6 @@ fig_size[1] = 10 #10
 plt.rcParams["figure.figsize"] = fig_size
 plt.rcParams["font.family"] = ["sans-serif"]
 plt.rcParams["font.size"] = 12
-
-
-def _hidden_subprocess_kwargs() -> dict[str, object]:
-    if os.name != "nt":
-        return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    return {
-        "startupinfo": startupinfo,
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    }
 
 
 def _apply_app_font_to_matplotlib(app: QtWidgets.QApplication | None = None) -> None:
@@ -222,6 +219,7 @@ PLOT_AXIS_VOLTAGE = "voltage"
 PLOT_AXIS_CURRENT_DENSITY = "current_density"
 PLOT_AXIS_POWER_MW = "power_mw"
 PLOT_AXIS_NONE = "none"
+MIN_PLOTTABLE_RESISTANCE_OHM = 1.0
 PLOT_X_AXIS_CHOICES = (
     (PLOT_AXIS_CURRENT_MA, "Current", "mA"),
     (PLOT_AXIS_SAMPLE_N, "N", ""),
@@ -469,20 +467,18 @@ class FabricationFolderLoadWorker(QtCore.QObject):
     succeeded = QtCore.pyqtSignal(object, object, int)
     failed = QtCore.pyqtSignal(object, str)
     cancelled = QtCore.pyqtSignal(object)
-    finished = QtCore.pyqtSignal()
 
     def __init__(self, root: Path) -> None:
         super().__init__()
         self.root = Path(root)
-        self._cancelled = False
+        self._cancel_event = Event()
 
     def cancel(self) -> None:
-        self._cancelled = True
+        self._cancel_event.set()
 
-    @QtCore.pyqtSlot()
     def run(self) -> None:
         try:
-            if self._cancelled:
+            if self._cancel_event.is_set():
                 self.cancelled.emit(self.root)
                 return
             if not self.root.exists() or not self.root.is_dir():
@@ -492,7 +488,7 @@ class FabricationFolderLoadWorker(QtCore.QObject):
             self.progress_changed.emit(f"Scanning fabrication folder: {self.root}")
             files: list[Path] = []
             for path in self.root.rglob("*.xlsx"):
-                if self._cancelled:
+                if self._cancel_event.is_set():
                     self.cancelled.emit(self.root)
                     return
                 if path.is_file() and not path.name.startswith("~$"):
@@ -507,16 +503,97 @@ class FabricationFolderLoadWorker(QtCore.QObject):
             self.progress_changed.emit(f"Reading {len(files)} fabrication workbook(s)...")
             from microwire_data_builder import core as builder_core
 
-            index = builder_core.build_fabrication_index(files)
-            if self._cancelled:
+            index = builder_core.build_fabrication_index(
+                files,
+                cancel_callback=self._cancel_event.is_set,
+            )
+            if self._cancel_event.is_set():
                 self.cancelled.emit(self.root)
                 return
             records = _records_from_fabrication_index_payload(index, source=self.root.name)
             self.succeeded.emit(self.root, records, len(files))
         except Exception as exc:
-            self.failed.emit(self.root, f"Failed to load fabrication spreadsheets: {exc}")
+            if self._cancel_event.is_set():
+                self.cancelled.emit(self.root)
+            else:
+                self.failed.emit(self.root, f"Failed to load fabrication spreadsheets: {exc}")
+
+
+_RETAINED_FABRICATION_TASKS: set["DaemonFabricationTask"] = set()
+
+
+class DaemonFabricationTask:
+    """Run a fabrication scan without any reference back to its window."""
+
+    def __init__(self, worker: FabricationFolderLoadWorker) -> None:
+        self.worker = worker
+        self.done_event = Event()
+        self._event_lock = Lock()
+        self._events: deque[tuple[str, tuple[object, ...]]] = deque()
+        worker.progress_changed.connect(
+            self._record_progress_changed,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        worker.succeeded.connect(
+            self._record_succeeded,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        worker.failed.connect(
+            self._record_failed,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        worker.cancelled.connect(
+            self._record_cancelled,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
+        self.thread = Thread(
+            target=self._run,
+            name="current-annealing-fabrication-filesystem",
+            daemon=True,
+        )
+
+    def _record_event(self, name: str, args: tuple[object, ...]) -> None:
+        with self._event_lock:
+            self._events.append((name, args))
+
+    def _record_progress_changed(self, message: str) -> None:
+        self._record_event("progress_changed", (message,))
+
+    def _record_succeeded(self, root: object, records: object, file_count: int) -> None:
+        self._record_event("succeeded", (root, records, file_count))
+
+    def _record_failed(self, root: object, message: str) -> None:
+        self._record_event("failed", (root, message))
+
+    def _record_cancelled(self, root: object) -> None:
+        self._record_event("cancelled", (root,))
+
+    def drain_events(self) -> list[tuple[str, tuple[object, ...]]]:
+        with self._event_lock:
+            events = list(self._events)
+            self._events.clear()
+        return events
+
+    def start(self) -> None:
+        _RETAINED_FABRICATION_TASKS.add(self)
+        self.thread.start()
+
+    def cancel(self) -> None:
+        self.worker.cancel()
+
+    def isRunning(self) -> bool:  # noqa: N802 - compatibility with previous QThread owner
+        return self.thread.is_alive()
+
+    def wait(self, timeout_ms: int) -> bool:
+        self.thread.join(timeout=max(0, int(timeout_ms)) / 1000.0)
+        return not self.thread.is_alive()
+
+    def _run(self) -> None:
+        try:
+            self.worker.run()
         finally:
-            self.finished.emit()
+            self.done_event.set()
+            _RETAINED_FABRICATION_TASKS.discard(self)
 
 
 class MeasurementHistoryDialog(QtWidgets.QDialog):
@@ -721,8 +798,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self._metadata_microwire_completer_key: tuple[str, tuple[str, ...]] | None = None
         self._metadata_diameter_imported = False
         self._metadata_diameter_import_sample_key: tuple[str, str] | None = None
-        self._fabrication_thread: QtCore.QThread | None = None
+        self._fabrication_thread: DaemonFabricationTask | None = None
         self._fabrication_worker: FabricationFolderLoadWorker | None = None
+        self._fabrication_tasks: dict[int, DaemonFabricationTask] = {}
+        self._fabrication_poll_timer = QtCore.QTimer(self)
+        self._fabrication_poll_timer.setInterval(50)
+        self._fabrication_poll_timer.timeout.connect(
+            self._poll_fabrication_tasks,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        self._source_provenance_cache = SourceProvenanceCache()
+        self._source_provenance_token: object | None = None
+        self._source_provenance_output_path: str | None = None
+        self._source_provenance_poll_timer = QtCore.QTimer(self)
+        self._source_provenance_poll_timer.setInterval(50)
+        self._source_provenance_poll_timer.timeout.connect(
+            self._poll_source_provenance_capture,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        self._window_closing = False
+        self._closing_safe_end = False
+        self._close_in_progress = False
+        self._callbacks_torn_down = False
+        self._delay_timer = QtCore.QTimer(self)
+        self._delay_timer.setSingleShot(True)
+        self._delay_timer.timeout.connect(
+            self._finish_simple_delay,
+            QtCore.Qt.ConnectionType.DirectConnection,
+        )
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         self.supply_profile_id = "hmp4030"
         self.min_start_current_mA = 1
@@ -753,6 +856,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shared_broker_client: Any = None
         self._shared_broker_lease_id: str | None = None
         self._shared_broker_owner = "current_annealing_logger"
+        self._shared_broker_role_checked_channel: int | None = None
         self._shared_broker_current_limit_mA: float | None = None
         self._shared_broker_limit_warning_shown = False
         self._owned_shared_broker_server: Any = None
@@ -772,20 +876,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
         self.ser_mcu = QtSerialPort.QSerialPort()
         self.lock = QtCore.QMutex()
-        self.timer = QtCore.QTimer()
-        self.timer.stop();
-        self.timer.timeout.connect(self.handle_update_serial_response_label)
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(
+            self.handle_update_serial_response_label,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self.timer.start(50)
         # timer for time remaining label
-        self.time_timer = QtCore.QTimer()
-        self.time_timer.timeout.connect(self.update_time_estimate)
+        self.time_timer = QtCore.QTimer(self)
+        self.time_timer.timeout.connect(
+            self.update_time_estimate,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self.time_timer.start(1000)
         
         # Timer that schedules outgoing commands
         self.command_number = 0
-        self.timer_command = QtCore.QTimer()
-        self.timer_command.stop();
-        self.timer_command.timeout.connect(self.handle_send_new_command)
+        self.timer_command = QtCore.QTimer(self)
+        self.timer_command.timeout.connect(
+            self.handle_send_new_command,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         
         self.f_name: str | None = None
         self.f_out: TextIO | None = None
@@ -857,6 +968,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pg_placeholder_labels: list[QtWidgets.QLabel] = []
         self._hardware_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_auto_connect_error = ""
+        self._last_run_error = ""
+        self._last_stop_reason = ""
+        self._process_state = "idle"
         self._history_settings = QtCore.QSettings("microwire", "current_annealing_history")
         self._measurement_history: List[Dict[str, Any]] = self._load_measurement_history()
 
@@ -1043,8 +1157,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_color="r"
         # Initialize progress UI defaults
         if hasattr(self.ui, 'progressBar_process'):
-            self.ui.progressBar_process.setMaximum(0)
+            self.ui.progressBar_process.setMaximum(1)
             self.ui.progressBar_process.setValue(0)
+        self._set_process_state("idle")
+        self._set_hardware_status("Disconnected", state="idle")
         if hasattr(self.ui, 'label_time_remaining'):
             self.ui.label_time_remaining.setText("Time remaining: N/A")
         # Current step defaults
@@ -1449,7 +1565,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Stopping the process.",
             )
             if self.process_running:
-                self.stop_annealing("Contact lost; stopping measurement.", show_dialog=False)
+                self.stop_annealing(
+                    "Contact lost; stopping measurement.",
+                    show_dialog=False,
+                    final_state="failed",
+                )
 
     def _clear_zero_placeholders(self) -> None:
         """Remove any temporary zero-current markers from the plots."""
@@ -1692,14 +1812,14 @@ class MainWindow(QtWidgets.QMainWindow):
         thread = self._fabrication_thread
         if thread is None:
             return False
+        if thread.done_event.is_set():
+            self._poll_fabrication_tasks()
+            thread = self._fabrication_thread
+            if thread is None:
+                return False
         if thread.isRunning():
             return True
-        worker = self._fabrication_worker
-        if worker is not None:
-            self._finish_fabrication_thread(thread, worker)
-        else:
-            self._fabrication_thread = None
-            self._set_fabrication_loading_ui(False)
+        self._poll_fabrication_tasks()
         return False
 
     def _set_fabrication_loading_ui(self, loading: bool) -> None:
@@ -1719,23 +1839,67 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_fabrication_folder_from_ui()
 
     def _cancel_fabrication_folder_load(self) -> None:
-        worker = self._fabrication_worker
-        if worker is not None:
-            worker.cancel()
+        for task in list(self._fabrication_tasks.values()):
+            task.cancel()
+
+    def _retain_fabrication_task(
+        self,
+        task: DaemonFabricationTask,
+    ) -> None:
+        self._fabrication_tasks[id(task)] = task
+        self._fabrication_poll_timer.start()
+
+    def _release_fabrication_task(self, task: DaemonFabricationTask) -> None:
+        self._fabrication_tasks.pop(id(task), None)
+
+    def _wait_for_fabrication_tasks(self, timeout_ms: int = 250) -> bool:
+        tasks = list(self._fabrication_tasks.values())
+        if not tasks:
+            return True
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        all_finished = True
+        for task in tasks:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000.0))
+            if task.isRunning() and remaining_ms > 0:
+                task.wait(remaining_ms)
+            if task.isRunning():
+                all_finished = False
+            else:
+                self._release_fabrication_task(task)
+        return all_finished
+
+    @QtCore.pyqtSlot()
+    def _poll_fabrication_tasks(self) -> None:
+        for task in list(self._fabrication_tasks.values()):
+            current = self._fabrication_thread is task and not self._window_closing
+            for event_name, args in task.drain_events():
+                if not current:
+                    continue
+                if event_name == "progress_changed" and args:
+                    self._set_metadata_status(str(args[0]))
+                elif event_name == "succeeded" and len(args) == 3:
+                    self._handle_fabrication_load_success(args[0], args[1], int(args[2]))
+                elif event_name == "failed" and len(args) == 2:
+                    self._handle_fabrication_load_failure(args[0], str(args[1]))
+                elif event_name == "cancelled" and args:
+                    self._handle_fabrication_load_cancelled(args[0])
+            if task.done_event.is_set():
+                self._finish_fabrication_thread(task, task.worker)
+        if self._fabrication_tasks and not self._window_closing:
+            self._fabrication_poll_timer.start()
+        else:
+            self._fabrication_poll_timer.stop()
 
     def _finish_fabrication_thread(
         self,
-        thread: QtCore.QThread,
+        thread: DaemonFabricationTask,
         worker: FabricationFolderLoadWorker,
     ) -> None:
         if self._fabrication_thread is thread:
             self._fabrication_thread = None
             self._fabrication_worker = None
             self._set_fabrication_loading_ui(False)
-        try:
-            thread.deleteLater()
-        except Exception:
-            pass
+        self._release_fabrication_task(thread)
 
     def _handle_fabrication_load_success(self, root_obj: object, records_obj: object, file_count: int) -> None:
         root = Path(str(root_obj))
@@ -1876,8 +2040,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_fabrication_folder_from_ui(self) -> bool:
         if self._fabrication_load_active():
-            self._set_metadata_status("Fabrication folder load is already running.")
-            return False
+            self._cancel_fabrication_folder_load()
         folder_text = self.ui.lineEdit_fabrication_folder.text().strip()
         if not folder_text:
             self._set_metadata_status("Select a fabrication folder first.")
@@ -1886,22 +2049,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not root.exists() or not root.is_dir():
             self._set_metadata_status("Fabrication folder was not found.")
             return False
-        thread = QtCore.QThread(self)
         worker = FabricationFolderLoadWorker(root)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress_changed.connect(self._set_metadata_status)
-        worker.succeeded.connect(self._handle_fabrication_load_success)
-        worker.failed.connect(self._handle_fabrication_load_failure)
-        worker.cancelled.connect(self._handle_fabrication_load_cancelled)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda thread=thread, worker=worker: self._finish_fabrication_thread(thread, worker))
-        self._fabrication_thread = thread
+        task = DaemonFabricationTask(worker)
+        self._fabrication_thread = task
         self._fabrication_worker = worker
+        self._retain_fabrication_task(task)
         self._set_fabrication_loading_ui(True)
         self._set_metadata_status(f"Scanning fabrication folder: {root}")
-        thread.start()
+        task.start()
         return True
 
     def _refresh_metadata_completers(self) -> None:
@@ -2301,7 +2456,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         if current_mA < self._minimum_plottable_current_mA():
             return False
-        return resistance > 0.0
+        return resistance >= MIN_PLOTTABLE_RESISTANCE_OHM
 
     def _append_measurement_sample(self, current_mA: float, resistance: float, voltage: float | None = None) -> None:
         if not self._measurement_sample_is_plottable(current_mA, resistance):
@@ -2743,26 +2898,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Could not refresh the shared HMP broker channel limits before starting: "
                     + broker_failure_diagnostic(exc, context="Current Annealing shared HMP broker")
                 )
-            else:
-                limit_mA = getattr(self, "_shared_broker_current_limit_mA", None)
-                try:
-                    requested_mA = max(
-                        float(getattr(self, "max_current_mA", 0.0) or 0.0),
-                        float(getattr(self, "start_current_mA", 0.0) or 0.0),
-                    )
-                except Exception:
-                    requested_mA = 0.0
-                try:
-                    limit_value = None if limit_mA is None else float(limit_mA)
-                except Exception:
-                    limit_value = None
-                tolerance_mA = max(1e-6, self._current_resolution_mA() * 1e-3)
-                if limit_value is not None and limit_value > 0.0 and requested_mA > limit_value + tolerance_mA:
-                    errors.append(
-                        f"Requested max current is {requested_mA:g} mA, but the shared broker "
-                        f"has CH{self._shared_broker_channel()} confirmed for only {limit_value:g} mA. "
-                        "Update the shared broker/profile limit before starting."
-                    )
         return errors
 
     def _show_start_preflight_errors(self, errors: list[str]) -> None:
@@ -2779,6 +2914,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if bool(getattr(self, "is_connected", False)):
             return True
         self._last_auto_connect_error = ""
+        self._set_process_state("connecting")
+        self._set_hardware_status("Connecting…", state="connecting")
         dialog: QtWidgets.QProgressDialog | None = None
         try:
             text = "Connecting shared HMP broker..." if self._using_shared_broker() else "Connecting hardware..."
@@ -2798,10 +2935,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._connect_shared_broker_mode()
             else:
                 self.handle_connect_port_clicked()
-            return bool(getattr(self, "is_connected", False))
+            connected = bool(getattr(self, "is_connected", False))
+            if connected:
+                self._set_hardware_status("Connected", state="connected")
+            else:
+                detail = str(self._last_auto_connect_error or "Hardware connection did not complete.")
+                self._set_process_state("failed", detail)
+            return connected
         except Exception as exc:
             message = f"Hardware auto-connect failed: {exc}"
             self._last_auto_connect_error = message
+            self._set_hardware_status(message, state="failed")
+            self._set_process_state("failed", message)
             self._show_status_message(message, timeout_ms=15000)
             try:
                 QtWidgets.QMessageBox.warning(self, "Hardware auto-connect failed", message)
@@ -2836,8 +2981,66 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         return self._shared_broker_client
 
+    def _shared_broker_channel_payload(
+        self,
+        snapshot: dict[str, Any] | None,
+        channel: int,
+    ) -> dict[str, Any] | None:
+        if not isinstance(snapshot, dict):
+            return None
+        bench_profile = snapshot.get("bench_profile")
+        if not isinstance(bench_profile, dict):
+            return None
+        channels = bench_profile.get("channels")
+        if not isinstance(channels, dict):
+            return None
+        payload = channels.get(str(channel))
+        return payload if isinstance(payload, dict) else None
+
+    def _shared_broker_current_limit_needs_clearing(self, payload: dict[str, Any] | None) -> bool:
+        return isinstance(payload, dict) and payload.get("current_limit_a") is not None
+
+    def _ensure_shared_broker_channel_role(self, snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        channel = int(getattr(self, "channel_select", 0) or 0)
+        if channel <= 0:
+            return snapshot
+        if self._shared_broker_role_checked_channel == channel:
+            return snapshot
+        client = self._get_shared_broker_client()
+        if snapshot is None:
+            snapshot = client.snapshot()
+        payload = self._shared_broker_channel_payload(snapshot, channel)
+        if payload is None:
+            return snapshot
+        configured_role = str(payload.get("role") or "unused")
+        confirmed = bool(payload.get("confirmed", False))
+        needs_current_limit_clear = self._shared_broker_current_limit_needs_clearing(payload)
+        if configured_role == ROLE_CURRENT_ANNEALING and confirmed and not needs_current_limit_clear:
+            self._shared_broker_role_checked_channel = channel
+            return snapshot
+        if configured_role not in {"unused", ROLE_CURRENT_ANNEALING}:
+            raise RuntimeError(f"Shared HMP broker CH{channel} is assigned to {configured_role}, not current annealing.")
+        request = getattr(client, "request", None)
+        if not callable(request):
+            return snapshot
+        request(
+            "assign_role",
+            channel=channel,
+            role=ROLE_CURRENT_ANNEALING,
+            confirmed=True,
+            voltage_limit_v=None,
+            current_limit_a=None,
+        )
+        self._shared_broker_role_checked_channel = channel
+        try:
+            return client.snapshot()
+        except Exception:
+            self._shared_broker_current_limit_mA = None
+            return snapshot
+
     def handle_broker_settings_changed(self) -> None:
         self._shared_broker_client = None
+        self._shared_broker_role_checked_channel = None
         try:
             self.settings.setValue("shared_broker_host", self._shared_broker_host())
             self.settings.setValue("shared_broker_port", self._shared_broker_port())
@@ -2911,8 +3114,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_detected_hmp_profile(HMP4030_PROFILE, selected=selected_channel)
         elif profile_id == HMP4040_PROFILE.profile_id:
             self._set_detected_hmp_profile(HMP4040_PROFILE, selected=selected_channel)
+        snapshot = self._ensure_shared_broker_channel_role(snapshot) or snapshot
         self._remember_shared_broker_channel_limit(snapshot)
         self.is_connected = True
+        self._set_hardware_status("Connected to shared HMP broker", state="connected")
         self.ui.pushButton_connect_port.setText("Disconnect broker")
         self._set_port_controls_enabled(False)
         self.ui.frame_command_and_response.setEnabled(False)
@@ -3161,13 +3366,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 if driver.profile is None:
                     raise RuntimeError(f"Unsupported shared HMP response: {idn_text}")
                 broker = SharedPowerSupplyBroker(driver, driver.profile)
-                current_limit_a = self._shared_broker_current_limit_a()
                 broker.assign_role(
                     channel=channel,
                     role=ROLE_CURRENT_ANNEALING,
                     confirmed=True,
-                    voltage_limit_v=float(getattr(self, "max_voltage", HMP4040_PROFILE.max_voltage_v)),
-                    current_limit_a=current_limit_a,
+                    voltage_limit_v=None,
+                    current_limit_a=None,
                 )
                 broker.confirm_profile(name="Current Annealing auto-started shared HMP broker")
                 server, thread = start_broker_server(broker, host=host, port=port)
@@ -3182,7 +3386,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._owned_shared_broker_server = server
             self._owned_shared_broker_thread = thread
             self._owned_shared_broker_driver = driver
-            self._shared_broker_current_limit_mA = max(0.0, current_limit_a * 1000.0)
+            self._shared_broker_current_limit_mA = None
             self.port_name = port_name
             self._show_status_message(
                 f"Started shared HMP broker on {host}:{port} for {port_name}.",
@@ -3241,6 +3445,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_safe_end_commands()
         self._shared_broker_client = None
         self._shared_broker_lease_id = None
+        self._shared_broker_role_checked_channel = None
         self._shared_broker_current_limit_mA = None
         self._stop_owned_shared_broker()
         self.is_connected = False
@@ -3256,6 +3461,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._shared_broker_lease_id:
             return self._shared_broker_lease_id
         channel = self._shared_broker_channel()
+        self._ensure_shared_broker_channel_role()
         lease = self._get_shared_broker_client().lease(
             channel=channel,
             owner=self._shared_broker_owner,
@@ -3286,6 +3492,13 @@ class MainWindow(QtWidgets.QMainWindow):
             start_scheduler(tick_s=0.05)
 
     def _read_shared_broker_sample(self) -> bool:
+        if self._read_shared_broker_sample_once():
+            return True
+        if self.process_running and self._recover_shared_broker_connection():
+            return self._read_shared_broker_sample_once()
+        return False
+
+    def _read_shared_broker_sample_once(self) -> bool:
         channel = self._shared_broker_channel()
         client = self._get_shared_broker_client()
         readback = None
@@ -3325,6 +3538,31 @@ class MainWindow(QtWidgets.QMainWindow):
             f"{float(current_mA):.6g} mA"
         )
         self.sample_ready = True
+        return True
+
+    def _recover_shared_broker_connection(self) -> bool:
+        self._show_status_message(
+            "Shared HMP broker stopped responding; trying to reconnect without stopping the annealing run.",
+            timeout_ms=12000,
+        )
+        self._shared_broker_client = None
+        self._shared_broker_lease_id = None
+        self._shared_broker_role_checked_channel = None
+        self._shared_broker_current_limit_mA = None
+        try:
+            self._connect_shared_broker_mode()
+            self._initialize_shared_broker_output()
+        except Exception as exc:
+            self._show_status_message(
+                "Shared HMP broker recovery failed: "
+                + broker_failure_diagnostic(exc, context="Current Annealing shared HMP broker"),
+                timeout_ms=15000,
+            )
+            return False
+        self._show_status_message(
+            f"Recovered shared HMP broker on CH{self._shared_broker_channel()}; annealing run continues.",
+            timeout_ms=12000,
+        )
         return True
 
     def _set_shared_broker_current(self) -> None:
@@ -3476,25 +3714,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # Normalise "-0" artefacts from floating point conversion.
         return "0" if text == "-0" else text
 
-    def _write_sample_to_file(self, *, initial_sample: bool) -> None:
+    def _write_sample_to_file(self, *, initial_sample: bool) -> bool:
         """Persist the latest sample to disk if appropriate."""
 
         if initial_sample or not self.f_name:
-            return
+            return True
         current_mA = float(self.current_current_read) * 1000.0
         voltage = float(self.current_voltage)
         resistance = float(self.current_resistance)
         if not self._measurement_sample_is_plottable(current_mA, resistance):
-            return
+            return True
         if not self.f_out:
             try:
                 Path(self.f_name).parent.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
+            except OSError as exc:
+                return self._handle_measurement_write_failure(exc)
             try:
                 self.f_out = open(self.f_name, "a", encoding="utf-8")
-            except OSError:
+            except OSError as exc:
                 self.f_out = None
+                return self._handle_measurement_write_failure(exc)
         if self.f_out:
             line = "\t".join(
                 [
@@ -3503,9 +3742,36 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._format_sample_value(resistance),
                 ]
             ) + "\n"
-            self.f_out.write(line)
-            self.f_out.close()
+            try:
+                self.f_out.write(line)
+                self.f_out.flush()
+                self.f_out.close()
+            except OSError as exc:
+                try:
+                    self.f_out.close()
+                except OSError:
+                    pass
+                self.f_out = None
+                return self._handle_measurement_write_failure(exc)
             self.f_out = None
+            return True
+        return self._handle_measurement_write_failure(OSError("output file is unavailable"))
+
+    def _handle_measurement_write_failure(self, exc: OSError) -> bool:
+        path = str(self.f_name or "the measurement file")
+        message = f"Measurement file write failed for {path}: {exc}"
+        LOGGER.error(message)
+        self._last_run_error = message
+        if self.process_running:
+            self.stop_annealing(message, show_dialog=False, final_state="failed")
+        else:
+            self._set_process_state("failed", message)
+            self._show_status_message(message, timeout_ms=0)
+        try:
+            QtWidgets.QMessageBox.critical(self, "Measurement not saved", message)
+        except Exception:
+            pass
+        return False
 
     def _record_sample_progress(self) -> None:
         """Update progress/rate counters for a persisted non-initial sample."""
@@ -3527,20 +3793,43 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.progressBar_process.setMaximum(self.total_steps)
             self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
 
-    def _record_acquired_sample(self, *, record_voltage_progress: bool = False) -> None:
+    def _first_sample_current_matches_setpoint(self, current_mA: float) -> bool:
+        if not bool(getattr(self, "first_sample", False)):
+            return True
+        try:
+            target_mA = max(0.0, float(getattr(self, "current_current_set", 0.0) or 0.0) * 1000.0)
+        except Exception:
+            return True
+        if not math.isfinite(target_mA) or target_mA <= 0.0:
+            return True
+        try:
+            resolution_mA = float(self._current_resolution_mA())
+        except Exception:
+            resolution_mA = 0.2
+        try:
+            step_mA = abs(float(getattr(self, "current_step_mA", resolution_mA) or resolution_mA))
+        except Exception:
+            step_mA = resolution_mA
+        tolerance_mA = max(2.0 * resolution_mA, 2.0 * step_mA, 0.25 * target_mA)
+        return abs(float(current_mA) - target_mA) <= tolerance_mA
+
+    def _record_acquired_sample(self, *, record_voltage_progress: bool = False) -> bool:
         """Write, plot, and account for the latest accepted measurement once."""
 
         if self._skip_current_sample:
-            return
+            return False
         try:
             current_mA = float(self.curr_value_x)
             resistance = float(self.curr_value_y)
         except Exception:
-            return
+            return False
         if not self._measurement_sample_is_plottable(current_mA, resistance):
-            return
+            return False
+        if not self._first_sample_current_matches_setpoint(current_mA):
+            return False
         initial_sample = self.first_sample
-        self._write_sample_to_file(initial_sample=initial_sample)
+        if not self._write_sample_to_file(initial_sample=initial_sample):
+            return False
         if self.first_sample:
             self.first_sample = False
         self._append_measurement_sample(current_mA, resistance, float(getattr(self, "current_voltage", math.nan)))
@@ -3548,9 +3837,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._record_sample_progress()
         if record_voltage_progress:
             self._record_voltage_progress()
+        return True
 
-    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> None:
-        self._record_acquired_sample(record_voltage_progress=record_voltage_progress)
+    def _accept_measurement_sample(self, *, record_voltage_progress: bool = False) -> bool:
+        return self._record_acquired_sample(record_voltage_progress=record_voltage_progress)
 
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
         spin = getattr(self.ui, 'spinBox_loops', None)
@@ -3620,7 +3910,10 @@ class MainWindow(QtWidgets.QMainWindow):
             
             if self.ser_mcu.open(QtCore.QIODeviceBase.OpenModeFlag.ReadWrite):
                 self.ser_mcu.clear()
-                self.ser_mcu.readyRead.connect(self.handle_ser_mcu_readyRead)
+                self.ser_mcu.readyRead.connect(
+                    self.handle_ser_mcu_readyRead,
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                )
                 self.is_connected = True
                 self.ui.pushButton_connect_port.setText('Disconnect')
                 self._set_port_controls_enabled(False)
@@ -3632,6 +3925,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.handle_raw_vcp_mode_selected()
                 self._update_mode_action_state()
                 self._show_connect_overlay(False)
+                self._set_hardware_status(f"Connected to {name}", state="connected")
+            else:
+                detail = str(self.ser_mcu.errorString() or "Unknown serial-port error")
+                message = f"Could not open {name}: {detail}"
+                LOGGER.error(message)
+                self.is_connected = False
+                self._last_auto_connect_error = message
+                self._set_hardware_status(message, state="failed")
+                self._show_status_message(message, timeout_ms=0)
+                try:
+                    QtWidgets.QMessageBox.warning(self, "Serial port open failed", message)
+                except Exception:
+                    pass
 
         else:
             if self.process_running:
@@ -3639,12 +3945,10 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.send_safe_end_commands()
             # Proactively disconnect signal-slot before closing the port
-            try:
-                self.ser_mcu.readyRead.disconnect(self.handle_ser_mcu_readyRead)
-            except Exception:
-                pass
+            self._disconnect_serial_ready_read()
             self.ser_mcu.close()
             self.is_connected = False
+            self._set_hardware_status("Disconnected", state="idle")
             self.ui.pushButton_connect_port.setText('Connect to port')
             self._show_connect_overlay(False)
             self.ui.frame_command_and_response.setEnabled(False)
@@ -3671,7 +3975,16 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _disconnect_serial_ready_read(self) -> None:
+        try:
+            self.ser_mcu.readyRead.disconnect(self.handle_ser_mcu_readyRead)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    @QtCore.pyqtSlot()
     def handle_ser_mcu_readyRead(self):
+        if self._window_closing or not self.is_connected:
+            return
         if self.ser_mcu.canReadLine():
             self.lock.lock()
             try:
@@ -3730,7 +4043,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.sample_ready = True
             self.lock.unlock()
                     
+    @QtCore.pyqtSlot()
     def handle_update_serial_response_label(self):
+        if self._window_closing:
+            return
         self.ui.label_serial_response.setText(self.serial_response)
 
     def _reset_voltage_projection(self) -> None:
@@ -3888,7 +4204,10 @@ class MainWindow(QtWidgets.QMainWindow):
             text += f" (≈ {self._estimated_limit_current_mA:.0f} mA)"
         return text
 
+    @QtCore.pyqtSlot()
     def update_time_estimate(self):
+        if self._window_closing:
+            return
         label = getattr(self.ui, 'label_time_remaining', None)
         limit_label = getattr(self.ui, 'label_time_to_limit', None)
         if label is None:
@@ -4561,7 +4880,6 @@ class MainWindow(QtWidgets.QMainWindow):
         current_limits_mA: list[float] = []
         for value in (
             getattr(self, "max_current_mA", 0.0),
-            getattr(self, "_shared_broker_current_limit_mA", None),
         ):
             try:
                 limit = float(value)
@@ -4575,30 +4893,6 @@ class MainWindow(QtWidgets.QMainWindow):
             tolerance_mA = max(1e-9, self._current_resolution_mA() * 1e-6)
             if requested_mA > max_current_mA + tolerance_mA:
                 self.current_current_set = max_current_mA / 1000.0
-                shared_limit_mA = getattr(self, "_shared_broker_current_limit_mA", None)
-                try:
-                    shared_limit_value = None if shared_limit_mA is None else float(shared_limit_mA)
-                except Exception:
-                    shared_limit_value = None
-                if self._using_shared_broker() and shared_limit_value is not None and shared_limit_value > 0.0:
-                    message = (
-                        f"Shared broker CH{self._shared_broker_channel()} limit is {shared_limit_value:g} mA, "
-                        f"but the run requested {requested_mA:g} mA. "
-                        "The current was clamped to the confirmed broker limit."
-                    )
-                    if self.process_running:
-                        self._show_status_message(message, timeout_ms=15000)
-                        if not self._shared_broker_limit_warning_shown:
-                            self._shared_broker_limit_warning_shown = True
-                            try:
-                                QtWidgets.QMessageBox.warning(self, "Shared broker current limit", message)
-                            except Exception:
-                                pass
-                    if self.process_running and self.current_increment > 0:
-                        self.current_increment = -abs(self.current_step_A)
-                        self.line_color = "b"
-                        self.direction_ascending = False
-                        self._reset_voltage_projection()
         if self._using_shared_broker():
             self._set_shared_broker_current()
             self.ui.label_last_command.setText(
@@ -4619,16 +4913,28 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_raw_vcp_mode_selected(self):
         self.operation_mode = 0
         self.ui.frame_process_settings.setEnabled(False)
+        self.ui.pushButton_start_process.setEnabled(False)
+        self.ui.pushButton_start_process.setText("Recipe disabled (Raw VCP)")
+        self.ui.pushButton_start_process.setToolTip(
+            "Raw VCP is manual serial-console mode. Select Manual or Automatic annealing to run a recipe."
+        )
+        self._set_process_state("idle", "Raw VCP manual mode — recipe actions disabled")
 
     def handle_manual_mode_selected(self):
         self.operation_mode = 1
         self.ui.frame_process_settings.setEnabled(True)
         self.ui.spinBox_max_current.setEnabled(False)
+        self.ui.pushButton_start_process.setEnabled(True)
+        self.ui.pushButton_start_process.setText("Start annealing process")
+        self.ui.pushButton_start_process.setToolTip("")
 
     def handle_automatic_mode_selected(self):
         self.operation_mode = 2
         self.ui.frame_process_settings.setEnabled(True)
         self.ui.spinBox_max_current.setEnabled(True)
+        self.ui.pushButton_start_process.setEnabled(True)
+        self.ui.pushButton_start_process.setText("Start annealing process")
+        self.ui.pushButton_start_process.setToolTip("")
 
     def handle_mode_changed(self, index: int) -> None:
         if index == 0:
@@ -4712,6 +5018,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 value = 0
         self.channel_select = value
+        self._shared_broker_role_checked_channel = None
         spin = getattr(self.ui, 'spinBox_channel', None)
         if isinstance(spin, QtWidgets.QSpinBox):
             spin.blockSignals(True)
@@ -4796,6 +5103,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_toggle_process_clicked(self):
         if not self.process_running:
+            if self.operation_mode == 0:
+                self._set_process_state("idle", "Raw VCP manual mode — recipe actions disabled")
+                self._show_status_message(
+                    "Raw VCP is manual serial-console mode; select an annealing mode to run a recipe.",
+                    timeout_ms=10000,
+                )
+                return
             preflight_errors = self._start_preflight_errors(check_connection=False)
             if preflight_errors:
                 self._show_start_preflight_errors(preflight_errors)
@@ -4809,6 +5123,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._show_start_preflight_errors(preflight_errors)
                 return
             self.process_running = True
+            self._last_run_error = ""
             self._update_mode_action_state()
             self._sync_runtime_settings()
             self._refresh_command_profiles()
@@ -4828,9 +5143,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
                 self.ui.pushButton_reverse_now.setEnabled(True)
-            if hasattr(self.ui, 'pushButton_update_running_recipe'):
-                self.ui.pushButton_update_running_recipe.setVisible(True)
-                self.ui.pushButton_update_running_recipe.setEnabled(True)
             self.force_stop_at_zero = False
             self.command_number = 0
             self.sample_index = 0
@@ -4849,11 +5161,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._process_start_time = None
                     self.ui.pushButton_start_process.setText("Start annealing process")
                     self._restore_idle_controls()
+                    self._set_process_state("idle")
                     return
                 self._record_name_history()
                 if hasattr(self.ui, 'progressBar_process'):
                     self.ui.progressBar_process.setMaximum(0)
                     self.ui.progressBar_process.setValue(0)
+                self._set_process_state("infinite-running", "Manual annealing — running until stopped")
                 if hasattr(self.ui, 'label_time_remaining'):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 if hasattr(self.ui, 'label_time_to_limit'):
@@ -4883,6 +5197,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._process_start_time = None
                     self.ui.pushButton_start_process.setText("Start annealing process")
                     self._restore_idle_controls()
+                    self._set_process_state("idle")
                     return
                 self._record_name_history()
                 self.current_increment = self.current_step_A
@@ -4909,6 +5224,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.ui.progressBar_process.setValue(0)
                     else:
                         self.ui.progressBar_process.setMaximum(0)
+                if self.infinite_loops:
+                    self._set_process_state("infinite-running")
+                else:
+                    self._set_process_state("finite-running")
                 if hasattr(self.ui, 'label_time_to_limit'):
                     self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
                 self.line_color="r"
@@ -4974,29 +5293,15 @@ class MainWindow(QtWidgets.QMainWindow):
             keep.add(self.ui.pushButton_update_running_recipe)
         if hasattr(self.ui, 'groupBox_live_values'):
             keep.add(self.ui.groupBox_live_values)
-        runtime_editable = {
-            getattr(self.ui, name, None)
-            for name in (
-                'spinBox_max_current',
-                'spinBox_step_mA',
-                'spinBox_start_current',
-                'spinBox_loops',
-                'checkBox_infinite_loops',
-                'label_max_current',
-                'label_max_current_density',
-                'label_step',
-                'label_step_density',
-                'label_start_current',
-                'label_start_current_density',
-            )
-        }
         for child in self.ui.groupBox_process_settings.findChildren(QtWidgets.QWidget):
             if child in keep:
                 continue
-            if not enabled and child in runtime_editable:
-                child.setEnabled(True)
-                continue
             child.setEnabled(enabled)
+        recipe_help = "" if enabled else "Recipe is locked for this run. Stop before editing it."
+        for name in ('spinBox_max_current', 'spinBox_step_mA', 'spinBox_start_current', 'spinBox_loops', 'checkBox_infinite_loops'):
+            widget = getattr(self.ui, name, None)
+            if widget is not None:
+                widget.setToolTip(recipe_help)
 
     def _restore_idle_controls(self) -> None:
         """Re-enable process controls after a start attempt is canceled."""
@@ -5009,8 +5314,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_update_running_recipe.setEnabled(False)
             self.ui.pushButton_update_running_recipe.setVisible(False)
 
-    def stop_annealing(self, reason: str | None = None, *, show_dialog: bool = False):
+    def stop_annealing(
+        self,
+        reason: str | None = None,
+        *,
+        show_dialog: bool = False,
+        final_state: str | None = None,
+    ):
         """Abort the annealing run and power down the supply safely."""
+        message = reason or "Measurement stopped."
+        self._last_stop_reason = message
+        self._set_process_state("stopping", message)
+        QtWidgets.QApplication.processEvents()
         self.process_running = False
         self.wait = False  # break any pending delays
         self.force_stop_at_zero = False
@@ -5065,16 +5380,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._max_voltage_dialog = False
         self.first_sample = True
         self._reset_loop_tracking()
-        message = reason or "Measurement stopped."
-        self._show_status_message(message, timeout_ms=15000)
+        if final_state is None:
+            final_state = "completed" if message.startswith("Run complete") else "idle"
+        self._set_process_state(final_state, message)
+        self._show_status_message(message, timeout_ms=0 if final_state == "failed" else 15000)
         if show_dialog:
             try:
                 QtWidgets.QMessageBox.information(self, "Measurement stopped", message)
             except Exception:
                 pass
         
+    @QtCore.pyqtSlot()
     def handle_send_new_command(self):
-        if not self.process_running:
+        if self._window_closing or not self.process_running:
             return
 
         self._sync_runtime_settings()
@@ -5119,7 +5437,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            self._record_acquired_sample()
+            if not self._record_acquired_sample():
+                if self.process_running:
+                    self._send_current_setpoint()
+                return
 
 
             # Iterate the current set point
@@ -5176,7 +5497,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             # Signal that a new sample arrived so command sequencing can continue
-            self._record_acquired_sample(record_voltage_progress=True)
+            if not self._record_acquired_sample(record_voltage_progress=True):
+                if self.process_running:
+                    self._send_current_setpoint()
+                return
 
             # Reverse or stop immediately at the configured maximum current.
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
@@ -5211,7 +5535,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.direction_ascending = True
                     self._reset_voltage_projection()
                 else:
-                    self.stop_annealing("Run complete; stopping measurement.", show_dialog=True)
+                    self.stop_annealing(
+                        "Run complete; measurement stopped safely.",
+                        show_dialog=True,
+                        final_state="completed",
+                    )
 
         else:
             pass
@@ -5281,12 +5609,23 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._show_status_message(f"Could not release sleep prevention: {exc}", timeout_ms=10000)
             
+    @QtCore.pyqtSlot()
+    def _finish_simple_delay(self) -> None:
+        if self._window_closing and not self._closing_safe_end:
+            return
+        self.wait = False
+
     def simple_delay(self, delay_ms):
+        if self._window_closing and not self._closing_safe_end:
+            self.wait = False
+            return
         self.wait = True
-        QtCore.QTimer.singleShot(delay_ms, lambda: setattr(self, 'wait', False))
-        
-        while self.wait:
+        self._delay_timer.start(max(0, int(delay_ms)))
+
+        while self.wait and (not self._window_closing or self._closing_safe_end):
             QtWidgets.QApplication.processEvents()
+        self.wait = False
+        self._delay_timer.stop()
         
     def wait_for_sample(self, timeout_ms: int) -> bool:
         """Spin the event loop until a sample arrives, stop requested, or timeout."""
@@ -5331,7 +5670,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "No response from power supply. Is it turned on? Aborting the process.",
         )
         if self.process_running:
-            self.stop_annealing("No response from power supply. Measurement stopped.", show_dialog=False)
+            self.stop_annealing(
+                "No response from power supply. Measurement stopped.",
+                show_dialog=False,
+                final_state="failed",
+            )
         self._serial_quiet_failures = 0
 
     def handle_legacy_log_path_changed(self):
@@ -5450,6 +5793,66 @@ class MainWindow(QtWidgets.QMainWindow):
                 status_bar.showMessage(message, timeout_ms)
         except Exception:
             pass
+
+    def _set_hardware_status(self, message: str, *, state: str) -> None:
+        label = getattr(self.ui, "label_hardware_status", None)
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        colors = {"idle": "#6b7280", "connecting": "#b45309", "connected": "#15803d", "failed": "#b91c1c"}
+        label.setText(f"Hardware status: {message}")
+        label.setStyleSheet(f"font-weight: 600; color: {colors.get(state, '#6b7280')};")
+
+    def _set_process_state(self, state: str, detail: str | None = None) -> None:
+        self._process_state = state
+        labels = {
+            "idle": "Idle — no run active",
+            "connecting": "Connecting — waiting for hardware",
+            "finite-running": "Running — finite recipe",
+            "infinite-running": "Running continuously — stop manually",
+            "stopping": "Stopping safely — disabling output",
+            "completed": "Completed — output stopped safely",
+            "failed": "Failed — output stopped; operator action required",
+        }
+        colors = {
+            "idle": "#6b7280", "connecting": "#b45309", "finite-running": "#1d4ed8",
+            "infinite-running": "#7e22ce", "stopping": "#b45309", "completed": "#15803d", "failed": "#b91c1c",
+        }
+        text = labels.get(state, state.replace("-", " ").title())
+        if detail and state in {"failed", "completed", "idle"}:
+            text = f"{text}: {detail}"
+        label = getattr(self.ui, "label_process_state", None)
+        if isinstance(label, QtWidgets.QLabel):
+            label.setText(text)
+            label.setStyleSheet(f"font-weight: 600; color: {colors.get(state, '#6b7280')};")
+        bar = getattr(self.ui, "progressBar_process", None)
+        if not isinstance(bar, QtWidgets.QProgressBar):
+            return
+        if state == "idle":
+            bar.setRange(0, 1)
+            bar.setValue(0)
+            bar.setFormat("Idle")
+        elif state == "connecting":
+            bar.setRange(0, 0)
+            bar.setFormat("Connecting…")
+        elif state == "finite-running":
+            if self.total_steps > 0:
+                bar.setRange(0, self.total_steps)
+                bar.setValue(min(self.step_idx, self.total_steps))
+            bar.setFormat("Running — %p%")
+        elif state == "infinite-running":
+            bar.setRange(0, 0)
+            bar.setFormat("Running continuously")
+        elif state == "stopping":
+            bar.setRange(0, 0)
+            bar.setFormat("Stopping safely…")
+        elif state == "completed":
+            bar.setRange(0, 1)
+            bar.setValue(1)
+            bar.setFormat("Completed")
+        elif state == "failed":
+            bar.setRange(0, 1)
+            bar.setValue(0)
+            bar.setFormat("Failed")
 
     def _adjust_progress_for_reverse(self) -> None:
         if not self.total_steps:
@@ -5891,37 +6294,55 @@ class MainWindow(QtWidgets.QMainWindow):
                 return ""
         return ""
 
-    def _source_control_metadata(self) -> Dict[str, Any]:
+    def _source_provenance_repo_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _request_source_provenance(self, output_path: str) -> object:
+        self._release_source_provenance()
+        token = self._source_provenance_cache.request(self._source_provenance_repo_root())
+        self._source_provenance_token = token
+        self._source_provenance_output_path = str(output_path)
+        self._source_provenance_poll_timer.start()
+        return token
+
+    @QtCore.pyqtSlot()
+    def _poll_source_provenance_capture(self) -> None:
+        token = self._source_provenance_token
+        output_path = self._source_provenance_output_path
+        snapshot = self._source_provenance_cache.snapshot(token)
+        if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
+            return
+        self._source_provenance_poll_timer.stop()
+        if (
+            self._window_closing
+            or token != self._source_provenance_token
+            or output_path != self._source_provenance_output_path
+            or output_path is None
+        ):
+            return
+        self._write_source_provenance_completion(output_path, token)
+
+    def _release_source_provenance(self) -> None:
+        self._source_provenance_poll_timer.stop()
+        self._source_provenance_cache.release(self._source_provenance_token)
+        self._source_provenance_token = None
+        self._source_provenance_output_path = None
+
+    def _source_control_metadata(self, token: object | None = None) -> Dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[2]
+        snapshot = self._source_provenance_cache.snapshot(
+            self._source_provenance_token if token is None else token
+        )
+        if snapshot is not None:
+            return snapshot
+        return unavailable_source_provenance(repo_root, error="capture_not_requested")
 
-        def _git_text(*args: str) -> str | None:
-            try:
-                completed = subprocess.run(
-                    ["git", "-C", str(repo_root), *args],
-                    capture_output=True,
-                    text=True,
-                    timeout=1.5,
-                    check=False,
-                    **_hidden_subprocess_kwargs(),
-                )
-            except Exception:
-                return None
-            if completed.returncode != 0:
-                return None
-            text = completed.stdout.strip()
-            return text or None
-
-        status = _git_text("status", "--short")
-        return {
-            "repo_root": str(repo_root),
-            "branch": _git_text("branch", "--show-current"),
-            "commit": _git_text("rev-parse", "HEAD"),
-            "is_dirty": bool(status),
-            "status_short": status or "",
-            "remote_url": _git_text("config", "--get", "remote.origin.url"),
-        }
-
-    def _metadata_payload(self, output_path: str) -> Dict[str, Any]:
+    def _metadata_payload(
+        self,
+        output_path: str,
+        *,
+        source_provenance_token: object | None = None,
+    ) -> Dict[str, Any]:
         output = Path(output_path)
         loops, infinite = self._current_loop_settings()
         reverse = self._reverse_to_zero_after_max_enabled()
@@ -5981,7 +6402,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "builder_project": self._ui_text("lineEdit_builder_project"),
                 "fabrication_folder": self._ui_text("lineEdit_fabrication_folder"),
             },
-            "source_control": self._source_control_metadata(),
+            "source_control": self._source_control_metadata(source_provenance_token),
             "recipe": {
                 "start_current_mA": float(getattr(self, "start_current_mA", 0.0) or 0.0),
                 "max_current_mA": float(getattr(self, "max_current_mA", 0.0) or 0.0),
@@ -5994,17 +6415,63 @@ class MainWindow(QtWidgets.QMainWindow):
             },
         }
 
-    def _write_metadata_file(self, output_path: str) -> None:
+    def _metadata_path(self, output_path: str) -> Path:
+        output = Path(output_path)
+        return output.parent / "metadata" / output.stem / "metadata.json"
+
+    def _write_metadata_file(
+        self,
+        output_path: str,
+        *,
+        source_provenance_token: object | None = None,
+    ) -> bool:
         output = Path(output_path)
         metadata_dir = output.parent / "metadata" / output.stem
         try:
             metadata_dir.mkdir(parents=True, exist_ok=True)
-            (metadata_dir / "metadata.json").write_text(
-                json.dumps(self._metadata_payload(output_path), indent=2, ensure_ascii=False) + "\n",
+            self._metadata_path(output_path).write_text(
+                json.dumps(
+                    self._metadata_payload(
+                        output_path,
+                        source_provenance_token=source_provenance_token,
+                    ),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
                 encoding="utf-8",
             )
-        except OSError:
-            pass
+        except OSError as exc:
+            message = f"Metadata sidecar write failed for {metadata_dir}: {exc}"
+            LOGGER.error(message)
+            self._last_run_error = message
+            self._set_process_state("failed", message)
+            self._show_status_message(message, timeout_ms=0)
+            try:
+                QtWidgets.QMessageBox.critical(self, "Metadata not saved", message)
+            except Exception:
+                pass
+            return False
+        return True
+
+    def _write_source_provenance_completion(self, output_path: str, token: object) -> None:
+        if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
+            return
+        snapshot = self._source_provenance_cache.snapshot(token)
+        if snapshot is None or snapshot["capture_state"] == CAPTURE_PENDING:
+            return
+        metadata_path = self._metadata_path(output_path)
+        try:
+            if token != self._source_provenance_token or output_path != self._source_provenance_output_path:
+                return
+            patch_source_control_metadata(metadata_path, snapshot, ensure_ascii=False)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            message = f"Source provenance metadata update failed for {metadata_path}: {exc}"
+            LOGGER.error(message)
+            self._show_status_message(message, timeout_ms=12000)
+        finally:
+            if token == self._source_provenance_token and output_path == self._source_provenance_output_path:
+                self._release_source_provenance()
 
     def _evacuate_existing_output_for_replacement(self, output_path: str) -> None:
         output = Path(output_path)
@@ -6075,7 +6542,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         self.f_name = path
-        self._write_metadata_file(path)
+        source_provenance_token = self._request_source_provenance(path)
+        if not self._write_metadata_file(
+            path,
+            source_provenance_token=source_provenance_token,
+        ):
+            if source_provenance_token == self._source_provenance_token:
+                self._release_source_provenance()
+            return False
         # subsequent writes will append
         return True
 
@@ -6113,15 +6587,57 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.ui.comboBox_port.count() > 0:
                 self.port_name = self.ui.comboBox_port.currentData()
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
-        self._cancel_fabrication_folder_load()
-        self._release_experiment_sleep_guard()
-        self._stop_owned_shared_broker()
-        if self.ser_mcu.isOpen():
-            self.handle_connect_port_clicked()
-            # self.ser_mcu.close()
+    def _teardown_gui_callbacks(self) -> None:
+        if self._callbacks_torn_down:
+            return
+        self._callbacks_torn_down = True
+        timer_callbacks = (
+            (self.timer, self.handle_update_serial_response_label),
+            (self.time_timer, self.update_time_estimate),
+            (self.timer_command, self.handle_send_new_command),
+            (self._fabrication_poll_timer, self._poll_fabrication_tasks),
+            (self._source_provenance_poll_timer, self._poll_source_provenance_capture),
+            (self._delay_timer, self._finish_simple_delay),
+        )
+        for timer, callback in timer_callbacks:
+            timer.stop()
+            try:
+                timer.timeout.disconnect(callback)
+            except (RuntimeError, TypeError):
+                pass
+        self.wait = False
+        self._disconnect_serial_ready_read()
 
-        super().closeEvent(event)
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        try:
+            WINDOWS.remove(self)
+        except ValueError:
+            pass
+        if self._callbacks_torn_down:
+            super().closeEvent(event)
+            return
+        if self._close_in_progress:
+            event.accept()
+            return
+        self._close_in_progress = True
+        try:
+            self._window_closing = True
+            self._closing_safe_end = True
+            try:
+                if self.ser_mcu.isOpen():
+                    self.handle_connect_port_clicked()
+            finally:
+                self._closing_safe_end = False
+            self._teardown_gui_callbacks()
+            self._release_source_provenance()
+            self._cancel_fabrication_folder_load()
+            self._wait_for_fabrication_tasks(timeout_ms=250)
+            self._release_experiment_sleep_guard()
+            self._stop_owned_shared_broker()
+
+            super().closeEvent(event)
+        finally:
+            self._close_in_progress = False
 
     # --- Overlay helpers
     def _setup_connect_overlay(self) -> None:

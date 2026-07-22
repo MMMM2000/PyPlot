@@ -1,4 +1,4 @@
-﻿# TMA Target-Acquisition Handoff: Ni46Fe27Ga23Co2Cu2 2/8
+# TMA Target-Acquisition Handoff: Ni46Fe27Ga23Co2Cu2 2/8
 
 Date: 2026-06-09
 Worker branch: `codex/mini-dma-live-opt-12-2-12e8`

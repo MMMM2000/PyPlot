@@ -1,4 +1,4 @@
-﻿"""Generate the standard TMA optimization campaign report."""
+"""Generate the standard TMA optimization campaign report."""
 
 from __future__ import annotations
 
