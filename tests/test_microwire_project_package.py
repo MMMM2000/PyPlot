@@ -110,6 +110,53 @@ def test_v3_round_trip_uses_split_entries_and_content_addressed_blobs(tmp_path: 
     ]
 
 
+def test_payload_resolver_decodes_only_records_matching_table_paths(tmp_path: Path) -> None:
+    first_path = tmp_path / "first.VSM-HYS-DATA"
+    second_path = tmp_path / "second.VSM-HYS-DATA"
+    records = [
+        builder_ui.VsmHysteresisRecord(
+            path=first_path,
+            sample="Ni50Fe27Ga23 1/1",
+            data=pd.DataFrame({"Applied Field [Oe]": [1.0], "Signal [emu]": [2.0]}),
+            temperature=100.0,
+            angle=0.0,
+            key=("Ni50Fe27Ga23", 1, 1, None),
+            label="first",
+        ),
+        builder_ui.VsmHysteresisRecord(
+            path=second_path,
+            sample="Ni50Fe27Ga23 1/2",
+            data=pd.DataFrame({"Applied Field [Oe]": [3.0], "Signal [emu]": [4.0]}),
+            temperature=200.0,
+            angle=90.0,
+            key=("Ni50Fe27Ga23", 1, 2, None),
+            label="second",
+        ),
+    ]
+    payload = _payload()
+    payload["sections"]["vsm_hysteresis"] = {
+        "columns": ["Composition", "Microwire", "VSM hysteresis graphs", "_sources"],
+        "rows": [],
+        "index": [],
+        "payloads": {
+            "vsm_hysteresis_records": safe_codec.encode_envelope(records),
+        },
+    }
+    target = tmp_path / "subset.pydpj"
+    index = project_package.write_project_package(target, payload)
+
+    loaded = project_package.ProjectPayloadResolver(index).load_records_for_paths(
+        "vsm_hysteresis",
+        "vsm_hysteresis_records",
+        [second_path],
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0].path == second_path
+    assert loaded[0].label == "second"
+    assert loaded[0].data.iloc[0]["Signal [emu]"] == pytest.approx(4.0)
+
+
 def test_streaming_codec_uses_columnar_dataframe_blobs_without_row_expansion() -> None:
     frame = pd.DataFrame({
         "temperature": np.linspace(100.0, 500.0, 20_000),
@@ -690,7 +737,7 @@ def test_trusted_migration_cancellation_leaves_no_partial_output(tmp_path: Path)
     assert not list(tmp_path.glob(".cancelled.pydpj.*.tmp"))
 
 
-def test_builder_window_loads_v3_state_table_and_keeps_payload_lazy(
+def test_builder_window_loads_visible_v3_graph_payload_for_overview(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
@@ -732,7 +779,9 @@ def test_builder_window_loads_v3_state_table_and_keeps_payload_lazy(
         assert window.statusBar().currentMessage() == ""
         assert isinstance(window._project_package_index, project_package.ProjectIndex)
         assert window.annealing_section.data.table.iloc[0]["State"] == "No transition"
-        assert window.annealing_section.store.has_payload_loader("annealing_records")
+        assert not window.annealing_section.store.has_payload_loader("annealing_records")
+        loaded_payload = window.annealing_section.store.load_payload("annealing_records")
+        assert loaded_payload["marker"] == "one"
         exported = window.annealing_section.export_project_payload()
         assert exported["payloads"] == {}
         assert "sections/assemble/table.json" not in read_paths

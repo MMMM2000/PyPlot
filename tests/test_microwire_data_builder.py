@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 from PyQt6 import QtCore, QtGui, QtTest, QtWidgets
 
+from microwire_data_builder import storage as builder_storage
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder.ui import BuilderWindow, MicroscopeSection
 from microwire_data_builder.storage import MiniDatabaseData
@@ -10821,6 +10822,18 @@ def test_builder_database_latest_resolver_prefers_root_latest(tmp_path: Path) ->
     assert builder_ui._resolve_latest_database_project(latest) == latest
 
 
+def test_builder_database_latest_resolver_prefers_packaged_v3(tmp_path: Path) -> None:
+    database_dir = tmp_path / "microwire_database"
+    database_dir.mkdir()
+    legacy = database_dir / "microwire_database_latest.pydpj"
+    packaged = database_dir / "microwire_database_latest_v3.pydpj"
+    legacy.write_text("{}", encoding="utf-8")
+    packaged.write_text("packaged", encoding="utf-8")
+
+    assert builder_ui._latest_database_project_in_dir(database_dir) == packaged
+    assert builder_ui._resolve_latest_database_project(packaged) == packaged
+
+
 def test_builder_database_latest_resolver_leaves_normal_projects(tmp_path: Path) -> None:
     project_path = tmp_path / "ordinary_project.pydpj"
     project_path.write_text("{}", encoding="utf-8")
@@ -10917,6 +10930,37 @@ def test_builder_blank_startup_skips_initial_section_store_load(
             for section in window.sections.values()
             if isinstance(section, builder_ui.MiniDatabaseSection)
         )
+    finally:
+        window._dirty = False
+        window.close()
+
+
+def test_builder_blank_startup_suppresses_irrelevant_legacy_payload_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    monkeypatch.setenv("MICROWIRE_BUILDER_SETTINGS_FILE", str(tmp_path / "builder.ini"))
+    monkeypatch.setenv("MICROWIRE_BUILDER_STORAGE_ROOT", str(tmp_path / "storage"))
+    legacy_payload = (
+        tmp_path
+        / "storage"
+        / "mini_databases"
+        / "payloads"
+        / "annealing_annealing_records.pkl"
+    )
+    legacy_payload.parent.mkdir(parents=True)
+    legacy_payload.write_bytes(b"not executed")
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        builder_storage.LOGGER,
+        "warning",
+        lambda message, *args: warnings.append(str(message) % args if args else str(message)),
+    )
+
+    window = BuilderWindow()
+    try:
+        assert not any("Legacy Builder payload" in message for message in warnings)
+        assert legacy_payload.read_bytes() == b"not executed"
     finally:
         window._dirty = False
         window.close()

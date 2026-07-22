@@ -884,6 +884,9 @@ def _sanitise_existing_file(value: object) -> Optional[str]:
 
 
 def _database_name_from_project_stem(stem: str) -> str | None:
+    packaged_latest = re.match(r"^(?P<name>.+)_latest_v\d+$", stem, re.IGNORECASE)
+    if packaged_latest:
+        return packaged_latest.group("name") or None
     if stem.endswith("_latest"):
         return stem[: -len("_latest")] or None
     match = re.match(r"^(?P<name>.+)_\d{4}-\d{2}-\d{2}_\d{4}(?:_\d+)?$", stem)
@@ -901,7 +904,7 @@ def _resolve_latest_database_project(path: Path) -> Path:
             return candidate
     except Exception:
         return candidate
-    if candidate.name.endswith("_latest.pydpj"):
+    if re.search(r"_latest(?:_v\d+)?\.pydpj$", candidate.name, re.IGNORECASE):
         return candidate
 
     database_name = _database_name_from_project_stem(candidate.stem)
@@ -940,6 +943,23 @@ def _latest_database_project_in_dir(database_dir: Path) -> Path | None:
             return None
     except Exception:
         return None
+    try:
+        packaged_candidates = [
+            candidate
+            for candidate in root.glob("*_latest_v*.pydpj")
+            if candidate.exists()
+            and candidate.is_file()
+            and re.search(r"_latest_v\d+\.pydpj$", candidate.name, re.IGNORECASE)
+        ]
+    except Exception:
+        packaged_candidates = []
+    if packaged_candidates:
+        try:
+            packaged_candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        except Exception:
+            packaged_candidates.sort(key=lambda path: path.name, reverse=True)
+        return packaged_candidates[0]
+
     preferred = root / "microwire_database_latest.pydpj"
     try:
         if preferred.exists() and preferred.is_file():
@@ -1061,6 +1081,25 @@ LEGACY_PROJECT_PAYLOAD_MESSAGE = (
 PROJECT_DECODED_PAYLOADS_KEY = "__decoded_payloads"
 PROJECT_LAZY_PAYLOAD_LOADERS_KEY = "__lazy_payload_loaders"
 _ACTIVE_PROJECT_PAYLOAD_STAGER: Callable[[Any], Any] | None = None
+
+# These payloads are the data behind the Builder's overview thumbnails.  Their
+# section tables remain independently lazy, but once a graph tab is selected
+# the records are decoded on its existing background section worker so the
+# overview can progressively render real previews instead of permanent cards.
+PROJECT_OVERVIEW_PAYLOADS = {
+    "annealing": "annealing_records",
+    "dma_iso_stress": "dma_iso_stress_records",
+    "fmr": "fmr_records",
+    "mini_dma": "mini_dma_records",
+    "shape_memory_stress_strain": "shape_memory_stress_strain_records",
+    "vsm_hysteresis": "vsm_hysteresis_records",
+    "vsm_temperature_scan": "vsm_temperature_scan_records",
+}
+PROJECT_OVERVIEW_PAYLOAD_SECTIONS = set(PROJECT_OVERVIEW_PAYLOADS)
+PROJECT_EAGER_OVERVIEW_SECTIONS = PROJECT_OVERVIEW_PAYLOAD_SECTIONS - {
+    "mini_dma",
+    "vsm_hysteresis",
+}
 
 
 def _has_lazy_project_payloads(payload: object) -> bool:
@@ -1269,6 +1308,27 @@ class _ProjectSectionLoadWorker(QtCore.QObject):
                     f"Unexpected diagnostics in packaged section {self._section_key}"
                 )
             self.finished.emit(prepared)
+        except Exception as exc:
+            self.failed.emit(exc)
+
+
+class _ProjectRecordSubsetLoadWorker(QtCore.QObject):
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self,
+        loader: Callable[[Sequence[str]], Sequence[Any]],
+        source_paths: Sequence[str],
+    ) -> None:
+        super().__init__()
+        self._loader = loader
+        self._source_paths = tuple(source_paths)
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:
+        try:
+            self.finished.emit(list(self._loader(self._source_paths)))
         except Exception as exc:
             self.failed.emit(exc)
 
@@ -11464,7 +11524,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         init_started_s = time.perf_counter()
         self.logger = logger
         self._log_callback = log_callback
-        self.store = MiniDatabaseStore(self.section_key)
+        self.store = MiniDatabaseStore(
+            self.section_key,
+            suppress_legacy_diagnostics=self._skip_initial_store_load,
+        )
         self._store_blocked_error = ""
         if self._skip_initial_store_load:
             self.data = MiniDatabaseData()
@@ -11517,6 +11580,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._pending_scan_thread: QtCore.QThread | None = None
         self._pending_scan_worker: Optional[_PendingScanWorker] = None
         self._progress_dialog: QtWidgets.QProgressDialog | None = None
+        self._project_overview_loader: Callable[[Sequence[str]], Sequence[Any]] | None = None
+        self._project_overview_generation = 0
+        self._project_overview_pending: Set[str] = set()
+        self._project_overview_threads: Dict[
+            str, Tuple[QtCore.QThread, _ProjectRecordSubsetLoadWorker]
+        ] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -12140,6 +12209,79 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 self.section_title,
                 f"None of the selected rows have available source files.\n\n{details}",
             )
+
+    def _set_project_overview_loader(
+        self,
+        loader: Callable[[Sequence[str]], Sequence[Any]] | None,
+    ) -> None:
+        self._project_overview_generation += 1
+        self._project_overview_loader = loader
+        self._project_overview_pending = set()
+        cache = getattr(self, "_pixmap_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
+        model = getattr(self, "model", None)
+        if callable(loader) and isinstance(model, DataFrameModel):
+            try:
+                model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _request_project_overview_records(
+        self,
+        request_key: str,
+        source_paths: Sequence[Path | str],
+    ) -> bool:
+        loader = self._project_overview_loader
+        if not callable(loader):
+            return False
+        paths = tuple(str(path) for path in source_paths if str(path).strip())
+        if not paths:
+            return False
+        key = str(request_key)
+        if key in self._project_overview_pending:
+            return True
+        self._project_overview_pending.add(key)
+        generation = self._project_overview_generation
+        thread = QtCore.QThread(self)
+        worker = _ProjectRecordSubsetLoadWorker(loader, paths)
+        worker.moveToThread(thread)
+        self._project_overview_threads[key] = (thread, worker)
+        result: Dict[str, object] = {}
+
+        worker.finished.connect(lambda records: result.__setitem__("records", records))
+        worker.failed.connect(lambda error: result.__setitem__("error", error))
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+
+        def _complete() -> None:
+            self._project_overview_threads.pop(key, None)
+            self._project_overview_pending.discard(key)
+            if generation != self._project_overview_generation:
+                return
+            error = result.get("error")
+            if error is not None:
+                self.logger.warning(
+                    "Failed to load packaged preview records for %s: %s",
+                    self.section_key,
+                    error,
+                )
+                return
+            records = result.get("records")
+            if isinstance(records, list):
+                self._accept_project_overview_records(records)
+
+        thread.finished.connect(_complete)
+        thread.finished.connect(thread.deleteLater)
+        thread.started.connect(worker.run)
+        thread.start()
+        return True
+
+    def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
+        _ = records
+
     def _start_progress(self, total: int) -> None:
         self._progress_total = max(int(total), 0)
         self._progress_current = 0
@@ -12617,6 +12759,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def reset_to_blank(self) -> None:
         """Clear all processed data and disconnect sources for a fresh start."""
 
+        self._set_project_overview_loader(None)
         payload_names: Set[str] = set()
         extra = getattr(self.data, "extra", None)
         if isinstance(extra, Mapping):
@@ -12713,6 +12856,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         """Restore section state from a project payload."""
 
         started_s = time.perf_counter()
+        self._set_project_overview_loader(None)
         if not isinstance(payload, Mapping):
             self.reset_to_blank()
             _log_builder_timing(
@@ -13440,7 +13584,10 @@ class FabricationSection(MiniDatabaseSection):
         annealing_keys: Set[Tuple[str, int, int]] = set()
         microscope_keys: Set[Tuple[str, int, int]] = set()
         try:
-            store = MiniDatabaseStore("annealing")
+            store = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             records = store.load_payload("annealing_records")
         except Exception:
             records = None
@@ -13465,7 +13612,10 @@ class FabricationSection(MiniDatabaseSection):
             microscope_data = None
             if not MiniDatabaseSection._skip_initial_store_load:
                 try:
-                    microscope_data = MiniDatabaseStore("microscope").load()
+                    microscope_data = MiniDatabaseStore(
+                        "microscope",
+                        suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                    ).load()
                 except Exception:
                     microscope_data = None
             microscope_table = (
@@ -16162,7 +16312,10 @@ class MicroscopeSection(MiniDatabaseSection):
         keys: Set[MicrowireKey] = set()
         source_labels: Dict[str, str] = {}
         try:
-            annealing_records = MiniDatabaseStore("annealing").load_payload(
+            annealing_records = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            ).load_payload(
                 "annealing_records"
             )
         except Exception:
@@ -20147,7 +20300,10 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self.logger = logger
         self._log_callback = log_callback
         self._vsm_temperature_section = vsm_temperature_section
-        self.store = MiniDatabaseStore(self.section_key)
+        self.store = MiniDatabaseStore(
+            self.section_key,
+            suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+        )
         self.data = (
             MiniDatabaseData()
             if MiniDatabaseSection._skip_initial_store_load
@@ -22004,7 +22160,10 @@ class VideoSection(MiniDatabaseSection):
     ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
         relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
         try:
-            store = MiniDatabaseStore("annealing")
+            store = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             records = store.load_payload("annealing_records")
         except Exception:
             records = None
@@ -22025,7 +22184,10 @@ class VideoSection(MiniDatabaseSection):
         microscope_data = None
         if not MiniDatabaseSection._skip_initial_store_load:
             try:
-                microscope_data = MiniDatabaseStore("microscope").load()
+                microscope_data = MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load()
             except Exception:
                 microscope_data = None
         microscope_table = (
@@ -22425,7 +22587,10 @@ class VideoSection(MiniDatabaseSection):
 
         lengths: Dict[Tuple[str, int, int], Optional[float]] = {}
         try:
-            raw_index = MiniDatabaseStore("fabrication").load_payload("fabrication_index_raw")
+            raw_index = MiniDatabaseStore(
+                "fabrication",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            ).load_payload("fabrication_index_raw")
         except Exception:
             raw_index = None
         if isinstance(raw_index, FabricationIndex):
@@ -23001,7 +23166,10 @@ class VideoSection(MiniDatabaseSection):
         if MiniDatabaseSection._skip_initial_store_load:
             return None
         try:
-            store = MiniDatabaseStore("fabrication")
+            store = MiniDatabaseStore(
+                "fabrication",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             data = store.load()
         except Exception:
             return None
@@ -23791,6 +23959,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._project_previews_deferred = _has_lazy_project_payloads(payload)
         self._load_hidden_paths()
         _drop_visible_sample_column(self)
         if not _has_lazy_project_payloads(payload):
@@ -23803,14 +23972,29 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
     def _refresh_record_groups(self) -> None:
-        grouped: Dict[str, List[VsmHysteresisRecord]] = {}
+        self._project_previews_deferred = False
         try:
             payload = self.store.load_payload("vsm_hysteresis_records")
         except Exception:
             payload = None
         all_records = list(payload) if isinstance(payload, list) else []
+        self._set_record_groups(all_records)
+
+    def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
+        merged = {
+            _record_path_key(record): record
+            for record in self._all_records
+            if isinstance(record, VsmHysteresisRecord)
+        }
+        for record in records:
+            if isinstance(record, VsmHysteresisRecord):
+                merged[_record_path_key(record)] = record
+        self._set_record_groups(list(merged.values()))
+
+    def _set_record_groups(self, all_records: Sequence[VsmHysteresisRecord]) -> None:
+        grouped: Dict[str, List[VsmHysteresisRecord]] = {}
         self._all_records = list(all_records)
-        visible_records = self._visible_records(all_records)
+        visible_records = self._visible_records(self._all_records)
         display_records = _filter_vsm_hysteresis_records_by_angle_mode(
             visible_records,
             self._current_angle_filter_mode(),
@@ -23984,6 +24168,17 @@ class VsmHysteresisSection(MiniDatabaseSection):
             row_key = _row_to_microwire_key(row)
             if row_key:
                 records = self._record_groups_by_key.get(row_key, [])
+        if not records and bool(getattr(self, "_project_previews_deferred", False)):
+            sources = self._row_sources(row)
+            self._request_project_overview_records(cache_key, sources)
+            preview = getattr(self, "_deferred_preview_pixmap", None)
+            if not isinstance(preview, QtGui.QPixmap):
+                preview = _deferred_graph_preview_pixmap(
+                    "Loading packaged graph preview..."
+                )
+                self._deferred_preview_pixmap = preview
+            self._pixmap_cache[cache_key] = preview
+            return preview
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             if self.isVisible() and not self._data_page_is_active():
@@ -25444,6 +25639,17 @@ class MiniDmaSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+    def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
+        merged = {
+            _record_path_key(record): record
+            for record in self._all_mini_dma_records
+            if isinstance(record, MiniDmaRecord)
+        }
+        for record in records:
+            if isinstance(record, MiniDmaRecord):
+                merged[_record_path_key(record)] = record
+        self._set_record_groups(list(merged.values()))
+
     def _preview_icon_width(self) -> int:
         count = max(int(getattr(self, "_preview_group_count", 1)), 1)
         return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
@@ -25489,15 +25695,29 @@ class MiniDmaSection(MiniDatabaseSection):
         if not records and row_key:
             records = self._record_groups_by_key.get(row_key, [])
         if bool(getattr(self, "_project_previews_deferred", False)):
-            preview = getattr(self, "_deferred_preview_pixmap", None)
-            if not isinstance(preview, QtGui.QPixmap):
-                preview = _deferred_graph_preview_pixmap(
-                    "Preview kept lazy for a responsive project load.\n"
-                    "Select this row, then use Open in PyPlot."
-                )
-                self._deferred_preview_pixmap = preview
-            self._pixmap_cache[cache_key] = preview
-            return preview
+            preview_records = [
+                record
+                for record in records
+                if isinstance(getattr(record, "data", None), pd.DataFrame)
+                and not record.data.empty
+            ]
+            if preview_records:
+                records = preview_records
+            else:
+                sources = [
+                    getattr(record, "path", "")
+                    for record in records
+                    if getattr(record, "path", None)
+                ] or self._row_sources(row)
+                self._request_project_overview_records(cache_key, sources)
+                preview = getattr(self, "_deferred_preview_pixmap", None)
+                if not isinstance(preview, QtGui.QPixmap):
+                    preview = _deferred_graph_preview_pixmap(
+                        "Loading packaged graph preview..."
+                    )
+                    self._deferred_preview_pixmap = preview
+                self._pixmap_cache[cache_key] = preview
+                return preview
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             if self._should_defer_preview_render():
@@ -27147,7 +27367,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             else (
                 pd.DataFrame()
                 if MiniDatabaseSection._skip_initial_store_load
-                else MiniDatabaseStore("microscope").load().table
+                else MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load().table
             )
         )
         microscope_lookup = _microscope_diameter_lookup(microscope_frame)
@@ -27813,7 +28036,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
             else (
                 pd.DataFrame()
                 if MiniDatabaseSection._skip_initial_store_load
-                else MiniDatabaseStore("microscope").load().table
+                else MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load().table
             )
         )
         microscope_lookup = _microscope_diameter_lookup(microscope_frame)
@@ -28021,7 +28247,10 @@ class ShapeMemoryStressStrainSection(MiniDatabaseSection):
         density = None
         try:
             row_key = _row_to_microwire_key(frame.iloc[row_index])
-            microscope_section = MiniDatabaseStore("microscope").load()
+            microscope_section = MiniDatabaseStore(
+                "microscope",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            ).load()
             microscope_frame = (
                 microscope_section.table
                 if isinstance(microscope_section.table, pd.DataFrame)
@@ -29581,7 +29810,10 @@ class StrainSection(MiniDatabaseSection):
     def _load_reference_data(self) -> None:
         wire_choices: Dict[str, Dict[str, tuple[int, int, Optional[str]]]] = {}
         try:
-            annealing_store = MiniDatabaseStore("annealing")
+            annealing_store = MiniDatabaseStore(
+                "annealing",
+                suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+            )
             records = annealing_store.load_payload("annealing_records")
         except Exception:
             records = None
@@ -29613,7 +29845,10 @@ class StrainSection(MiniDatabaseSection):
             if MiniDatabaseSection._skip_initial_store_load:
                 frame = pd.DataFrame()
             else:
-                microscope_data = MiniDatabaseStore("microscope").load()
+                microscope_data = MiniDatabaseStore(
+                    "microscope",
+                    suppress_legacy_diagnostics=MiniDatabaseSection._skip_initial_store_load,
+                ).load()
                 frame = microscope_data.table if isinstance(microscope_data.table, pd.DataFrame) else pd.DataFrame()
         except Exception:
             frame = pd.DataFrame()
@@ -38003,11 +38238,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
             keys.update(self._active_transition_project_section_keys())
         transitions_active = current is getattr(self, "transitions_section", None)
         for key in sorted(keys & deferred):
+            overview_active = (
+                not transitions_active
+                and key in PROJECT_EAGER_OVERVIEW_SECTIONS
+                and self.sections.get(key) is current
+            )
             self._load_deferred_project_section_async(
                 key,
                 decode_payloads=(
-                    transitions_active
-                    and key in {"annealing", "vsm_temperature_scan"}
+                    overview_active
+                    or (
+                        transitions_active
+                        and key in {"annealing", "vsm_temperature_scan"}
+                    )
                 ),
             )
 
@@ -38024,6 +38267,32 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if index == 2:
             return {"mini_dma"}
         return {"annealing", "current_density"}
+
+    def _configure_project_overview_loader(
+        self,
+        section_key: str,
+        section: object,
+        payload: object,
+        resolver: ProjectPayloadResolver | None,
+    ) -> None:
+        setter = getattr(section, "_set_project_overview_loader", None)
+        if not callable(setter):
+            return
+        payload_id = PROJECT_OVERVIEW_PAYLOADS.get(str(section_key))
+        if (
+            payload_id is None
+            or not isinstance(resolver, ProjectPayloadResolver)
+            or not _has_lazy_project_payloads(payload)
+        ):
+            setter(None)
+            return
+        setter(
+            partial(
+                resolver.load_records_for_paths,
+                str(section_key),
+                payload_id,
+            )
+        )
 
     def _load_deferred_project_section_async(
         self, section_key: str, *, decode_payloads: bool = False
@@ -38074,6 +38343,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 importer = getattr(section, "import_project_payload", None)
                 if callable(importer):
                     importer(payload if isinstance(payload, Mapping) else {})
+                self._configure_project_overview_loader(
+                    section_key,
+                    section,
+                    payload,
+                    resolver,
+                )
                 transaction.commit_memory_only()
                 self._deferred_project_section_keys.discard(section_key)
                 self.logger.info("Loaded deferred project section %s", section_key)
@@ -40527,6 +40802,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
                             importer = getattr(section, "import_project_payload", None)
                             if callable(importer):
                                 importer(section_payload if isinstance(section_payload, Mapping) else {})
+                            self._configure_project_overview_loader(
+                                key,
+                                section,
+                                section_payload,
+                                payload_resolver,
+                            )
                         except Exception as exc:
                             self._abort_project_restore(
                                 RuntimeError(f"Failed to load section {key}: {exc}")
@@ -40544,10 +40825,21 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         _schedule(_step)
 
                     if isinstance(package_index, ProjectIndex) and key in package_index.sections:
+                        overview_active = (
+                            current_widget is section
+                            and key in PROJECT_EAGER_OVERVIEW_SECTIONS
+                        )
+                        transition_payload_required = (
+                            current_widget is getattr(self, "transitions_section", None)
+                            and key in {"annealing", "vsm_temperature_scan"}
+                        )
                         self._read_packaged_project_section_async(
                             state=state,
                             section_key=key,
                             callback=_import_section,
+                            decode_payloads=(
+                                overview_active or transition_payload_required
+                            ),
                         )
                     else:
                         _import_section(sections_payload.get(key))
@@ -40608,6 +40900,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         state: Dict[str, Any],
         section_key: str,
         callback: Callable[[object], None],
+        decode_payloads: bool = False,
     ) -> None:
         """Read and decode one v3 section off the GUI thread."""
 
@@ -40619,7 +40912,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
             callback({})
             return
         thread = QtCore.QThread(self)
-        worker = _ProjectSectionLoadWorker(package_index, payload_resolver, section_key)
+        worker = _ProjectSectionLoadWorker(
+            package_index,
+            payload_resolver,
+            section_key,
+            decode_payloads=decode_payloads,
+        )
         worker.moveToThread(thread)
         state["section_thread"] = thread
         state["section_worker"] = worker

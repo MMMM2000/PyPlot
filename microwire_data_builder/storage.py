@@ -97,8 +97,14 @@ class MiniDatabaseStore:
     _payload_loaders: Dict[tuple[str, str], Callable[[], Any]] = {}
     _payload_tombstones: set[tuple[str, str]] = set()
 
-    def __init__(self, section: str) -> None:
+    def __init__(
+        self,
+        section: str,
+        *,
+        suppress_legacy_diagnostics: bool = False,
+    ) -> None:
         self.section = section
+        self._suppress_legacy_diagnostics = bool(suppress_legacy_diagnostics)
         base = _storage_root() / "mini_databases"
         try:
             base.mkdir(parents=True, exist_ok=True)
@@ -132,7 +138,8 @@ class MiniDatabaseStore:
             "executes pickle. Use the explicit trusted-copy migration command with a "
             "separate output location."
         )
-        LOGGER.warning(message)
+        if not self._suppress_legacy_diagnostics:
+            LOGGER.warning(message)
         return message
 
     @classmethod

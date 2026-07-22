@@ -355,11 +355,20 @@ class ProjectPayloadResolver:
         self.index = index
         self.budget = budget or ReadBudget()
         self._lock = threading.RLock()
+        self._encoded_payload_cache: dict[tuple[str, str], Any] = {}
+
+    def _encoded_payload(self, section_key: str, payload_id: str, reader: ProjectReader) -> Any:
+        key = (str(section_key), str(payload_id))
+        encoded = self._encoded_payload_cache.get(key)
+        if encoded is None:
+            encoded = reader.read_payload_with_blob_refs(*key)
+            self._encoded_payload_cache[key] = encoded
+        return encoded
 
     def load(self, section_key: str, payload_id: str) -> Any:
         with self._lock:
             with self.index.open_reader(budget=self.budget) as reader:
-                encoded = reader.read_payload_with_blob_refs(section_key, payload_id)
+                encoded = self._encoded_payload(section_key, payload_id, reader)
 
                 def _resolve(digest: str, size: int) -> bytes:
                     descriptor = reader.index.blobs.get(digest)
@@ -373,6 +382,83 @@ class ProjectPayloadResolver:
                     encoded,
                     blob_resolver=_resolve,
                 )
+
+    def load_records_for_paths(
+        self,
+        section_key: str,
+        payload_id: str,
+        source_paths: Iterable[str | Path],
+    ) -> list[Any]:
+        """Decode only list records whose encoded ``path`` matches a table row.
+
+        Large overview payloads may contain thousands of independently stored
+        array blobs.  The table already carries each row's source paths, so a
+        preview can remain portable while reading only the blobs required for
+        the visible row.
+        """
+
+        wanted = {
+            os.path.normcase(os.path.normpath(str(path)))
+            for path in source_paths
+            if str(path).strip()
+        }
+        if not wanted:
+            return []
+        with self._lock:
+            with self.index.open_reader(budget=self.budget) as reader:
+                encoded = self._encoded_payload(section_key, payload_id, reader)
+                if not isinstance(encoded, dict):
+                    raise SafeCodecError("Builder record payload envelope is malformed")
+                value = encoded.get("value")
+                if not isinstance(value, dict) or value.get("$type") != "list":
+                    raise SafeCodecError("Builder record payload is not an encoded list")
+                items = value.get("items")
+                if not isinstance(items, list):
+                    raise SafeCodecError("Builder record payload list is malformed")
+
+                selected: list[Any] = []
+                for item in items:
+                    if not isinstance(item, dict) or item.get("$type") != "dataclass":
+                        continue
+                    state = item.get("state")
+                    pairs = state.get("items") if isinstance(state, dict) else None
+                    if not isinstance(pairs, list):
+                        continue
+                    encoded_path: str | None = None
+                    for pair in pairs:
+                        if not isinstance(pair, list) or len(pair) != 2 or pair[0] != "path":
+                            continue
+                        path_value = pair[1]
+                        if (
+                            isinstance(path_value, dict)
+                            and path_value.get("$type") == "path"
+                            and isinstance(path_value.get("value"), str)
+                        ):
+                            encoded_path = path_value["value"]
+                        break
+                    if encoded_path is None:
+                        continue
+                    normalised = os.path.normcase(os.path.normpath(encoded_path))
+                    if normalised in wanted:
+                        selected.append(item)
+
+                subset = dict(encoded)
+                subset_value = dict(value)
+                subset_value["items"] = selected
+                subset["value"] = subset_value
+
+                def _resolve(digest: str, size: int) -> bytes:
+                    descriptor = reader.index.blobs.get(digest)
+                    if descriptor is None or descriptor["bytes"] != size:
+                        raise SafeCodecError(
+                            "Builder codec blob reference does not match its manifest"
+                        )
+                    return reader.read_blob(digest)
+
+                decoded = decode_envelope(subset, blob_resolver=_resolve)
+                if not isinstance(decoded, list):
+                    raise SafeCodecError("Builder record subset did not decode to a list")
+                return decoded
 
 
 def _json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
