@@ -271,6 +271,30 @@ The Prague-like simulator baseline has p95 measured absolute stress error of abo
 
 **Decision:** no simulated candidate is ready for controller implementation. The next iteration should first prove event-level parity with the recorded baseline, fit loop-local plant/residual models, and redesign evidence so stationary noise can be distinguished from coherent transformation without adding a fixed confirmation burden.
 
+## Fixed-current hunting analysis and cycle-center simulation (2026-07-22)
+
+The finalized Prague trace changes the diagnosis. Among the 656 windowized hold segments, the 197 segments lasting at least 30 s consumed 71.0% of hold time. Within those long segments, 86.6% of time had no more than 0.02 mA current span, 76.3% had an endpoint stress shift smaller than one quarter of the within-segment stress span, and 96.9% had a segment-center error no larger than 5 MPa. The typical signal was therefore not a monotonic recovery toward target: it repeatedly traversed a roughly centered oscillation while current was effectively fixed. The estimated stress period was about 10.3 s at the median and 16.6 s at the upper quartile.
+
+That finding makes a longer processed value useful, but not as a replacement for fast safety feedback. The underlying loop problem is that the 1.8 s median sees one oscillation phase, commands a motor correction, and then resets the post-move evidence needed to resume current. A longer center should first decide whether a motor correction is justified. Raw/latest and 1.8 s feedback must still retain authority for hold entry, hard stress limits, stale-data detection, and a veto on resuming current.
+
+The simulator was extended with a dedicated `prague_stationary_hunting` case containing the audited 10.3 s oscillation, delayed mechanical response, and a post-move feedback-settle gate. Its baseline is a mechanistic calibration rather than a replay: median hold fraction is 92.7% versus 88.4% recorded, and 62.8% of hold time is in episodes of at least 30 s versus 71.0% recorded. The baseline p95 hold duration is 71.5 s and maximum continuous hold is 211.8 s, so it reproduces the long fixed-current failure regime without claiming sample-identical trajectories.
+
+Three ablations were compared against the current-policy baseline over 12 paired deterministic seeds:
+
+| Candidate | Elapsed change | Hold change | p95 true-error change | Interpretation |
+|---|---:|---:|---:|---|
+| Cycle-center motor | -51.74% | -55.87% | -4.59% | Stops phase-chasing motor moves when the long center is near target. |
+| Cycle-center resume | 0.00% | 0.00% | -0.00% | Cannot help while continued motor moves keep invalidating post-move confirmation. |
+| Combined motor + resume probation | -31.49% | -34.58% | -2.08% | Helps, but extra resume/probation logic gives back substantial speed. |
+
+The motor-only candidate reduced median elapsed time from 3,796.8 s to 1,832.4 s and hold time from 3,519.0 s to 1,553.0 s. It reduced p95 hold duration from 71.5 s to 24.8 s, the share of hold time in 30 s or longer episodes from 62.8% to 6.8%, time outside the pause band from 2,898.5 s to 1,151.4 s, motor travel from 5.861 mm to 2.594 mm, and motor reversals from 707.5 to 331.0. All 12 paired runs completed with no safety stop and no rate above the requested 0.4 mA/s. Every seed was faster: elapsed improvement ranged from 43.1% to 61.7%, while the worst seed-level p95 stress-error change was +0.22%, inside the pre-registered +5% gate. Re-holds improved at the median and the worst seed increased by 1.39%, also inside the +5% gate.
+
+The same candidate was exactly inactive in all 12 seeds of the original Prague-volatile, calm, coherent-transformation, sparse-feedback, and heavy-tail scenarios because those holds did not accumulate the required fixed-current history. This is a useful non-regression property, not proof that those five simple plants cover all slow real-wire behavior.
+
+A 36-configuration screen varied the long-window maximum, minimum fixed-current span, center band, and stationary-drift allowance. Twenty-four configurations passed the model gates. The 10-12 s windows often produced little benefit or made elapsed time worse because they still represented only part of the measured oscillation. The selected conservative configuration uses at most 20 s of data, requires at least 10 s and 32 samples at effectively unchanged current, a +/-5 MPa center band, and endpoint drift no larger than 15% of the observed oscillation span. These are offline screen values, not production defaults.
+
+**Revised decision:** the best first controller candidate is cycle-aware motor suppression, not permissive resume logic. When the fixed-current long center is near target and the signal is stationary, do not chase the fast-window phase with another motor move. If the long center is biased, use it only to choose a conservative correction direction/magnitude; keep the current held. After motor activity stops, let the existing fresh-feedback resume path release the hold. The cycle-center resume and reduced-rate probe remain later ablations because they did not add net value here.
+
 ## Implementation sequence after design approval
 
 1. Extract a pure hold/resume supervisor and baseline parity tests.
@@ -283,4 +307,4 @@ The Prague-like simulator baseline has p95 measured absolute stress error of abo
 
 ## Recommendation
 
-Proceed to build the offline baseline-parity/shadow replay, not to change the live controller. The strongest first candidate is dual-timescale confidence plus evidence-based resume and explicit reduced-rate probation. Treat a dynamic control-value window and learned current feed-forward as later options only if the simpler candidate fails the offline gates.
+Proceed to an offline baseline-parity and shadow-replay implementation of the fixed-current cycle-center estimator; do not change the live controller yet. Replay must show when the estimator becomes ready, which real motor commands it would suppress, whether the existing post-move feedback gate would then release the hold, and every fast/raw veto. Only after event-level parity and held-out real-run validation should cycle-aware motor suppression be implemented behind a non-UI feature flag. Do not include cycle-center resume or new probation logic in that first slice: the ablation shows that solving phase-chasing at the motor-decision layer is both simpler and faster.
