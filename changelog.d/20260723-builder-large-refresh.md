@@ -15,3 +15,11 @@
 - Allow automation recipes to bound source-folder traversal with `max_depth`;
   the Praha TMA refresh can scan its immediate run folders without entering
   ancillary per-run trees.
+- Record each update command's excluded directory names and traversal depth in
+  the generated manifest so intentionally deferred runs remain auditable.
+- Support auditable directory-prefix exclusions for actively growing run
+  families, preventing newly created suffixes from bypassing a deliberate
+  sample deferral.
+- Route automation payloads through the same staged columnar/blob writer used
+  by interactive v3 saves, allowing legitimate multi-million-cell TMA frames
+  without legacy row-oriented JSON expansion or relaxed codec limits.

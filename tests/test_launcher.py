@@ -3777,6 +3777,10 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
     archived_run = _write_mini_dma_run(data_root / "archive" / "old_run", sample_name="Ni50Fe27Ga23 12_3")
     tests_run = _write_mini_dma_run(data_root / "tests" / "fixture_run", sample_name="Ni50Fe27Ga23 12_4")
     cache_run = _write_mini_dma_run(data_root / "cache" / "scratch_run", sample_name="Ni50Fe27Ga23 12_5")
+    deferred_run = _write_mini_dma_run(
+        data_root / "Ni47Fe24Ga23Co6 2_1 iso-stress_run07",
+        sample_name="Ni47Fe24Ga23Co6 2_1",
+    )
     invalid_run = data_root / "Ni50Fe27Ga23 12_6 notes"
     invalid_run.mkdir(parents=True)
     (invalid_run / "measurement.csv").write_text("not,a,mini,dma\n1,2,3,4\n", encoding="utf-8")
@@ -3796,6 +3800,7 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
                         "paths": [str(data_root)],
                         "max_depth": 1,
                         "exclude_dir_names": ["archive"],
+                        "exclude_dir_prefixes": ["Ni47Fe24Ga23Co6 2_1"],
                     }
                 ],
             }
@@ -3816,7 +3821,10 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
     assert str(archived_run) not in rows[0]["_sources"]
     assert str(tests_run) not in rows[0]["_sources"]
     assert str(cache_run) not in rows[0]["_sources"]
+    assert str(deferred_run) not in rows[0]["_sources"]
     assert str(invalid_run) not in rows[0]["_sources"]
+    manifest = json.loads(output_project.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    assert manifest["commands"][0]["exclude_dir_prefixes"] == ["Ni47Fe24Ga23Co6 2_1"]
 
 
 def test_automation_recipe_rejects_origin_when_unavailable(

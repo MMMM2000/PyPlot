@@ -608,10 +608,16 @@ def _collect_builder_paths(
     *,
     supported_suffixes: Sequence[str],
     exclude_dir_names: Sequence[str] = (),
+    exclude_dir_prefixes: Sequence[str] = (),
     max_depth: int | None = None,
 ) -> list[Path]:
     suffixes = {suffix.lower() for suffix in supported_suffixes}
     excluded_names = {str(name).strip().lower() for name in exclude_dir_names if str(name).strip()}
+    excluded_prefixes = tuple(
+        str(prefix).strip().lower()
+        for prefix in exclude_dir_prefixes
+        if str(prefix).strip()
+    )
 
     collected: list[Path] = []
     for path in paths:
@@ -625,6 +631,7 @@ def _collect_builder_paths(
                     name
                     for name in dirnames
                     if name.lower() not in excluded_names
+                    and not name.lower().startswith(excluded_prefixes)
                 )
                 if max_depth is not None and depth >= max_depth:
                     dirnames[:] = []
@@ -831,6 +838,13 @@ def _run_builder_update_section_command(
         raise _AutomationRecipeError(
             f"{section_name} update field 'exclude_dir_names' must be an array when provided."
         )
+    raw_exclude_dir_prefixes = command.get("exclude_dir_prefixes", [])
+    if raw_exclude_dir_prefixes in (None, ""):
+        raw_exclude_dir_prefixes = []
+    if not isinstance(raw_exclude_dir_prefixes, list):
+        raise _AutomationRecipeError(
+            f"{section_name} update field 'exclude_dir_prefixes' must be an array when provided."
+        )
     raw_max_depth = command.get("max_depth")
     if raw_max_depth is None:
         max_depth = None
@@ -842,6 +856,7 @@ def _run_builder_update_section_command(
         max_depth = raw_max_depth
     section = section_class(LOGGER, lambda *_args: None)
     exclude_names = [str(name) for name in raw_exclude_dir_names]
+    exclude_prefixes = [str(prefix) for prefix in raw_exclude_dir_prefixes]
     if section_name == "mini_dma":
         default_excludes = getattr(section_class, "excluded_refresh_dirs", ())
         if max_depth == 1:
@@ -850,6 +865,11 @@ def _run_builder_update_section_command(
                 for name in [*default_excludes, *exclude_names]
                 if str(name).strip()
             }
+            excluded_prefixes = tuple(
+                prefix.strip().casefold()
+                for prefix in exclude_prefixes
+                if prefix.strip()
+            )
             shallow_candidates: list[Path] = []
             for input_path in input_paths:
                 if input_path.is_file():
@@ -860,7 +880,12 @@ def _run_builder_update_section_command(
                 if direct_measurement.is_file():
                     shallow_candidates.append(direct_measurement)
                 for child in sorted(input_path.iterdir(), key=lambda item: item.name.casefold()):
-                    if child.name.casefold() in excluded or not child.is_dir():
+                    child_name = child.name.casefold()
+                    if (
+                        child_name in excluded
+                        or child_name.startswith(excluded_prefixes)
+                        or not child.is_dir()
+                    ):
                         continue
                     measurement = child / "measurement.csv"
                     print(
@@ -877,6 +902,7 @@ def _run_builder_update_section_command(
                     input_paths,
                     supported_suffixes=supported_suffixes,
                     exclude_dir_names=[*default_excludes, *exclude_names],
+                    exclude_dir_prefixes=exclude_prefixes,
                     max_depth=max_depth,
                 )
                 if candidate.name.casefold() == "measurement.csv"
@@ -886,6 +912,7 @@ def _run_builder_update_section_command(
             input_paths,
             supported_suffixes=supported_suffixes,
             exclude_dir_names=exclude_names,
+            exclude_dir_prefixes=exclude_prefixes,
             max_depth=max_depth,
         )
     print(
@@ -992,6 +1019,9 @@ def _run_builder_update_section_command(
             "record_count": _builder_payload_record_count(merged_records),
             "row_count": int(len(section.data.table.index)),
             "sources": source_strings,
+            "exclude_dir_names": list(dict.fromkeys(exclude_names)),
+            "exclude_dir_prefixes": list(dict.fromkeys(exclude_prefixes)),
+            "max_depth": max_depth,
         }
     finally:
         section.close()
@@ -1049,6 +1079,15 @@ def _decode_builder_section_payload(
     encoded = payloads.get(payload_name)
     if isinstance(encoded, Mapping) and encoded.get("encoding") == "pickle-base64":
         _warn_builder_legacy_pickle_blocked()
+    if not (
+        isinstance(encoded, Mapping)
+        and encoded.get("encoding") == "microwire-json"
+    ):
+        # Automation keeps freshly updated payloads raw in its isolated memory
+        # transaction until all dependent commands (notably Assemble rebuild)
+        # have consumed them. They are staged with the v3 streaming codec
+        # immediately before the final package write.
+        return encoded
     decoder = getattr(builder_ui, "_decode_project_payload", None)
     if not callable(decoder):
         return None
@@ -3532,6 +3571,7 @@ def _promote_builder_database_latest(
 
 
 def _run_builder_automation_recipe(recipe_path: Path) -> int:
+    payload_staging_root: Path | None = None
     try:
         recipe = _load_json_object(recipe_path, label="Automation recipe")
         base_dir = recipe_path.parent
@@ -3574,6 +3614,10 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             else:
                 working_copy_dir = (base_dir / "builder_automation").resolve()
         working_copy_dir.mkdir(parents=True, exist_ok=True)
+        payload_staging_root = working_copy_dir / "_payload_staging"
+        if payload_staging_root.exists():
+            shutil.rmtree(payload_staging_root)
+        payload_staging_root.mkdir(parents=True, exist_ok=True)
 
         output_project = _resolve_recipe_path_value(
             recipe.get("output_project"),
@@ -3648,8 +3692,12 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             "MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS"
         )
         builder_storage: Any = None
+        builder_ui_module: Any = None
         original_storage_root: Any = None
         builder_transaction: Any = None
+        previous_payload_stager: Any = None
+        payload_stager_installed = False
+        staged_payload_count = 0
         command_results: list[dict[str, Any]] = []
         try:
             os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
@@ -3660,6 +3708,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             from microwire_data_builder import storage as builder_storage
             from microwire_data_builder import ui as builder_ui
 
+            builder_ui_module = builder_ui
             original_storage_root = builder_storage._storage_root
             automation_store = working_copy_dir / "_builder_store"
             if automation_store.exists():
@@ -3674,6 +3723,10 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             builder_transaction = (
                 builder_storage.MiniDatabaseStore.begin_memory_transaction()
             )
+
+            previous_payload_stager = builder_ui._ACTIVE_PROJECT_PAYLOAD_STAGER
+            builder_ui._ACTIVE_PROJECT_PAYLOAD_STAGER = lambda value: value
+            payload_stager_installed = True
             for index, command in enumerate(commands):
                 if not isinstance(command, dict):
                     raise _AutomationRecipeError(f"Builder command {index} must be an object.")
@@ -3741,8 +3794,30 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                     f"{command_label}",
                     flush=True,
                 )
+            for section_payload in sections.values():
+                if not isinstance(section_payload, dict):
+                    continue
+                raw_payloads = section_payload.get("payloads")
+                if not isinstance(raw_payloads, dict):
+                    continue
+                for payload_id, value in list(raw_payloads.items()):
+                    if (
+                        isinstance(value, Mapping)
+                        and value.get("encoding") == "microwire-json"
+                    ):
+                        continue
+                    staged_payload_count += 1
+                    raw_payloads[payload_id] = builder_ui.stage_payload_value(
+                        value,
+                        payload_staging_root
+                        / f"payload-{staged_payload_count:04d}",
+                    )
             builder_transaction.commit_memory_only()
         finally:
+            if payload_stager_installed and builder_ui_module is not None:
+                builder_ui_module._ACTIVE_PROJECT_PAYLOAD_STAGER = (
+                    previous_payload_stager
+                )
             if builder_transaction is not None and not builder_transaction.finished:
                 builder_transaction.rollback()
             if builder_storage is not None and original_storage_root is not None:
@@ -3790,6 +3865,9 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             traceback.print_exc()
         print(f"[automation-recipe] {type(exc).__name__}: {exc}")
         return 1
+    finally:
+        if payload_staging_root is not None:
+            shutil.rmtree(payload_staging_root, ignore_errors=True)
 
 
 def _load_automation_recipe_request(recipe_path: Path) -> _PyPlotAutomationRequest:
