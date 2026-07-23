@@ -13734,8 +13734,6 @@ def test_setup_preload_target_ramp_finishes_inside_automatic_tolerance(
     )
 
     try:
-        assert window._handle_target_ramp_step(step, 7) is False
-        now_s[0] += mini_dma_mod.TARGET_RAMP_ENDPOINT_STABLE_S + 0.01
         assert window._handle_target_ramp_step(step, 7) is True
         assert moves == []
         assert window._active_target_ramp_step_index is None
@@ -13789,13 +13787,10 @@ def test_target_ramp_switches_to_endpoint_acquisition_with_zero_setpoint_rate(
     try:
         assert window._handle_target_ramp_step(step, 7) is False
         now_s[0] = 102.1
-        assert window._handle_target_ramp_step(step, 7) is False
-        now_s[0] += mini_dma_mod.TARGET_RAMP_ENDPOINT_STABLE_S + 0.01
         assert window._handle_target_ramp_step(step, 7) is True
 
         assert decisions == [
             (5.0, mini_dma_mod.ForceControlIntent.TRACK_TRAJECTORY, moving_rate),
-            (end_value, mini_dma_mod.ForceControlIntent.ACQUIRE_TARGET, 0.0),
             (end_value, mini_dma_mod.ForceControlIntent.ACQUIRE_TARGET, 0.0),
         ]
         assert window._active_target_ramp_setpoint_rate_value_s is None

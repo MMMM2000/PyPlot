@@ -144,7 +144,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-23.2"
+CONTROL_LOGIC_VERSION = "2026-07-23.3"
 CONTROL_LOGIC_PROFILE = (
     "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-response-gated-hold"
 )
@@ -894,7 +894,6 @@ SERVO_CURRENT_SWEEP_POST_HOLD_THROTTLE_FACTOR = 0.6
 CURRENT_SWEEP_HOLD_PAUSE_TOLERANCE_FACTOR = 3.0
 CURRENT_SWEEP_HOLD_RESUME_TOLERANCE_FACTOR = 1.5
 CURRENT_SWEEP_HOLD_RESUME_STABLE_S = 0.5
-TARGET_RAMP_ENDPOINT_STABLE_S = 0.75
 CURRENT_SWEEP_HOLD_ESTIMATE_MIN_S = 10.0
 CURRENT_SWEEP_HOLD_ESTIMATE_FRACTION = 0.25
 CURRENT_SWEEP_HOLD_ESTIMATE_MAX_S = 60.0
@@ -8342,7 +8341,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value: float | None = None
         self._active_target_ramp_rate_value_s: float | None = None
         self._active_target_ramp_setpoint_rate_value_s: float | None = None
-        self._target_ramp_endpoint_in_band_since_s: float | None = None
         self._active_timed_step_index: int | None = None
         self._active_timed_step_started_s = 0.0
         self._active_timed_move_sent = False
@@ -31416,7 +31414,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
-        self._target_ramp_endpoint_in_band_since_s = None
         self._setup_zero_fallback_return_position_mm = None
         self._end_zero_fallback_armed = False
         self._end_zero_fallback_start_point_index = 0
@@ -32289,7 +32286,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
-        self._target_ramp_endpoint_in_band_since_s = None
         self._reset_timed_step_state()
         self._setup_measured_length_mm = None
         self._setup_starting_length_mm = None
@@ -33423,7 +33419,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_target_ramp_end_value = None
         self._active_target_ramp_rate_value_s = None
         self._active_target_ramp_setpoint_rate_value_s = None
-        self._target_ramp_endpoint_in_band_since_s = None
         self._active_mechanical_scan_step_index = None
         self._active_mechanical_scan_started_s = 0.0
         self._active_mechanical_scan_move_count = 0
@@ -35850,7 +35845,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._setup_preload_ramp_skipped = False
         if self._active_target_ramp_step_index != step_index:
             self._active_target_ramp_step_index = step_index
-            self._target_ramp_endpoint_in_band_since_s = None
             self._active_target_ramp_started_s = time.monotonic()
             self._active_target_ramp_rate_value_s = configured_ramp_rate
             self._active_target_ramp_end_value = end_value
@@ -35955,22 +35949,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return True
 
         if elapsed_s >= duration_s and reached:
-            now_s = time.monotonic()
-            if self._target_ramp_endpoint_in_band_since_s is None:
-                self._target_ramp_endpoint_in_band_since_s = now_s
-                return False
-            if now_s - self._target_ramp_endpoint_in_band_since_s < TARGET_RAMP_ENDPOINT_STABLE_S:
-                return False
             self._active_target_ramp_step_index = None
             self._active_target_ramp_started_s = 0.0
             self._active_target_ramp_start_value = None
             self._active_target_ramp_end_value = None
             self._active_target_ramp_rate_value_s = None
             self._active_target_ramp_setpoint_rate_value_s = None
-            self._target_ramp_endpoint_in_band_since_s = None
             return True
-        if elapsed_s >= duration_s:
-            self._target_ramp_endpoint_in_band_since_s = None
         return False
 
     def _handle_starting_length_prompt_step(self) -> bool:
