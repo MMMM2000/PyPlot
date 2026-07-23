@@ -36,10 +36,10 @@ def _capture_widget_state(candidate: object) -> dict[str, object] | None:
             "data": _json_scalar(candidate.currentData()),
             "text": candidate.currentText(),
         }
-    if isinstance(candidate, QtWidgets.QAbstractSpinBox):
-        value_method = getattr(candidate, "value", None)
-        if callable(value_method):
-            return {"kind": "spin", "value": float(value_method())}
+    if isinstance(candidate, QtWidgets.QSpinBox):
+        return {"kind": "integer_spin", "value": int(candidate.value())}
+    if isinstance(candidate, QtWidgets.QDoubleSpinBox):
+        return {"kind": "decimal_spin", "value": float(candidate.value())}
     if isinstance(candidate, QtWidgets.QLineEdit):
         return {"kind": "line", "text": candidate.text()}
     if isinstance(candidate, QtWidgets.QPlainTextEdit):
@@ -137,10 +137,16 @@ def _apply_window_configuration(window: object, payload: Mapping[str, object]) -
                     index = int(raw_state.get("index", -1))
                 if 0 <= index < candidate.count():
                     candidate.setCurrentIndex(index)
-            elif kind == "spin" and isinstance(candidate, QtWidgets.QAbstractSpinBox):
-                setter = getattr(candidate, "setValue", None)
-                if callable(setter):
-                    setter(float(raw_state.get("value", 0.0)))
+            elif kind == "integer_spin" and isinstance(
+                candidate,
+                QtWidgets.QSpinBox,
+            ):
+                candidate.setValue(int(raw_state.get("value", 0)))
+            elif kind == "decimal_spin" and isinstance(
+                candidate,
+                QtWidgets.QDoubleSpinBox,
+            ):
+                candidate.setValue(float(raw_state.get("value", 0.0)))
             elif kind == "line" and isinstance(candidate, QtWidgets.QLineEdit):
                 candidate.setText(str(raw_state.get("text", "")))
             elif kind == "plain" and isinstance(candidate, QtWidgets.QPlainTextEdit):

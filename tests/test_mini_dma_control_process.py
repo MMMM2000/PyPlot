@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, FrozenInstanceError
+import json
 import os
 import time
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from data_logging.mini_dma_logger.control_process import (
 )
 from data_logging.mini_dma_logger.production_control_backend import (
     ProductionMiniDmaBackend,
+    _apply_window_configuration,
     capture_window_configuration,
 )
 
@@ -520,6 +522,8 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
         def __init__(self) -> None:
             self.current = QtWidgets.QDoubleSpinBox()
             self.current.setValue(12.5)
+            self.count = QtWidgets.QSpinBox()
+            self.count.setValue(7)
             self.mode = QtWidgets.QComboBox()
             self.mode.addItem("Prague", "prague")
             self.enabled = QtWidgets.QCheckBox()
@@ -534,6 +538,82 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
     )
     assert '"starting_length_mm":57.0' in payload
     assert '"prior_run_preflight_complete":true' in payload
+    assert '"kind":"integer_spin","value":7' in payload
+    assert '"kind":"decimal_spin","value":12.5' in payload
     assert '"value":12.5' in payload
     assert '"data":"prague"' in payload
     assert "PyQt6" not in payload
+
+
+def test_window_configuration_round_trip_preserves_qt_spin_box_types(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    assert qapp is not None
+
+    class _Window:
+        def __init__(self) -> None:
+            self.count = QtWidgets.QSpinBox()
+            self.current = QtWidgets.QDoubleSpinBox()
+            self._first_overheating_preflight_decision = None
+
+    source = _Window()
+    source.count.setValue(17)
+    source.current.setValue(12.5)
+    payload = json.loads(
+        capture_window_configuration(
+            source,
+            starting_length_mm=None,
+            cadence_downgrade_accepted=True,
+        )
+    )
+    target = _Window()
+
+    _apply_window_configuration(target, payload)
+
+    assert target.count.value() == 17
+    assert target.current.value() == pytest.approx(12.5)
+
+
+def test_real_tma_window_configuration_round_trip_accepts_all_widget_types(
+    tmp_path,
+    qtbot,
+) -> None:
+    from data_logging.mini_dma_logger.mini_dma_logger import MainWindow
+
+    source = MainWindow(
+        log_dir=str(tmp_path / "source"),
+        persist_settings=False,
+        control_process_enabled=False,
+    )
+    target = MainWindow(
+        log_dir=str(tmp_path / "target"),
+        persist_settings=False,
+        control_process_enabled=False,
+        controller_process_mode=True,
+    )
+    qtbot.addWidget(source)
+    qtbot.addWidget(target)
+    payload = json.loads(
+        capture_window_configuration(
+            source,
+            starting_length_mm=None,
+            cadence_downgrade_accepted=True,
+        )
+    )
+
+    _apply_window_configuration(target, payload)
+
+    integer_widgets = [
+        candidate
+        for candidate in vars(source).values()
+        if isinstance(candidate, QtWidgets.QSpinBox)
+    ]
+    decimal_widgets = [
+        candidate
+        for candidate in vars(source).values()
+        if isinstance(candidate, QtWidgets.QDoubleSpinBox)
+    ]
+    assert integer_widgets
+    assert decimal_widgets
+    source.close()
+    target.close()
