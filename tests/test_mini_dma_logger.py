@@ -1509,6 +1509,164 @@ def test_first_overheating_history_uses_loaded_pydpj_cache_without_ui_thread_rea
         _close_test_window(window)
 
 
+class _FakeIsolatedControlProcess:
+    def __init__(self) -> None:
+        self.pid = 4242
+        self.exitcode = None
+        self.started = False
+        self.closed = False
+        self.requests: list[object] = []
+        self.commands: list[tuple[str, object | None]] = []
+        self.next_snapshot: object | None = None
+        self.next_events: tuple[object, ...] = ()
+
+    def start_process(self) -> None:
+        self.started = True
+
+    def start_session(self, request: object) -> int:
+        self.requests.append(request)
+        return 1
+
+    def pause(self, identity: object) -> int:
+        self.commands.append(("pause", identity))
+        return 2
+
+    def resume(self, identity: object) -> int:
+        self.commands.append(("resume", identity))
+        return 3
+
+    def stop(self, identity: object) -> int:
+        self.commands.append(("stop", identity))
+        return 4
+
+    def update_config(self, identity: object, config_json: str) -> int:
+        self.commands.append(("update_config", identity))
+        assert '"runtime_update":true' in config_json
+        return 5
+
+    def emergency_stop(self) -> None:
+        self.commands.append(("emergency", None))
+
+    def poll_latest_snapshot(self) -> object | None:
+        snapshot = self.next_snapshot
+        self.next_snapshot = None
+        return snapshot
+
+    def poll_events(self) -> tuple[object, ...]:
+        events = self.next_events
+        self.next_events = ()
+        return events
+
+    def is_alive(self) -> bool:
+        return self.started and not self.closed
+
+    def close(self, *, timeout_s: float = 2.0) -> bool:
+        del timeout_s
+        self.closed = True
+        return True
+
+
+def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    _ensure_app()
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window._force_control_profile = (  # type: ignore[method-assign]
+        lambda: mini_dma_mod.ForceControlProfile.KOSICE_ADAPTIVE
+    )
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is True
+        assert len(process.requests) == 1
+        request = process.requests[0]
+        assert request.identity == window._production_control_identity
+        assert request.policy is mini_dma_mod.ControlPolicy.KOSICE
+        assert '"schema_version":1' in request.config_json
+        assert window._isolated_recipe_active is True
+        assert window._automation_active is True
+        assert window._scale_thread is None
+        assert window._supply_controller is None
+        assert window._tic_command_dispatcher is None
+
+        def _confirm(
+            state: object,
+            *,
+            last_command_sequence: int = 1,
+            last_command_result: str = "accepted",
+        ) -> None:
+            process.next_snapshot = SimpleNamespace(
+                identity=request.identity,
+                state=state,
+                sequence=1,
+                monotonic_s=time.monotonic(),
+                tick_count=1,
+                last_command_sequence=last_command_sequence,
+                last_command_result=last_command_result,
+                last_command_detail="synthetic confirmation",
+                policy=request.policy,
+                owner_pid=process.pid,
+                dropped_event_count=0,
+                readback={
+                    "automation_phase": state.value,
+                    "automation_index": 0,
+                    "automation_total": 1,
+                    "task": "synthetic",
+                },
+            )
+            window._poll_production_control_process()
+
+        _confirm(mini_dma_mod.ControlState.RUNNING)
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window.spin_current_sweep_step_mA.setValue(
+            window.spin_current_sweep_step_mA.value() + 0.25
+        )
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+        _confirm(
+            mini_dma_mod.ControlState.RUNNING,
+            last_command_sequence=5,
+        )
+        assert window._isolated_command_pending is None
+
+        window._pause_recipe()
+        _confirm(mini_dma_mod.ControlState.PAUSED)
+        window._resume_paused_recipe()
+        _confirm(mini_dma_mod.ControlState.RUNNING)
+        window._stop_recipe_from_button()
+        assert [kind for kind, _identity in process.commands] == [
+            "update_config",
+            "pause",
+            "resume",
+            "stop",
+        ]
+
+        assert window._connect_scale(show_errors=False) is False
+        assert window._connect_supply(show_errors=False) is False
+        with pytest.raises(RuntimeError, match="dedicated Mini DMA control process"):
+            window._build_tic_dispatcher()
+        _confirm(mini_dma_mod.ControlState.STOPPED)
+        assert process.closed is True
+        assert window._isolated_recipe_active is False
+    finally:
+        _close_test_window(window)
+
+
 def _prepare_first_overheating_preflight_window(
     tmp_path: Path,
     qtbot,

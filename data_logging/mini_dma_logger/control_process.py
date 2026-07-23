@@ -1,15 +1,16 @@
-"""Spawn-safe process and IPC foundation for authoritative TMA control.
+"""Spawn-safe process and IPC kernel for authoritative TMA control.
 
-This module deliberately has no Qt, serial, Tic, or PSU imports.  Production
-hardware is not wired to it yet; the simulated backend exists so lifecycle and
-IPC invariants can be proved before device ownership moves out of the UI
-process.
+This module deliberately has no Qt, serial, Tic, or PSU imports. Production
+dependencies are loaded lazily in the child through an explicit backend
+factory, while the simulated backend proves lifecycle and IPC invariants
+without hardware.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import importlib
 import multiprocessing
 import os
 from queue import Empty, Full
@@ -37,6 +38,7 @@ class ControlCommandKind(str, Enum):
     PAUSE = "pause"
     RESUME = "resume"
     STOP = "stop"
+    UPDATE_CONFIG = "update_config"
 
 
 class ControlEventKind(str, Enum):
@@ -49,6 +51,7 @@ class ControlEventKind(str, Enum):
     EMERGENCY = "emergency"
     FAULT = "fault"
     COMMAND_REJECTED = "command_rejected"
+    CONFIG_UPDATED = "config_updated"
     SHUTDOWN = "shutdown"
 
 
@@ -72,6 +75,7 @@ class ControlStartRequest:
     snapshot_interval_s: float = 0.10
     parent_heartbeat_timeout_s: float = 2.0
     recipe_tick_limit: int | None = None
+    config_json: str = "{}"
 
     def __post_init__(self) -> None:
         if not isinstance(self.policy, ControlPolicy):
@@ -84,6 +88,8 @@ class ControlStartRequest:
             raise ValueError("parent_heartbeat_timeout_s must be positive")
         if self.recipe_tick_limit is not None and self.recipe_tick_limit <= 0:
             raise ValueError("recipe_tick_limit must be positive when provided")
+        if not isinstance(self.config_json, str):
+            raise ValueError("config_json must be an immutable JSON string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +98,7 @@ class ControlCommand:
     sequence: int
     identity: ControlSessionIdentity
     start_request: ControlStartRequest | None = None
+    config_json: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ControlCommandKind):
@@ -103,8 +110,17 @@ class ControlCommand:
                 raise ValueError("start command requires a start_request")
             if self.start_request.identity != self.identity:
                 raise ValueError("start command identities do not match")
+            if self.config_json is not None:
+                raise ValueError("start command cannot carry a config update")
+        elif self.kind is ControlCommandKind.UPDATE_CONFIG:
+            if self.start_request is not None:
+                raise ValueError("config update cannot carry a start request")
+            if not isinstance(self.config_json, str):
+                raise ValueError("config update requires an immutable JSON string")
         elif self.start_request is not None:
             raise ValueError("only start commands may carry a start_request")
+        elif self.config_json is not None:
+            raise ValueError("only config-update commands may carry config JSON")
 
 
 ReadbackValue = float | int | str | bool | None
@@ -118,6 +134,8 @@ class ControlSnapshot:
     monotonic_s: float
     tick_count: int
     last_command_sequence: int
+    last_command_result: str
+    last_command_detail: str
     policy: ControlPolicy | None
     owner_pid: int
     dropped_event_count: int
@@ -147,6 +165,23 @@ class SimulatedBackendConfig:
             raise ValueError("crash_after_ticks must be positive when provided")
 
 
+@dataclass(frozen=True, slots=True)
+class BackendFactorySpec:
+    """Spawn-safe lazy backend factory.
+
+    Keeping the module import inside the child lets the IPC kernel remain free
+    of Qt, serial, Tic, and PSU imports while a production backend can own
+    those dependencies exclusively in the spawned process.
+    """
+
+    module: str
+    factory: str
+
+    def __post_init__(self) -> None:
+        if not self.module.strip() or not self.factory.strip():
+            raise ValueError("backend factory module and name must not be empty")
+
+
 class ControlBackend(Protocol):
     def start(self, request: ControlStartRequest) -> None: ...
 
@@ -160,9 +195,25 @@ class ControlBackend(Protocol):
 
     def emergency_stop(self, reason: str) -> None: ...
 
+    def update_config(self, config_json: str) -> tuple[bool, str]: ...
+
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]: ...
 
+    def completion_detail(self) -> str | None: ...
+
     def close(self) -> None: ...
+
+
+def _build_backend(
+    backend_config: SimulatedBackendConfig,
+    backend_factory_spec: BackendFactorySpec | None,
+) -> ControlBackend:
+    if backend_factory_spec is None:
+        return SimulatedControlBackend(backend_config)
+    module = importlib.import_module(backend_factory_spec.module)
+    factory = getattr(module, backend_factory_spec.factory)
+    backend = factory()
+    return backend
 
 
 class SimulatedControlBackend:
@@ -202,6 +253,10 @@ class SimulatedControlBackend:
         self._output_enabled = False
         self._emergency_reason = str(reason)
 
+    def update_config(self, config_json: str) -> tuple[bool, str]:
+        del config_json
+        return True, "simulated configuration updated"
+
     def readback(self) -> tuple[tuple[str, ReadbackValue], ...]:
         return (
             ("backend_owner_pid", self._owner_pid),
@@ -210,6 +265,9 @@ class SimulatedControlBackend:
             ("emergency_reason", self._emergency_reason),
             ("policy", None if self._policy is None else self._policy.value),
         )
+
+    def completion_detail(self) -> str | None:
+        return None
 
     def close(self) -> None:
         self._output_enabled = False
@@ -249,6 +307,7 @@ class _ControlProcessRuntime:
         emergency_event: Any,
         shutdown_event: Any,
         backend_config: SimulatedBackendConfig,
+        backend_factory_spec: BackendFactorySpec | None,
     ) -> None:
         self._command_queue = command_queue
         self._heartbeat_queue = heartbeat_queue
@@ -256,12 +315,17 @@ class _ControlProcessRuntime:
         self._event_queue = event_queue
         self._emergency_event = emergency_event
         self._shutdown_event = shutdown_event
-        self._backend: ControlBackend = SimulatedControlBackend(backend_config)
+        self._backend: ControlBackend = _build_backend(
+            backend_config,
+            backend_factory_spec,
+        )
         self._identity: ControlSessionIdentity | None = None
         self._request: ControlStartRequest | None = None
         self._state = ControlState.IDLE
         self._tick_count = 0
         self._last_command_sequence = 0
+        self._last_command_result = "none"
+        self._last_command_detail = ""
         self._snapshot_sequence = 0
         self._event_sequence = 0
         self._dropped_event_count = 0
@@ -300,7 +364,15 @@ class _ControlProcessRuntime:
                     self._backend.tick(now_s)
                     self._tick_count += 1
                     request = self._request
-                    if request is not None and request.recipe_tick_limit == self._tick_count:
+                    completion_detail = self._backend.completion_detail()
+                    if completion_detail is not None:
+                        self._state = ControlState.STOPPED
+                        self._emit_event(
+                            ControlEventKind.RECIPE_COMPLETE,
+                            detail=completion_detail,
+                        )
+                        self._publish_snapshot()
+                    elif request is not None and request.recipe_tick_limit == self._tick_count:
                         self._backend.stop()
                         self._state = ControlState.STOPPED
                         self._emit_event(ControlEventKind.RECIPE_COMPLETE)
@@ -358,6 +430,7 @@ class _ControlProcessRuntime:
                 return
             self._backend.pause()
             self._state = ControlState.PAUSED
+            self._accept_command("recipe paused")
             self._emit_event(ControlEventKind.PAUSED)
         elif command.kind is ControlCommandKind.RESUME:
             if self._state is not ControlState.PAUSED:
@@ -366,6 +439,7 @@ class _ControlProcessRuntime:
             self._backend.resume()
             self._state = ControlState.RUNNING
             self._next_tick_s = time.monotonic()
+            self._accept_command("recipe resumed")
             self._emit_event(ControlEventKind.RESUMED)
         elif command.kind is ControlCommandKind.STOP:
             if self._state not in {ControlState.RUNNING, ControlState.PAUSED}:
@@ -373,7 +447,22 @@ class _ControlProcessRuntime:
                 return
             self._backend.stop()
             self._state = ControlState.STOPPED
+            self._accept_command("recipe stopped")
             self._emit_event(ControlEventKind.STOPPED)
+        elif command.kind is ControlCommandKind.UPDATE_CONFIG:
+            if self._state not in {ControlState.RUNNING, ControlState.PAUSED}:
+                self._reject(
+                    "config update requires an active session",
+                    identity=command.identity,
+                )
+                return
+            assert command.config_json is not None
+            accepted, detail = self._backend.update_config(command.config_json)
+            if not accepted:
+                self._reject(detail or "configuration update rejected")
+                return
+            self._accept_command(detail or "configuration updated")
+            self._emit_event(ControlEventKind.CONFIG_UPDATED, detail=detail)
         self._publish_snapshot()
 
     def _handle_start(self, command: ControlCommand) -> None:
@@ -397,6 +486,7 @@ class _ControlProcessRuntime:
         self._tick_count = 0
         self._backend.start(request)
         self._state = ControlState.RUNNING
+        self._accept_command("recipe started")
         now_s = time.monotonic()
         self._last_parent_heartbeat_s = now_s
         self._next_tick_s = now_s
@@ -425,7 +515,13 @@ class _ControlProcessRuntime:
         *,
         identity: ControlSessionIdentity | None = None,
     ) -> None:
+        self._last_command_result = "rejected"
+        self._last_command_detail = detail
         self._emit_event(ControlEventKind.COMMAND_REJECTED, detail=detail, identity=identity)
+
+    def _accept_command(self, detail: str) -> None:
+        self._last_command_result = "accepted"
+        self._last_command_detail = str(detail)
 
     def _emit_event(
         self,
@@ -466,6 +562,8 @@ class _ControlProcessRuntime:
             monotonic_s=now_s,
             tick_count=self._tick_count,
             last_command_sequence=self._last_command_sequence,
+            last_command_result=self._last_command_result,
+            last_command_detail=self._last_command_detail,
             policy=None if self._request is None else self._request.policy,
             owner_pid=os.getpid(),
             dropped_event_count=self._dropped_event_count,
@@ -485,6 +583,7 @@ def _run_control_process(
     emergency_event: Any,
     shutdown_event: Any,
     backend_config: SimulatedBackendConfig,
+    backend_factory_spec: BackendFactorySpec | None,
 ) -> None:
     runtime = _ControlProcessRuntime(
         command_queue=command_queue,
@@ -494,6 +593,7 @@ def _run_control_process(
         emergency_event=emergency_event,
         shutdown_event=shutdown_event,
         backend_config=backend_config,
+        backend_factory_spec=backend_factory_spec,
     )
     runtime.run()
 
@@ -509,6 +609,7 @@ class MiniDmaControlProcess:
         event_capacity: int = 64,
         heartbeat_interval_s: float | None = 0.10,
         mp_context: str = "spawn",
+        backend_factory_spec: BackendFactorySpec | None = None,
     ) -> None:
         if command_capacity <= 0 or event_capacity <= 0:
             raise ValueError("IPC capacities must be positive")
@@ -522,6 +623,7 @@ class MiniDmaControlProcess:
         self._emergency_event = self._context.Event()
         self._shutdown_event = self._context.Event()
         self._backend_config = backend_config or SimulatedBackendConfig()
+        self._backend_factory_spec = backend_factory_spec
         self._heartbeat_interval_s = heartbeat_interval_s
         self._heartbeat_stop = ThreadEvent()
         self._heartbeat_thread: Thread | None = None
@@ -554,6 +656,7 @@ class MiniDmaControlProcess:
                 self._emergency_event,
                 self._shutdown_event,
                 self._backend_config,
+                self._backend_factory_spec,
             ),
         )
         self._process.start()
@@ -576,6 +679,17 @@ class MiniDmaControlProcess:
 
     def stop(self, identity: ControlSessionIdentity) -> int:
         return self._send(ControlCommandKind.STOP, identity)
+
+    def update_config(
+        self,
+        identity: ControlSessionIdentity,
+        config_json: str,
+    ) -> int:
+        return self._send(
+            ControlCommandKind.UPDATE_CONFIG,
+            identity,
+            config_json=config_json,
+        )
 
     def emergency_stop(self) -> None:
         """Use the out-of-band safety path; it cannot be blocked by commands."""
@@ -620,6 +734,7 @@ class MiniDmaControlProcess:
         identity: ControlSessionIdentity,
         *,
         start_request: ControlStartRequest | None = None,
+        config_json: str | None = None,
     ) -> int:
         if not self.is_alive():
             raise RuntimeError("control process is not running")
@@ -631,6 +746,7 @@ class MiniDmaControlProcess:
             sequence=sequence,
             identity=identity,
             start_request=start_request,
+            config_json=config_json,
         )
         try:
             self._command_queue.put_nowait(command)
@@ -646,6 +762,7 @@ class MiniDmaControlProcess:
 
 
 __all__ = [
+    "BackendFactorySpec",
     "ControlBackpressureError",
     "ControlCommand",
     "ControlCommandKind",

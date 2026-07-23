@@ -5,6 +5,7 @@ import os
 import time
 
 import pytest
+from PyQt6 import QtWidgets
 
 from data_logging.mini_dma_logger.control_process import (
     ControlBackpressureError,
@@ -17,6 +18,10 @@ from data_logging.mini_dma_logger.control_process import (
     ControlState,
     MiniDmaControlProcess,
     SimulatedBackendConfig,
+)
+from data_logging.mini_dma_logger.production_control_backend import (
+    ProductionMiniDmaBackend,
+    capture_window_configuration,
 )
 
 
@@ -261,3 +266,169 @@ def test_backend_fault_attempts_emergency_stop_and_reports_fault() -> None:
         assert process.exitcode not in {None, 0}
     finally:
         assert process.close()
+
+
+def test_runtime_configuration_update_is_session_scoped() -> None:
+    process = MiniDmaControlProcess(heartbeat_interval_s=0.02)
+    identity = _identity()
+    try:
+        process.start_process()
+        process.start_session(
+            ControlStartRequest(identity=identity, policy=ControlPolicy.PRAGUE)
+        )
+        _wait_for_snapshot(process, lambda item: item.state is ControlState.RUNNING)
+
+        process.update_config(identity, '{"runtime_update":true}')
+        updated = _wait_for_event(process, ControlEventKind.CONFIG_UPDATED)
+        assert updated.identity == identity
+        assert "configuration updated" in updated.detail
+        acknowledged = _wait_for_snapshot(
+            process,
+            lambda item: item.last_command_sequence >= 2,
+        )
+        assert acknowledged.state is ControlState.RUNNING
+        assert acknowledged.last_command_result == "accepted"
+        assert "configuration updated" in acknowledged.last_command_detail
+    finally:
+        assert process.close()
+
+
+class _FakeProductionWindow:
+    def __init__(self, **_kwargs: object) -> None:
+        self._controller_process_cadence_downgrade_accepted = False
+        self._first_overheating_preflight_decision = None
+        self._automation_active = False
+        self._automation_paused = False
+        self._automation_phase = "idle"
+        self._automation_name = "current_sweep_stress"
+        self._automation_index = 0
+        self._automation_steps = [object(), object()]
+        self._current_position_mm = 1.25
+        self._supply_snapshot = {"current_mA": 2.0, "voltage_V": 0.4}
+        self._supply_effective_readback_hz = 2.0
+        self._supply_output_enabled = False
+        self._supply_last_setpoint_mA = 2.0
+        self._session_active = False
+        self._session_points = [object()]
+        self._session_base_path = None
+        self._last_tic_vin_v = 12.0
+        self.starting_length_mm = None
+        self.closed = False
+        self.runtime_update_calls = 0
+
+    def set_length_setup_automation_values(
+        self,
+        *,
+        starting_length_mm: float | None,
+        preload_length_mm: float | None,
+    ) -> None:
+        del preload_length_mm
+        self.starting_length_mm = starting_length_mm
+
+    def _start_auto_ramp(self) -> None:
+        self._automation_active = True
+        self._session_active = True
+        self._supply_output_enabled = True
+        self._automation_phase = "current"
+
+    def _pause_recipe(self) -> None:
+        self._automation_paused = True
+        self._supply_output_enabled = False
+
+    def _resume_paused_recipe(self) -> None:
+        self._automation_paused = False
+        self._supply_output_enabled = True
+
+    def _stop_auto_ramp(self, **_kwargs: object) -> None:
+        self._automation_active = False
+        self._session_active = False
+        self._supply_output_enabled = False
+
+    def _disable_supply_output(self) -> None:
+        self._supply_output_enabled = False
+
+    def _disable_motor_supply_output(self) -> None:
+        pass
+
+    def _apply_current_sweep_pending_overrides(self, *, show_message: bool) -> bool:
+        assert show_message is False
+        self.runtime_update_calls += 1
+        return True
+
+    def _current_effective_load_g(self) -> float:
+        return 0.5
+
+    def _current_distribution_value(self, basis: str) -> float:
+        assert basis == "stress_mpa"
+        return 25.0
+
+    def _scale_reading_age_s(self) -> float:
+        return 0.05
+
+    def _current_task_summary(self) -> str:
+        return "fake production task"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    request = ControlStartRequest(
+        identity=_identity(),
+        policy=ControlPolicy.PRAGUE,
+        config_json=(
+            '{"schema_version":1,"widgets":{},"starting_length_mm":57.25,'
+            '"cadence_downgrade_accepted":true}'
+        ),
+    )
+
+    backend.start(request)
+    readback = dict(backend.readback())
+    assert readback["backend_owner_pid"] == os.getpid()
+    assert readback["automation_active"] is True
+    assert readback["supply_output_enabled"] is True
+    assert readback["stress_mpa"] == pytest.approx(25.0)
+
+    backend.pause()
+    assert dict(backend.readback())["automation_paused"] is True
+    assert dict(backend.readback())["supply_output_enabled"] is False
+    backend.resume()
+    assert dict(backend.readback())["supply_output_enabled"] is True
+    accepted, detail = backend.update_config(
+        '{"schema_version":1,"runtime_update":true,"widgets":{}}'
+    )
+    assert accepted is True
+    assert detail == "current-sweep runtime settings applied"
+    backend.stop()
+    assert backend.completion_detail() == "production recipe completed"
+    assert dict(backend.readback())["supply_output_enabled"] is False
+    backend.close()
+
+
+def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    assert qapp is not None
+    class _Window:
+        def __init__(self) -> None:
+            self.current = QtWidgets.QDoubleSpinBox()
+            self.current.setValue(12.5)
+            self.mode = QtWidgets.QComboBox()
+            self.mode.addItem("Prague", "prague")
+            self.enabled = QtWidgets.QCheckBox()
+            self.enabled.setChecked(True)
+            self.name = QtWidgets.QLineEdit("sample")
+            self._first_overheating_preflight_decision = {"action": "continue"}
+
+    payload = capture_window_configuration(
+        _Window(),
+        starting_length_mm=57.0,
+        cadence_downgrade_accepted=True,
+    )
+    assert '"starting_length_mm":57.0' in payload
+    assert '"value":12.5' in payload
+    assert '"data":"prague"' in payload
+    assert "PyQt6" not in payload

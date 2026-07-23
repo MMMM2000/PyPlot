@@ -1,95 +1,69 @@
 # Mini DMA/TMA control-process migration
 
-Status: incremental stacked work based on `codex/mini-dma-transform-disturbance-invariant`
-at `ee10c238` (PR 298, including the motor-confirmation fixes and the PR 299
-Košice import). This branch must remain based on PR 298 until PR 298 is merged.
-After that merge, rebase this branch onto `main` and retarget its pull request;
-do not merge or rewrite PR 298 as part of this work.
+Status: production cutover on `codex/tma-control-process-production`, stacked on
+`codex/hmp-usb-cadence-arbitration` at `21c7c11c` (PR 300). PR 298 has merged.
+This branch must remain stacked on PR 300 until that branch merges; afterwards,
+rebase onto current `main` and retarget this pull request. Do not merge or
+rewrite PR 300 as part of this work.
 
-## Evidence from the current architecture
+## Evidence from the previous architecture
 
-- `AutomationControlLoop` runs recipe ticks on a Python thread, so tick cadence
-  no longer directly depends on Qt repaint cadence.
-- `MiniDmaAutomationController` still owns only dispatch. Its host is
-  `MainWindow`, and every recipe action calls back into that window for scale
-  state, force policy, Tic commands, PSU commands, recipe state, logging, and
-  UI publication.
+- `AutomationControlLoop` ran recipe ticks on a Python thread, so ordinary Qt
+  repaint work did not directly set tick cadence.
+- `MiniDmaAutomationController` delegated every recipe action back to
+  `MainWindow`. Scale state, Prague/Košice force policy, Tic and PSU commands,
+  recipe state, logging, and UI publication therefore remained in the GUI
+  process.
 - `ScaleWorker`, `TicCommandDispatcher`, `PowerSupplyController`,
-  `SharedBrokerSupplyController`, `AsyncRunLogWriter`, and the session writers
-  are all constructed or retained by `MainWindow`. The GUI process therefore
-  remains the authoritative hardware and run-state owner.
-- Pause, resume, stop, emergency stop, and close currently combine controller,
-  hardware, logging, and widget transitions in `MainWindow` methods. Several
-  worker paths must marshal back to the Qt thread before completing.
-- `MiniDmaControlConfig`, `MiniDmaRunMetadataSnapshot`, and frozen Tic settings
-  already provide useful immutable hand-off points. Prague and Košice policy
-  selection is already explicit through `ForceControlProfile`; it should not be
-  collapsed during the infrastructure migration.
-- Existing tests prove thread independence, frozen settings, Prague/Košice
-  policy separation, immediate Tic target confirmation, asynchronous logging,
-  and simulator behavior. They do not yet prove OS-process isolation or
-  exclusive hardware ownership.
+  `SharedBrokerSupplyController`, `AsyncRunLogWriter`, and session writers were
+  constructed or retained by `MainWindow`.
+- Pause, resume, stop, emergency stop, and close combined controller, hardware,
+  logging, and widget transitions. A busy GUI process could still delay or
+  starve the authoritative controller despite the worker thread.
 
-## Target boundary
+## Implemented production boundary
 
-The control child process will be the only process allowed to construct or use
-the active scale, Tic, and PSU adapters. It will own recipe clocks and state,
-live readback confirmation, safety decisions, and authoritative run files. The
-Qt process will build immutable configuration, send sequenced operator
-commands, and render immutable/downsampled snapshots and events.
+1. The dependency-light process kernel owns immutable commands, snapshots and
+   events, generation checks, bounded channels, heartbeat/crash handling, and
+   an out-of-band emergency path. It imports no Qt, serial, Tic, or PSU code.
+2. A production child adapter constructs the existing Mini DMA controller only
+   inside the spawned process. Scale acquisition, Tic and PSU objects, recipe
+   clocks/state, immediate confirmation, and all run writers therefore remain
+   together in the authoritative child.
+3. The visible window captures immutable JSON configuration, releases any local
+   device handles, starts the child, and thereafter sends session-scoped
+   lifecycle commands. It renders coalesced immutable snapshots.
+4. Parent-side scale, PSU, and Tic construction is fenced while the child owns
+   the recipe. The child retains the existing cross-process Tic device lease.
+5. The production child runs the existing recipe implementation unchanged, so
+   Prague legacy-seek and Košice adaptive policies stay separate while sharing
+   the isolated process and hardware infrastructure.
+6. Disposable test windows default to the legacy in-process path. Tests must
+   explicitly opt into isolation with a fake supervisor, preventing accidental
+   serial access during software verification.
 
-Every IPC message carries a session identity and generation. Commands are
-bounded and reject overload instead of silently growing. Emergency and shutdown
-signals have out-of-band paths so command saturation cannot hide them. Snapshot
-delivery is a one-item latest-value channel; event delivery is bounded and
-reports dropped-event counts. A non-Qt heartbeat thread represents parent
-process liveness, so a blocked Qt event loop does not falsely trip the control
-process. Loss of the parent heartbeat, an unhandled control exception, or an
-explicit emergency request drives the child through the backend emergency-safe
-path.
+Normal persisted app launches default to the isolated production path. The
+in-process path remains as an explicit constructor seam for deterministic tests
+and for the child-host adapter.
 
-## Incremental migration
+## Software gates
 
-1. **Process/IPC kernel (this branch).** Add a dependency-light, spawn-safe
-   process supervisor and runtime with immutable commands/snapshots/events,
-   generation checks, bounded IPC, heartbeat/crash behavior, and a deterministic
-   simulated backend. Do not connect it to production devices yet.
-2. **Authoritative logging seam.** Move run-directory allocation and the
-   measurement/control-trace writers behind a process-owned run-log adapter.
-   Preserve the existing generation-safe late-write accounting and metadata
-   finalization invariants. The UI consumes log-status events only.
-3. **Scale ownership.** Move serial scale construction, acquisition, filtering,
-   freshness, and safety-limit evaluation into the child. Publish downsampled
-   immutable scale/readback snapshots. Keep all fake-driver coverage offline.
-4. **Tic and PSU ownership.** Construct the Tic dispatcher/controller and direct
-   or broker-backed PSU adapter only inside the child. Keep immediate target
-   status/readback confirmation in the child. Enforce one active hardware lease
-   per process generation and fail closed on duplicate ownership.
-5. **Recipe/policy cutover.** Move the existing recipe state machine and frozen
-   `MiniDmaControlConfig` into the child without changing policy behavior.
-   Retain distinct Prague legacy-seek and Košice disturbance-aware force
-   controllers over the shared process-owned hardware interfaces.
-6. **Qt adapter and removal.** Replace `MainWindow` control calls with a thin IPC
-   adapter, coalesce visual updates, and remove the old in-process control loop
-   only after parity tests cover start, pause, resume, stop, emergency, crash,
-   reconnect, stale generations, and both control policies.
-
-Each step should be independently mergeable and must keep the existing
-in-process path as the production default until the corresponding hardware and
-logging parity tests are complete. No live-hardware validation is authorized by
-this plan.
-
-## Gates before production cutover
-
-- Spawned-process fake tests demonstrate cadence during deliberate UI-thread
+- Spawned-process fake tests must demonstrate cadence during deliberate UI
   blocking, exclusive backend construction in the child PID, bounded queues,
   snapshot coalescing, stale-generation rejection, and emergency delivery.
-- Deterministic simulator matrices demonstrate unchanged Prague and Košice
-  decisions from identical recorded inputs.
-- Fault injection covers scale/Tic/PSU exceptions, writer failure, parent death,
-  child death, command saturation, and shutdown timeouts, with the expected
-  final motor/PSU state recorded.
-- Packaging tests confirm the spawn entry point and hidden imports in the frozen
-  Windows application.
-- Live hardware work, if later authorized, begins only after the repository's
-  campaign preflight and ownership/safety checks.
+- Lifecycle coverage must include start, pause, resume, stop, emergency,
+  parent-heartbeat loss, child fault, command saturation, and shutdown.
+- UI adapter tests must prove immutable configuration hand-off, policy
+  selection, command confirmation, and refusal of parent-side hardware access.
+- Existing Prague and Košice controller suites must remain green; this migration
+  does not change their physical assumptions or control laws.
+- Packaging analysis must include the dynamically imported process kernel and
+  production backend.
+
+## Remaining live gate
+
+No live hardware command is authorized by this implementation or its software
+verification. A separately authorized run must begin with the repository
+campaign preflight and ownership/safety checks. It remains the final evidence
+for real driver enumeration, device timing, physical limits, emergency output
+state, and end-to-end measurement files.
