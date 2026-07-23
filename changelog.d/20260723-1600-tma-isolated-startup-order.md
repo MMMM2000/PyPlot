@@ -11,3 +11,6 @@
 - Defer isolated startup until the completed-run history index is ready, then
   log the exact sample identity, indexed record count, and matching metadata or
   builder-project source before any child hardware preflight.
+- Restore explicitly selected scale and PSU serial ports in the child even
+  when its asynchronous port enumeration has not populated those choices yet,
+  and include the recent child log in hardware-preflight faults.

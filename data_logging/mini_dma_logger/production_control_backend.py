@@ -133,6 +133,14 @@ def _apply_window_configuration(window: object, payload: Mapping[str, object]) -
                 if index < 0:
                     wanted_text = str(raw_state.get("text", ""))
                     index = candidate.findText(wanted_text)
+                if (
+                    index < 0
+                    and name in {"combo_scale_port", "combo_supply_port"}
+                    and wanted not in {None, ""}
+                ):
+                    wanted_text = str(raw_state.get("text", "") or wanted)
+                    candidate.addItem(wanted_text, wanted)
+                    index = candidate.count() - 1
                 if index < 0:
                     index = int(raw_state.get("index", -1))
                 if 0 <= index < candidate.count():
@@ -256,10 +264,19 @@ class ProductionMiniDmaBackend:
         starting_length = payload.get("starting_length_mm")
         steps, _summary, _interval_ms = self._window._build_automation_recipe()
         if not self._window._preflight_recipe_hardware(steps, show_progress=False):
+            log_output = getattr(self._window, "log_output", None)
+            log_text = (
+                str(log_output.toPlainText()).strip()
+                if log_output is not None and hasattr(log_output, "toPlainText")
+                else ""
+            )
+            recent_log = " | ".join(log_text.splitlines()[-12:])
             detail = (
                 str(getattr(self._window, "_controller_process_error", "")).strip()
                 or "controller-process hardware preflight failed"
             )
+            if recent_log:
+                detail = f"{detail} Child log: {recent_log}"
             raise RuntimeError(detail)
         self._hardware_preflight = _hardware_preflight_readback(self._window)
         self._window._controller_process_hardware_preflight_complete = True

@@ -492,6 +492,13 @@ def test_production_backend_preflights_before_requesting_starting_length() -> No
 
 def test_production_backend_rejects_start_when_child_hardware_preflight_fails() -> None:
     class _FailingPreflightWindow(_FakeProductionWindow):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.log_output = QtWidgets.QPlainTextEdit()
+            self.log_output.setPlainText(
+                "Preflight: trying COM6\nScale connection failed: synthetic timeout"
+            )
+
         def _preflight_recipe_hardware(
             self,
             _steps: list[object],
@@ -516,7 +523,10 @@ def test_production_backend_rejects_start_when_child_hardware_preflight_fails() 
         ),
     )
 
-    with pytest.raises(RuntimeError, match="synthetic scale connection failure"):
+    with pytest.raises(
+        RuntimeError,
+        match="synthetic scale connection failure.*Scale connection failed",
+    ):
         backend.start(request)
 
     assert backend._window.lifecycle_calls == ["hardware_preflight"]
@@ -605,6 +615,35 @@ def test_window_configuration_round_trip_preserves_qt_spin_box_types(
 
     assert target.count.value() == 17
     assert target.current.value() == pytest.approx(12.5)
+
+
+def test_window_configuration_round_trip_restores_unenumerated_serial_ports(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    assert qapp is not None
+
+    class _Window:
+        def __init__(self) -> None:
+            self.combo_scale_port = QtWidgets.QComboBox()
+            self.combo_supply_port = QtWidgets.QComboBox()
+            self._first_overheating_preflight_decision = None
+
+    source = _Window()
+    source.combo_scale_port.addItem("COM6 - saved scale", "COM6")
+    source.combo_supply_port.addItem("COM5 - HMP USB", "COM5")
+    payload = json.loads(
+        capture_window_configuration(
+            source,
+            starting_length_mm=None,
+            cadence_downgrade_accepted=True,
+        )
+    )
+    target = _Window()
+
+    _apply_window_configuration(target, payload)
+
+    assert target.combo_scale_port.currentData() == "COM6"
+    assert target.combo_supply_port.currentData() == "COM5"
 
 
 def test_real_tma_window_configuration_round_trip_accepts_all_widget_types(
