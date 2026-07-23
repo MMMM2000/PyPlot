@@ -144,7 +144,7 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-23.1"
+CONTROL_LOGIC_VERSION = "2026-07-23.2"
 CONTROL_LOGIC_PROFILE = (
     "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-response-gated-hold"
 )
@@ -8094,8 +8094,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_hold_response_stiffness_by_key: dict[tuple[str, int, float], float] = {}
         self._current_sweep_hold_response_count_by_key: dict[tuple[str, int, float], int] = {}
         self._current_sweep_cycle_center_motor_suppression_enabled = (
-            os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, "").strip().lower()
-            in {"1", "true", "yes", "on"}
+            os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, "1").strip().lower()
+            not in {"0", "false", "no", "off"}
         )
         self._iso_current_stress_ramp_rate_sample_by_key: dict[tuple[str, int, str], tuple[float, float]] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
