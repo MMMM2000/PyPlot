@@ -24092,6 +24092,39 @@ def test_current_sweep_hold_quiet_response_keeps_normal_post_move_sample_gate(
         _close_test_window(window)
 
 
+@pytest.mark.parametrize(
+    ("environment_value", "expected_enabled"),
+    [
+        (None, True),
+        ("0", False),
+        ("false", False),
+        ("1", True),
+    ],
+)
+def test_current_sweep_cycle_center_defaults_enabled_with_explicit_opt_out(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+    environment_value: str | None,
+    expected_enabled: bool,
+) -> None:
+    if environment_value is None:
+        monkeypatch.delenv(mini_dma_mod.CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(
+            mini_dma_mod.CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV,
+            environment_value,
+        )
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert (
+            window._current_sweep_cycle_center_motor_suppression_enabled
+            is expected_enabled
+        )
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_cycle_center_requires_fixed_current_history_and_fast_veto(
     tmp_path: Path,
     qtbot,

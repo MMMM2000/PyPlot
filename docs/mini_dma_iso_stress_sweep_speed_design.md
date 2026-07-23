@@ -311,7 +311,7 @@ Proceed to an offline baseline-parity and shadow-replay implementation of the fi
 
 ## Experimental controller implementation (2026-07-23)
 
-The first live-controller slice is implemented on the isolated design branch behind the non-UI environment flag `MINI_DMA_CYCLE_CENTER_MOTOR_SUPPRESSION=1`. It does not alter hold entry, current resume, recipe rate, hard stress limits, stale-feedback handling, fresh-sample confirmation, persistence, reversal, or post-move settling. After those gates permit another correction, the controller can suppress that motor command when all of the following are true:
+The first live-controller slice is implemented on the isolated design branch and is enabled by default for hardware validation. Set the non-UI environment flag `MINI_DMA_CYCLE_CENTER_MOTOR_SUPPRESSION=0` to restore baseline behavior. It does not alter hold entry, current resume, recipe rate, hard stress limits, stale-feedback handling, fresh-sample confirmation, persistence, reversal, or post-move settling. After those gates permit another correction, the controller can suppress that motor command when all of the following are true:
 
 - current is already held and at least 10 s / 32 scale samples were collected since hold entry;
 - the fixed-current robust center from at most 20 s of data is within 5 MPa of target;
