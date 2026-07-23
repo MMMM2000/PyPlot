@@ -333,16 +333,40 @@ def processed_control_signal(
     if len(window) < 1:
         window = [latest]
     raw_values = [sample.raw_stress_mpa for sample in window]
-    center = statistics.median(raw_values)
-    noise = 1.4826 * _median_absolute_deviation(raw_values, center)
-    slope = 0.0
-    if len(window) >= 2:
-        first_half = window[: max(1, len(window) // 2)]
-        second_half = window[max(1, len(window) // 2) :]
-        first_center = statistics.median(sample.raw_stress_mpa for sample in first_half)
-        second_center = statistics.median(sample.raw_stress_mpa for sample in second_half)
-        dt = max(1e-9, statistics.median(sample.elapsed_s for sample in second_half) - statistics.median(sample.elapsed_s for sample in first_half))
-        slope = (second_center - first_center) / dt
+    raw_center = statistics.median(raw_values)
+    raw_mad = _median_absolute_deviation(raw_values, raw_center)
+    outlier_limit = 6.0 * raw_mad
+    inlier_indices = [
+        index
+        for index, value in enumerate(raw_values)
+        if abs(value - raw_center) <= outlier_limit
+    ]
+    if len(inlier_indices) >= 3:
+        trend_samples = [window[index] for index in inlier_indices]
+        trend_values = [raw_values[index] for index in inlier_indices]
+    else:
+        trend_samples = window
+        trend_values = raw_values
+    pairwise_slopes = [
+        (trend_values[j] - trend_values[i])
+        / (trend_samples[j].elapsed_s - trend_samples[i].elapsed_s)
+        for i in range(len(trend_samples) - 1)
+        for j in range(i + 1, len(trend_samples))
+        if trend_samples[j].elapsed_s > trend_samples[i].elapsed_s
+    ]
+    slope = statistics.median(pairwise_slopes) if pairwise_slopes else 0.0
+    endpoint_time_s = window[-1].elapsed_s
+    endpoint_candidates = [
+        value - slope * (sample.elapsed_s - endpoint_time_s)
+        for sample, value in zip(trend_samples, trend_values, strict=False)
+    ]
+    center = statistics.median(endpoint_candidates)
+    residuals = [
+        value - (center + slope * (sample.elapsed_s - endpoint_time_s))
+        for sample, value in zip(trend_samples, trend_values, strict=False)
+    ]
+    residual_center = statistics.median(residuals)
+    noise = 1.4826 * _median_absolute_deviation(residuals, residual_center)
     age_s = max(0.0, latest.elapsed_s - window[-1].elapsed_s)
     return ProcessedControlSignal(
         center_mpa=center,
