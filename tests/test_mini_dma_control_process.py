@@ -311,6 +311,10 @@ class _FakeProductionWindow:
         self._supply_effective_readback_hz = 2.0
         self._supply_output_enabled = False
         self._supply_last_setpoint_mA = 2.0
+        self._supply_controller = None
+        self._scale_thread = object()
+        self._tic_controller = object()
+        self._tic_command_dispatcher = None
         self._session_active = False
         self._session_points = [object()]
         self._session_base_path = None
@@ -318,6 +322,8 @@ class _FakeProductionWindow:
         self.starting_length_mm = None
         self.closed = False
         self.runtime_update_calls = 0
+        self.supply_disable_calls = 0
+        self.motor_supply_disable_calls = 0
         self.lifecycle_calls: list[str] = []
         self.spin_initial_length = QtWidgets.QDoubleSpinBox()
         self.spin_initial_length.setValue(57.25)
@@ -369,10 +375,11 @@ class _FakeProductionWindow:
         self._supply_output_enabled = False
 
     def _disable_supply_output(self) -> None:
+        self.supply_disable_calls += 1
         self._supply_output_enabled = False
 
     def _disable_motor_supply_output(self) -> None:
-        pass
+        self.motor_supply_disable_calls += 1
 
     def _apply_current_sweep_pending_overrides(self, *, show_message: bool) -> bool:
         assert show_message is False
@@ -462,6 +469,9 @@ def test_production_backend_preflights_before_requesting_starting_length() -> No
     assert backend._window.lifecycle_calls == ["hardware_preflight"]
     readback = dict(backend.readback())
     assert readback["hardware_preflight_complete"] is True
+    assert readback["scale_connected"] is True
+    assert readback["tic_connected"] is True
+    assert "scale connected" in readback["hardware_preflight_detail"]
     assert readback["operator_input_required"] == "starting_length_mm"
     assert readback["operator_input_default"] == pytest.approx(57.25)
     assert readback["automation_active"] is False
@@ -511,6 +521,29 @@ def test_production_backend_rejects_start_when_child_hardware_preflight_fails() 
 
     assert backend._window.lifecycle_calls == ["hardware_preflight"]
     assert dict(backend.readback())["automation_active"] is False
+    backend.close()
+
+
+def test_production_backend_stop_while_waiting_for_length_disables_outputs() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    request = ControlStartRequest(
+        identity=_identity(),
+        policy=ControlPolicy.PRAGUE,
+        config_json=(
+            '{"schema_version":1,"widgets":{},"starting_length_mm":null,'
+            '"prior_run_preflight_complete":true,'
+            '"cadence_downgrade_accepted":true}'
+        ),
+    )
+    backend.start(request)
+
+    backend.stop()
+
+    assert backend._window.supply_disable_calls == 1
+    assert backend._window.motor_supply_disable_calls == 1
+    assert dict(backend.readback())["operator_input_required"] is None
     backend.close()
 
 

@@ -6,3 +6,5 @@
   length request.
 - Preserve integer and decimal Qt spin-box types while reconstructing recipe
   configuration in the dedicated process.
+- Show and log the child process hardware-readiness result before requesting
+  the mounted starting length.

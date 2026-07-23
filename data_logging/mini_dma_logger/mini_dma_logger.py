@@ -30968,6 +30968,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._first_overheating_preflight_allows_start():
             return
+        self._log(
+            "Previous-run and first-overheating preflight completed in the visible UI."
+        )
         if (
             self._scale_thread is not None
             or self._supply_controller is not None
@@ -31181,6 +31184,31 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._isolated_operator_prompt_open = True
         try:
+            preflight_detail = str(
+                readback.get("hardware_preflight_detail")
+                or "required hardware is ready"
+            )
+            self._log(
+                "Dedicated controller hardware preflight completed: "
+                f"{preflight_detail}."
+            )
+            self.label_current_task.setText(
+                "Current task: Hardware ready; waiting for mounted length"
+            )
+            self.label_current_task.setVisible(True)
+            self.label_control_process_status.setText(
+                "Controller: child hardware preflight passed | "
+                f"{preflight_detail}"
+            )
+            self.label_live_summary.setText(
+                "Process-owned hardware ready | "
+                f"scale {'connected' if readback.get('scale_connected') else 'not required'} | "
+                f"PSU {'connected' if readback.get('supply_connected') else 'not required'} | "
+                f"Tic {'connected' if readback.get('tic_connected') else 'not required'}"
+            )
+            QtWidgets.QApplication.processEvents(
+                QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+            )
             default_value = float(
                 readback.get("operator_input_default")
                 or self.spin_initial_length.value()

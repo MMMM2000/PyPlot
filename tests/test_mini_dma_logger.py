@@ -1755,6 +1755,12 @@ def test_isolated_start_waits_for_child_preflight_before_length_prompt(
             dropped_event_count=0,
             readback={
                 "hardware_preflight_complete": True,
+                "hardware_preflight_detail": (
+                    "scale COM6 at 9600 baud; PSU COM5; Tic connected"
+                ),
+                "scale_connected": True,
+                "supply_connected": True,
+                "tic_connected": True,
                 "operator_input_required": "starting_length_mm",
                 "operator_input_default": 57.25,
                 "automation_active": False,
@@ -1772,6 +1778,8 @@ def test_isolated_start_waits_for_child_preflight_before_length_prompt(
         assert process.update_payloads
         assert '"operator_response":"starting_length_mm"' in process.update_payloads[-1]
         assert '"value":57.602' in process.update_payloads[-1]
+        assert "hardware preflight completed" in window.log_output.toPlainText()
+        assert "scale COM6 at 9600 baud" in window.log_output.toPlainText()
     finally:
         window._isolated_recipe_active = False
         window._automation_active = False

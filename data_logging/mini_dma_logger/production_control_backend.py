@@ -165,6 +165,53 @@ def _apply_window_configuration(window: object, payload: Mapping[str, object]) -
             del blocker
 
 
+def _hardware_preflight_readback(window: object) -> dict[str, ReadbackValue]:
+    scale_port = str(
+        getattr(getattr(window, "combo_scale_port", None), "currentData", lambda: "")()
+        or ""
+    )
+    scale_baud = str(
+        getattr(getattr(window, "combo_scale_baud", None), "currentText", lambda: "")()
+        or ""
+    )
+    supply = getattr(window, "_supply_controller", None)
+    supply_connected = False
+    if supply is not None:
+        try:
+            supply_connected = bool(supply.is_connected())
+        except Exception:
+            supply_connected = False
+    supply_endpoint = str(getattr(supply, "port_name", "") or "")
+    scale_connected = getattr(window, "_scale_thread", None) is not None
+    tic_connected = (
+        getattr(window, "_tic_controller", None) is not None
+        or getattr(window, "_tic_command_dispatcher", None) is not None
+    )
+    detail_parts = [
+        (
+            f"scale {scale_port or 'connected'}"
+            + (f" at {scale_baud} baud" if scale_baud else "")
+            if scale_connected
+            else "scale not required"
+        ),
+        (
+            f"PSU {supply_endpoint or 'connected'}"
+            if supply_connected
+            else "PSU not required"
+        ),
+        "Tic connected" if tic_connected else "Tic not required",
+    ]
+    return {
+        "hardware_preflight_detail": "; ".join(detail_parts),
+        "scale_connected": scale_connected,
+        "scale_port": scale_port or None,
+        "scale_baud": scale_baud or None,
+        "supply_connected": supply_connected,
+        "supply_endpoint": supply_endpoint or None,
+        "tic_connected": tic_connected,
+    }
+
+
 class ProductionMiniDmaBackend:
     """Child-owned adapter around the existing production controller."""
 
@@ -178,6 +225,7 @@ class ProductionMiniDmaBackend:
         self._last_error = ""
         self._window_factory = window_factory
         self._awaiting_starting_length = False
+        self._hardware_preflight: dict[str, ReadbackValue] = {}
 
     def start(self, request: ControlStartRequest) -> None:
         payload = json.loads(request.config_json)
@@ -213,6 +261,7 @@ class ProductionMiniDmaBackend:
                 or "controller-process hardware preflight failed"
             )
             raise RuntimeError(detail)
+        self._hardware_preflight = _hardware_preflight_readback(self._window)
         self._window._controller_process_hardware_preflight_complete = True
         requires_starting_length = any(
             step.action == "starting_length_prompt" for step in steps
@@ -261,6 +310,9 @@ class ProductionMiniDmaBackend:
                 user_initiated=True,
                 offer_recovery=False,
             )
+        elif self._awaiting_starting_length:
+            window._disable_supply_output()
+            window._disable_motor_supply_output()
         self._awaiting_starting_length = False
         self._stopped = True
         self._drain_events()
@@ -416,7 +468,7 @@ class ProductionMiniDmaBackend:
             ("tic_vin_v", window._last_tic_vin_v),
             ("emergency_reason", self._emergency_reason),
             ("error", self._last_error),
-        )
+        ) + tuple(self._hardware_preflight.items())
         capture_plot_point = getattr(window, "_capture_live_plot_point", None)
         plot_point = capture_plot_point() if callable(capture_plot_point) else None
         if plot_point is None:
