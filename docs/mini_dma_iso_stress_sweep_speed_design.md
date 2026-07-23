@@ -308,3 +308,14 @@ A 36-configuration screen varied the long-window maximum, minimum fixed-current 
 ## Recommendation
 
 Proceed to an offline baseline-parity and shadow-replay implementation of the fixed-current cycle-center estimator; do not change the live controller yet. Replay must show when the estimator becomes ready, which real motor commands it would suppress, whether the existing post-move feedback gate would then release the hold, and every fast/raw veto. Only after event-level parity and held-out real-run validation should cycle-aware motor suppression be implemented behind a non-UI feature flag. Do not include cycle-center resume or new probation logic in that first slice: the ablation shows that solving phase-chasing at the motor-decision layer is both simpler and faster.
+
+## Experimental controller implementation (2026-07-23)
+
+The first live-controller slice is implemented on the isolated design branch behind the non-UI environment flag `MINI_DMA_CYCLE_CENTER_MOTOR_SUPPRESSION=1`. It does not alter hold entry, current resume, recipe rate, hard stress limits, stale-feedback handling, fresh-sample confirmation, persistence, reversal, or post-move settling. After those gates permit another correction, the controller can suppress that motor command when all of the following are true:
+
+- current is already held and at least 10 s / 32 scale samples were collected since hold entry;
+- the fixed-current robust center from at most 20 s of data is within 5 MPa of target;
+- the two half-window centers indicate no material drift, bounded by 0.35 MPa/s and 15% of the observed signal span;
+- neither the latest raw-equivalent stress nor the 1.8 s processed value is more than 35 MPa from target.
+
+If any condition fails, the existing correction path runs unchanged. The feature state and all cycle-center evidence are included in the control-logic fingerprint and `control_trace.csv`. This is an experimental branch implementation, not a `main` default.

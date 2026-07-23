@@ -22812,6 +22812,152 @@ def test_current_sweep_hold_quiet_response_keeps_normal_post_move_sample_gate(
         _close_test_window(window)
 
 
+def test_current_sweep_cycle_center_requires_fixed_current_history_and_fast_veto(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    now_s = time.time()
+    start_s = now_s - 20.0
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._current_sweep_ramp_hold_scale_started_s = start_s
+    window._current_sweep_cycle_center_motor_suppression_enabled = True
+    for index in range(81):
+        elapsed_s = index * 0.25
+        stress_mpa = 50.0 + 12.0 * math.cos(
+            2.0 * math.pi * elapsed_s / 10.0
+        )
+        load_g = mini_dma_mod.load_g_from_stress_mpa(
+            stress_mpa,
+            window.spin_diameter.value(),
+        )
+        assert load_g is not None
+        timestamp_s = start_s + elapsed_s
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        state = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+        )
+
+        assert state.signal is not None
+        assert state.signal.sample_count == 81
+        assert state.signal.span_s == pytest.approx(20.0)
+        assert state.ready is True
+        assert state.stationary is True
+        assert state.error_value == pytest.approx(0.0, abs=0.5)
+        assert state.fast_veto is False
+        assert state.suppression_allowed is True
+
+        veto_signal = mini_dma_mod.ScaleControlSignal(
+            value=90.0,
+            latest_value=90.0,
+            noise=0.1,
+            slope_per_s=0.0,
+            sample_count=7,
+            timestamp_s=now_s,
+        )
+        vetoed = window._current_sweep_hold_cycle_center_state(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            50.0,
+            veto_signal,
+        )
+        assert vetoed.fast_veto is True
+        assert vetoed.suppression_allowed is False
+    finally:
+        _close_test_window(window)
+
+
+def test_current_sweep_cycle_center_suppresses_phase_chasing_motor_command(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    moves: list[float] = []
+    trace_rows: list[dict[str, object]] = []
+    now_s = time.time()
+    start_s = now_s - 20.0
+
+    window._move_to_position_mm = (  # type: ignore[method-assign]
+        lambda target_mm, **_kwargs: moves.append(float(target_mm)) or True
+    )
+    window._write_control_trace = (  # type: ignore[method-assign]
+        lambda **kwargs: trace_rows.append(dict(kwargs))
+    )
+    window._seek_requires_fresh_after_last_move = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: False
+    )
+    window._seek_has_unused_scale_sample = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: True
+    )
+    window._current_hold_error_is_persistent = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: True
+    )
+    window.spin_zero_load_scale_g.setValue(0.0)
+    window.spin_diameter.setValue(0.0191)
+    window.spin_backlash_mm.setValue(0.0)
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._current_sweep_ramp_hold_scale_started_s = start_s
+    window._current_sweep_cycle_center_motor_suppression_enabled = True
+    for index in range(81):
+        elapsed_s = index * 0.25
+        stress_mpa = 50.0 + 12.0 * math.cos(
+            2.0 * math.pi * elapsed_s / 10.0
+        )
+        load_g = mini_dma_mod.load_g_from_stress_mpa(
+            stress_mpa,
+            window.spin_diameter.value(),
+        )
+        assert load_g is not None
+        timestamp_s = start_s + elapsed_s
+        window._scale_signal_buffer.add_sample(
+            timestamp_s=timestamp_s,
+            raw_g=load_g,
+            applied_load_g=load_g,
+            raw_text=f"{load_g:.5f} g",
+        )
+        window._latest_scale_timestamp = timestamp_s
+        window._latest_scale_value_g = load_g
+
+    try:
+        reached = window._seek_distribution_target(
+            mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            target_value=50.0,
+            tolerance=0.171,
+        )
+
+        assert reached is False
+        assert not moves
+        assert trace_rows[-1]["result"] == "suppressed"
+        assert trace_rows[-1]["reason"] == "cycle_center_motor_suppression"
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_hold_volatile_response_waits_before_compounding_move(
     tmp_path: Path,
     qtbot,
@@ -28487,7 +28633,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
 
         assert first_logic["name"] == "mini_dma_control"
         assert first_logic["version"]
-        assert first_logic["profile"] == "processed-center-response-gated-hold"
+        assert first_logic["profile"] == "cycle-centered-response-gated-hold"
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64
         assert "current_hold_persistent_error_gate" in first_logic["features"]
@@ -28505,6 +28651,11 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert "current_sweep_reverse_current_recipe_flag" in first_logic["features"]
         assert "control_constants" in first_logic["fingerprint_fields"]
         assert "current_hold_noise_sigma" in first_logic["fingerprint_fields"]
+        assert (
+            "current_hold_cycle_center_motor_suppression_enabled"
+            in first_logic["fingerprint_fields"]
+        )
+        assert "current_hold_cycle_center_motor_suppression" in first_logic["features"]
 
         old_fingerprint = first_logic["fingerprint"]
         window.spin_current_sweep_hold_noise_sigma.setValue(
