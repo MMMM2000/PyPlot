@@ -24193,6 +24193,185 @@ def test_current_sweep_cycle_center_requires_fixed_current_history_and_fast_veto
         _close_test_window(window)
 
 
+def test_current_sweep_cycle_center_resume_requires_fresh_bounded_evidence(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    resumes: list[str] = []
+    trace_rows: list[dict[str, object]] = []
+    signal = mini_dma_mod.ScaleControlSignal(
+        value=51.5,
+        latest_value=58.0,
+        noise=6.0,
+        slope_per_s=0.0,
+        sample_count=81,
+        timestamp_s=time.time(),
+        span_s=20.0,
+        raw_min_value=38.0,
+        raw_max_value=62.0,
+        endpoint_slope_per_s=0.05,
+    )
+    state = mini_dma_mod.CurrentHoldCycleCenterState(
+        signal=signal,
+        error_value=-1.5,
+        ready=True,
+        stationary=True,
+        fast_veto=False,
+        suppression_allowed=True,
+    )
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._scale_control_signal_for_basis = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: signal
+    )
+    window._current_sweep_hold_cycle_center_state = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: state
+    )
+    window._has_fresh_scale_reading = lambda **_kwargs: True  # type: ignore[method-assign]
+    window._resume_current_sweep_ramp_from_hold = (  # type: ignore[method-assign]
+        lambda **kwargs: resumes.append(str(kwargs["reason"]))
+    )
+    window._write_control_trace = (  # type: ignore[method-assign]
+        lambda **kwargs: trace_rows.append(dict(kwargs))
+    )
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_hold_enabled=True,
+    )
+
+    try:
+        window._latest_scale_arrival_monotonic_s = 10.0
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=100.0,
+            )
+            is False
+        )
+        window._latest_scale_arrival_monotonic_s = 11.9
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=101.9,
+            )
+            is False
+        )
+        window._latest_scale_arrival_monotonic_s = 12.1
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=102.1,
+            )
+            is True
+        )
+
+        assert len(resumes) == 1
+        assert "mature fixed-current distribution" in resumes[0]
+        assert trace_rows[-1]["result"] == "cycle_center_resume"
+    finally:
+        _close_test_window(window)
+
+
+@pytest.mark.parametrize(
+    ("signal", "state"),
+    [
+        (
+            mini_dma_mod.ScaleControlSignal(
+                value=50.0,
+                latest_value=50.0,
+                noise=12.1,
+                slope_per_s=0.0,
+                sample_count=81,
+                timestamp_s=1.0,
+                span_s=20.0,
+                raw_min_value=30.0,
+                raw_max_value=70.0,
+                endpoint_slope_per_s=0.0,
+            ),
+            mini_dma_mod.CurrentHoldCycleCenterState(
+                signal=None,
+                error_value=0.0,
+                ready=True,
+                stationary=True,
+                fast_veto=False,
+                suppression_allowed=True,
+            ),
+        ),
+        (
+            mini_dma_mod.ScaleControlSignal(
+                value=50.0,
+                latest_value=71.0,
+                noise=5.0,
+                slope_per_s=0.0,
+                sample_count=81,
+                timestamp_s=1.0,
+                span_s=20.0,
+                raw_min_value=30.0,
+                raw_max_value=71.0,
+                endpoint_slope_per_s=0.0,
+            ),
+            mini_dma_mod.CurrentHoldCycleCenterState(
+                signal=None,
+                error_value=0.0,
+                ready=True,
+                stationary=True,
+                fast_veto=False,
+                suppression_allowed=True,
+            ),
+        ),
+    ],
+)
+def test_current_sweep_cycle_center_resume_vetoes_dispersion_and_fast_excursions(
+    tmp_path: Path,
+    qtbot,
+    signal: mini_dma_mod.ScaleControlSignal,
+    state: mini_dma_mod.CurrentHoldCycleCenterState,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    state = dataclasses.replace(state, signal=signal)
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._set_automation_context(
+        phase="current_hold",
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        target_value=50.0,
+        plateau_index=1,
+    )
+    window._scale_control_signal_for_basis = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: signal
+    )
+    window._current_sweep_hold_cycle_center_state = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: state
+    )
+    window._has_fresh_scale_reading = lambda **_kwargs: True  # type: ignore[method-assign]
+    window._latest_scale_arrival_monotonic_s = 10.0
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=50.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_hold_enabled=True,
+    )
+
+    try:
+        assert (
+            window._maybe_resume_current_sweep_ramp_from_cycle_center(
+                step,
+                now_s=100.0,
+            )
+            is False
+        )
+        assert window._current_sweep_ramp_hold_cycle_center_since_s is None
+    finally:
+        _close_test_window(window)
+
+
 def test_current_sweep_cycle_center_suppresses_phase_chasing_motor_command(
     tmp_path: Path,
     qtbot,
@@ -29979,7 +30158,7 @@ def test_session_metadata_records_control_logic_version_and_fingerprint(
         assert first_logic["version"]
         assert (
             first_logic["profile"]
-            == "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-hold"
+            == "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
         )
         assert first_logic["fingerprint"].startswith("sha256:")
         assert len(first_logic["fingerprint"]) == len("sha256:") + 64

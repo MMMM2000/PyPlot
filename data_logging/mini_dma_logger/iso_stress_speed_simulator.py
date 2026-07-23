@@ -167,7 +167,9 @@ class IsoStressPolicyConfig:
     cycle_drift_ratio_max: float = 0.15
     cycle_slope_max_mpa_s: float = 0.35
     cycle_fast_veto_mpa: float = 35.0
-    cycle_evidence_required_s: float = 0.5
+    cycle_resume_fast_veto_mpa: float = 20.0
+    cycle_resume_noise_max_mpa: float = 12.0
+    cycle_evidence_required_s: float = 2.0
     cycle_probe_factor: float = 0.25
     cycle_probe_s: float = 2.0
     cycle_probe_min_samples: int = 8
@@ -666,14 +668,18 @@ def run_iso_stress_simulation(
                 cycle_centered = (
                     cycle_stationary
                     and abs(cycle.center_mpa) <= policy.cycle_center_band_mpa
-                    and abs(fast_error) <= policy.cycle_fast_veto_mpa
+                    and cycle.noise_mpa <= policy.cycle_resume_noise_max_mpa
+                    and abs(fast_error) <= policy.cycle_resume_fast_veto_mpa
                     and abs(measured_stress - plant.target_stress_mpa)
-                    <= policy.cycle_fast_veto_mpa
+                    <= policy.cycle_resume_fast_veto_mpa
                     and post_move_feedback_ready
                 )
                 if cycle_centered:
                     evidence_s = min(
-                        policy.evidence_cap_s,
+                        max(
+                            policy.evidence_cap_s,
+                            policy.cycle_evidence_required_s,
+                        ),
                         evidence_s + step_dt,
                     )
                     decision = "earn_cycle_center_evidence"

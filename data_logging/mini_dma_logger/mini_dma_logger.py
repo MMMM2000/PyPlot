@@ -127,8 +127,8 @@ RUNTIME_PENDING_CHECKBOX_STYLE = "QCheckBox { color: #facc15; font-weight: 600; 
 SESSION_SETUP_CSV = "setup.csv"
 SESSION_UI_TELEMETRY_CSV = "ui_telemetry.csv"
 CONTROL_LOGIC_NAME = "mini_dma_control"
-CONTROL_LOGIC_VERSION = "2026-07-23.3"
-CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-hold"
+CONTROL_LOGIC_VERSION = "2026-07-23.4"
+CONTROL_LOGIC_PROFILE = "scale-routed-prague-legacy-kosice-adaptive-cycle-centered-resume"
 RECIPE_SPINBOX_WIDTH_PX = 220
 RECIPE_EQUIVALENT_LABEL_WIDTH_PX = 120
 RECIPE_EQUIVALENT_ROW_SPACING_PX = 6
@@ -138,6 +138,7 @@ CONTROL_LOGIC_FEATURES = [
     "setup_zero_plateau_accept_current_position",
     "current_hold_filtered_scale_signal",
     "current_hold_cycle_center_motor_suppression",
+    "current_hold_cycle_center_resume_confirmation",
     "current_hold_filtered_signal_change_gate",
     "current_hold_persistent_error_gate",
     "current_hold_automatic_entry_gate",
@@ -849,7 +850,11 @@ SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_BAND_MPA = 5.0
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_DRIFT_RATIO_MAX = 0.15
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_SLOPE_MAX_MPA_S = 0.35
 SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_FAST_VETO_MPA = 35.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA = 20.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA = 12.0
+SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S = 2.0
 CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV = "MINI_DMA_CYCLE_CENTER_MOTOR_SUPPRESSION"
+CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_ENV = "MINI_DMA_CYCLE_CENTER_RESUME"
 SERVO_CURRENT_SWEEP_HOLD_MIN_PAUSE_STRESS_MPA = 2.0
 SERVO_CURRENT_SWEEP_HOLD_MIN_RESUME_STRESS_MPA = 1.0
 SERVO_CURRENT_SWEEP_HOLD_NOISE_SIGMA = 3.0
@@ -7911,6 +7916,10 @@ class MainWindow(QtWidgets.QMainWindow):
             os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_ENV, "1").strip().lower()
             not in {"0", "false", "no", "off"}
         )
+        self._current_sweep_cycle_center_resume_enabled = (
+            os.environ.get(CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_ENV, "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
         self._iso_current_stress_ramp_rate_sample_by_key: dict[tuple[str, int, str], tuple[float, float]] = {}
         self._setup_preload_engaged_seek_keys: set[tuple[str, int, float]] = set()
         self._seek_live_stiffness_g_per_mm: float | None = None
@@ -8123,6 +8132,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_step_index: int | None = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s: float | None = None
+        self._current_sweep_ramp_hold_cycle_center_since_s: float | None = None
         self._current_sweep_ramp_hold_seek_accepted_since_s: float | None = None
         self._current_sweep_ramp_hold_entry_abs_error: float | None = None
         self._current_sweep_ramp_hold_entry_signed_error: float | None = None
@@ -26102,6 +26112,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_hold_cycle_center_fast_veto_mpa": (
                     SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_FAST_VETO_MPA
                 ),
+                "current_hold_cycle_center_resume_fast_veto_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA
+                ),
+                "current_hold_cycle_center_resume_noise_max_mpa": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA
+                ),
+                "current_hold_cycle_center_resume_evidence_s": (
+                    SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S
+                ),
             },
             "settings": {
                 "control_interval_ms": self._control_interval_ms(),
@@ -26125,6 +26144,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "current_ramp_hold_pause_factor": float(self.spin_current_sweep_hold_pause_factor.value()),
                 "current_ramp_hold_resume_factor": float(self.spin_current_sweep_hold_resume_factor.value()),
                 "current_ramp_hold_resume_stable_s": float(self.spin_current_sweep_hold_resume_stable_s.value()),
+                "current_hold_cycle_center_resume_enabled": (
+                    self._current_sweep_cycle_center_resume_enabled
+                ),
                 "current_hold_filter_window_s": self._current_sweep_hold_filter_window_s(),
                 "current_hold_noise_sigma": self._current_sweep_hold_noise_sigma(),
                 "current_hold_min_pause_stress_mpa": self._current_sweep_hold_min_pause_stress_mpa(),
@@ -32970,6 +32992,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_sweep_ramp_hold_step_index = None
         self._current_sweep_ramp_hold_started_s = 0.0
         self._current_sweep_ramp_hold_in_band_since_s = None
+        self._current_sweep_ramp_hold_cycle_center_since_s = None
         self._current_sweep_ramp_hold_seek_accepted_since_s = None
         self._current_sweep_ramp_hold_entry_abs_error = None
         self._current_sweep_ramp_hold_entry_signed_error = None
@@ -33685,7 +33708,121 @@ class MainWindow(QtWidgets.QMainWindow):
                 return False, False
         else:
             self._current_sweep_ramp_hold_in_band_since_s = None
+        if self._maybe_resume_current_sweep_ramp_from_cycle_center(
+            step,
+            now_s=now_s,
+        ):
+            return False, False
         return True, False
+
+    def _maybe_resume_current_sweep_ramp_from_cycle_center(
+        self,
+        step: AutomationStep,
+        *,
+        now_s: float,
+    ) -> bool:
+        """Resume from a mature, stationary distribution centered on target.
+
+        This supplements the fast-window criterion without weakening it:
+        recent and latest feedback, long-window dispersion, coherent drift,
+        motor settling, and fresh-sample evidence can all veto the resume.
+        """
+        if (
+            not self._current_sweep_cycle_center_resume_enabled
+            or step.target_value is None
+            or step.basis not in {HSW_BASIS_LOAD_G, HSW_BASIS_STRESS_MPA}
+        ):
+            self._current_sweep_ramp_hold_cycle_center_since_s = None
+            return False
+        fast_signal = self._scale_control_signal_for_basis(
+            step.basis,
+            trend_aware=True,
+        )
+        state = self._current_sweep_hold_cycle_center_state(
+            step.basis,
+            float(step.target_value),
+            fast_signal,
+        )
+        signal = state.signal
+        fast_veto_band = self._current_sweep_hold_min_band_for_basis(
+            step.basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_FAST_VETO_MPA,
+        )
+        noise_cap = self._current_sweep_hold_min_band_for_basis(
+            step.basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_NOISE_MAX_MPA,
+        )
+        center_band = self._current_sweep_hold_min_band_for_basis(
+            step.basis,
+            SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_BAND_MPA,
+        )
+        motion_ready_after_s = self._motion_feedback_ready_after_s()
+        motion_ready_after_monotonic_s = self._motion_feedback_ready_after_monotonic_s()
+        motor_active_or_settling = (
+            self._pending_motion_command is not None
+            or self._kosice_active_motion_target_steps is not None
+            or (
+                motion_ready_after_monotonic_s is not None
+                and time.monotonic() < motion_ready_after_monotonic_s
+            )
+        )
+        post_move_feedback_ready = (
+            not motor_active_or_settling
+            and self._has_fresh_scale_reading(
+                after_s=motion_ready_after_s,
+                after_monotonic_s=motion_ready_after_monotonic_s,
+            )
+        )
+        eligible = (
+            state.ready
+            and state.stationary
+            and not state.fast_veto
+            and signal is not None
+            and state.error_value is not None
+            and abs(float(state.error_value)) <= center_band
+            and float(signal.noise) <= noise_cap
+            and fast_signal is not None
+            and abs(float(step.target_value) - float(fast_signal.value)) <= fast_veto_band
+            and abs(float(step.target_value) - float(fast_signal.latest_value)) <= fast_veto_band
+            and post_move_feedback_ready
+        )
+        sample_clock_s = self._latest_scale_arrival_monotonic_s
+        if not eligible or sample_clock_s is None:
+            self._current_sweep_ramp_hold_cycle_center_since_s = None
+            return False
+        if self._current_sweep_ramp_hold_cycle_center_since_s is None:
+            self._current_sweep_ramp_hold_cycle_center_since_s = float(sample_clock_s)
+            self._log_waiting_for_feedback(
+                "The mature fixed-current stress distribution is centered on target; "
+                "confirming fresh stationary feedback before resuming current."
+            )
+            return False
+        evidence_s = max(
+            0.0,
+            float(sample_clock_s)
+            - float(self._current_sweep_ramp_hold_cycle_center_since_s),
+        )
+        if evidence_s < SERVO_CURRENT_SWEEP_HOLD_CYCLE_CENTER_RESUME_EVIDENCE_S:
+            return False
+        self._write_control_trace(
+            decision="accept",
+            basis=step.basis,
+            target_value=step.target_value,
+            current_value=signal.value,
+            error_value=state.error_value,
+            tolerance=center_band,
+            result="cycle_center_resume",
+            reason="mature_stationary_distribution",
+        )
+        self._resume_current_sweep_ramp_from_hold(
+            now_s=now_s,
+            reason=(
+                "mature fixed-current distribution is centered on target "
+                f"(center error {_format_compact_number(abs(float(state.error_value)))}, "
+                f"robust noise {_format_compact_number(float(signal.noise))})"
+            ),
+        )
+        return True
 
     def _maybe_resume_current_sweep_held_recovery_from_adaptive_band(
         self,
