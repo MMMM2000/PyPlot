@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, FrozenInstanceError
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 from PyQt6 import QtWidgets
@@ -315,6 +316,26 @@ class _FakeProductionWindow:
         self.starting_length_mm = None
         self.closed = False
         self.runtime_update_calls = 0
+        self.lifecycle_calls: list[str] = []
+        self.spin_initial_length = QtWidgets.QDoubleSpinBox()
+        self.spin_initial_length.setValue(57.25)
+
+    def _build_automation_recipe(self) -> tuple[list[object], str, int]:
+        return (
+            [SimpleNamespace(action="starting_length_prompt"), SimpleNamespace(action="wait")],
+            "fake recipe",
+            50,
+        )
+
+    def _preflight_recipe_hardware(
+        self,
+        _steps: list[object],
+        *,
+        show_progress: bool,
+    ) -> bool:
+        assert show_progress is False
+        self.lifecycle_calls.append("hardware_preflight")
+        return True
 
     def set_length_setup_automation_values(
         self,
@@ -326,6 +347,7 @@ class _FakeProductionWindow:
         self.starting_length_mm = starting_length_mm
 
     def _start_auto_ramp(self) -> None:
+        self.lifecycle_calls.append("recipe_start")
         self._automation_active = True
         self._session_active = True
         self._supply_output_enabled = True
@@ -394,6 +416,7 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
     )
 
     backend.start(request)
+    assert backend._window.lifecycle_calls == ["hardware_preflight", "recipe_start"]
     readback = dict(backend.readback())
     assert readback["backend_owner_pid"] == os.getpid()
     assert readback["automation_active"] is True
@@ -418,6 +441,77 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
     backend.close()
 
 
+def test_production_backend_preflights_before_requesting_starting_length() -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FakeProductionWindow)
+    request = ControlStartRequest(
+        identity=_identity(),
+        policy=ControlPolicy.PRAGUE,
+        config_json=(
+            '{"schema_version":1,"widgets":{},"starting_length_mm":null,'
+            '"prior_run_preflight_complete":true,'
+            '"cadence_downgrade_accepted":true}'
+        ),
+    )
+
+    backend.start(request)
+
+    assert backend._window.lifecycle_calls == ["hardware_preflight"]
+    readback = dict(backend.readback())
+    assert readback["hardware_preflight_complete"] is True
+    assert readback["operator_input_required"] == "starting_length_mm"
+    assert readback["operator_input_default"] == pytest.approx(57.25)
+    assert readback["automation_active"] is False
+    assert backend.completion_detail() is None
+
+    accepted, detail = backend.update_config(
+        '{"schema_version":1,"operator_response":"starting_length_mm","value":57.602}'
+    )
+
+    assert accepted is True
+    assert "recipe started" in detail
+    assert backend._window.starting_length_mm == pytest.approx(57.602)
+    assert backend._window.lifecycle_calls == ["hardware_preflight", "recipe_start"]
+    assert dict(backend.readback())["operator_input_required"] is None
+    assert dict(backend.readback())["automation_active"] is True
+    backend.close()
+
+
+def test_production_backend_rejects_start_when_child_hardware_preflight_fails() -> None:
+    class _FailingPreflightWindow(_FakeProductionWindow):
+        def _preflight_recipe_hardware(
+            self,
+            _steps: list[object],
+            *,
+            show_progress: bool,
+        ) -> bool:
+            assert show_progress is False
+            self.lifecycle_calls.append("hardware_preflight")
+            self._controller_process_error = "synthetic scale connection failure"
+            return False
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    del app
+    backend = ProductionMiniDmaBackend(window_factory=_FailingPreflightWindow)
+    request = ControlStartRequest(
+        identity=_identity(),
+        policy=ControlPolicy.PRAGUE,
+        config_json=(
+            '{"schema_version":1,"widgets":{},"starting_length_mm":null,'
+            '"prior_run_preflight_complete":true,'
+            '"cadence_downgrade_accepted":true}'
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic scale connection failure"):
+        backend.start(request)
+
+    assert backend._window.lifecycle_calls == ["hardware_preflight"]
+    assert dict(backend.readback())["automation_active"] is False
+    backend.close()
+
+
 def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
     qapp: QtWidgets.QApplication,
 ) -> None:
@@ -439,6 +533,7 @@ def test_capture_window_configuration_is_json_and_does_not_retain_qt_objects(
         cadence_downgrade_accepted=True,
     )
     assert '"starting_length_mm":57.0' in payload
+    assert '"prior_run_preflight_complete":true' in payload
     assert '"value":12.5' in payload
     assert '"data":"prague"' in payload
     assert "PyQt6" not in payload

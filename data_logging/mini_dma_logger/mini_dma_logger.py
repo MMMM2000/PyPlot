@@ -93,6 +93,7 @@ from data_logging.mini_dma_logger.control_process import (
 )
 from data_logging.mini_dma_logger.production_control_backend import (
     capture_runtime_configuration,
+    capture_starting_length_response,
     capture_window_configuration,
 )
 
@@ -7916,6 +7917,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._controller_process_mode = bool(controller_process_mode)
         self._controller_process_error = ""
         self._controller_process_cadence_downgrade_accepted = False
+        self._controller_process_prior_run_preflight_complete = False
+        self._controller_process_hardware_preflight_complete = False
         self._production_control_process: MiniDmaControlProcess | None = None
         self._production_control_identity: ControlSessionIdentity | None = None
         self._production_control_generation = 0
@@ -7925,6 +7928,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_command_pending: str | None = None
         self._isolated_pending_sequence: int | None = None
         self._isolated_runtime_update_values: dict[str, float | bool] | None = None
+        self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s: float | None = None
         self._ui_thread_id = get_ident()
         self._control_worker_thread_id: int | None = None
@@ -30964,19 +30968,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._first_overheating_preflight_allows_start():
             return
-        starting_length_mm: float | None = None
-        if any(step.action == "starting_length_prompt" for step in steps):
-            starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
-                self,
-                APP_NAME,
-                "Measured mounted wire length now (mm):",
-                max(0.001, float(self.spin_initial_length.value())),
-                0.001,
-                100000.0,
-                4,
-            )
-            if not accepted:
-                return
         if (
             self._scale_thread is not None
             or self._supply_controller is not None
@@ -30996,7 +30987,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         config_json = capture_window_configuration(
             self,
-            starting_length_mm=starting_length_mm,
+            starting_length_mm=None,
             cadence_downgrade_accepted=True,
         )
         policy = (
@@ -31051,6 +31042,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self._production_control_snapshot = snapshot
             readback = dict(snapshot.readback)
             self._consume_isolated_plot_snapshot(readback)
+            if (
+                readback.get("operator_input_required") == "starting_length_mm"
+                and not self._isolated_operator_prompt_open
+                and self._isolated_command_pending == "start"
+            ):
+                self._request_isolated_starting_length(readback)
             self._automation_paused = snapshot.state is ControlState.PAUSED
             self._isolated_recipe_paused = self._automation_paused
             pending_sequence = self._isolated_pending_sequence
@@ -31066,12 +31063,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._log(f"Control-process command rejected: {detail}")
                 self._update_recipe_buttons()
             elif (
-                self._isolated_command_pending == "update_config"
+                self._isolated_command_pending in {"update_config", "starting_length"}
                 and pending_sequence is not None
                 and snapshot.last_command_sequence >= pending_sequence
                 and getattr(snapshot, "last_command_result", "") == "accepted"
             ):
-                if self._isolated_runtime_update_values is not None:
+                if (
+                    self._isolated_command_pending == "update_config"
+                    and self._isolated_runtime_update_values is not None
+                ):
                     self._current_sweep_runtime_applied_values = dict(
                         self._isolated_runtime_update_values
                     )
@@ -31080,7 +31080,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._isolated_pending_sequence = None
                 self._update_recipe_buttons()
             if (
-                (self._isolated_command_pending == "start" and snapshot.state is ControlState.RUNNING)
+                (
+                    self._isolated_command_pending == "start"
+                    and snapshot.state is ControlState.RUNNING
+                    and bool(readback.get("automation_active"))
+                )
                 or (
                     self._isolated_command_pending == "pause"
                     and snapshot.state is ControlState.PAUSED
@@ -31167,6 +31171,50 @@ class MainWindow(QtWidgets.QMainWindow):
                 detail=f"control process exited with code {process.exitcode}",
             )
 
+    def _request_isolated_starting_length(
+        self,
+        readback: Mapping[str, object],
+    ) -> None:
+        process = self._production_control_process
+        identity = self._production_control_identity
+        if process is None or identity is None:
+            return
+        self._isolated_operator_prompt_open = True
+        try:
+            default_value = float(
+                readback.get("operator_input_default")
+                or self.spin_initial_length.value()
+            )
+            starting_length_mm, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                APP_NAME,
+                "Measured mounted wire length now (mm):",
+                max(0.001, default_value),
+                0.001,
+                100000.0,
+                4,
+            )
+            if accepted:
+                sequence = process.update_config(
+                    identity,
+                    capture_starting_length_response(starting_length_mm),
+                )
+                self._isolated_command_pending = "starting_length"
+                self._isolated_pending_sequence = sequence
+                self.label_control_process_status.setText(
+                    "Controller: mounted length sent; awaiting child confirmation"
+                )
+            else:
+                sequence = process.stop(identity)
+                self._isolated_command_pending = "stop"
+                self._isolated_pending_sequence = sequence
+                self.label_control_process_status.setText(
+                    "Controller: startup cancelled; awaiting safe child stop"
+                )
+            self._update_recipe_buttons()
+        finally:
+            self._isolated_operator_prompt_open = False
+
     def _finish_isolated_recipe(
         self,
         *,
@@ -31180,6 +31228,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_command_pending = None
         self._isolated_pending_sequence = None
         self._isolated_runtime_update_values = None
+        self._isolated_operator_prompt_open = False
         self._isolated_last_plot_elapsed_s = None
         self._automation_active = False
         self._automation_paused = False
@@ -31255,10 +31304,20 @@ class MainWindow(QtWidgets.QMainWindow):
                     "Discarded stopped-recipe resume state because the visible recipe controls changed."
                 )
             self._resume_recipe_state = None
-        if not self._first_overheating_preflight_allows_start():
+        if (
+            self._controller_process_mode
+            and self._controller_process_prior_run_preflight_complete
+        ):
+            self._controller_process_prior_run_preflight_complete = False
+        elif not self._first_overheating_preflight_allows_start():
             return
         self._sync_stale_log_name_from_sample()
-        if not self._preflight_recipe_hardware(steps, show_progress=True):
+        if (
+            self._controller_process_mode
+            and self._controller_process_hardware_preflight_complete
+        ):
+            self._controller_process_hardware_preflight_complete = False
+        elif not self._preflight_recipe_hardware(steps, show_progress=True):
             self._first_overheating_preflight_decision = None
             return
         if not self._prepare_continuity_current_for_recipe(steps):

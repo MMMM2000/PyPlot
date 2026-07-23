@@ -1517,6 +1517,7 @@ class _FakeIsolatedControlProcess:
         self.closed = False
         self.requests: list[object] = []
         self.commands: list[tuple[str, object | None]] = []
+        self.update_payloads: list[str] = []
         self.next_snapshot: object | None = None
         self.next_events: tuple[object, ...] = ()
 
@@ -1541,7 +1542,7 @@ class _FakeIsolatedControlProcess:
 
     def update_config(self, identity: object, config_json: str) -> int:
         self.commands.append(("update_config", identity))
-        assert '"runtime_update":true' in config_json
+        self.update_payloads.append(config_json)
         return 5
 
     def emergency_stop(self) -> None:
@@ -1633,6 +1634,11 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
                 plateau_label="synthetic",
             )
             readback = {
+                "automation_active": state
+                in {
+                    mini_dma_mod.ControlState.RUNNING,
+                    mini_dma_mod.ControlState.PAUSED,
+                },
                 "automation_phase": state.value,
                 "automation_index": 0,
                 "automation_total": 1,
@@ -1694,6 +1700,81 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         assert process.closed is True
         assert window._isolated_recipe_active is False
     finally:
+        _close_test_window(window)
+
+
+def test_isolated_start_waits_for_child_preflight_before_length_prompt(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("starting_length_prompt")],
+        "Synthetic isolated recipe",
+        50,
+    )
+    ordering: list[str] = []
+    window._first_overheating_preflight_allows_start = (  # type: ignore[method-assign]
+        lambda: ordering.append("prior_run_check") or True
+    )
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *_args, **_kwargs: (
+            ordering.append("length_prompt") or 57.602,
+            True,
+        ),
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert ordering == ["prior_run_check"]
+        assert len(process.requests) == 1
+        assert '"starting_length_mm":null' in process.requests[0].config_json
+        process.next_snapshot = SimpleNamespace(
+            identity=process.requests[0].identity,
+            state=mini_dma_mod.ControlState.RUNNING,
+            sequence=1,
+            monotonic_s=time.monotonic(),
+            tick_count=1,
+            last_command_sequence=1,
+            last_command_result="accepted",
+            last_command_detail="hardware preflight complete",
+            policy=process.requests[0].policy,
+            owner_pid=process.pid,
+            dropped_event_count=0,
+            readback={
+                "hardware_preflight_complete": True,
+                "operator_input_required": "starting_length_mm",
+                "operator_input_default": 57.25,
+                "automation_active": False,
+                "automation_phase": "awaiting_operator_input",
+                "automation_index": 0,
+                "automation_total": 1,
+                "task": "Waiting for mounted starting length",
+            },
+        )
+
+        window._poll_production_control_process()
+
+        assert ordering == ["prior_run_check", "length_prompt"]
+        assert window._isolated_command_pending == "starting_length"
+        assert process.update_payloads
+        assert '"operator_response":"starting_length_mm"' in process.update_payloads[-1]
+        assert '"value":57.602' in process.update_payloads[-1]
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
         _close_test_window(window)
 
 
