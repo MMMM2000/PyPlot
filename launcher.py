@@ -608,30 +608,32 @@ def _collect_builder_paths(
     *,
     supported_suffixes: Sequence[str],
     exclude_dir_names: Sequence[str] = (),
+    max_depth: int | None = None,
 ) -> list[Path]:
     suffixes = {suffix.lower() for suffix in supported_suffixes}
     excluded_names = {str(name).strip().lower() for name in exclude_dir_names if str(name).strip()}
 
-    def _is_excluded(candidate: Path, root: Path) -> bool:
-        if not excluded_names:
-            return False
-        try:
-            relative_parts = candidate.relative_to(root).parts
-        except ValueError:
-            relative_parts = candidate.parts
-        return any(part.lower() in excluded_names for part in relative_parts[:-1])
-
     collected: list[Path] = []
     for path in paths:
         if path.is_dir():
-            for candidate in sorted(path.rglob("*")):
-                if not candidate.is_file():
-                    continue
-                if _is_excluded(candidate, path):
-                    continue
-                if suffixes and candidate.suffix.lower() not in suffixes:
-                    continue
-                collected.append(candidate)
+            for directory, dirnames, filenames in os.walk(path):
+                try:
+                    depth = len(Path(directory).relative_to(path).parts)
+                except ValueError:
+                    depth = 0
+                dirnames[:] = sorted(
+                    name
+                    for name in dirnames
+                    if name.lower() not in excluded_names
+                )
+                if max_depth is not None and depth >= max_depth:
+                    dirnames[:] = []
+                base = Path(directory)
+                for filename in sorted(filenames):
+                    candidate = base / filename
+                    if suffixes and candidate.suffix.lower() not in suffixes:
+                        continue
+                    collected.append(candidate)
         elif path.is_file():
             if suffixes and path.suffix.lower() not in suffixes:
                 continue
@@ -829,31 +831,78 @@ def _run_builder_update_section_command(
         raise _AutomationRecipeError(
             f"{section_name} update field 'exclude_dir_names' must be an array when provided."
         )
+    raw_max_depth = command.get("max_depth")
+    if raw_max_depth is None:
+        max_depth = None
+    elif isinstance(raw_max_depth, bool) or not isinstance(raw_max_depth, int) or raw_max_depth < 0:
+        raise _AutomationRecipeError(
+            f"{section_name} update field 'max_depth' must be a non-negative integer when provided."
+        )
+    else:
+        max_depth = raw_max_depth
     section = section_class(LOGGER, lambda *_args: None)
     exclude_names = [str(name) for name in raw_exclude_dir_names]
     if section_name == "mini_dma":
-        mini_dma_core = getattr(builder_ui, "mini_dma_core", None)
         default_excludes = getattr(section_class, "excluded_refresh_dirs", ())
-        if mini_dma_core is not None and hasattr(mini_dma_core, "iter_measurement_paths"):
-            candidates = mini_dma_core.iter_measurement_paths(
-                input_paths,
-                exclude_dir_names=[*default_excludes, *exclude_names],
-            )
+        if max_depth == 1:
+            excluded = {
+                str(name).strip().casefold()
+                for name in [*default_excludes, *exclude_names]
+                if str(name).strip()
+            }
+            shallow_candidates: list[Path] = []
+            for input_path in input_paths:
+                if input_path.is_file():
+                    if input_path.name.casefold() == "measurement.csv":
+                        shallow_candidates.append(input_path)
+                    continue
+                direct_measurement = input_path / "measurement.csv"
+                if direct_measurement.is_file():
+                    shallow_candidates.append(direct_measurement)
+                for child in sorted(input_path.iterdir(), key=lambda item: item.name.casefold()):
+                    if child.name.casefold() in excluded or not child.is_dir():
+                        continue
+                    measurement = child / "measurement.csv"
+                    print(
+                        f"[builder-automation] mini_dma: checking {measurement}",
+                        flush=True,
+                    )
+                    if measurement.is_file():
+                        shallow_candidates.append(measurement)
+            candidates = list(dict.fromkeys(shallow_candidates))
         else:
-            candidates = _collect_builder_paths(
-                input_paths,
-                supported_suffixes=supported_suffixes,
-                exclude_dir_names=[*default_excludes, *exclude_names],
-            )
+            candidates = [
+                candidate
+                for candidate in _collect_builder_paths(
+                    input_paths,
+                    supported_suffixes=supported_suffixes,
+                    exclude_dir_names=[*default_excludes, *exclude_names],
+                    max_depth=max_depth,
+                )
+                if candidate.name.casefold() == "measurement.csv"
+            ]
     else:
         candidates = _collect_builder_paths(
             input_paths,
             supported_suffixes=supported_suffixes,
             exclude_dir_names=exclude_names,
+            max_depth=max_depth,
         )
+    print(
+        f"[builder-automation] {section_name}: discovered {len(candidates)} candidate(s)",
+        flush=True,
+    )
     try:
+        print(
+            f"[builder-automation] {section_name}: loading saved section state",
+            flush=True,
+        )
         section.import_project_payload(sections.get(section_name, {}))
         existing_payload = section.store.load_payload(payload_name)
+        print(
+            f"[builder-automation] {section_name}: saved section state loaded",
+            flush=True,
+        )
         existing_records = list(existing_payload) if isinstance(existing_payload, list) else []
         existing_records = _filter_builder_records_outside_refresh_roots(
             existing_records,
@@ -861,7 +910,21 @@ def _run_builder_update_section_command(
         )
         source_strings = [str(path) for path in input_paths]
         section.data.sources = list(dict.fromkeys([*section.data.sources, *source_strings]))
-        result = section.process(candidates)
+        if section_name == "mini_dma":
+            def report_tma_progress(
+                current: int,
+                total: int,
+                label: str | None,
+            ) -> None:
+                detail = f": {label}" if label else ""
+                print(
+                    f"[builder-automation] TMA {current}/{total}{detail}",
+                    flush=True,
+                )
+
+            result = section.process(candidates, progress=report_tma_progress)
+        else:
+            result = section.process(candidates)
 
         processed_keys = set()
         for processed_path in result.processed:
@@ -3586,6 +3649,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
         )
         builder_storage: Any = None
         original_storage_root: Any = None
+        builder_transaction: Any = None
         command_results: list[dict[str, Any]] = []
         try:
             os.environ.setdefault("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", "1")
@@ -3606,11 +3670,25 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
             builder_storage.MiniDatabaseStore._pending_sections = set()
             builder_storage.MiniDatabaseStore._pending_payloads = set()
             builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+            builder_storage.MiniDatabaseStore._memory_transactions = []
+            builder_transaction = (
+                builder_storage.MiniDatabaseStore.begin_memory_transaction()
+            )
             for index, command in enumerate(commands):
                 if not isinstance(command, dict):
                     raise _AutomationRecipeError(f"Builder command {index} must be an object.")
                 action = str(command.get("action") or "").strip()
                 section_name = str(command.get("section") or "").strip()
+                command_label = (
+                    f"{action} {section_name}".strip()
+                    if section_name
+                    else action
+                )
+                print(
+                    f"[builder-automation] Starting command {index + 1}/{len(commands)}: "
+                    f"{command_label}",
+                    flush=True,
+                )
                 if action == "rebuild_assemble":
                     command_results.append(
                         _run_builder_rebuild_assemble_command_lightweight(
@@ -3620,6 +3698,11 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                             sections=sections,
                             output_project=output_project,
                         )
+                    )
+                    print(
+                        f"[builder-automation] Finished command {index + 1}/{len(commands)}: "
+                        f"{command_label}",
+                        flush=True,
                     )
                     continue
                 if action == "export_assemble":
@@ -3632,6 +3715,11 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                             base_dir=base_dir,
                             sections=sections,
                         )
+                    )
+                    print(
+                        f"[builder-automation] Finished command {index + 1}/{len(commands)}: "
+                        f"{command_label}",
+                        flush=True,
                     )
                     continue
                 if action != "update_section":
@@ -3648,7 +3736,15 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                         base_dir=base_dir,
                     )
                 )
+                print(
+                    f"[builder-automation] Finished command {index + 1}/{len(commands)}: "
+                    f"{command_label}",
+                    flush=True,
+                )
+            builder_transaction.commit_memory_only()
         finally:
+            if builder_transaction is not None and not builder_transaction.finished:
+                builder_transaction.rollback()
             if builder_storage is not None and original_storage_root is not None:
                 builder_storage._storage_root = original_storage_root  # type: ignore[assignment]
                 builder_storage.MiniDatabaseStore._memory_data = {}
@@ -3656,6 +3752,7 @@ def _run_builder_automation_recipe(recipe_path: Path) -> int:
                 builder_storage.MiniDatabaseStore._pending_sections = set()
                 builder_storage.MiniDatabaseStore._pending_payloads = set()
                 builder_storage.MiniDatabaseStore._disk_writes_suspended = 0
+                builder_storage.MiniDatabaseStore._memory_transactions = []
             if previous_dialog_setting is None:
                 os.environ.pop("MICROWIRE_BUILDER_SUPPRESS_INFO_DIALOGS", None)
             else:

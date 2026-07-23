@@ -25525,6 +25525,11 @@ class MiniDmaSection(MiniDatabaseSection):
             self._check_cancelled()
             path = Path(path)
             progress_name = path.parent.name if path.name.casefold() == "measurement.csv" else path.name
+            if progress is not None:
+                try:
+                    progress(idx - 1, total, f"Parsing {progress_name}")
+                except Exception:
+                    pass
             try:
                 measurement_path = mini_dma_core.resolve_measurement_path(path)
             except Exception:

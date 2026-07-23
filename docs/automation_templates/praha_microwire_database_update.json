@@ -11,6 +11,7 @@
       "paths": [
         "G:/My Drive/1 Projects/Praha/mini DMA"
       ],
+      "max_depth": 1,
       "exclude_dir_names": [
         ".cache",
         ".pytest_cache",

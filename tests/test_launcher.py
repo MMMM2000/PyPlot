@@ -20,6 +20,7 @@ import launcher as launcher_module
 from microwire_data_builder import ui as builder_ui
 from microwire_data_builder import safe_codec
 from microwire_data_builder import project_package
+from microwire_data_builder import storage as builder_storage
 from microwire_data_builder.core import (
     MeasurementMetadata,
     MeasurementRecord,
@@ -2387,6 +2388,20 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
         encoding="utf-8",
     )
 
+    def fail_temporary_disk_write(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("automation refresh must keep temporary store writes in memory")
+
+    monkeypatch.setattr(
+        builder_storage.MiniDatabaseStore,
+        "_write_payload_to_disk",
+        fail_temporary_disk_write,
+    )
+    monkeypatch.setattr(
+        builder_storage.MiniDatabaseStore,
+        "_write_data_to_disk",
+        fail_temporary_disk_write,
+    )
+
     exit_code = launcher_module._run_automation_recipe(  # noqa: SLF001
         argparse.Namespace(automation_recipe=str(recipe_path)),
         [],
@@ -2410,7 +2425,10 @@ def test_builder_automation_recipe_updates_vsm_temperature_scan_copy(
     assert manifest["commands"][0]["updated_count"] == 1
     assert manifest["commands"][0]["skipped_count"] == 1
     assert manifest["commands"][0]["skipped_sources"] == [str(bad_scan_path)]
-    assert '"kind": "builder"' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "[builder-automation] Starting command 1/1: update_section vsm_temperature_scan" in output
+    assert "[builder-automation] Finished command 1/1: update_section vsm_temperature_scan" in output
+    assert '"kind": "builder"' in output
 
 
 def test_builder_automation_recipe_updates_annealing_copy(
@@ -3512,11 +3530,11 @@ def test_builder_automation_recipe_updates_mini_dma_copy(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     command = manifest["commands"][0]
     assert command["section"] == "mini_dma"
-    assert command["candidate_count"] == 1
+    assert command["candidate_count"] == 2
     assert command["record_count"] == 1
     assert command["updated_count"] == 1
-    assert command["skipped_count"] == 0
-    assert command["skipped_sources"] == []
+    assert command["skipped_count"] == 1
+    assert command["skipped_sources"] == [str(bad_run / "measurement.csv")]
     rebuild_command = manifest["commands"][1]
     assert rebuild_command["action"] == "rebuild_assemble"
     assert rebuild_command["status"] == "ok"
@@ -3776,6 +3794,7 @@ def test_builder_automation_recipe_can_exclude_named_subdirectories(
                         "action": "update_section",
                         "section": "mini_dma",
                         "paths": [str(data_root)],
+                        "max_depth": 1,
                         "exclude_dir_names": ["archive"],
                     }
                 ],
