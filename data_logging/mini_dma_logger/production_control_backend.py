@@ -8,6 +8,7 @@ readback snapshots to the visible UI process.
 
 from __future__ import annotations
 
+from dataclasses import fields
 import json
 import os
 from typing import Any, Mapping
@@ -289,7 +290,7 @@ class ProductionMiniDmaBackend:
             stress = None
         snapshot = getattr(window, "_supply_snapshot", {})
         session_path = getattr(window, "_session_base_path", None)
-        return (
+        base_readback: tuple[tuple[str, ReadbackValue], ...] = (
             ("backend_owner_pid", self._owner_pid),
             ("started", self._started),
             ("stopped", self._stopped),
@@ -298,7 +299,20 @@ class ProductionMiniDmaBackend:
             ("automation_phase", str(window._automation_phase)),
             ("automation_name", str(window._automation_name)),
             ("automation_index", int(window._automation_index)),
-            ("automation_total", int(len(window._automation_steps))),
+            (
+                "automation_completed",
+                int(getattr(window, "_automation_completed_ticks", window._automation_index)),
+            ),
+            (
+                "automation_total",
+                int(
+                    getattr(
+                        window,
+                        "_automation_total_steps",
+                        len(window._automation_steps),
+                    )
+                ),
+            ),
             ("task", str(window._current_task_summary())),
             ("position_mm", float(window._current_position_mm)),
             ("load_g", effective_load),
@@ -324,6 +338,18 @@ class ProductionMiniDmaBackend:
             ("emergency_reason", self._emergency_reason),
             ("error", self._last_error),
         )
+        capture_plot_point = getattr(window, "_capture_live_plot_point", None)
+        plot_point = capture_plot_point() if callable(capture_plot_point) else None
+        if plot_point is None:
+            return base_readback
+        plot_readback = tuple(
+            (
+                f"plot_{field.name}",
+                _json_scalar(getattr(plot_point, field.name)),
+            )
+            for field in fields(plot_point)
+        )
+        return base_readback + plot_readback
 
     def completion_detail(self) -> str | None:
         if self._started and self._window is not None and not self._window._automation_active:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import dataclass, FrozenInstanceError
 import os
 import time
 
@@ -368,6 +368,14 @@ class _FakeProductionWindow:
     def _current_task_summary(self) -> str:
         return "fake production task"
 
+    def _capture_live_plot_point(self) -> object:
+        @dataclass
+        class _PlotPoint:
+            elapsed_s: float
+            load_g: float
+
+        return _PlotPoint(elapsed_s=1.5, load_g=0.5)
+
     def close(self) -> None:
         self.closed = True
 
@@ -391,6 +399,8 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
     assert readback["automation_active"] is True
     assert readback["supply_output_enabled"] is True
     assert readback["stress_mpa"] == pytest.approx(25.0)
+    assert readback["plot_elapsed_s"] == pytest.approx(1.5)
+    assert readback["plot_load_g"] == pytest.approx(0.5)
 
     backend.pause()
     assert dict(backend.readback())["automation_paused"] is True

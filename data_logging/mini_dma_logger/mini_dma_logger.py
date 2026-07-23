@@ -16,7 +16,7 @@ import tempfile
 import time
 import weakref
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from itertools import zip_longest
 from pathlib import Path
@@ -7925,6 +7925,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_command_pending: str | None = None
         self._isolated_pending_sequence: int | None = None
         self._isolated_runtime_update_values: dict[str, float | bool] | None = None
+        self._isolated_last_plot_elapsed_s: float | None = None
         self._ui_thread_id = get_ident()
         self._control_worker_thread_id: int | None = None
         self._control_ui_event.connect(self._apply_control_ui_event, QtCore.Qt.ConnectionType.QueuedConnection)
@@ -30947,6 +30948,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_isolated_auto_ramp(self) -> None:
         if self._isolated_recipe_active:
             return
+        if self._session_active:
+            QtWidgets.QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Stop the current manual session before starting an isolated "
+                "recipe. The dedicated process must be the sole authoritative "
+                "run logger.",
+            )
+            return
         try:
             steps, _summary, interval_ms = self._build_automation_recipe()
         except ValueError as exc:
@@ -31017,6 +31027,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_recipe_paused = False
         self._isolated_command_pending = "start"
         self._isolated_pending_sequence = start_sequence
+        self._isolated_last_plot_elapsed_s = None
+        self._session_points = []
+        self._live_plot_points = []
         self._automation_active = True
         self._automation_paused = False
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
@@ -31037,6 +31050,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if snapshot is not None:
             self._production_control_snapshot = snapshot
             readback = dict(snapshot.readback)
+            self._consume_isolated_plot_snapshot(readback)
             self._automation_paused = snapshot.state is ControlState.PAUSED
             self._isolated_recipe_paused = self._automation_paused
             pending_sequence = self._isolated_pending_sequence
@@ -31083,6 +31097,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 readback.get("automation_phase") or snapshot.state.value
             )
             self._automation_index = int(readback.get("automation_index") or 0)
+            completed = int(
+                readback.get("automation_completed") or self._automation_index
+            )
             total = int(readback.get("automation_total") or 0)
             self._automation_total_steps = max(0, total)
             self.label_current_task.setText(
@@ -31109,7 +31126,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if total > 0:
                 self.recipe_progress.setValue(
-                    min(100, max(0, round(100.0 * self._automation_index / total)))
+                    min(100, max(0, round(100.0 * completed / total)))
                 )
             if snapshot.state in {
                 ControlState.STOPPED,
@@ -31163,6 +31180,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolated_command_pending = None
         self._isolated_pending_sequence = None
         self._isolated_runtime_update_values = None
+        self._isolated_last_plot_elapsed_s = None
         self._automation_active = False
         self._automation_paused = False
         self._automation_steps = []
@@ -31178,6 +31196,34 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Controller: dedicated process {state.value}{suffix}"
         )
         self._update_recipe_buttons()
+
+    def _consume_isolated_plot_snapshot(
+        self,
+        readback: Mapping[str, object],
+    ) -> None:
+        payload = {
+            field.name: readback.get(f"plot_{field.name}")
+            for field in fields(MeasurementPoint)
+        }
+        elapsed_value = payload.get("elapsed_s")
+        if elapsed_value is None:
+            return
+        elapsed_s = float(elapsed_value)
+        last_elapsed_s = self._isolated_last_plot_elapsed_s
+        if last_elapsed_s is not None and elapsed_s <= last_elapsed_s:
+            return
+        try:
+            point = MeasurementPoint(**payload)
+        except (TypeError, ValueError):
+            return
+        self._isolated_last_plot_elapsed_s = elapsed_s
+        self._live_plot_points.append(point)
+        if len(self._live_plot_points) > LIVE_PLOT_MAX_POINTS:
+            self._live_plot_points = self._live_plot_points[-LIVE_PLOT_MAX_POINTS:]
+        now_s = time.monotonic()
+        if self._dashboard_graph_refresh_due(now_s=now_s):
+            self._refresh_plots()
+            self._last_dashboard_plot_refresh_s = now_s
 
     def _start_auto_ramp(self) -> None:
         if (

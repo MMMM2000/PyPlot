@@ -1611,6 +1611,39 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
             last_command_sequence: int = 1,
             last_command_result: str = "accepted",
         ) -> None:
+            plot_point = mini_dma_mod.MeasurementPoint(
+                elapsed_s=1.5,
+                timestamp_utc="2026-07-23T12:00:00Z",
+                raw_position_mm=1.25,
+                position_mm=1.25,
+                raw_load_g=0.5,
+                load_g=0.5,
+                preload_state="ready",
+                strain_pct=0.25,
+                stress_mpa=25.0,
+                current_set_mA=2.0,
+                current_measured_mA=2.0,
+                voltage_V=0.4,
+                resistance_ohm=200.0,
+                power_W=0.0008,
+                automation_phase=state.value,
+                automation_basis="stress_mpa",
+                automation_target_value=25.0,
+                plateau_index=0,
+                plateau_label="synthetic",
+            )
+            readback = {
+                "automation_phase": state.value,
+                "automation_index": 0,
+                "automation_total": 1,
+                "task": "synthetic",
+            }
+            readback.update(
+                {
+                    f"plot_{field.name}": getattr(plot_point, field.name)
+                    for field in dataclasses.fields(plot_point)
+                }
+            )
             process.next_snapshot = SimpleNamespace(
                 identity=request.identity,
                 state=state,
@@ -1623,16 +1656,13 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
                 policy=request.policy,
                 owner_pid=process.pid,
                 dropped_event_count=0,
-                readback={
-                    "automation_phase": state.value,
-                    "automation_index": 0,
-                    "automation_total": 1,
-                    "task": "synthetic",
-                },
+                readback=readback,
             )
             window._poll_production_control_process()
 
         _confirm(mini_dma_mod.ControlState.RUNNING)
+        assert len(window._live_plot_points) == 1
+        assert window._live_plot_points[0].stress_mpa == pytest.approx(25.0)
         window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
         window.spin_current_sweep_step_mA.setValue(
             window.spin_current_sweep_step_mA.value() + 0.25
@@ -1664,6 +1694,38 @@ def test_visible_ui_delegates_recipe_lifecycle_to_isolated_process(
         assert process.closed is True
         assert window._isolated_recipe_active is False
     finally:
+        _close_test_window(window)
+
+
+def test_isolated_recipe_refuses_parallel_ui_owned_session(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._session_active = True
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, _title, message: warnings.append(str(message)),
+    )
+
+    try:
+        window._start_auto_ramp()
+        assert process.started is False
+        assert warnings
+        assert "sole authoritative run logger" in warnings[0]
+    finally:
+        window._session_active = False
         _close_test_window(window)
 
 
