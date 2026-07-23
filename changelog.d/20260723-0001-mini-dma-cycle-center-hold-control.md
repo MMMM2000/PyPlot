@@ -1,0 +1,2 @@
+- Added an opt-in Mini DMA iso-stress current-hold controller that suppresses phase-chasing motor corrections only after a fixed-current 20 s processed window is stationary and centered, while retaining the existing fast/raw safety, freshness, persistence, resume, and correction gates.
+- Added cycle-center readiness, center, slope, signal span, fast-veto, and suppression fields to `control_trace.csv` and the control-logic fingerprint for auditable offline and hardware validation.
