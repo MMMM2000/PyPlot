@@ -19,6 +19,7 @@ PLAN_KIND = "mini_dma_bench_sequence"
 PLAN_SCHEMA_VERSION = 1
 DEFAULT_MAX_RUN_DURATION_S = 3600.0
 DEFAULT_BENCH_LOCK_TIMEOUT_S = 300.0
+DEFAULT_SERIAL_PORT_SCAN_TIMEOUT_S = 10.0
 
 
 class MiniDmaBenchAutomationError(RuntimeError):
@@ -515,6 +516,32 @@ def _apply_hardware_config(window: Any, hardware: MiniDmaHardwareConfig) -> None
     persist = getattr(window, "_persist_settings_if_enabled", None)
     if callable(persist):
         persist()
+
+
+def _wait_for_serial_port_scan(
+    window: Any,
+    hardware: MiniDmaHardwareConfig,
+    *,
+    app: Any,
+    sleep_fn: Callable[[float], None],
+    timeout_s: float = DEFAULT_SERIAL_PORT_SCAN_TIMEOUT_S,
+) -> None:
+    if hardware.supply_port is None and hardware.scale_port is None:
+        return
+    if not hasattr(window, "_serial_port_scan_completed"):
+        return
+    start_scan = getattr(window, "_start_serial_port_enumeration", None)
+    if not bool(getattr(window, "_serial_port_scan_completed", False)) and callable(start_scan):
+        start_scan()
+    deadline_s = time.monotonic() + max(0.0, float(timeout_s))
+    while not bool(getattr(window, "_serial_port_scan_completed", False)):
+        app.processEvents()
+        if time.monotonic() >= deadline_s:
+            raise MiniDmaBenchAutomationError(
+                "Timed out waiting for serial-port discovery before applying pinned bench hardware."
+            )
+        sleep_fn(0.05)
+    app.processEvents()
 
 
 def _apply_sample_identity(window: Any, sample: MiniDmaSampleIdentity) -> None:
@@ -1049,6 +1076,12 @@ def run_mini_dma_bench_plan(
                     continue
                 window = factory(log_dir=None if plan.log_dir is None else str(plan.log_dir), persist_settings=True)
                 try:
+                    _wait_for_serial_port_scan(
+                        window,
+                        plan.hardware,
+                        app=app,
+                        sleep_fn=sleep_fn,
+                    )
                     _apply_hardware_config(window, plan.hardware)
                     _apply_sample_identity(window, plan.sample_identity)
                     run_summary = _execute_run(
