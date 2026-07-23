@@ -401,6 +401,132 @@ def test_automation_controller_dispatches_steps_outside_main_window(tmp_path: Pa
         _close_test_window(window)
 
 
+def test_automation_controller_executes_exact_finite_fatigue_cycles(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    observed: list[tuple[str, int | None, str | None]] = []
+    loop_step = mini_dma_mod.AutomationStep(
+        "fatigue_loop",
+        target_value=150.0,
+        target_start_value=0.0,
+        target_end_value=150.0,
+        target_ramp_rate_value_s=5.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=60.0,
+        current_ramp_rate_mA_s=1.0,
+        fatigue_cycle_limit=2,
+    )
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._automation_steps = [loop_step]
+    window._automation_index = 0
+    window._fatigue_cycle_limit = 2
+    window._fatigue_loop_anchor_index = 0
+    window._set_recipe_current_mA = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._record_scheduled_recipe_point = (  # type: ignore[method-assign]
+        lambda step: observed.append(
+            (step.action, step.fatigue_cycle_index, step.fatigue_leg)
+        )
+        or True
+    )
+    window._handle_target_ramp_step = (  # type: ignore[method-assign]
+        lambda step, _index: observed.append(
+            (step.action, step.fatigue_cycle_index, step.fatigue_leg)
+        )
+        or True
+    )
+    window._handle_current_sweep_step = (  # type: ignore[method-assign]
+        lambda step, _index: observed.append(
+            (step.action, step.fatigue_cycle_index, step.fatigue_leg)
+        )
+        or True
+    )
+    window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
+    window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+    window._restore_main_window_focus_soon = lambda: None  # type: ignore[method-assign]
+    window._stop_auto_ramp = (  # type: ignore[method-assign]
+        lambda **_kwargs: setattr(window, "_automation_active", False)
+    )
+
+    try:
+        for _tick in range(20):
+            if not window._automation_active:
+                break
+            window._automation_controller.tick()
+
+        assert window._automation_active is False
+        assert observed == [
+            ("set_current", 1, "prepare"),
+            ("ramp_target", 1, "prepare"),
+            ("sweep_current", 1, "up"),
+            ("sweep_current", 1, "down"),
+            ("set_current", 2, "prepare"),
+            ("ramp_target", 2, "prepare"),
+            ("sweep_current", 2, "up"),
+            ("sweep_current", 2, "down"),
+        ]
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_automation_controller_forever_fatigue_remains_bounded_until_stopped(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    observed_cycles: list[int] = []
+    loop_step = mini_dma_mod.AutomationStep(
+        "fatigue_loop",
+        target_value=150.0,
+        target_start_value=0.0,
+        target_end_value=150.0,
+        target_ramp_rate_value_s=5.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=60.0,
+        current_ramp_rate_mA_s=1.0,
+        fatigue_cycle_limit=None,
+    )
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._automation_steps = [loop_step]
+    window._automation_index = 0
+    window._fatigue_cycle_limit = None
+    window._fatigue_loop_anchor_index = 0
+    window._set_recipe_current_mA = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+    window._record_scheduled_recipe_point = lambda _step: True  # type: ignore[method-assign]
+    window._handle_target_ramp_step = lambda _step, _index: True  # type: ignore[method-assign]
+
+    def _sweep(step: mini_dma_mod.AutomationStep, _index: int) -> bool:
+        if step.fatigue_leg == "down":
+            observed_cycles.append(int(step.fatigue_cycle_index or 0))
+        return True
+
+    window._handle_current_sweep_step = _sweep  # type: ignore[method-assign]
+    window._update_recipe_progress = lambda **_kwargs: None  # type: ignore[method-assign]
+    window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+    try:
+        for _tick in range(30):
+            window._automation_controller.tick()
+            assert len(window._automation_steps) <= 5
+            if len(observed_cycles) >= 5:
+                break
+
+        assert observed_cycles == [1, 2, 3, 4, 5]
+        assert window._automation_active is True
+        window._automation_active = False
+        window._automation_controller.tick()
+        assert observed_cycles == [1, 2, 3, 4, 5]
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_automation_controller_does_not_advance_progress_during_current_hold(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -5655,6 +5781,103 @@ def _calibration_point(
     )
 
 
+def test_forever_fatigue_bounds_retained_measurements_but_preserves_total_count(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    point = _calibration_point(
+        position_mm=0.0,
+        load_g=1.0,
+        phase="current",
+        stress_mpa=150.0,
+    )
+    total_points = (
+        mini_dma_mod.FATIGUE_RETAINED_MEASUREMENT_POINTS
+        + mini_dma_mod.FATIGUE_RETAINED_MEASUREMENT_TRIM_CHUNK
+        + 25
+    )
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._fatigue_cycle_index = 1
+
+    try:
+        for index in range(total_points):
+            window._retain_session_point(dataclasses.replace(point, elapsed_s=float(index)))
+
+        assert window._session_point_count() == total_points
+        assert window._session_points_discarded_from_memory > 0
+        assert len(window._session_points) <= (
+            mini_dma_mod.FATIGUE_RETAINED_MEASUREMENT_POINTS
+            + mini_dma_mod.FATIGUE_RETAINED_MEASUREMENT_TRIM_CHUNK
+        )
+        assert window._session_points[-1].elapsed_s == pytest.approx(total_points - 1)
+        display_points = window._display_plot_points()
+        assert len(display_points) <= mini_dma_mod.DISPLAY_PLOT_MAX_POINTS
+        assert display_points[-1].elapsed_s == pytest.approx(total_points - 1)
+    finally:
+        _close_test_window(window)
+
+
+def test_forever_fatigue_writes_every_point_while_compacting_memory(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    template = _calibration_point(
+        position_mm=0.0,
+        load_g=1.0,
+        phase="current",
+        stress_mpa=150.0,
+    )
+    written: list[mini_dma_mod.MeasurementPoint] = []
+    monkeypatch.setattr(mini_dma_mod, "FATIGUE_RETAINED_MEASUREMENT_POINTS", 3)
+    monkeypatch.setattr(mini_dma_mod, "FATIGUE_RETAINED_MEASUREMENT_TRIM_CHUNK", 2)
+    window._session_active = True
+    window._session_logging_enabled = True
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._fatigue_cycle_index = 1
+    window._automation_basis = None
+    window._handle_raw_scale_display_limit_status = lambda: False  # type: ignore[method-assign]
+    window._scale_summary_for_record = lambda **_kwargs: mini_dma_mod.ScaleIntervalSummary(  # type: ignore[method-assign]
+        raw_last_g=1.0,
+        applied_last_g=1.0,
+        load_mean_g=1.0,
+        load_std_g=0.0,
+        load_min_g=1.0,
+        load_max_g=1.0,
+        sample_count=1,
+        sample_rate_hz=1.0,
+    )
+    window._measurement_position_mm = lambda: 0.0  # type: ignore[method-assign]
+    window._measurement_effective_position_mm = lambda: 0.0  # type: ignore[method-assign]
+    window._capture_measurement_point = (  # type: ignore[method-assign]
+        lambda **kwargs: dataclasses.replace(template, elapsed_s=float(kwargs["elapsed_s"]))
+    )
+    window._write_point = lambda point, **_kwargs: written.append(point)  # type: ignore[method-assign]
+    window._write_session_metadata = lambda **_kwargs: None  # type: ignore[method-assign]
+    window._dashboard_graph_refresh_due = lambda **_kwargs: False  # type: ignore[method-assign]
+    window._refresh_live_labels = lambda: None  # type: ignore[method-assign]
+
+    try:
+        for _index in range(12):
+            assert window._record_current_point(
+                quiet=True,
+                advance_heating=False,
+                require_fresh_after_move=False,
+            )
+
+        assert len(written) == 12
+        assert window._session_point_count() == 12
+        assert len(window._session_points) <= 5
+        assert window._session_points_discarded_from_memory > 0
+    finally:
+        window._session_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_calibration_report_estimates_stiffness_and_backlash() -> None:
     points = [
         _calibration_point(position_mm=0.0, load_g=0.000, phase="calibration_baseline"),
@@ -7716,34 +7939,181 @@ def test_iso_stress_fatigue_recipe_builds_repeated_current_cycles(tmp_path: Path
         steps, summary, interval_ms = window._build_automation_recipe()
         payload = window._current_recipe_payload()
 
-        set_current_steps = [step for step in steps if step.action == "set_current"]
-        ramp_steps = [step for step in steps if step.action == "ramp_target"]
-        sweep_steps = [step for step in steps if step.action == "sweep_current"]
-
         assert interval_ms == window._control_interval_ms()
-        assert len(set_current_steps) == 3
-        assert len(ramp_steps) == 3
-        assert len(sweep_steps) == 6
-        assert [step.note for step in sweep_steps] == ["1", "1", "2", "2", "3", "3"]
-        assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == [
-            (pytest.approx(1.0), pytest.approx(60.0)),
-            (pytest.approx(60.0), pytest.approx(1.0)),
-            (pytest.approx(1.0), pytest.approx(60.0)),
-            (pytest.approx(60.0), pytest.approx(1.0)),
-            (pytest.approx(1.0), pytest.approx(60.0)),
-            (pytest.approx(60.0), pytest.approx(1.0)),
+        assert len(steps) == 1
+        loop_step = steps[0]
+        assert loop_step.action == "fatigue_loop"
+        assert loop_step.fatigue_cycle_limit == 3
+        observed_cycles: list[tuple[int | None, list[str | None]]] = []
+        for expected_cycle in range(1, 4):
+            window._expand_next_fatigue_cycle(loop_step, len(window._automation_steps))
+            if not window._automation_steps:
+                window._automation_steps = steps
+                window._fatigue_loop_anchor_index = None
+                window._expand_next_fatigue_cycle(loop_step, 0)
+            sweep_steps = [
+                step for step in window._automation_steps if step.action == "sweep_current"
+            ]
+            observed_cycles.append(
+                (
+                    sweep_steps[0].fatigue_cycle_index,
+                    [step.fatigue_leg for step in sweep_steps],
+                )
+            )
+            assert len(window._automation_steps) == 5
+            assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps] == [
+                (pytest.approx(1.0), pytest.approx(60.0)),
+                (pytest.approx(60.0), pytest.approx(1.0)),
+            ]
+        assert observed_cycles == [
+            (1, ["up", "down"]),
+            (2, ["up", "down"]),
+            (3, ["up", "down"]),
         ]
-        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in set_current_steps)
-        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in ramp_steps)
-        assert all(step.basis == mini_dma_mod.HSW_BASIS_STRESS_MPA for step in sweep_steps)
-        assert all(step.target_value == pytest.approx(150.0) for step in set_current_steps)
-        assert all(step.target_value == pytest.approx(150.0) for step in ramp_steps)
-        assert all(step.target_value == pytest.approx(150.0) for step in sweep_steps)
+        window._expand_next_fatigue_cycle(loop_step, len(window._automation_steps) - 1)
+        assert window._automation_steps == []
         assert "iso-stress fatigue" in summary
         assert "3 cycle" in summary
+        assert "Force control:" in summary
         assert "First overheating" not in summary
         assert payload["recipe"]["current_sweep"]["reverse_current"] is True
     finally:
+        _close_test_window(window)
+
+
+def test_iso_stress_fatigue_supports_forever_without_expanding_recipe(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window.spin_current_sweep_fatigue_cycles.setValue(0)
+        assert window.spin_current_sweep_fatigue_cycles.maximum() == (
+            mini_dma_mod.MAX_FINITE_FATIGUE_CYCLES
+        )
+        assert window.spin_current_sweep_fatigue_cycles.specialValueText() == "Forever"
+        tooltip = window.spin_current_sweep_fatigue_cycles.toolTip()
+        assert "until the operator stops" in tooltip
+        steps, summary, _interval_ms = window._build_automation_recipe()
+        loop_step = steps[-1]
+        assert loop_step.action == "fatigue_loop"
+        assert loop_step.fatigue_cycle_limit is None
+        assert "forever" in summary
+
+        window._automation_steps = list(steps)
+        for expected_cycle in range(1, 101):
+            loop_index = len(window._automation_steps) - 1
+            window._expand_next_fatigue_cycle(loop_step, loop_index)
+            assert window._fatigue_cycle_index == expected_cycle
+            assert len(window._automation_steps) == 5
+    finally:
+        _close_test_window(window)
+
+
+def test_large_finite_fatigue_recipe_stays_compact(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+        window.check_current_sweep_first_overheating.setChecked(False)
+        window.spin_current_sweep_fatigue_cycles.setValue(100_000)
+
+        steps, summary, interval_ms = window._build_automation_recipe()
+
+        assert len(steps) == 1
+        assert steps[0].action == "fatigue_loop"
+        assert steps[0].fatigue_cycle_limit == 100_000
+        assert "100000 cycle(s)" in summary
+        point_count, tick_count = window._estimate_recipe_points_and_ticks(
+            steps,
+            interval_ms,
+        )
+        assert point_count > 100_000
+        assert tick_count > point_count
+    finally:
+        _close_test_window(window)
+
+
+def test_forever_fatigue_progress_reports_cycle_without_eta(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._automation_active = True
+        window._fatigue_cycle_limit = None
+        window._fatigue_cycle_index = 37
+
+        window._update_recipe_progress()
+
+        assert window.recipe_progress.minimum() == 0
+        assert window.recipe_progress.maximum() == 0
+        assert "Fatigue cycle 37" in window.recipe_progress.format()
+        assert "until stopped" in window.recipe_progress.format()
+        assert "ETA" not in window.recipe_progress.format()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_force_control_profile_is_visible_from_scale_settings(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        assert "Prague legacy" in window.label_force_control_profile.text()
+
+        window.combo_scale_baud.setCurrentText(str(mini_dma_mod.KERN_KCP_SCALE_PREFERRED_BAUD))
+        window.edit_scale_request.setText(mini_dma_mod.KERN_KCP_SCALE_REQUEST)
+        window.edit_scale_terminator.setText(mini_dma_mod.KERN_KCP_SCALE_TERMINATOR)
+
+        assert "Košice adaptive" in window.label_force_control_profile.text()
+        assert "setup target seeking remains on the Prague setup path" in (
+            window.label_force_control_profile.text()
+        )
+    finally:
+        _close_test_window(window)
+
+
+def test_recipe_without_setup_enables_measurement_logging_before_control_starts(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+    window.combo_recipe_mode.setCurrentIndex(mode_index)
+    window.check_pre_measurement_setup_enabled.setChecked(False)
+    window.spin_current_sweep_fatigue_cycles.setValue(1)
+    events: list[str] = []
+    window._first_overheating_preflight_allows_start = lambda: True  # type: ignore[method-assign]
+    window._preflight_recipe_hardware = lambda _steps, **_kwargs: True  # type: ignore[method-assign]
+    window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+    window._record_first_overheating_preflight_skip_for_session = lambda: None  # type: ignore[method-assign]
+
+    def _start_session(*, enable_logging: bool = True, record_initial_point: bool = True) -> None:
+        events.append(f"session:{enable_logging}:{record_initial_point}")
+        window._session_active = True
+        window._session_logging_enabled = bool(enable_logging)
+
+    def _begin_logging() -> None:
+        events.append("logging")
+        window._session_logging_enabled = True
+
+    window._start_session = _start_session  # type: ignore[method-assign]
+    window._begin_recipe_logging = _begin_logging  # type: ignore[method-assign]
+    window._start_automation_control_loop = (  # type: ignore[method-assign]
+        lambda _interval_ms: events.append("control")
+    )
+
+    try:
+        window._start_auto_ramp()
+
+        assert events[:3] == ["session:False:False", "logging", "control"]
+        assert window._session_logging_enabled is True
+    finally:
+        window._automation_active = False
+        window._session_active = False
         _close_test_window(window)
 
 
@@ -7766,14 +8136,29 @@ def test_iso_stress_fatigue_recipe_can_start_with_first_overheating(tmp_path: Pa
         window.spin_current_sweep_first_overheating_end_mA.setValue(40.0)
 
         steps, summary, _interval_ms = window._build_automation_recipe()
+        loop_step = steps[-1]
+        assert loop_step.action == "fatigue_loop"
+        window._automation_steps = list(steps)
+        window._expand_next_fatigue_cycle(loop_step, len(steps) - 1)
 
-        set_current_steps = [step for step in steps if step.action == "set_current"]
-        ramp_steps = [step for step in steps if step.action == "ramp_target"]
-        sweep_steps = [step for step in steps if step.action == "sweep_current"]
+        set_current_steps = [
+            step for step in window._automation_steps if step.action == "set_current"
+        ]
+        ramp_steps = [
+            step for step in window._automation_steps if step.action == "ramp_target"
+        ]
+        sweep_steps = [
+            step for step in window._automation_steps if step.action == "sweep_current"
+        ]
 
-        assert [step.note for step in set_current_steps] == ["first_overheating", "1", "2"]
-        assert [step.note for step in ramp_steps] == ["first_overheating", "1", "2"]
-        assert [step.note for step in sweep_steps] == ["first_overheating", "first_overheating", "1", "1", "2", "2"]
+        assert [step.note for step in set_current_steps] == ["first_overheating", "1"]
+        assert [step.note for step in ramp_steps] == ["first_overheating", "1"]
+        assert [step.note for step in sweep_steps] == [
+            "first_overheating",
+            "first_overheating",
+            "1",
+            "1",
+        ]
         assert [(step.current_start_mA, step.current_end_mA) for step in sweep_steps[:2]] == [
             (pytest.approx(1.0), pytest.approx(40.0)),
             (pytest.approx(40.0), pytest.approx(1.0)),
@@ -21473,6 +21858,47 @@ def test_first_overheating_runtime_update_changes_active_ramp_before_old_max(
         _close_test_window(window)
 
 
+def test_fatigue_runtime_update_preserves_incremental_loop_after_first_overheating(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    try:
+        mode_index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        window.combo_recipe_mode.setCurrentIndex(mode_index)
+        window.check_pre_measurement_setup_enabled.setChecked(False)
+        window.check_current_sweep_first_overheating.setChecked(True)
+        window.spin_current_sweep_fatigue_cycles.setValue(0)
+        steps, _summary, _interval_ms = window._build_automation_recipe()
+        first_sweep_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.action == "sweep_current" and step.note == "first_overheating"
+        )
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+        window._automation_steps = list(steps)
+        window._automation_index = first_sweep_index
+        window._active_current_sweep_step_index = first_sweep_index
+        window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+        window._automation_target_value = 20.0
+
+        window.spin_current_sweep_end_mA.setValue(75.0)
+        window.spin_current_sweep_step_mA.setValue(0.5)
+        preview = window._current_sweep_pending_update_preview()
+        updated_steps = preview["updated_steps"]
+        loop_steps = [step for step in updated_steps if step.action == "fatigue_loop"]
+
+        assert preview["tail_replanned"] is False
+        assert len(loop_steps) == 1
+        assert loop_steps[0].fatigue_cycle_limit is None
+        assert loop_steps[0].current_end_mA == pytest.approx(75.0)
+        assert loop_steps[0].current_ramp_rate_mA_s == pytest.approx(0.5)
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_first_overheating_runtime_update_rejects_after_preheat_ramp(
     tmp_path: Path,
     qtbot,
@@ -28010,6 +28436,59 @@ def test_manual_recipe_stop_turns_current_off_and_keeps_resume_state(tmp_path: P
         _close_test_window(window)
 
 
+def test_stopped_current_sweep_resumes_in_new_session_from_saved_current(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    step = mini_dma_mod.AutomationStep(
+        "sweep_current",
+        target_value=150.0,
+        basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        current_start_mA=1.0,
+        current_end_mA=60.0,
+        current_ramp_rate_mA_s=1.0,
+        fatigue_cycle_index=4,
+        fatigue_leg="up",
+    )
+    state = mini_dma_mod.AutomationResumeState(
+        steps=[step],
+        index=0,
+        interval_ms=50,
+        total_steps=1,
+        name=mini_dma_mod.CURRENT_SWEEP_FATIGUE,
+        origin_mm=2.5,
+        summary="fatigue resume test",
+        current_setpoint_mA=23.4,
+        source_run_path=str(tmp_path / "stopped-run"),
+    )
+    starts: list[tuple[bool, bool]] = []
+    setpoints: list[float] = []
+    window._preflight_recipe_hardware = lambda _steps, **_kwargs: True  # type: ignore[method-assign]
+
+    def _start_session(*, enable_logging: bool = True, record_initial_point: bool = True) -> None:
+        starts.append((enable_logging, record_initial_point))
+        window._session_active = True
+
+    window._start_session = _start_session  # type: ignore[method-assign]
+    window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+    window._set_recipe_current_mA = (  # type: ignore[method-assign]
+        lambda value, **_kwargs: setpoints.append(float(value)) is None
+    )
+
+    try:
+        window._resume_stopped_recipe(state)
+
+        assert starts == [(True, False)]
+        assert window._automation_active is True
+        assert window._automation_steps[0].current_start_mA == pytest.approx(23.4)
+        assert setpoints == [pytest.approx(23.4)]
+        assert "finalized run" in window.log_output.toPlainText()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_motor_supply_channel_is_enabled_before_recipe_tic_preflight(tmp_path: Path, qtbot) -> None:
     window = _build_window(tmp_path, qtbot)
 
@@ -28277,6 +28756,29 @@ def test_iso_stress_fatigue_recipe_round_trips_from_json(tmp_path: Path, qtbot) 
         assert window.check_current_sweep_hold_on_error.isChecked() is True
         assert window.check_current_sweep_first_overheating.isChecked() is True
         assert window.check_current_sweep_reverse_current.isChecked() is True
+    finally:
+        _close_test_window(window)
+
+
+def test_iso_stress_fatigue_forever_round_trips_from_json(tmp_path: Path, qtbot) -> None:
+    window = _build_window(tmp_path, qtbot)
+    recipe_path = tmp_path / "iso-stress-fatigue-forever.recipe.json"
+
+    try:
+        index = window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_FATIGUE)
+        window.combo_recipe_mode.setCurrentIndex(index)
+        window.spin_current_sweep_fatigue_cycles.setValue(0)
+
+        window._save_recipe_to_path(recipe_path)
+        payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+        assert payload["recipe"]["current_sweep"]["fatigue_cycles"] == 0
+        assert "forever" in window._suggest_recipe_filename()
+
+        window.spin_current_sweep_fatigue_cycles.setValue(5)
+        window._load_recipe_from_path(recipe_path)
+
+        assert window.spin_current_sweep_fatigue_cycles.value() == 0
+        assert window.spin_current_sweep_fatigue_cycles.text() == "Forever"
     finally:
         _close_test_window(window)
 
@@ -31404,7 +31906,7 @@ def test_tic_step_mode_ui_cannot_override_canonical_profile(tmp_path: Path, qtbo
         _close_test_window(window)
 
 
-def test_recipe_pause_halts_and_releases_active_motion(tmp_path: Path, qtbot) -> None:
+def test_recipe_pause_halts_and_releases_active_motion(tmp_path: Path, qtbot, monkeypatch) -> None:
     window = _build_window(tmp_path, qtbot)
 
     class _FakeDispatcher:
@@ -31430,14 +31932,56 @@ def test_recipe_pause_halts_and_releases_active_motion(tmp_path: Path, qtbot) ->
     window._kosice_active_motion_target_steps = 814
     window._current_position_steps = 813
     window._current_position_mm = 8.13
+    clock = {"now": 100.0}
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
 
     try:
         window._pause_recipe()
 
         assert window._automation_paused is True
+        assert window._automation_pause_started_s == pytest.approx(100.0)
         assert dispatcher.halted is True
         assert window._kosice_active_motion_target_steps is None
         assert window._last_commanded_position_steps == 813
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
+def test_recipe_resume_excludes_pause_from_active_ramp_clocks(
+    tmp_path: Path,
+    qtbot,
+    monkeypatch,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window._automation_active = True
+    window._automation_paused = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_FATIGUE
+    window._automation_pause_started_s = 100.0
+    window._paused_current_setpoint_mA = 20.0
+    window._automation_progress_started_s = 10.0
+    window._active_current_sweep_started_s = 90.0
+    window._active_current_sweep_wall_started_s = 89.0
+    window._active_target_ramp_started_s = 80.0
+    window._active_timed_step_started_s = 70.0
+    setpoints: list[float] = []
+    window._set_recipe_current_mA = (  # type: ignore[method-assign]
+        lambda value, **_kwargs: setpoints.append(float(value)) is None
+    )
+    window._resume_automation_control_loop = lambda: None  # type: ignore[method-assign]
+    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: 112.0)
+
+    try:
+        window._resume_paused_recipe()
+
+        assert setpoints == [pytest.approx(20.0)]
+        assert window._active_current_sweep_started_s == pytest.approx(102.0)
+        assert window._active_current_sweep_wall_started_s == pytest.approx(101.0)
+        assert window._active_target_ramp_started_s == pytest.approx(92.0)
+        assert window._active_timed_step_started_s == pytest.approx(82.0)
+        assert window._automation_progress_started_s == pytest.approx(22.0)
+        assert window._automation_pause_started_s is None
+        assert window._automation_paused is False
     finally:
         window._automation_active = False
         _close_test_window(window)
