@@ -49,6 +49,36 @@ def test_generate_core_run_plot_writes_png_and_summary(tmp_path: Path) -> None:
     assert summary["hidden_fault_tail_points"] == 0
 
 
+def test_generate_core_run_plot_recovers_shifted_control_trace_row(tmp_path: Path) -> None:
+    run_dir = tmp_path / "malformed-trace"
+    run_dir.mkdir()
+    (run_dir / "metadata.json").write_text(
+        json.dumps({"stop": {"reason": "recipe_completed"}}),
+        encoding="utf-8",
+    )
+    (run_dir / "measurement.csv").write_text(
+        "elapsed_s,automation_phase,stress_mpa,automation_target_value,strain_pct,current_set_mA,current_measured_mA,voltage_V,resistance_ohm\n"
+        "0,current,50,50,0,1,1,0.1,100\n"
+        "1,current,50,50,0.1,2,2,0.2,100\n",
+        encoding="utf-8",
+    )
+    (run_dir / "control_trace.csv").write_text(
+        "elapsed_s,automation_phase,decision,result,reason,error_value\n"
+        ",0.5,current_hold,hold,recovering,noise,1.5\n"
+        "1.0,current,resume,resumed,stable,0.0\n",
+        encoding="utf-8",
+    )
+
+    summary = generate_core_run_plot(run_dir)
+
+    assert Path(summary["image_path"]).exists()
+    assert Path(summary["detail_image_path"]).exists()
+    assert any(
+        warning.startswith("malformed:control_trace.csv:rows=1")
+        for warning in summary["metadata_warnings"]
+    )
+
+
 def test_generate_core_run_plot_hides_wire_break_tail_from_result_axes(tmp_path: Path) -> None:
     run_dir = tmp_path / "run_break"
     run_dir.mkdir()

@@ -11,6 +11,8 @@ import csv
 import io
 import json
 import math
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,12 @@ from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 
-from .run_quality import RunQuality, analyze_and_write_run_quality, analyze_run_quality
+from .run_quality import (
+    RunQuality,
+    _read_csv_rows_validated,
+    analyze_and_write_run_quality,
+    analyze_run_quality,
+)
 
 MAX_TEMPERATURE_SIDECAR_BYTES = 512 * 1024 * 1024
 
@@ -46,16 +53,60 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _read_csv_rows(path: Path) -> list[dict[str, str]]:
-    if not path.exists():
-        return []
-    with path.open("r", newline="", encoding="utf-8-sig") as handle:
-        return list(csv.DictReader(handle))
+    rows, _row_count, _warnings = _read_csv_rows_validated(path)
+    return rows
 
 
-def _read_csv_frame(path: Path) -> pd.DataFrame:
+def _read_csv_frame(path: Path, *, usecols: list[str] | None = None) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
-    return pd.read_csv(path, encoding="utf-8-sig")
+    try:
+        return pd.read_csv(
+            path,
+            encoding="utf-8-sig",
+            usecols=usecols,
+            on_bad_lines="skip",
+        )
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame()
+
+
+def _read_control_error_frame(path: Path, *, max_rows: int = 5000) -> pd.DataFrame:
+    columns = _csv_header(path)
+    wanted = [name for name in ("elapsed_s", "error_value") if name in columns]
+    if len(wanted) != 2:
+        return pd.DataFrame()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return pd.DataFrame()
+    if size <= 32 * 1024 * 1024:
+        return _read_csv_frame(path, usecols=wanted)
+    return _read_sparse_csv_frame(path, wanted, max_rows=max_rows)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _atomic_save_figure(fig: Any, path: Path, *, dpi: int) -> None:
+    temporary = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp{path.suffix}")
+    try:
+        fig.savefig(temporary, dpi=dpi)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _read_temperature_sidecar_frame(run_path: Path, *, max_rows: int = 5000) -> pd.DataFrame:
@@ -582,8 +633,10 @@ def _plot_phone_summary(
     lower_right = fig.add_subplot(grid[1, 2])
     if not _plot_temperature(lower_right, df, temperature):
         _plot_current_resistance(lower_right, df)
-    fig.savefig(out, dpi=160)
-    plt.close(fig)
+    try:
+        _atomic_save_figure(fig, out, dpi=160)
+    finally:
+        plt.close(fig)
 
 
 def _plot_detail_summary(
@@ -606,8 +659,10 @@ def _plot_detail_summary(
         _plot_resistance_current(axes[1, 1], df, metadata)
     _plot_error_trace(axes[2, 0], df, trace)
     _plot_strain_stress(axes[2, 1], df)
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
+    try:
+        _atomic_save_figure(fig, out, dpi=150)
+    finally:
+        plt.close(fig)
 
 
 def _hold_spans(rows: list[dict[str, str]]) -> list[tuple[float, float]]:
@@ -648,7 +703,7 @@ def generate_core_run_plot(
         raise FileNotFoundError(f"TMA run folder is missing required file(s): {', '.join(missing)} in {run_path}")
     rows = _read_csv_rows(run_path / "measurement.csv")
     df = _read_csv_frame(run_path / "measurement.csv")
-    trace = _read_csv_frame(run_path / "control_trace.csv")
+    trace = _read_control_error_frame(run_path / "control_trace.csv")
     temperature = pd.DataFrame() if _frame_has_temperature(df) else _read_temperature_sidecar_frame(run_path)
     metadata = _read_json(run_path / "metadata.json")
     quality = analyze_and_write_run_quality(run_path) if write_quality else analyze_run_quality(run_path)
@@ -691,7 +746,7 @@ def generate_core_run_plot(
         "hidden_fault_tail_points": int(len(df) - len(_plot_rows(df))),
         "temperature_sidecar_sample_rows": int(len(temperature)),
     }
-    summary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(summary, json.dumps(payload, indent=2, ensure_ascii=False))
     return payload
 
 
