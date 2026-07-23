@@ -279,6 +279,36 @@ def test_mini_dma_bench_plan_waits_for_serial_scan_before_hardware_overrides(tmp
     assert events.index("process") < events.index("find:COM6")
 
 
+def test_wait_for_tma_history_scan_blocks_until_current_root_is_ready(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class _FakeWindow:
+        _tma_history_root: Path | None = None
+
+        def _current_tma_history_root(self) -> Path:
+            return tmp_path
+
+        def _start_pending_tma_history_scan(self) -> None:
+            events.append("start")
+
+    window = _FakeWindow()
+
+    class _FakeApp:
+        def processEvents(self) -> None:
+            events.append("process")
+            window._tma_history_root = tmp_path
+
+    bench_automation._wait_for_tma_history_scan(
+        window,
+        app=_FakeApp(),
+        sleep_fn=lambda _seconds: events.append("sleep"),
+    )
+
+    assert events == ["start", "process", "sleep", "process"]
+
+
 def test_mini_dma_bench_plan_requires_automated_lengths_for_execution(tmp_path: Path) -> None:
     recipe_path = tmp_path / "iso-strain.recipe.json"
     _write_recipe(recipe_path)
