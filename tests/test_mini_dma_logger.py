@@ -1834,6 +1834,8 @@ def _prepare_first_overheating_preflight_window(
     window.edit_name_wire.setText("12/2")
     window.edit_name_specimen.setText("segment A")
     window.check_current_sweep_first_overheating.setChecked(False)
+    window._tma_history_scan_timer.stop()
+    window._tma_history_scan_pending_root = None
     window._tma_history_root = window._current_tma_history_root()
     window._tma_history_records = ()
     window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
@@ -1993,7 +1995,72 @@ def test_first_overheating_preflight_skips_prompt_when_enabled_or_history_exists
         )
         assert window._first_overheating_preflight_allows_start() is True
         assert prompts == []
+        window._flush_pending_run_log_lines()
+        log_text = window.log_output.toPlainText()
+        assert "Previous TMA measurement check: FOUND" in log_text
+        assert "synthetic metadata" in log_text
     finally:
+        _close_test_window(window)
+
+
+def test_isolated_start_waits_for_completed_history_scan_and_logs_match_source(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    window._test_settings_snapshot = {}  # type: ignore[attr-defined]
+    qtbot.addWidget(window)
+    process = _FakeIsolatedControlProcess()
+    window._create_production_control_process = lambda: process  # type: ignore[method-assign]
+    window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+        [mini_dma_mod.AutomationStep("wait", duration_s=0.0)],
+        "Synthetic isolated recipe",
+        50,
+    )
+    window.edit_name_composition.setText("Ni47Fe24Ga23Co6")
+    window.edit_name_wire.setText("2/1")
+    window.edit_name_specimen.setText("")
+    root = window._current_tma_history_root()
+    window._tma_history_root = None
+    window._tma_history_scan_pending_root = root
+
+    try:
+        window._start_auto_ramp()
+
+        assert process.started is False
+        assert window._tma_history_start_deferred is True
+        assert "recipe start is deferred automatically" in window.log_output.toPlainText()
+
+        window._tma_history_scan_timer.stop()
+        window._tma_history_scan_pending_root = None
+        match_source = str(root / "Ni47Fe24Ga23Co6 2_1 iso-stress_run09" / "metadata.json")
+        window._handle_tma_history_scan_success(
+            root,
+            (
+                mini_dma_mod.TmaHistoryRecord(
+                    identity=mini_dma_mod.TmaSampleIdentity(
+                        "Ni47Fe24Ga23Co6",
+                        "2/1",
+                    ),
+                    source=match_source,
+                ),
+            ),
+        )
+        qtbot.waitUntil(lambda: process.started, timeout=3000)
+
+        assert len(process.requests) == 1
+        window._flush_pending_run_log_lines()
+        log_text = window.log_output.toPlainText()
+        assert "Previous TMA measurement check: FOUND" in log_text
+        assert "1 matching source(s) among 1 completed run record(s)" in log_text
+        assert match_source in log_text
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
         _close_test_window(window)
 
 

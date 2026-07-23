@@ -8128,6 +8128,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_records: tuple[TmaHistoryRecord, ...] = ()
         self._tma_history_root: Path | None = None
         self._tma_history_scan_task: TmaHistoryScanTask | None = None
+        self._tma_history_check_pending = False
+        self._tma_history_start_deferred = False
+        self._last_tma_history_evidence: dict[str, Any] = {}
         self._tma_history_scan_pending_root: Path | None = None
         self._run_summary_pending: deque[tuple[Path, bool]] = deque()
         self._run_summary_task: RunSummaryTask | None = None
@@ -16228,6 +16231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_records = tuple(
             record for record in records if isinstance(record, TmaHistoryRecord)
         )
+        self._resume_start_after_tma_history_scan()
 
     def _handle_tma_history_scan_failure(self, root_obj: object, message: str) -> None:
         root = Path(root_obj)
@@ -16236,6 +16240,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._tma_history_root = root
         self._tma_history_records = ()
         self._log(message)
+        self._resume_start_after_tma_history_scan()
+
+    def _resume_start_after_tma_history_scan(self) -> None:
+        if not self._tma_history_start_deferred or self._window_closing:
+            return
+        self._tma_history_start_deferred = False
+        QtCore.QTimer.singleShot(0, self._start_auto_ramp)
 
     def _stop_tma_history_scan_task(self) -> None:
         self._tma_history_scan_timer.stop()
@@ -30813,20 +30824,95 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _has_previous_tma_measurement(self, identity: TmaSampleIdentity) -> bool:
+        self._tma_history_check_pending = False
+        checked_sources: list[str] = []
+        matching_sources: list[str] = []
+        project_match_found = False
         path_text = self.edit_project_path.text().strip()
         if path_text:
+            checked_sources.append(f"builder project {path_text}")
             cached_project = _peek_builder_project_cache_entry(Path(path_text))
             if cached_project is not None and _project_has_previous_tma_measurement(
                 cached_project.payload,
                 identity,
             ):
-                return True
-        if self._tma_history_root != self._current_tma_history_root():
-            return False
-        return _has_unambiguous_tma_identity_match(
-            identity,
-            (record.identity for record in self._tma_history_records),
+                matching_sources.append(f"builder project {path_text}")
+                project_match_found = True
+        root = self._current_tma_history_root()
+        checked_sources.append(f"completed-run metadata under {root}")
+        if (
+            self._tma_history_root != root
+            or self._tma_history_scan_task is not None
+            or self._tma_history_scan_pending_root is not None
+        ):
+            self._tma_history_check_pending = True
+            self._last_tma_history_evidence = {
+                "identity": identity,
+                "checked_sources": tuple(checked_sources),
+                "matching_sources": (),
+                "history_record_count": None,
+            }
+            if (
+                self._tma_history_scan_task is None
+                and self._tma_history_scan_pending_root != root
+            ):
+                self._schedule_tma_history_scan()
+            return project_match_found
+        matching_sources.extend(
+            record.source
+            for record in self._tma_history_records
+            if _tma_identities_match(identity, record.identity)
         )
+        self._last_tma_history_evidence = {
+            "identity": identity,
+            "checked_sources": tuple(checked_sources),
+            "matching_sources": tuple(matching_sources),
+            "history_record_count": len(self._tma_history_records),
+        }
+        return project_match_found or bool(matching_sources)
+
+    def _log_previous_tma_measurement_evidence(self, *, found: bool) -> None:
+        evidence = self._last_tma_history_evidence
+        identity_obj = evidence.get("identity")
+        identity = (
+            identity_obj
+            if isinstance(identity_obj, TmaSampleIdentity)
+            else self._current_tma_sample_identity()
+        )
+        specimen = f", specimen {identity.specimen}" if identity.specimen else ""
+        identity_text = (
+            f"{identity.composition} {identity.microwire}{specimen}"
+        )
+        matching_sources = tuple(evidence.get("matching_sources") or ())
+        checked_sources = tuple(evidence.get("checked_sources") or ())
+        record_count = evidence.get("history_record_count")
+        if found:
+            source_text = "; ".join(str(source) for source in matching_sources)
+            count_text = (
+                ""
+                if record_count is None
+                else (
+                    f" {len(matching_sources)} matching source(s) among "
+                    f"{int(record_count)} completed run record(s)."
+                )
+            )
+            self._log(
+                "Previous TMA measurement check: FOUND for "
+                f"{identity_text}.{count_text} "
+                f"Match: {source_text or 'loaded history index'}."
+            )
+        else:
+            checked_text = "; ".join(str(source) for source in checked_sources)
+            count_text = (
+                ""
+                if record_count is None
+                else f" ({int(record_count)} completed run record(s) indexed)"
+            )
+            self._log(
+                "Previous TMA measurement check: NO MATCH for "
+                f"{identity_text}. Checked: {checked_text or 'configured history sources'}"
+                f"{count_text}."
+            )
 
     def _build_first_overheating_preflight_dialog(self) -> QtWidgets.QMessageBox:
         box = QtWidgets.QMessageBox(self)
@@ -30887,6 +30973,18 @@ class MainWindow(QtWidgets.QMainWindow):
         identity = self._current_tma_sample_identity()
         recipe_mode = str(self.combo_recipe_mode.currentData() or "")
         history_found = self._has_previous_tma_measurement(identity)
+        if self._tma_history_check_pending:
+            self._tma_history_start_deferred = True
+            root = self._current_tma_history_root()
+            self._log(
+                "Previous TMA measurement check is still indexing completed runs under "
+                f"{root}; recipe start is deferred automatically until it finishes."
+            )
+            self.label_control_process_status.setText(
+                "Controller: waiting for previous-run history scan"
+            )
+            return False
+        self._log_previous_tma_measurement_evidence(found=history_found)
         if not _first_overheating_preflight_required(
             recipe_mode=recipe_mode,
             first_overheating_enabled=self.check_current_sweep_first_overheating.isChecked(),
@@ -30968,9 +31066,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._first_overheating_preflight_allows_start():
             return
-        self._log(
-            "Previous-run and first-overheating preflight completed in the visible UI."
-        )
         if (
             self._scale_thread is not None
             or self._supply_controller is not None
