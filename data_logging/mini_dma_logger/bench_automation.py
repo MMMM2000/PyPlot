@@ -40,8 +40,6 @@ class MiniDmaBenchGuardrails:
     max_stress_mpa: float | None = None
     recovery_stress_mpa: float | None = None
     wire_break_stops_plan: bool = True
-    allow_mechanical_slack_takeup: bool = False
-    mechanical_slack_max_seek_mm: float | None = None
     current_hold_quality_timeout_s: float | None = None
     current_hold_quality_error_mpa: float | None = None
 
@@ -209,9 +207,6 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
     recovery_stress_mpa = _optional_float(raw_guardrails, "recovery_stress_mpa")
     if recovery_stress_mpa is not None and recovery_stress_mpa <= 0.0:
         raise MiniDmaBenchAutomationError("TMA bench plan guardrail recovery_stress_mpa must be positive.")
-    mechanical_slack_max_seek_mm = _optional_float(raw_guardrails, "mechanical_slack_max_seek_mm")
-    if mechanical_slack_max_seek_mm is not None and mechanical_slack_max_seek_mm <= 0.0:
-        raise MiniDmaBenchAutomationError("TMA bench plan guardrail mechanical_slack_max_seek_mm must be positive.")
     current_hold_quality_timeout_s = _optional_float(raw_guardrails, "current_hold_quality_timeout_s")
     if current_hold_quality_timeout_s is not None and current_hold_quality_timeout_s <= 0.0:
         raise MiniDmaBenchAutomationError(
@@ -226,8 +221,6 @@ def load_mini_dma_bench_plan(path: str | Path) -> MiniDmaBenchPlan:
         max_stress_mpa=max_stress_mpa,
         recovery_stress_mpa=recovery_stress_mpa,
         wire_break_stops_plan=bool(raw_guardrails.get("wire_break_stops_plan", True)),
-        allow_mechanical_slack_takeup=bool(raw_guardrails.get("allow_mechanical_slack_takeup", False)),
-        mechanical_slack_max_seek_mm=mechanical_slack_max_seek_mm,
         current_hold_quality_timeout_s=current_hold_quality_timeout_s,
         current_hold_quality_error_mpa=current_hold_quality_error_mpa,
     )
@@ -432,18 +425,6 @@ def _apply_length_setup_automation(window: Any, run: MiniDmaBenchRun) -> None:
             starting_length_mm=run.starting_length_mm,
             preload_length_mm=run.preload_length_mm,
         )
-
-
-def _apply_bench_guardrails(window: Any, guardrails: MiniDmaBenchGuardrails) -> None:
-    method = getattr(window, "set_bench_mechanical_slack_takeup", None)
-    if callable(method):
-        method(
-            allow=guardrails.allow_mechanical_slack_takeup,
-            max_seek_mm=guardrails.mechanical_slack_max_seek_mm,
-        )
-        return
-    setattr(window, "_bench_allow_mechanical_slack_takeup", guardrails.allow_mechanical_slack_takeup)
-    setattr(window, "_bench_mechanical_slack_max_seek_mm", guardrails.mechanical_slack_max_seek_mm)
 
 
 def _ensure_measurement_logging_session(window: Any) -> None:
@@ -824,7 +805,6 @@ def _execute_run(
     window._load_recipe_from_path(run.recipe_path)
     _apply_sample_identity(window, sample_identity)
     _apply_length_setup_automation(window, run)
-    _apply_bench_guardrails(window, guardrails)
     _prefer_next_output_run(window)
     _ensure_measurement_logging_session(window)
     window._start_auto_ramp()
@@ -984,8 +964,6 @@ def run_mini_dma_bench_plan(
                         "max_stress_mpa": plan.guardrails.max_stress_mpa,
                         "recovery_stress_mpa": plan.guardrails.recovery_stress_mpa,
                         "wire_break_stops_plan": plan.guardrails.wire_break_stops_plan,
-                        "allow_mechanical_slack_takeup": plan.guardrails.allow_mechanical_slack_takeup,
-                        "mechanical_slack_max_seek_mm": plan.guardrails.mechanical_slack_max_seek_mm,
                     },
                 }
                 for run in plan.runs
