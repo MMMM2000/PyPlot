@@ -8213,12 +8213,18 @@ class MainWindow(QtWidgets.QMainWindow):
             "strain": [],
             "resistance": [],
         }
+        self._adaptive_target_headline_label: QtWidgets.QLabel | None = None
         self._adaptive_workspace_context_label: QtWidgets.QLabel | None = None
         self._adaptive_workspace_phase_label: QtWidgets.QLabel | None = None
         self._adaptive_plot_stack: QtWidgets.QStackedWidget | None = None
         self._adaptive_result_tabs: QtWidgets.QTabWidget | None = None
         self._dashboard_view_tabs: QtWidgets.QTabBar | None = None
         self._adaptive_workspace_user_prefers_custom = False
+        self._adaptive_summary_labels: dict[str, QtWidgets.QLabel] = {}
+        self._adaptive_sweep_progress: QtWidgets.QProgressBar | None = None
+        self._header_metric_labels: dict[str, tuple[QtWidgets.QLabel, QtWidgets.QLabel]] = {}
+        self._header_identity_label: QtWidgets.QLabel | None = None
+        self._run_log_button: QtWidgets.QPushButton | None = None
         self._control_view_stack: QtWidgets.QStackedWidget | None = None
         self._control_view_tabs: QtWidgets.QTabBar | None = None
         self._control_column: QtWidgets.QWidget | None = None
@@ -8938,6 +8944,182 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setText(text)
             label.setToolTip(text)
 
+    def _build_tma_header_metric(
+        self,
+        parent: QtWidgets.QWidget,
+        key: str,
+        title: str,
+    ) -> QtWidgets.QWidget:
+        metric = QtWidgets.QWidget(parent)
+        metric.setObjectName(f"tmaHeaderMetric_{key}")
+        metric.setMinimumWidth(92)
+        metric.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        layout = QtWidgets.QVBoxLayout(metric)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(0)
+        title_label = QtWidgets.QLabel(title.upper(), metric)
+        title_label.setProperty("role", "metricName")
+        value_label = QtWidgets.QLabel("-", metric)
+        value_label.setProperty("role", "metricValue")
+        secondary_label = QtWidgets.QLabel("", metric)
+        secondary_label.setProperty("role", "metricSecondary")
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        layout.addWidget(secondary_label)
+        self._header_metric_labels[key] = (value_label, secondary_label)
+        return metric
+
+    def _set_header_metric(self, key: str, primary: str, secondary: str = "") -> None:
+        labels = self._header_metric_labels.get(key)
+        if labels is None:
+            return
+        labels[0].setText(primary)
+        labels[0].setToolTip(primary)
+        labels[1].setText(secondary)
+        labels[1].setToolTip(secondary)
+
+    def _apply_adaptive_workspace_style(self, root: QtWidgets.QWidget) -> None:
+        root.setStyleSheet(
+            """
+            QWidget#tmaWorkspaceRoot {
+                background: #111316;
+                color: #edf0f3;
+            }
+            QWidget#tmaWorkspaceRoot QWidget {
+                background: transparent;
+                color: #edf0f3;
+            }
+            QWidget#tmaWorkspaceRoot QPushButton {
+                background: #20242a;
+                border: 1px solid #343a42;
+                border-radius: 4px;
+                padding: 6px 10px;
+            }
+            QWidget#tmaWorkspaceRoot QPushButton:hover {
+                background: #272c33;
+            }
+            QWidget#tmaWorkspaceRoot QLineEdit,
+            QWidget#tmaWorkspaceRoot QPlainTextEdit,
+            QWidget#tmaWorkspaceRoot QSpinBox,
+            QWidget#tmaWorkspaceRoot QDoubleSpinBox,
+            QWidget#tmaWorkspaceRoot QComboBox,
+            QWidget#tmaWorkspaceRoot QListWidget,
+            QWidget#tmaWorkspaceRoot QTreeWidget {
+                background: #14171a;
+                border: 1px solid #343a42;
+                color: #edf0f3;
+                selection-background-color: #e8ad43;
+                selection-color: #101214;
+            }
+            QWidget#tmaWorkspaceRoot QTabWidget::pane {
+                background: transparent;
+                border: 0;
+            }
+            QFrame#tmaWorkspaceHeader {
+                background: #191c20;
+                border: 0;
+                border-bottom: 1px solid #343a42;
+            }
+            QFrame#tmaBottomDock {
+                background: #191c20;
+                border: 0;
+                border-top: 1px solid #343a42;
+            }
+            QLabel[role="product"] {
+                color: #edf0f3;
+                font-size: 17px;
+                font-weight: 700;
+            }
+            QLabel[role="identity"] {
+                color: #9ca5af;
+                font-size: 10px;
+            }
+            QLabel[role="metricName"] {
+                color: #9ca5af;
+                font-size: 9px;
+            }
+            QLabel[role="metricValue"] {
+                color: #edf0f3;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QLabel[role="metricSecondary"] {
+                color: #9ca5af;
+                font-size: 9px;
+            }
+            QTabBar#tmaControlViewTabs::tab,
+            QTabBar#dashboardViewTabs::tab {
+                background: transparent;
+                color: #9ca5af;
+                border: 0;
+                border-bottom: 1px solid #343a42;
+                padding: 8px 12px;
+            }
+            QTabBar#tmaControlViewTabs::tab:selected,
+            QTabBar#dashboardViewTabs::tab:selected {
+                color: #edf0f3;
+                border-bottom: 2px solid #e8ad43;
+                font-weight: 600;
+            }
+            QFrame#adaptiveSweepInspector {
+                background: #191c20;
+                border: 1px solid #292e35;
+                border-radius: 4px;
+            }
+            QLabel[role="inspectorTitle"] {
+                color: #edf0f3;
+                font-size: 13px;
+                font-weight: 650;
+            }
+            QLabel[role="summaryName"] {
+                color: #9ca5af;
+                font-size: 9px;
+            }
+            QLabel[role="summaryValue"] {
+                color: #edf0f3;
+                font-size: 13px;
+                font-weight: 650;
+            }
+            QLabel#adaptiveWorkspacePhase {
+                background: #e8ad43;
+                color: #101214;
+                border-radius: 3px;
+                padding: 4px 8px;
+                font-size: 10px;
+                font-weight: 750;
+            }
+            QPushButton#adaptivePrimaryAction {
+                background: #e8ad43;
+                color: #101214;
+                border: 1px solid #e8ad43;
+                border-radius: 4px;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QPushButton#adaptivePrimaryAction:disabled {
+                background: #343a42;
+                border-color: #343a42;
+                color: #69727d;
+            }
+            QProgressBar#adaptiveSweepProgress,
+            QProgressBar#recipeProgress {
+                background: #14171a;
+                border: 1px solid #343a42;
+                border-radius: 3px;
+                color: #edf0f3;
+                min-height: 18px;
+                text-align: left;
+            }
+            QProgressBar#adaptiveSweepProgress::chunk,
+            QProgressBar#recipeProgress::chunk {
+                background: #e8ad43;
+            }
+            """
+        )
+
     def _build_ui(self, log_dir: str) -> None:
         install_standard_menu(
             self,
@@ -8949,9 +9131,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
-        root = QtWidgets.QHBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(10)
+        central.setObjectName("tmaWorkspaceRoot")
+        root = QtWidgets.QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self._apply_adaptive_workspace_style(central)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, central)
         splitter.setChildrenCollapsible(False)
@@ -8973,7 +9157,6 @@ class MainWindow(QtWidgets.QMainWindow):
         control_view_tabs.addTab("Prepare")
         control_view_tabs.setExpanding(True)
         control_view_tabs.setDrawBase(False)
-        control_column_layout.addWidget(control_view_tabs)
 
         control_view_stack = QtWidgets.QStackedWidget(control_column)
         self._control_view_stack = control_view_stack
@@ -9009,11 +9192,11 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         self.recipe_action_footer = QtWidgets.QFrame(control_column)
+        self.recipe_action_footer.setObjectName("tmaBottomDock")
         self.recipe_action_footer.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        self.recipe_action_footer_layout = QtWidgets.QVBoxLayout(self.recipe_action_footer)
-        self.recipe_action_footer_layout.setContentsMargins(8, 8, 8, 8)
-        self.recipe_action_footer_layout.setSpacing(6)
-        control_column_layout.addWidget(self.recipe_action_footer)
+        self.recipe_action_footer_layout = QtWidgets.QHBoxLayout(self.recipe_action_footer)
+        self.recipe_action_footer_layout.setContentsMargins(14, 7, 14, 7)
+        self.recipe_action_footer_layout.setSpacing(8)
 
         control_panel = QtWidgets.QWidget(control_scroll)
         control_panel.setMinimumWidth(0)
@@ -11208,26 +11391,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_recipe_estimate.setWordWrap(True)
         self.label_recipe_estimate.setVisible(False)
         self.recipe_progress = QtWidgets.QProgressBar(self.recipe_action_footer)
+        self.recipe_progress.setObjectName("recipeProgress")
         self.recipe_progress.setRange(0, 100)
         self.recipe_progress.setValue(0)
         self.recipe_progress.setTextVisible(True)
         self.recipe_progress.setFormat("Recipe progress: idle")
-        self.recipe_progress.setStyleSheet("QProgressBar { text-align: left; }")
+        self.recipe_progress.setMinimumWidth(260)
         self.label_current_task = QtWidgets.QLabel("Current task: idle", self.recipe_action_footer)
         self.label_current_task.setWordWrap(True)
         task_font = self.label_current_task.font()
         task_font.setBold(True)
         self.label_current_task.setFont(task_font)
         self.label_current_task.setStyleSheet("color: palette(text);")
-        self.label_current_task.setVisible(False)
+        self.label_current_task.setVisible(True)
 
-        self.recipe_action_footer_layout.addWidget(self.recipe_progress)
+        footer_status = QtWidgets.QWidget(self.recipe_action_footer)
+        footer_status_layout = QtWidgets.QVBoxLayout(footer_status)
+        footer_status_layout.setContentsMargins(0, 0, 0, 0)
+        footer_status_layout.setSpacing(2)
+        footer_status_layout.addWidget(self.recipe_progress)
+        footer_status_layout.addWidget(self.label_current_task)
+        self.recipe_action_footer_layout.addWidget(footer_status, stretch=1)
+        self._run_log_button = QtWidgets.QPushButton("Run log", self.recipe_action_footer)
+        self._run_log_button.setCheckable(True)
+        self._run_log_button.setToolTip("Show or hide the live run log.")
+        self._run_log_button.toggled.connect(self._set_run_log_visible)
+        self.recipe_action_footer_layout.addWidget(self._run_log_button)
         ramp_buttons = QtWidgets.QHBoxLayout()
         ramp_buttons.setSpacing(6)
         self.button_start_recipe = QtWidgets.QPushButton("Start recipe", self.recipe_action_footer)
+        self.button_start_recipe.setObjectName("adaptivePrimaryAction")
         self.button_start_recipe.clicked.connect(self._start_auto_ramp)
         self.button_start_recipe.setMinimumWidth(110)
         ramp_buttons.addWidget(self.button_start_recipe, stretch=1)
+        self.button_apply_current_sweep_edits = QtWidgets.QPushButton(
+            "Update remaining sweeps",
+            self.recipe_action_footer,
+        )
+        self.button_apply_current_sweep_edits.setObjectName("adaptivePrimaryAction")
+        self.button_apply_current_sweep_edits.setToolTip(
+            "Apply pending current-sweep recipe edits to remaining steps and extend the active current ramp when safe."
+        )
+        self.button_apply_current_sweep_edits.clicked.connect(self._apply_current_sweep_pending_overrides)
+        self.button_apply_current_sweep_edits.setVisible(False)
+        self.button_apply_current_sweep_edits.setEnabled(False)
+        ramp_buttons.addWidget(self.button_apply_current_sweep_edits, stretch=1)
         self.button_pause_recipe = QtWidgets.QPushButton("Pause", self.recipe_action_footer)
         self.button_pause_recipe.clicked.connect(self._toggle_recipe_pause)
         self.button_pause_recipe.setEnabled(False)
@@ -11238,17 +11446,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_stop_recipe.setMinimumWidth(82)
         ramp_buttons.addWidget(self.button_stop_recipe, stretch=1)
         self.recipe_action_footer_layout.addLayout(ramp_buttons)
-        self.button_apply_current_sweep_edits = QtWidgets.QPushButton(
-            "Update remaining sweeps",
-            self.recipe_action_footer,
-        )
-        self.button_apply_current_sweep_edits.setToolTip(
-            "Apply pending current-sweep recipe edits to remaining steps and extend the active current ramp when safe."
-        )
-        self.button_apply_current_sweep_edits.clicked.connect(self._apply_current_sweep_pending_overrides)
-        self.button_apply_current_sweep_edits.setVisible(False)
-        self.button_apply_current_sweep_edits.setEnabled(False)
-        self.recipe_action_footer_layout.addWidget(self.button_apply_current_sweep_edits)
         experiment_layout.addWidget(automation_box)
 
         manual_box = self._group_box("Manual Actions")
@@ -11336,22 +11533,48 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_layout.setContentsMargins(0, 0, 0, 0)
         plot_layout.setSpacing(6)
 
-        hero_box = QtWidgets.QFrame(plot_panel)
+        hero_box = QtWidgets.QFrame(central)
         self.dashboard_header = hero_box
-        hero_box.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        hero_box.setObjectName("tmaWorkspaceHeader")
+        hero_box.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        hero_box.setMinimumHeight(68)
+        hero_box.setMaximumHeight(78)
         hero_layout = QtWidgets.QHBoxLayout(hero_box)
-        hero_layout.setContentsMargins(12, 10, 12, 10)
-        hero_layout.setSpacing(18)
-        hero_title = QtWidgets.QLabel("TMA Dashboard", hero_box)
-        hero_font = hero_title.font()
-        hero_font.setPointSize(max(hero_font.pointSize(), 13))
-        hero_font.setBold(True)
-        hero_title.setFont(hero_font)
-        hero_layout.addWidget(hero_title)
+        hero_layout.setContentsMargins(14, 6, 14, 6)
+        hero_layout.setSpacing(12)
+
+        product = QtWidgets.QWidget(hero_box)
+        product_layout = QtWidgets.QVBoxLayout(product)
+        product_layout.setContentsMargins(0, 0, 0, 0)
+        product_layout.setSpacing(0)
+        hero_title = QtWidgets.QLabel("TMA Logger", product)
+        hero_title.setProperty("role", "product")
+        product_layout.addWidget(hero_title)
+        self._header_identity_label = QtWidgets.QLabel("No sample selected", product)
+        self._header_identity_label.setProperty("role", "identity")
+        self._header_identity_label.setMinimumWidth(180)
+        product_layout.addWidget(self._header_identity_label)
+        hero_layout.addWidget(product)
+        hero_layout.addWidget(control_view_tabs)
+
+        self._dashboard_view_tabs = QtWidgets.QTabBar(hero_box)
+        self._dashboard_view_tabs.setObjectName("dashboardViewTabs")
+        self._dashboard_view_tabs.addTab("Target workspace")
+        self._dashboard_view_tabs.addTab("Custom dashboard")
+        self._dashboard_view_tabs.setDrawBase(False)
+        self._dashboard_view_tabs.setExpanding(False)
+        self._dashboard_view_tabs.currentChanged.connect(
+            self._handle_dashboard_view_changed
+        )
+        hero_layout.addWidget(self._dashboard_view_tabs)
+        hero_layout.addStretch(1)
+        hero_layout.addWidget(self._build_tma_header_metric(hero_box, "tension", "Tension"))
+        hero_layout.addWidget(self._build_tma_header_metric(hero_box, "strain", "Strain"))
+        hero_layout.addWidget(self._build_tma_header_metric(hero_box, "current", "Current"))
         self.button_emergency_stop = QtWidgets.QPushButton("EMERGENCY STOP", hero_box)
         self.button_emergency_stop.setObjectName("emergencyStopButton")
-        self.button_emergency_stop.setMinimumHeight(42)
-        self.button_emergency_stop.setMinimumWidth(160)
+        self.button_emergency_stop.setMinimumHeight(38)
+        self.button_emergency_stop.setMinimumWidth(142)
         self.button_emergency_stop.setToolTip(
             "Immediately stop the active recipe/session, halt the Tic motor, and turn the power-supply output off."
         )
@@ -11370,17 +11593,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.button_emergency_stop.clicked.connect(self._emergency_stop)
         hero_layout.addWidget(self.button_emergency_stop)
-
-        self._dashboard_view_tabs = QtWidgets.QTabBar(hero_box)
-        self._dashboard_view_tabs.setObjectName("dashboardViewTabs")
-        self._dashboard_view_tabs.addTab("Target workspace")
-        self._dashboard_view_tabs.addTab("Custom dashboard")
-        self._dashboard_view_tabs.setDrawBase(False)
-        self._dashboard_view_tabs.setExpanding(False)
-        self._dashboard_view_tabs.currentChanged.connect(
-            self._handle_dashboard_view_changed
-        )
-        hero_layout.addWidget(self._dashboard_view_tabs)
         self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
         self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
         hero_layout.addWidget(self.button_plot_setup)
@@ -11426,7 +11638,7 @@ class MainWindow(QtWidgets.QMainWindow):
             3,
         )
         status_layout.setRowMinimumHeight(2, 26)
-        hero_layout.addWidget(self.dashboard_status_box, stretch=1)
+        self.dashboard_status_box.setVisible(False)
         self.label_recipe_banner = QtWidgets.QLabel("Manual mode", hero_box)
         self.label_recipe_banner.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
@@ -11436,8 +11648,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
         self.label_recipe_banner.setVisible(False)
-        hero_layout.addWidget(self.label_recipe_banner)
-        plot_layout.addWidget(hero_box, stretch=0)
+        root.insertWidget(0, hero_box)
 
         self.plot_config_dialog = PlotConfigDialog(self)
         plot_config_box = self._group_box("Plot Dashboard")
@@ -11508,7 +11719,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_canvas_container.setMinimumHeight(0)
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
         self._dashboard_plot_canvas_layout = plot_canvas_layout
-        plot_canvas_layout.setContentsMargins(10, 10, 10, 16)
+        plot_canvas_layout.setContentsMargins(0, 0, 0, 0)
         plot_canvas_layout.setSpacing(0)
         plot_stack = QtWidgets.QStackedWidget(plot_canvas_container)
         self._adaptive_plot_stack = plot_stack
@@ -11577,6 +11788,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.log_output.setPlaceholderText("TMA log output")
         log_layout.addWidget(self.log_output, stretch=1)
+        log_container.setVisible(False)
         self.statusBar().hide()
         plot_splitter.setStretchFactor(0, 8)
         plot_splitter.setStretchFactor(1, 1)
@@ -11585,6 +11797,7 @@ class MainWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([460, 1380])
+        root.addWidget(self.recipe_action_footer, stretch=0)
 
         for widget in (
             self.edit_name_composition,
@@ -11747,40 +11960,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self._install_settings_wheel_guard()
 
     def _build_adaptive_run_workspace(self, parent: QtWidgets.QWidget) -> None:
-        layout = QtWidgets.QVBoxLayout(parent)
-        layout.setContentsMargins(2, 0, 2, 0)
-        layout.setSpacing(8)
+        layout = QtWidgets.QHBoxLayout(parent)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(12)
+
+        center = QtWidgets.QWidget(parent)
+        center_layout = QtWidgets.QVBoxLayout(center)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(8)
 
         headline = QtWidgets.QHBoxLayout()
-        headline.setSpacing(10)
-        self._adaptive_workspace_context_label = QtWidgets.QLabel(
-            "Following active target",
-            parent,
+        headline.setSpacing(9)
+        self._adaptive_target_headline_label = QtWidgets.QLabel(
+            "No active target",
+            center,
         )
-        context_font = self._adaptive_workspace_context_label.font()
-        context_font.setPointSize(max(context_font.pointSize(), 11))
+        self._adaptive_target_headline_label.setObjectName("adaptiveTargetHeadline")
+        context_font = self._adaptive_target_headline_label.font()
+        context_font.setPointSize(max(context_font.pointSize(), 12))
         context_font.setBold(True)
-        self._adaptive_workspace_context_label.setFont(context_font)
-        headline.addWidget(self._adaptive_workspace_context_label)
-        self._adaptive_workspace_phase_label = QtWidgets.QLabel("Idle", parent)
+        self._adaptive_target_headline_label.setFont(context_font)
+        headline.addWidget(self._adaptive_target_headline_label)
+        self._adaptive_workspace_phase_label = QtWidgets.QLabel("Idle", center)
         self._adaptive_workspace_phase_label.setObjectName("adaptiveWorkspacePhase")
-        self._adaptive_workspace_phase_label.setStyleSheet(
-            "QLabel#adaptiveWorkspacePhase { color: palette(highlight); font-weight: 600; }"
-        )
         headline.addWidget(self._adaptive_workspace_phase_label)
         headline.addStretch(1)
-        layout.addLayout(headline)
+        self._adaptive_summary_labels["temperature"] = QtWidgets.QLabel(
+            "Temperature  -",
+            center,
+        )
+        self._adaptive_summary_labels["temperature"].setProperty("role", "metricSecondary")
+        headline.addWidget(self._adaptive_summary_labels["temperature"])
+        center_layout.addLayout(headline)
+        view_bar = QtWidgets.QHBoxLayout()
+        view_bar.setSpacing(8)
+        self._adaptive_workspace_context_label = QtWidgets.QLabel(
+            "Following active target",
+            center,
+        )
+        self._adaptive_workspace_context_label.setObjectName("adaptiveWorkspaceContext")
+        view_bar.addWidget(self._adaptive_workspace_context_label)
+        view_bar.addStretch(1)
+        center_layout.addLayout(view_bar)
 
         if pg is None:
             unavailable = QtWidgets.QLabel(
                 "pyqtgraph is not available; the adaptive Run workspace cannot display plots.",
-                parent,
+                center,
             )
             unavailable.setWordWrap(True)
-            layout.addWidget(unavailable, stretch=1)
+            center_layout.addWidget(unavailable, stretch=1)
+            layout.addWidget(center, stretch=1)
             return
 
-        result_tabs = QtWidgets.QTabWidget(parent)
+        result_tabs = QtWidgets.QTabWidget(center)
         self._adaptive_result_tabs = result_tabs
         result_tabs.setObjectName("adaptiveResultTabs")
         result_tabs.setDocumentMode(True)
@@ -11798,7 +12031,10 @@ class MainWindow(QtWidgets.QMainWindow):
             symbols=True,
         )
         strain_bundle.widget.setObjectName("adaptiveStrainCurrentPlot")
-        strain_bundle.widget.setMinimumHeight(285)
+        strain_bundle.widget.setMinimumHeight(250)
+        strain_bundle.left_curve.setPen(pg.mkPen("#e8ad43", width=1.8))
+        strain_bundle.left_curve.setSymbolBrush("#e8ad43")
+        strain_bundle.left_curve.setSymbolPen("#e8ad43")
         strain_layout.addWidget(strain_bundle.widget)
         result_tabs.addTab(strain_page, "Strain vs current")
         self._adaptive_plot_bundles["strain"] = strain_bundle
@@ -11816,12 +12052,12 @@ class MainWindow(QtWidgets.QMainWindow):
             symbols=True,
         )
         resistance_bundle.widget.setObjectName("adaptiveResistanceCurrentPlot")
-        resistance_bundle.widget.setMinimumHeight(285)
+        resistance_bundle.widget.setMinimumHeight(250)
         resistance_layout.addWidget(resistance_bundle.widget)
         result_tabs.addTab(resistance_page, "Resistance vs current")
         self._adaptive_plot_bundles["resistance"] = resistance_bundle
 
-        layout.addWidget(result_tabs, stretch=3)
+        center_layout.addWidget(result_tabs, stretch=3)
 
         progress_row = QtWidgets.QHBoxLayout()
         progress_row.setSpacing(8)
@@ -11863,10 +12099,89 @@ class MainWindow(QtWidgets.QMainWindow):
                 symbols=True,
             )
             bundle.widget.setObjectName(f"adaptive_{key}_plot")
-            bundle.widget.setMinimumSize(220, 190)
+            bundle.widget.setMinimumSize(180, 160)
             progress_row.addWidget(bundle.widget, stretch=1)
             self._adaptive_plot_bundles[key] = bundle
-        layout.addLayout(progress_row, stretch=2)
+        center_layout.addLayout(progress_row, stretch=2)
+        layout.addWidget(center, stretch=1)
+
+        inspector = QtWidgets.QFrame(parent)
+        inspector.setObjectName("adaptiveSweepInspector")
+        inspector.setMinimumWidth(250)
+        inspector.setMaximumWidth(310)
+        inspector_layout = QtWidgets.QVBoxLayout(inspector)
+        inspector_layout.setContentsMargins(12, 10, 12, 10)
+        inspector_layout.setSpacing(8)
+        inspector_title = QtWidgets.QLabel("Active sweep", inspector)
+        inspector_title.setProperty("role", "inspectorTitle")
+        inspector_layout.addWidget(inspector_title)
+        self._adaptive_summary_labels["sweep_context"] = QtWidgets.QLabel(
+            "Waiting for a stress target",
+            inspector,
+        )
+        self._adaptive_summary_labels["sweep_context"].setProperty("role", "metricSecondary")
+        self._adaptive_summary_labels["sweep_context"].setWordWrap(True)
+        inspector_layout.addWidget(self._adaptive_summary_labels["sweep_context"])
+        self._adaptive_sweep_progress = QtWidgets.QProgressBar(inspector)
+        self._adaptive_sweep_progress.setObjectName("adaptiveSweepProgress")
+        self._adaptive_sweep_progress.setRange(0, 100)
+        self._adaptive_sweep_progress.setValue(0)
+        self._adaptive_sweep_progress.setFormat("Idle")
+        inspector_layout.addWidget(self._adaptive_sweep_progress)
+
+        values = QtWidgets.QGridLayout()
+        values.setContentsMargins(0, 4, 0, 0)
+        values.setHorizontalSpacing(14)
+        values.setVerticalSpacing(9)
+        for index, (key, title) in enumerate(
+            (
+                ("target", "Target"),
+                ("processed", "Processed"),
+                ("error", "Error"),
+                ("current", "Current held"),
+            )
+        ):
+            cell = QtWidgets.QWidget(inspector)
+            cell_layout = QtWidgets.QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(0)
+            name = QtWidgets.QLabel(title.upper(), cell)
+            name.setProperty("role", "summaryName")
+            value = QtWidgets.QLabel("-", cell)
+            value.setProperty("role", "summaryValue")
+            cell_layout.addWidget(name)
+            cell_layout.addWidget(value)
+            values.addWidget(cell, index // 2, index % 2)
+            self._adaptive_summary_labels[key] = value
+        inspector_layout.addLayout(values)
+
+        divider = QtWidgets.QFrame(inspector)
+        divider.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        divider.setObjectName("adaptiveInspectorDivider")
+        inspector_layout.addWidget(divider)
+        for key, title in (
+            ("motor", "Motor"),
+            ("raw_stress", "Raw stress"),
+            ("voltage", "Supply"),
+        ):
+            row = QtWidgets.QWidget(inspector)
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            name = QtWidgets.QLabel(title, row)
+            name.setProperty("role", "summaryName")
+            value = QtWidgets.QLabel("-", row)
+            value.setProperty("role", "metricSecondary")
+            value.setAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+            row_layout.addWidget(name)
+            row_layout.addWidget(value, stretch=1)
+            inspector_layout.addWidget(row)
+            self._adaptive_summary_labels[key] = value
+        inspector_layout.addStretch(1)
+        layout.addWidget(inspector)
 
     def _group_box(self, title: str) -> QtWidgets.QGroupBox:
         box = QtWidgets.QGroupBox(title, self)
@@ -17380,6 +17695,8 @@ class MainWindow(QtWidgets.QMainWindow):
             else " | diameter -"
         )
         self.label_recipe_sample.setText(f"Sample: {sample_name}{diameter_text}")
+        if self._header_identity_label is not None:
+            self._header_identity_label.setText(f"{sample_name}{diameter_text}")
 
     def _load_equivalent_text(self, value_mpa: float, *, per_second: bool = False) -> str:
         load_g = load_g_from_stress_mpa(float(value_mpa), float(self.spin_diameter.value()))
@@ -29354,7 +29671,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.label_current_task.setText(f"Current task: {task_text}")
         if hasattr(self, "label_recipe_banner"):
             self.label_recipe_banner.setText(task_text)
-            self.label_recipe_banner.setVisible(self._automation_active)
+            self.label_recipe_banner.setVisible(False)
         self._set_dashboard_value("task", task_text)
 
     def _active_current_sweep_progress_text(self) -> str | None:
@@ -29491,6 +29808,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 complete=complete,
                 percent=percent,
             )
+            self._sync_adaptive_sweep_progress()
             return
         total = max(1, self._automation_total_steps or len(self._automation_steps))
         if self._automation_active and not complete and self._automation_completed_ticks >= total:
@@ -29540,6 +29858,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.recipe_progress.setFormat(getattr(self, "_recipe_idle_progress_text", "Recipe progress: idle"))
         self._update_current_task_display()
         self._update_length_setup_progress(value=value, total=total, complete=complete, percent=percent)
+        self._sync_adaptive_sweep_progress()
+
+    def _sync_adaptive_sweep_progress(self) -> None:
+        progress = self._adaptive_sweep_progress
+        if progress is None:
+            return
+        progress.setRange(self.recipe_progress.minimum(), self.recipe_progress.maximum())
+        progress.setValue(self.recipe_progress.value())
+        progress.setFormat(self.recipe_progress.format())
 
     def _current_sweep_override_values_from_controls(self) -> dict[str, float | bool]:
         pause_factor = float(self.spin_current_sweep_hold_pause_factor.value())
@@ -30509,6 +30836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._run_on_ui_thread(self._update_recipe_buttons)
             return
         self.button_start_recipe.setEnabled(not self._automation_active or self._automation_paused)
+        self.button_start_recipe.setVisible(not self._automation_active)
         self.button_pause_recipe.setEnabled(self._automation_active)
         compact_run_view = (
             self._control_view_stack is not None
@@ -35395,6 +35723,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "strain_pct",
             "-" if strain is None else f"{strain:.3f} %",
         )
+        self._set_header_metric("tension", stress_text, load_text)
+        self._set_header_metric(
+            "strain",
+            "-" if strain is None else f"{strain:.2f} %",
+        )
         speed_values = self._live_speed_values()
 
         self._set_dashboard_value("speed_mm_s", self._live_linear_speed_text(speed_values["speed_mm_s"]))
@@ -35449,7 +35782,27 @@ class MainWindow(QtWidgets.QMainWindow):
         current_text = "-" if supply_current is None else f"{supply_current:.2f}mA"
         voltage_text = "-" if supply_voltage is None else f"{supply_voltage:.2f}V"
         self._set_dashboard_value("supply", f"{current_text} {voltage_text}")
+        current_density_text = (
+            ""
+            if supply_current is None
+            else self._current_density_text(float(supply_current))
+        )
+        self._set_header_metric("current", current_text, current_density_text)
         self._refresh_supply_live_label()
+
+    def _set_run_log_visible(self, visible: bool) -> None:
+        container = getattr(self, "_dashboard_log_container", None)
+        splitter = getattr(self, "_dashboard_plot_splitter", None)
+        if container is None:
+            return
+        container.setVisible(bool(visible))
+        if splitter is not None:
+            if visible:
+                splitter.setSizes([max(480, splitter.height() - 118), 118])
+            else:
+                splitter.setSizes([max(1, splitter.height()), 0])
+        if self._run_log_button is not None:
+            self._run_log_button.setText("Hide log" if visible else "Run log")
 
     def _set_control_view(self, view: str) -> None:
         stack = self._control_view_stack
@@ -35554,11 +35907,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self._adaptive_target_selection = selection_obj
         self._refresh_plots()
 
+    def _planned_adaptive_stress_targets(self) -> list[float]:
+        if self._automation_active and self._automation_steps:
+            step_targets = {
+                round(float(step.target_value), 9)
+                for step in self._automation_steps
+                if (
+                    step.target_value is not None
+                    and str(step.basis or "") == HSW_BASIS_STRESS_MPA
+                    and step.action in {"sweep_current", "set_current", "settle"}
+                )
+            }
+            if step_targets:
+                return sorted(step_targets)
+        start = float(self.spin_current_sweep_target_start.value())
+        end = float(self.spin_current_sweep_target_end.value())
+        step = abs(float(self.spin_current_sweep_target_step.value()))
+        if step <= 0.0:
+            return [start]
+        direction = 1.0 if end >= start else -1.0
+        targets: list[float] = []
+        value = start
+        for _ in range(1000):
+            if direction > 0.0 and value > end + 1e-9:
+                break
+            if direction < 0.0 and value < end - 1e-9:
+                break
+            targets.append(round(float(value), 9))
+            value += direction * step
+        if targets and not math.isclose(targets[-1], end, rel_tol=0.0, abs_tol=1e-9):
+            targets.append(round(end, 9))
+        return targets
+
     def _adaptive_target_context(
         self,
         points: Sequence[MeasurementPoint],
     ) -> tuple[list[float], float | None, float | None]:
         measured_targets = measured_stress_targets(points)
+        navigator_targets = sorted(
+            {
+                *measured_targets,
+                *self._planned_adaptive_stress_targets(),
+            }
+        )
         active_target = self._active_adaptive_stress_target_mpa()
         selectable_active_target = active_target
         if (
@@ -35583,12 +35974,12 @@ class MainWindow(QtWidgets.QMainWindow):
         navigator = self._adaptive_target_navigator
         if navigator is not None:
             navigator.set_context(
-                targets_mpa=measured_targets,
+                targets_mpa=navigator_targets,
                 active_target_mpa=active_target,
                 selection=self._adaptive_target_selection,
                 equivalent_by_target={
                     float(target): self._load_equivalent_text(float(target))
-                    for target in measured_targets
+                    for target in navigator_targets
                 },
             )
         return measured_targets, active_target, selected_target
@@ -35766,6 +36157,81 @@ class MainWindow(QtWidgets.QMainWindow):
             bundle.right_view.enableAutoRange()
         bundle.plot_item.enableAutoRange()
 
+    def _refresh_adaptive_sweep_summary(
+        self,
+        points: Sequence[MeasurementPoint],
+        *,
+        active_target: float | None,
+    ) -> None:
+        labels = self._adaptive_summary_labels
+        if not labels:
+            return
+        latest = points[-1] if points else None
+        target_text = "-" if active_target is None else format_target_mpa(active_target)
+        processed_stress = None if latest is None else latest.stress_mpa
+        raw_stress = None
+        if self._has_fresh_scale_reading():
+            raw_stress = stress_mpa_from_load_g(
+                self._current_effective_load_g(),
+                float(self.spin_diameter.value()),
+            )
+        current_mA = (
+            None
+            if latest is None
+            else (
+                latest.current_measured_mA
+                if latest.current_measured_mA is not None
+                else latest.current_set_mA
+            )
+        )
+        error_mpa = (
+            None
+            if active_target is None or processed_stress is None
+            else float(processed_stress) - float(active_target)
+        )
+        labels["target"].setText(target_text)
+        labels["processed"].setText(
+            "-" if processed_stress is None else f"{float(processed_stress):.1f} MPa"
+        )
+        labels["error"].setText(
+            "-" if error_mpa is None else f"{float(error_mpa):+.1f} MPa"
+        )
+        labels["current"].setText(
+            "-" if current_mA is None else f"{float(current_mA):.2f} mA"
+        )
+        labels["motor"].setText(
+            f"{self._tensile_displacement_mm(self._effective_position_mm):.4f} mm"
+        )
+        labels["raw_stress"].setText(
+            "-" if raw_stress is None else f"{float(raw_stress):.1f} MPa"
+        )
+        voltage = self._supply_snapshot.get("voltage_V")
+        labels["voltage"].setText(
+            "-" if voltage is None else f"{float(voltage):.2f} V"
+        )
+        plateau = str(self._automation_plateau_label or target_text)
+        total_targets = max(
+            len(measured_stress_targets(points)),
+            len(self._planned_adaptive_stress_targets()),
+        )
+        active_index = (
+            int(self._automation_plateau_index or 0) + 1
+            if self._automation_plateau_index is not None
+            else None
+        )
+        index_text = (
+            ""
+            if active_index is None
+            else f" | target {active_index} of {max(active_index, total_targets)}"
+        )
+        labels["sweep_context"].setText(f"{plateau}{index_text}")
+        ir_object = self._latest_ir_snapshot().get("object_c_apparent")
+        labels["temperature"].setText(
+            "Temperature  -"
+            if ir_object is None
+            else f"Temperature  {float(ir_object):.1f} C"
+        )
+
     def _refresh_adaptive_workspace(self, points: Sequence[MeasurementPoint]) -> None:
         measured_targets, active_target, selected_target = self._adaptive_target_context(points)
         all_targets = self._adaptive_target_selection.mode == "all"
@@ -35797,9 +36263,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 context = f"Inspecting {inspected_text} | active {active_text}"
             self._adaptive_workspace_context_label.setText(context)
+        if self._adaptive_target_headline_label is not None:
+            headline_target = selected_target if selected_target is not None else active_target
+            self._adaptive_target_headline_label.setText(
+                "No active target"
+                if headline_target is None
+                else format_target_mpa(headline_target)
+            )
         if self._adaptive_workspace_phase_label is not None:
             phase = str(self._automation_phase or "idle").replace("_", " ").strip()
-            self._adaptive_workspace_phase_label.setText(phase.title())
+            phase_text = (
+                "STRESS RECOVERY HOLD"
+                if phase == "current hold"
+                and str(self._automation_basis or "") == HSW_BASIS_STRESS_MPA
+                else phase.upper()
+            )
+            self._adaptive_workspace_phase_label.setText(phase_text)
+        self._refresh_adaptive_sweep_summary(
+            points,
+            active_target=active_target,
+        )
+        self._sync_adaptive_sweep_progress()
 
         self._refresh_adaptive_result_plot(
             key="strain",

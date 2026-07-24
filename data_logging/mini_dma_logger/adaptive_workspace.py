@@ -122,8 +122,8 @@ class StressTargetNavigator(QtWidgets.QWidget):
         self._equivalent_by_target: dict[float, str] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(9, 10, 9, 8)
+        layout.setSpacing(6)
 
         title = QtWidgets.QLabel("Stress targets", self)
         title.setObjectName("targetNavigatorTitle")
@@ -179,19 +179,23 @@ class StressTargetNavigator(QtWidgets.QWidget):
         self.setStyleSheet(
             """
             QWidget#tmaStressTargetNavigator {
-                border-right: 1px solid palette(mid);
+                background: #191c20;
+                border-right: 1px solid #343a42;
             }
             QPushButton#followActiveTargetButton,
             QPushButton#allStressTargetsButton {
-                min-height: 30px;
+                min-height: 28px;
                 text-align: left;
                 padding: 4px 8px;
+                border: 1px solid #343a42;
+                border-radius: 3px;
             }
             QPushButton#followActiveTargetButton:checked,
             QPushButton#allStressTargetsButton:checked {
-                border: 1px solid palette(highlight);
-                color: palette(highlight);
-                font-weight: 600;
+                background: #e8ad43;
+                border-color: #e8ad43;
+                color: #101214;
+                font-weight: 700;
             }
             QListWidget#stressTargetList {
                 border: 0;
@@ -199,19 +203,21 @@ class StressTargetNavigator(QtWidgets.QWidget):
                 background: transparent;
             }
             QListWidget#stressTargetList::item {
-                min-height: 34px;
-                padding: 3px 7px;
+                min-height: 29px;
+                padding: 2px 6px;
+                color: #9ca5af;
             }
             QListWidget#stressTargetList::item:selected {
-                border-left: 3px solid palette(highlight);
-                background: palette(alternate-base);
+                border-left: 3px solid #e8ad43;
+                background: #20242a;
+                color: #edf0f3;
             }
             QLabel#activeTargetLabel {
-                color: palette(highlight);
+                color: #e8ad43;
                 font-weight: 600;
             }
             QLabel#inspectedTargetLabel {
-                color: palette(text);
+                color: #edf0f3;
             }
             """
         )

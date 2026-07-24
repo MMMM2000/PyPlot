@@ -236,7 +236,7 @@ def test_target_navigation_scopes_results_and_progress(
     app.processEvents()
 
     navigator = window._adaptive_target_navigator
-    assert navigator.target_list.count() == 2
+    assert navigator.target_list.count() == 20
     assert navigator.active_label.text() == "Active  100 MPa"
     assert navigator.inspected_label.text() == "Inspecting  100 MPa"
     assert "Following active target | 100 MPa" in (
@@ -275,6 +275,15 @@ def test_target_navigation_scopes_results_and_progress(
         if len(curve.getData()[0]) > 0
     ]
     assert len(visible_result_curves) == 2
+
+    future_item = navigator.target_list.item(navigator.target_list.count() - 1)
+    navigator.target_list.itemClicked.emit(future_item)
+    app.processEvents()
+    assert navigator.inspected_label.text() == "Inspecting  1000 MPa"
+    assert all(
+        curve.getData()[0] is None or len(curve.getData()[0]) == 0
+        for curve in window._adaptive_result_curves["strain"]
+    )
 
 
 def test_follow_active_keeps_last_measured_target_during_next_target_ramp(
@@ -320,3 +329,59 @@ def test_run_and_prepare_views_resize_control_column_for_compact_workspace(
         "Sample",
         "Hardware",
     ]
+
+
+def test_adaptive_workspace_uses_full_width_header_and_action_dock(
+    window: object,
+) -> None:
+    app = _ensure_app()
+    window.combo_recipe_mode.setCurrentIndex(
+        window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    )
+    window._set_control_view("run")
+    app.processEvents()
+
+    central = window.centralWidget()
+    assert window.dashboard_header.parentWidget() is central
+    assert window.recipe_action_footer.parentWidget() is central
+    assert window._control_view_tabs.parentWidget() is window.dashboard_header
+    assert window.dashboard_header.width() >= central.width() - 2
+    assert window.recipe_action_footer.width() >= central.width() - 2
+    assert window._adaptive_summary_labels["target"].isVisible()
+    assert window._adaptive_sweep_progress.isVisible()
+
+
+def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:
+    app = _ensure_app()
+    window.combo_recipe_mode.setCurrentIndex(
+        window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    )
+    window._session_points = _synthetic_points()
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._automation_target_value = 100.0
+    window._automation_phase = "current_hold"
+    window._automation_plateau_label = "100 MPa"
+    window._adaptive_workspace_user_prefers_custom = False
+    window._refresh_plots()
+    app.processEvents()
+
+    assert window._adaptive_target_headline_label.text() == "100 MPa"
+    assert window._adaptive_workspace_phase_label.text() == "STRESS RECOVERY HOLD"
+    assert window._adaptive_summary_labels["target"].text() == "100 MPa"
+    assert window._adaptive_summary_labels["processed"].text() == "101.5 MPa"
+    assert window._adaptive_summary_labels["current"].text() == "3.10 mA"
+
+
+def test_run_log_button_reuses_existing_log_panel(window: object) -> None:
+    app = _ensure_app()
+    assert not window._dashboard_log_container.isVisible()
+
+    window._run_log_button.click()
+    app.processEvents()
+    assert window._dashboard_log_container.isVisible()
+    assert window._run_log_button.text() == "Hide log"
+
+    window._run_log_button.click()
+    app.processEvents()
+    assert not window._dashboard_log_container.isVisible()
+    assert window._run_log_button.text() == "Run log"
