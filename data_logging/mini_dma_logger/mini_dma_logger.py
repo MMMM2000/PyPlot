@@ -56,6 +56,14 @@ from data_logging.source_provenance import (
     patch_source_control_metadata,
     unavailable_source_provenance,
 )
+from data_logging.mini_dma_logger.adaptive_workspace import (
+    StressTargetNavigator,
+    StressTargetSelection,
+    format_target_mpa,
+    measured_stress_targets,
+    points_for_target,
+    resolve_selected_target,
+)
 from data_logging.mini_dma_logger.run_cleanup import (
     MiniDmaRunCleanupCandidate,
     archive_cleanup_candidates,
@@ -8197,6 +8205,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._dashboard_plot_settings_by_mode: dict[str, list[dict[str, object]]] = {}
         self._plot_settings_restore_in_progress = False
         self._dashboard_value_labels: dict[str, QtWidgets.QLabel] = {}
+        self._adaptive_target_selection = StressTargetSelection.follow_active()
+        self._adaptive_target_navigator: StressTargetNavigator | None = None
+        self._adaptive_plot_bundles: dict[str, PyqtGraphPlotBundle] = {}
+        self._adaptive_result_curves: dict[str, list[Any]] = {
+            "strain": [],
+            "resistance": [],
+        }
+        self._adaptive_workspace_context_label: QtWidgets.QLabel | None = None
+        self._adaptive_workspace_phase_label: QtWidgets.QLabel | None = None
+        self._adaptive_plot_stack: QtWidgets.QStackedWidget | None = None
+        self._adaptive_result_tabs: QtWidgets.QTabWidget | None = None
+        self._dashboard_view_tabs: QtWidgets.QTabBar | None = None
+        self._adaptive_workspace_user_prefers_custom = False
+        self._control_view_stack: QtWidgets.QStackedWidget | None = None
+        self._control_view_tabs: QtWidgets.QTabBar | None = None
+        self._control_column: QtWidgets.QWidget | None = None
+        self._main_splitter: QtWidgets.QSplitter | None = None
         self._current_sweep_target_values_by_mode: dict[str, tuple[float, float, float, float]] = {}
         self._constant_current_step_base_position_by_note: dict[str, float] = {}
         self._constant_current_step_base_strain_by_note: dict[str, float] = {}
@@ -8929,14 +8954,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, central)
         splitter.setChildrenCollapsible(False)
+        self._main_splitter = splitter
         root.addWidget(splitter, 1)
 
         control_column = QtWidgets.QWidget(splitter)
+        self._control_column = control_column
         control_column.setMinimumWidth(560)
         control_column.setMaximumWidth(720)
         control_column_layout = QtWidgets.QVBoxLayout(control_column)
         control_column_layout.setContentsMargins(0, 0, 0, 0)
         control_column_layout.setSpacing(6)
+
+        control_view_tabs = QtWidgets.QTabBar(control_column)
+        self._control_view_tabs = control_view_tabs
+        control_view_tabs.setObjectName("tmaControlViewTabs")
+        control_view_tabs.addTab("Run")
+        control_view_tabs.addTab("Prepare")
+        control_view_tabs.setExpanding(True)
+        control_view_tabs.setDrawBase(False)
+        control_column_layout.addWidget(control_view_tabs)
+
+        control_view_stack = QtWidgets.QStackedWidget(control_column)
+        self._control_view_stack = control_view_stack
+        control_column_layout.addWidget(control_view_stack, stretch=1)
 
         control_scroll = QtWidgets.QScrollArea(control_column)
         self._control_scroll_area = control_scroll
@@ -8946,7 +8986,26 @@ class MainWindow(QtWidgets.QMainWindow):
         control_scroll.horizontalScrollBar().setFixedHeight(0)
         control_scroll.setMinimumWidth(560)
         control_scroll.setMaximumWidth(720)
-        control_column_layout.addWidget(control_scroll, stretch=1)
+        control_view_stack.addWidget(control_scroll)
+
+        run_navigator_page = QtWidgets.QWidget(control_column)
+        run_navigator_layout = QtWidgets.QVBoxLayout(run_navigator_page)
+        run_navigator_layout.setContentsMargins(0, 0, 0, 0)
+        run_navigator_layout.setSpacing(6)
+        self._adaptive_target_navigator = StressTargetNavigator(run_navigator_page)
+        self._adaptive_target_navigator.selection_changed.connect(
+            self._handle_adaptive_target_selection
+        )
+        self._adaptive_target_navigator.configure_requested.connect(
+            lambda: self._set_control_view("prepare")
+        )
+        run_navigator_layout.addWidget(self._adaptive_target_navigator, stretch=1)
+        control_view_stack.addWidget(run_navigator_page)
+        control_view_stack.setCurrentWidget(control_scroll)
+        control_view_tabs.setCurrentIndex(1)
+        control_view_tabs.currentChanged.connect(
+            lambda index: self._set_control_view("run" if index == 0 else "prepare")
+        )
 
         self.recipe_action_footer = QtWidgets.QFrame(control_column)
         self.recipe_action_footer.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
@@ -11310,6 +11369,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.button_emergency_stop.clicked.connect(self._emergency_stop)
         hero_layout.addWidget(self.button_emergency_stop)
+
+        self._dashboard_view_tabs = QtWidgets.QTabBar(hero_box)
+        self._dashboard_view_tabs.setObjectName("dashboardViewTabs")
+        self._dashboard_view_tabs.addTab("Target workspace")
+        self._dashboard_view_tabs.addTab("Custom dashboard")
+        self._dashboard_view_tabs.setDrawBase(False)
+        self._dashboard_view_tabs.setExpanding(False)
+        self._dashboard_view_tabs.currentChanged.connect(
+            self._handle_dashboard_view_changed
+        )
+        hero_layout.addWidget(self._dashboard_view_tabs)
         self.button_plot_setup = QtWidgets.QPushButton("Configure plots", hero_box)
         self.button_plot_setup.clicked.connect(self._show_plot_config_dialog)
         hero_layout.addWidget(self.button_plot_setup)
@@ -11438,12 +11508,25 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
         self._dashboard_plot_canvas_layout = plot_canvas_layout
         plot_canvas_layout.setContentsMargins(10, 10, 10, 16)
-        plot_canvas_layout.setSpacing(10)
+        plot_canvas_layout.setSpacing(0)
+        plot_stack = QtWidgets.QStackedWidget(plot_canvas_container)
+        self._adaptive_plot_stack = plot_stack
+        plot_canvas_layout.addWidget(plot_stack, stretch=1)
+
+        adaptive_page = QtWidgets.QWidget(plot_stack)
+        self._build_adaptive_run_workspace(adaptive_page)
+        plot_stack.addWidget(adaptive_page)
+
+        legacy_page = QtWidgets.QWidget(plot_stack)
+        legacy_layout = QtWidgets.QVBoxLayout(legacy_page)
+        legacy_layout.setContentsMargins(0, 0, 0, 0)
+        legacy_layout.setSpacing(10)
         self._dashboard_plot_grid = QtWidgets.QGridLayout()
         self._dashboard_plot_grid.setContentsMargins(0, 0, 0, 0)
         self._dashboard_plot_grid.setHorizontalSpacing(18)
         self._dashboard_plot_grid.setVerticalSpacing(18)
-        plot_canvas_layout.addLayout(self._dashboard_plot_grid, stretch=1)
+        legacy_layout.addLayout(self._dashboard_plot_grid, stretch=1)
+        plot_stack.addWidget(legacy_page)
         self._dashboard_plot_bundles = []
         self._dashboard_plot_widgets = []
         self._dashboard_left_curves = []
@@ -11451,7 +11534,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if pg is not None:
             for plot_index in range(4):
                 bundle = self._create_pyqtgraph_plot(
-                    parent=plot_canvas_container,
+                    parent=legacy_page,
                     title=f"Plot {plot_index + 1}",
                     x_label="Time (s)",
                     left_label="Applied tensile load (g)",
@@ -11467,7 +11550,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._dashboard_left_curves.append(bundle.left_curve)
                 self._dashboard_right_curves.append(bundle.right_curve)
         else:
-            plot_canvas_layout.addWidget(QtWidgets.QLabel("pyqtgraph is not available; live plots are disabled.", plot_canvas_container))
+            legacy_layout.addWidget(
+                QtWidgets.QLabel(
+                    "pyqtgraph is not available; live plots are disabled.",
+                    legacy_page,
+                )
+            )
 
         log_container = QtWidgets.QWidget(plot_splitter)
         self._dashboard_log_container = log_container
@@ -11656,6 +11744,128 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_plots()
         self._make_settings_panel_width_friendly()
         self._install_settings_wheel_guard()
+
+    def _build_adaptive_run_workspace(self, parent: QtWidgets.QWidget) -> None:
+        layout = QtWidgets.QVBoxLayout(parent)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(8)
+
+        headline = QtWidgets.QHBoxLayout()
+        headline.setSpacing(10)
+        self._adaptive_workspace_context_label = QtWidgets.QLabel(
+            "Following active target",
+            parent,
+        )
+        context_font = self._adaptive_workspace_context_label.font()
+        context_font.setPointSize(max(context_font.pointSize(), 11))
+        context_font.setBold(True)
+        self._adaptive_workspace_context_label.setFont(context_font)
+        headline.addWidget(self._adaptive_workspace_context_label)
+        self._adaptive_workspace_phase_label = QtWidgets.QLabel("Idle", parent)
+        self._adaptive_workspace_phase_label.setObjectName("adaptiveWorkspacePhase")
+        self._adaptive_workspace_phase_label.setStyleSheet(
+            "QLabel#adaptiveWorkspacePhase { color: palette(highlight); font-weight: 600; }"
+        )
+        headline.addWidget(self._adaptive_workspace_phase_label)
+        headline.addStretch(1)
+        layout.addLayout(headline)
+
+        if pg is None:
+            unavailable = QtWidgets.QLabel(
+                "pyqtgraph is not available; the adaptive Run workspace cannot display plots.",
+                parent,
+            )
+            unavailable.setWordWrap(True)
+            layout.addWidget(unavailable, stretch=1)
+            return
+
+        result_tabs = QtWidgets.QTabWidget(parent)
+        self._adaptive_result_tabs = result_tabs
+        result_tabs.setObjectName("adaptiveResultTabs")
+        result_tabs.setDocumentMode(True)
+
+        strain_page = QtWidgets.QWidget(result_tabs)
+        strain_layout = QtWidgets.QVBoxLayout(strain_page)
+        strain_layout.setContentsMargins(0, 6, 0, 0)
+        strain_bundle = self._create_pyqtgraph_plot(
+            parent=strain_page,
+            title="Strain vs current",
+            x_label="Measured current (mA)",
+            left_label="Strain (%)",
+            right_label=None,
+            left_color="#22c55e",
+            symbols=True,
+        )
+        strain_bundle.widget.setObjectName("adaptiveStrainCurrentPlot")
+        strain_bundle.widget.setMinimumHeight(285)
+        strain_layout.addWidget(strain_bundle.widget)
+        result_tabs.addTab(strain_page, "Strain vs current")
+        self._adaptive_plot_bundles["strain"] = strain_bundle
+
+        resistance_page = QtWidgets.QWidget(result_tabs)
+        resistance_layout = QtWidgets.QVBoxLayout(resistance_page)
+        resistance_layout.setContentsMargins(0, 6, 0, 0)
+        resistance_bundle = self._create_pyqtgraph_plot(
+            parent=resistance_page,
+            title="Resistance vs current",
+            x_label="Measured current (mA)",
+            left_label="Resistance (Ohm)",
+            right_label=None,
+            left_color="#14b8a6",
+            symbols=True,
+        )
+        resistance_bundle.widget.setObjectName("adaptiveResistanceCurrentPlot")
+        resistance_bundle.widget.setMinimumHeight(285)
+        resistance_layout.addWidget(resistance_bundle.widget)
+        result_tabs.addTab(resistance_page, "Resistance vs current")
+        self._adaptive_plot_bundles["resistance"] = resistance_bundle
+
+        layout.addWidget(result_tabs, stretch=3)
+
+        progress_row = QtWidgets.QHBoxLayout()
+        progress_row.setSpacing(8)
+        progress_specs = (
+            (
+                "stress",
+                "Stress / load vs time",
+                "Stress (MPa)",
+                "Applied load (g)",
+                "#a78bfa",
+                "#fbbf24",
+            ),
+            (
+                "strain_progress",
+                "Strain / displacement vs time",
+                "Strain (%)",
+                "Tensile displacement (mm)",
+                "#22c55e",
+                "#60a5fa",
+            ),
+            (
+                "current",
+                "Current vs time",
+                "Measured current (mA)",
+                "Set current (mA)",
+                "#fb7185",
+                "#f97316",
+            ),
+        )
+        for key, title, left_label, right_label, left_color, right_color in progress_specs:
+            bundle = self._create_pyqtgraph_plot(
+                parent=parent,
+                title=title,
+                x_label="Time (s)",
+                left_label=left_label,
+                right_label=right_label,
+                left_color=left_color,
+                right_color=right_color,
+                symbols=True,
+            )
+            bundle.widget.setObjectName(f"adaptive_{key}_plot")
+            bundle.widget.setMinimumSize(220, 190)
+            progress_row.addWidget(bundle.widget, stretch=1)
+            self._adaptive_plot_bundles[key] = bundle
+        layout.addLayout(progress_row, stretch=2)
 
     def _group_box(self, title: str) -> QtWidgets.QGroupBox:
         box = QtWidgets.QGroupBox(title, self)
@@ -23593,6 +23803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_recipe_file_status()
         if hasattr(self, "button_apply_current_sweep_edits"):
             self._refresh_current_sweep_pending_update_ui()
+        self._sync_dashboard_workspace_mode()
 
     def _scheduled_log_point_count(self, *, duration_s: float, control_interval_s: float) -> int:
         effective_log_interval_s = max(control_interval_s, self._current_sweep_log_interval_ms() / 1000.0)
@@ -30298,7 +30509,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.button_start_recipe.setEnabled(not self._automation_active or self._automation_paused)
         self.button_pause_recipe.setEnabled(self._automation_active)
-        self.button_pause_recipe.setText("Resume recipe" if self._automation_paused else "Pause recipe")
+        compact_run_view = (
+            self._control_view_stack is not None
+            and self._control_view_stack.currentIndex() == 1
+        )
+        self.button_start_recipe.setText("Start" if compact_run_view else "Start recipe")
+        self.button_pause_recipe.setText(
+            "Resume" if compact_run_view and self._automation_paused
+            else "Pause" if compact_run_view
+            else "Resume recipe" if self._automation_paused
+            else "Pause recipe"
+        )
         self.button_stop_recipe.setEnabled(self._automation_active)
         self._update_current_sweep_runtime_edit_state()
         self._update_length_setup_controls()
@@ -30963,6 +31184,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_name = str(self.combo_recipe_mode.currentData() or "ramp")
         if self._is_current_sweep_mode(self._automation_name):
             self._current_sweep_runtime_applied_values = self._current_sweep_visible_runtime_values_from_controls()
+            self._adaptive_target_selection = StressTargetSelection.follow_active()
+            self._adaptive_workspace_user_prefers_custom = False
+            self._set_control_view("run")
+            self._sync_dashboard_workspace_mode()
         self._last_recipe_summary = summary
         self._set_automation_context(phase="start")
         if steps and steps[0].note in {"setup_start_length", "setup_preload"}:
@@ -35225,6 +35450,372 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_dashboard_value("supply", f"{current_text} {voltage_text}")
         self._refresh_supply_live_label()
 
+    def _set_control_view(self, view: str) -> None:
+        stack = self._control_view_stack
+        tabs = self._control_view_tabs
+        column = self._control_column
+        splitter = self._main_splitter
+        if stack is None or tabs is None or column is None:
+            return
+        run_view = str(view).strip().lower() == "run"
+        target_index = 1 if run_view else 0
+        if stack.currentIndex() != target_index:
+            stack.setCurrentIndex(target_index)
+        tab_index = 0 if run_view else 1
+        if tabs.currentIndex() != tab_index:
+            blocker = QtCore.QSignalBlocker(tabs)
+            tabs.setCurrentIndex(tab_index)
+            del blocker
+        if run_view:
+            column.setMinimumWidth(210)
+            column.setMaximumWidth(280)
+            self.button_start_recipe.setText("Start")
+            self.button_start_recipe.setMinimumWidth(0)
+            self.button_pause_recipe.setText(
+                "Resume" if self._automation_paused else "Pause"
+            )
+            self.button_pause_recipe.setMinimumWidth(0)
+            self.button_stop_recipe.setMinimumWidth(0)
+            if splitter is not None:
+                splitter.setSizes([230, max(720, splitter.width() - 230)])
+        else:
+            column.setMinimumWidth(560)
+            column.setMaximumWidth(720)
+            self.button_start_recipe.setText("Start recipe")
+            self.button_start_recipe.setMinimumWidth(110)
+            self.button_pause_recipe.setText(
+                "Resume recipe" if self._automation_paused else "Pause recipe"
+            )
+            self.button_pause_recipe.setMinimumWidth(82)
+            self.button_stop_recipe.setMinimumWidth(82)
+            if splitter is not None:
+                splitter.setSizes([600, max(720, splitter.width() - 600)])
+
+    def _handle_dashboard_view_changed(self, index: int) -> None:
+        if not self._is_current_sweep_mode():
+            self._adaptive_workspace_user_prefers_custom = True
+        else:
+            self._adaptive_workspace_user_prefers_custom = int(index) == 1
+        self._sync_dashboard_workspace_mode()
+        self._refresh_plots()
+
+    def _sync_dashboard_workspace_mode(self) -> None:
+        stack = self._adaptive_plot_stack
+        tabs = self._dashboard_view_tabs
+        if stack is None or tabs is None:
+            return
+        current_sweep_mode = self._is_current_sweep_mode()
+        adaptive_visible = (
+            current_sweep_mode
+            and not self._adaptive_workspace_user_prefers_custom
+        )
+        target_index = 0 if adaptive_visible else 1
+        if stack.currentIndex() != target_index:
+            stack.setCurrentIndex(target_index)
+        tabs.setVisible(current_sweep_mode)
+        desired_tab = 0 if adaptive_visible else 1
+        if tabs.currentIndex() != desired_tab:
+            blocker = QtCore.QSignalBlocker(tabs)
+            tabs.setCurrentIndex(desired_tab)
+            del blocker
+        self.button_plot_setup.setVisible(not adaptive_visible)
+        if self._control_view_tabs is not None:
+            self._control_view_tabs.setTabEnabled(0, current_sweep_mode)
+        if not current_sweep_mode and self._control_view_stack is not None:
+            self._set_control_view("prepare")
+
+    def _active_adaptive_stress_target_mpa(self) -> float | None:
+        if str(self._automation_basis or "") != HSW_BASIS_STRESS_MPA:
+            return None
+        value = self._automation_target_value
+        if value is None or not math.isfinite(float(value)):
+            return None
+        return float(value)
+
+    def _handle_adaptive_target_selection(self, selection_obj: object) -> None:
+        if not isinstance(selection_obj, StressTargetSelection):
+            return
+        self._adaptive_target_selection = selection_obj
+        self._refresh_plots()
+
+    def _adaptive_target_context(
+        self,
+        points: Sequence[MeasurementPoint],
+    ) -> tuple[list[float], float | None, float | None]:
+        measured_targets = measured_stress_targets(points)
+        active_target = self._active_adaptive_stress_target_mpa()
+        selected_target = resolve_selected_target(
+            self._adaptive_target_selection,
+            active_target_mpa=active_target,
+            measured_targets_mpa=measured_targets,
+        )
+        navigator = self._adaptive_target_navigator
+        if navigator is not None:
+            navigator.set_context(
+                targets_mpa=measured_targets,
+                active_target_mpa=active_target,
+                selection=self._adaptive_target_selection,
+                equivalent_by_target={
+                    float(target): self._load_equivalent_text(float(target))
+                    for target in measured_targets
+                },
+            )
+        return measured_targets, active_target, selected_target
+
+    def _adaptive_result_curve_color(self, index: int) -> str:
+        colors = (
+            "#22c55e",
+            "#38bdf8",
+            "#fbbf24",
+            "#fb7185",
+            "#a78bfa",
+            "#14b8a6",
+            "#f97316",
+            "#60a5fa",
+            "#e879f9",
+            "#84cc16",
+            "#f43f5e",
+            "#06b6d4",
+        )
+        return colors[index % len(colors)]
+
+    def _ensure_adaptive_result_curves(
+        self,
+        key: str,
+        targets: Sequence[float],
+        *,
+        selected_target: float | None,
+    ) -> list[Any]:
+        if pg is None:
+            return []
+        bundle = self._adaptive_plot_bundles.get(key)
+        if bundle is None:
+            return []
+        desired_count = max(1, len(targets))
+        curves = self._adaptive_result_curves[key]
+        while len(curves) < desired_count:
+            curve = pg.PlotDataItem([], [])
+            bundle.plot_item.addItem(curve)
+            curves.append(curve)
+        for curve in curves[desired_count:]:
+            self._set_pyqtgraph_curve_data(curve, [], [])
+        active_target = self._active_adaptive_stress_target_mpa()
+        for index, curve in enumerate(curves[:desired_count]):
+            color = (
+                "#22c55e"
+                if key == "strain" and selected_target is not None
+                else "#14b8a6"
+                if key == "resistance" and selected_target is not None
+                else self._adaptive_result_curve_color(index)
+            )
+            target = targets[index] if index < len(targets) else selected_target
+            is_active = (
+                target is not None
+                and active_target is not None
+                and math.isclose(
+                    float(target),
+                    float(active_target),
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+            )
+            self._set_pyqtgraph_curve_style(
+                curve,
+                color,
+                width=1.6 if is_active else 1.0,
+                symbol="o",
+            )
+        self._set_pyqtgraph_curve_data(bundle.left_curve, [], [])
+        return curves[:desired_count]
+
+    def _refresh_adaptive_result_plot(
+        self,
+        *,
+        key: str,
+        points: Sequence[MeasurementPoint],
+        measured_targets: Sequence[float],
+        selected_target: float | None,
+        all_targets: bool,
+    ) -> None:
+        bundle = self._adaptive_plot_bundles.get(key)
+        if bundle is None:
+            return
+        x_channel = self._plot_channel("current_measured_mA")
+        y_channel = self._plot_channel(
+            "strain_pct" if key == "strain" else "resistance_ohm"
+        )
+        if x_channel is None or y_channel is None:
+            return
+        targets = list(measured_targets) if all_targets else (
+            [] if selected_target is None else [float(selected_target)]
+        )
+        curves = self._ensure_adaptive_result_curves(
+            key,
+            targets,
+            selected_target=None if all_targets else selected_target,
+        )
+        title_scope = (
+            "all measured stress targets"
+            if all_targets
+            else "-"
+            if selected_target is None
+            else format_target_mpa(selected_target)
+        )
+        title = (
+            "Strain vs current"
+            if key == "strain"
+            else "Resistance vs current"
+        )
+        self._style_pyqtgraph_plot(
+            bundle,
+            title=f"{title} | {title_scope}",
+            x_label=x_channel.label,
+            left_label=y_channel.label,
+            right_label=None,
+            left_color=y_channel.color,
+        )
+        if not targets:
+            for curve in curves:
+                self._set_pyqtgraph_curve_data(curve, [], [])
+            return
+        for curve, target_mpa in zip(curves, targets):
+            target_points = points_for_target(points, target_mpa)
+            x_values, y_values = self._plot_xy_values(
+                target_points,
+                x_channel,
+                y_channel,
+            )
+            self._set_pyqtgraph_curve_data(curve, x_values, y_values)
+        bundle.plot_item.enableAutoRange()
+
+    def _refresh_adaptive_progress_plot(
+        self,
+        key: str,
+        points: Sequence[MeasurementPoint],
+        *,
+        x_key: str,
+        left_key: str,
+        right_key: str,
+        title: str,
+    ) -> None:
+        bundle = self._adaptive_plot_bundles.get(key)
+        x_channel = self._plot_channel(x_key)
+        left_channel = self._plot_channel(left_key)
+        right_channel = self._plot_channel(right_key)
+        if bundle is None or x_channel is None or left_channel is None or right_channel is None:
+            return
+        self._style_pyqtgraph_plot(
+            bundle,
+            title=title,
+            x_label=x_channel.label,
+            left_label=left_channel.label,
+            right_label=right_channel.label,
+            left_color=left_channel.color,
+            right_color=right_channel.color,
+        )
+        self._set_pyqtgraph_curve_style(
+            bundle.left_curve,
+            left_channel.color,
+            width=0.9,
+            symbol="o",
+        )
+        self._set_pyqtgraph_curve_style(
+            bundle.right_curve,
+            right_channel.color,
+            width=0.8,
+            symbol="s",
+        )
+        left_x, left_y = self._plot_xy_values(points, x_channel, left_channel)
+        right_x, right_y = self._plot_xy_values(points, x_channel, right_channel)
+        self._set_pyqtgraph_curve_data(bundle.left_curve, left_x, left_y)
+        self._set_pyqtgraph_curve_data(bundle.right_curve, right_x, right_y)
+        if bundle.sync_right_view is not None:
+            bundle.sync_right_view()
+        if bundle.right_view is not None:
+            bundle.right_view.enableAutoRange()
+        bundle.plot_item.enableAutoRange()
+
+    def _refresh_adaptive_workspace(self, points: Sequence[MeasurementPoint]) -> None:
+        measured_targets, active_target, selected_target = self._adaptive_target_context(points)
+        all_targets = self._adaptive_target_selection.mode == "all"
+        scoped_points = (
+            list(points)
+            if all_targets
+            else points_for_target(points, selected_target)
+        )
+        if self._adaptive_workspace_context_label is not None:
+            active_text = (
+                "-"
+                if active_target is None
+                else format_target_mpa(active_target)
+            )
+            if all_targets:
+                context = f"All measured targets | active {active_text}"
+            elif self._adaptive_target_selection.mode == "follow_active":
+                selected_text = (
+                    "-"
+                    if selected_target is None
+                    else format_target_mpa(selected_target)
+                )
+                context = f"Following active target | {selected_text}"
+            else:
+                inspected_text = (
+                    "-"
+                    if selected_target is None
+                    else format_target_mpa(selected_target)
+                )
+                context = f"Inspecting {inspected_text} | active {active_text}"
+            self._adaptive_workspace_context_label.setText(context)
+        if self._adaptive_workspace_phase_label is not None:
+            phase = str(self._automation_phase or "idle").replace("_", " ").strip()
+            self._adaptive_workspace_phase_label.setText(phase.title())
+
+        self._refresh_adaptive_result_plot(
+            key="strain",
+            points=points,
+            measured_targets=measured_targets,
+            selected_target=selected_target,
+            all_targets=all_targets,
+        )
+        self._refresh_adaptive_result_plot(
+            key="resistance",
+            points=points,
+            measured_targets=measured_targets,
+            selected_target=selected_target,
+            all_targets=all_targets,
+        )
+        scope = (
+            "all targets"
+            if all_targets
+            else "-"
+            if selected_target is None
+            else format_target_mpa(selected_target)
+        )
+        self._refresh_adaptive_progress_plot(
+            "stress",
+            scoped_points,
+            x_key="elapsed_s",
+            left_key="stress_mpa",
+            right_key="load_g",
+            title=f"Stress / load vs time | {scope}",
+        )
+        self._refresh_adaptive_progress_plot(
+            "strain_progress",
+            scoped_points,
+            x_key="elapsed_s",
+            left_key="strain_pct",
+            right_key="position_mm",
+            title=f"Strain / displacement vs time | {scope}",
+        )
+        self._refresh_adaptive_progress_plot(
+            "current",
+            scoped_points,
+            x_key="elapsed_s",
+            left_key="current_measured_mA",
+            right_key="current_set_mA",
+            title=f"Current vs time | {scope}",
+        )
+
     def _refresh_plots(self) -> None:
         if not self._is_ui_thread():
             self._run_on_ui_thread(self._refresh_plots)
@@ -35235,6 +35826,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._refresh_recovery_plot()
             return
         display_points = self._display_plot_points()
+        self._sync_dashboard_workspace_mode()
+        if (
+            self._adaptive_plot_stack is not None
+            and self._adaptive_plot_stack.currentIndex() == 0
+        ):
+            self._refresh_adaptive_workspace(display_points)
+            self._refresh_recovery_plot()
+            return
         active_tiles = [tile for tile in self._plot_tiles if tile.visible.isChecked()]
         if not active_tiles:
             active_tiles = list(self._plot_tiles[:1])

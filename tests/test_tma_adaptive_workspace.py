@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import importlib
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault(
+    "MINI_DMA_QSETTINGS_INI_DIR",
+    str(Path("artifacts/test-qsettings-adaptive-workspace")),
+)
+
+pytest.importorskip("PyQt6.QtWidgets", reason="Qt widgets backend is unavailable")
+
+from PyQt6 import QtCore, QtWidgets
+
+adaptive_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.adaptive_workspace"
+)
+mini_dma_mod = importlib.import_module(
+    "data_logging.mini_dma_logger.mini_dma_logger"
+)
+
+
+def _ensure_app() -> QtWidgets.QApplication:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv[:1])
+    return app
+
+
+def _point(
+    *,
+    elapsed_s: float,
+    target_mpa: float,
+    current_mA: float,
+    strain_pct: float,
+) -> object:
+    return mini_dma_mod.MeasurementPoint(
+        elapsed_s=elapsed_s,
+        timestamp_utc="2026-07-24T08:00:00.000Z",
+        raw_position_mm=strain_pct / 10.0,
+        position_mm=strain_pct / 10.0,
+        raw_load_g=target_mpa / 100.0,
+        load_g=target_mpa / 100.0,
+        preload_state=mini_dma_mod.PRELOAD_ACTIVE,
+        strain_pct=strain_pct,
+        stress_mpa=target_mpa + 1.5,
+        current_set_mA=current_mA,
+        current_measured_mA=current_mA + 0.1,
+        voltage_V=2.0,
+        resistance_ohm=200.0 + current_mA,
+        power_W=0.02,
+        automation_phase="current_ramp",
+        automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+        automation_target_value=target_mpa,
+        plateau_index=int(target_mpa),
+        plateau_label=f"{target_mpa:g} MPa",
+    )
+
+
+def _synthetic_points() -> list[object]:
+    return [
+        _point(
+            elapsed_s=float(index),
+            target_mpa=target,
+            current_mA=1.0 + local_index,
+            strain_pct=(target / 100.0) + local_index * 0.2,
+        )
+        for index, (target, local_index) in enumerate(
+            (
+                (50.0, 0),
+                (50.0, 1),
+                (50.0, 2),
+                (100.0, 0),
+                (100.0, 1),
+                (100.0, 2),
+            )
+        )
+    ]
+
+
+@pytest.fixture
+def window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> object:
+    app = _ensure_app()
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "list_ports",
+        SimpleNamespace(comports=lambda: []),
+    )
+    monkeypatch.setattr(
+        mini_dma_mod,
+        "_load_pyusb_backend",
+        lambda: (_ for _ in ()).throw(RuntimeError("USB disabled in UI test")),
+    )
+    value = mini_dma_mod.MainWindow(log_dir=str(tmp_path), persist_settings=False)
+    value.resize(1280, 768)
+    value.show()
+    app.processEvents()
+    try:
+        yield value
+    finally:
+        value.close()
+        app.processEvents()
+
+
+def test_target_model_groups_only_stress_target_points() -> None:
+    points = _synthetic_points()
+    points.append(
+        mini_dma_mod.MeasurementPoint(
+            **{
+                **points[-1].__dict__,
+                "elapsed_s": 7.0,
+                "automation_basis": mini_dma_mod.HSW_BASIS_LOAD_G,
+                "automation_target_value": 2.0,
+            }
+        )
+    )
+
+    assert adaptive_mod.measured_stress_targets(points) == [50.0, 100.0]
+    selected = adaptive_mod.points_for_target(points, 50.0)
+    assert len(selected) == 3
+    assert all(point.automation_target_value == 50.0 for point in selected)
+
+
+def test_current_sweep_defaults_to_adaptive_but_custom_dashboard_remains(
+    window: object,
+) -> None:
+    combo = window.combo_recipe_mode
+    combo.setCurrentIndex(combo.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
+
+    assert window._adaptive_plot_stack.currentIndex() == 0
+    assert window._dashboard_view_tabs.isVisible()
+    assert window._dashboard_view_tabs.currentIndex() == 0
+    assert len(window._plot_tiles) == 4
+
+    window._dashboard_view_tabs.setCurrentIndex(1)
+    assert window._adaptive_plot_stack.currentIndex() == 1
+    assert window.button_plot_setup.isVisible()
+    assert all(tile.x_combo.count() > 0 for tile in window._plot_tiles)
+
+    combo.setCurrentIndex(combo.findData(mini_dma_mod.CALIBRATION))
+    assert window._adaptive_plot_stack.currentIndex() == 1
+    assert not window._dashboard_view_tabs.isVisible()
+
+
+def test_target_navigation_scopes_results_and_progress(
+    window: object,
+) -> None:
+    app = _ensure_app()
+    combo = window.combo_recipe_mode
+    combo.setCurrentIndex(combo.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
+    window._session_points = _synthetic_points()
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._automation_target_value = 100.0
+    window._automation_phase = "current_hold"
+    window._adaptive_workspace_user_prefers_custom = False
+    window._adaptive_target_selection = adaptive_mod.StressTargetSelection.follow_active()
+    window._refresh_plots()
+    app.processEvents()
+
+    navigator = window._adaptive_target_navigator
+    assert navigator.target_list.count() == 2
+    assert navigator.active_label.text() == "Active  100 MPa"
+    assert navigator.inspected_label.text() == "Inspecting  100 MPa"
+    assert "Following active target | 100 MPa" in (
+        window._adaptive_workspace_context_label.text()
+    )
+
+    strain_curves = window._adaptive_result_curves["strain"]
+    strain_x, _strain_y = strain_curves[0].getData()
+    assert len(strain_x) == 3
+    progress_x, _progress_y = (
+        window._adaptive_plot_bundles["stress"].left_curve.getData()
+    )
+    assert len(progress_x) == 3
+
+    first_item = navigator.target_list.item(0)
+    navigator.target_list.itemClicked.emit(first_item)
+    app.processEvents()
+    assert window._adaptive_target_selection == (
+        adaptive_mod.StressTargetSelection.target(50.0)
+    )
+    assert navigator.active_label.text() == "Active  100 MPa"
+    assert navigator.inspected_label.text() == "Inspecting  50 MPa"
+    assert "Inspecting 50 MPa | active 100 MPa" in (
+        window._adaptive_workspace_context_label.text()
+    )
+
+    navigator.all_button.click()
+    app.processEvents()
+    assert window._adaptive_target_selection.mode == "all"
+    all_progress_x, _all_progress_y = (
+        window._adaptive_plot_bundles["stress"].left_curve.getData()
+    )
+    assert len(all_progress_x) == 6
+    visible_result_curves = [
+        curve for curve in window._adaptive_result_curves["strain"][:2]
+        if len(curve.getData()[0]) > 0
+    ]
+    assert len(visible_result_curves) == 2
+
+
+def test_run_and_prepare_views_resize_control_column_for_compact_workspace(
+    window: object,
+) -> None:
+    window.combo_recipe_mode.setCurrentIndex(
+        window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    )
+    window._set_control_view("run")
+    assert window._control_view_stack.currentIndex() == 1
+    assert window._control_column.minimumWidth() == 210
+    assert window._control_column.maximumWidth() == 280
+    assert window._control_column.width() <= 280
+
+    window._adaptive_target_navigator.configure_button.click()
+    assert window._control_view_stack.currentIndex() == 0
+    assert window._control_column.minimumWidth() == 560
+    assert window.control_tabs.count() == 3
+    assert [window.control_tabs.tabText(index) for index in range(3)] == [
+        "Recipe",
+        "Sample",
+        "Hardware",
+    ]
