@@ -55,6 +55,36 @@ def _lazy(module: str, attr: str = "main", *, label: str | None = None) -> Exper
 
 
 EXPERIMENTS: Dict[str, ExperimentFactory] = {
+    "TMA UI Design Lab - Instrument Refined": _lazy(
+        "experiments.tma_ui_design_lab",
+        "launch_refined",
+        label="TMA UI Design Lab - Instrument Refined",
+    ),
+    "TMA UI Design Lab - Adaptive Workspace": _lazy(
+        "experiments.tma_ui_design_lab",
+        "launch_adaptive",
+        label="TMA UI Design Lab - Adaptive Workspace",
+    ),
+    "TMA UI Design Lab - Adaptive Workspace v2": _lazy(
+        "experiments.tma_ui_design_lab",
+        "launch_adaptive_v2",
+        label="TMA UI Design Lab - Adaptive Workspace v2",
+    ),
+    "TMA UI Design Lab - Adaptive Workspace v3": _lazy(
+        "experiments.tma_ui_design_lab",
+        "launch_adaptive_v3",
+        label="TMA UI Design Lab - Adaptive Workspace v3",
+    ),
+    "TMA UI Design Lab - Adaptive Workspace v4": _lazy(
+        "experiments.tma_ui_design_lab",
+        "launch_adaptive_v4",
+        label="TMA UI Design Lab - Adaptive Workspace v4",
+    ),
+    "TMA UI Design Lab - Plot-First Control Room": _lazy(
+        "experiments.tma_ui_design_lab",
+        "launch_plot_first",
+        label="TMA UI Design Lab - Plot-First Control Room",
+    ),
     "Strain Worksheet Updater": _lazy(
         "experiments.strain_worksheet_updater", label="Strain Worksheet Updater"
     ),

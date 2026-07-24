@@ -1,0 +1,1 @@
+- Added interactive TMA UI Design Lab directions to the launcher's optional Experiments tab, including an Adaptive v4 target-linked workspace where follow-active, individual stress-target, and all-target selection consistently drive tabbed strain/current and resistance/current results plus progress diagnostics.

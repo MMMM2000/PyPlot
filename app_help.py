@@ -91,8 +91,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                closing it would also close child dialogs.
             3. Use **Develop → Show Experiments Tab** to reveal or hide the prototype list and
                **Develop → Keep File Selections** if you want plotting dialogs to reopen with
-               the same input files pre-selected. The experiments currently bundle prototype
-               hardware viewers, conversion helpers, and folder exporters.
+               the same input files pre-selected. The experiments currently bundle interface
+               design labs, prototype hardware viewers, conversion helpers, and folder exporters.
             4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
                console, and reset splitter sizes when needed. **File → Exit** quits the launcher
                after confirming there are no unsaved child windows.
