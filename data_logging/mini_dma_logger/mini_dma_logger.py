@@ -11719,7 +11719,7 @@ class MainWindow(QtWidgets.QMainWindow):
         plot_canvas_container.setMinimumHeight(0)
         plot_canvas_layout = QtWidgets.QVBoxLayout(plot_canvas_container)
         self._dashboard_plot_canvas_layout = plot_canvas_layout
-        plot_canvas_layout.setContentsMargins(0, 0, 0, 0)
+        plot_canvas_layout.setContentsMargins(10, 10, 10, 16)
         plot_canvas_layout.setSpacing(0)
         plot_stack = QtWidgets.QStackedWidget(plot_canvas_container)
         self._adaptive_plot_stack = plot_stack
@@ -30944,7 +30944,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for widget, keys in self._current_sweep_runtime_widget_value_keys().items():
             self._set_current_sweep_runtime_pending(widget, any(key in pending_keys for key in keys))
 
-        self.button_apply_current_sweep_edits.setVisible(runtime_active and has_update_current_sweep)
+        self.button_apply_current_sweep_edits.setVisible(runtime_active)
         self.button_apply_current_sweep_edits.setEnabled(can_update_current_sweep)
 
     def _current_sweep_runtime_locked_widgets(self) -> tuple[QtWidgets.QWidget, ...]:
@@ -31990,12 +31990,22 @@ class MainWindow(QtWidgets.QMainWindow):
         right_label: str | None,
         left_color: str = "#fbbf24",
         right_color: str = "#60a5fa",
+        text_color_override: str | None = None,
+        background_color_override: str | None = None,
     ) -> None:
         if pg is None:
             return
         theme = self._plot_theme()
-        text_color = self._qcolor_from_rgb(theme["text_rgb"])
-        background_color = self._qcolor_from_rgb(theme["axes_rgb"])
+        text_color = (
+            QtGui.QColor(text_color_override)
+            if text_color_override
+            else self._qcolor_from_rgb(theme["text_rgb"])
+        )
+        background_color = (
+            QtGui.QColor(background_color_override)
+            if background_color_override
+            else self._qcolor_from_rgb(theme["axes_rgb"])
+        )
         bundle.widget.setBackground(background_color)
         bundle.plot_item.setTitle(title, color=text_color.name(), size="9pt")
         bundle.plot_item.setLabel("bottom", x_label, color=text_color.name())
@@ -36024,7 +36034,7 @@ class MainWindow(QtWidgets.QMainWindow):
         active_target = self._active_adaptive_stress_target_mpa()
         for index, curve in enumerate(curves[:desired_count]):
             color = (
-                "#22c55e"
+                "#e8ad43"
                 if key == "strain" and selected_target is not None
                 else "#14b8a6"
                 if key == "resistance" and selected_target is not None
@@ -36095,6 +36105,8 @@ class MainWindow(QtWidgets.QMainWindow):
             left_label=y_channel.label,
             right_label=None,
             left_color=y_channel.color,
+            text_color_override="#d7dce2",
+            background_color_override="#191c20",
         )
         if not targets:
             for curve in curves:
@@ -36134,6 +36146,8 @@ class MainWindow(QtWidgets.QMainWindow):
             right_label=right_channel.label,
             left_color=left_channel.color,
             right_color=right_channel.color,
+            text_color_override="#d7dce2",
+            background_color_override="#191c20",
         )
         self._set_pyqtgraph_curve_style(
             bundle.left_curve,
@@ -36299,20 +36313,13 @@ class MainWindow(QtWidgets.QMainWindow):
             selected_target=selected_target,
             all_targets=all_targets,
         )
-        scope = (
-            "all targets"
-            if all_targets
-            else "-"
-            if selected_target is None
-            else format_target_mpa(selected_target)
-        )
         self._refresh_adaptive_progress_plot(
             "stress",
             scoped_points,
             x_key="elapsed_s",
             left_key="stress_mpa",
             right_key="load_g",
-            title=f"Stress / load vs time | {scope}",
+            title="Stress / load progress",
         )
         self._refresh_adaptive_progress_plot(
             "strain_progress",
@@ -36320,7 +36327,7 @@ class MainWindow(QtWidgets.QMainWindow):
             x_key="elapsed_s",
             left_key="strain_pct",
             right_key="position_mm",
-            title=f"Strain / displacement vs time | {scope}",
+            title="Strain / displacement progress",
         )
         self._refresh_adaptive_progress_plot(
             "current",
@@ -36328,7 +36335,7 @@ class MainWindow(QtWidgets.QMainWindow):
             x_key="elapsed_s",
             left_key="current_measured_mA",
             right_key="current_set_mA",
-            title=f"Current vs time | {scope}",
+            title="Current progress",
         )
 
     def _refresh_plots(self) -> None:

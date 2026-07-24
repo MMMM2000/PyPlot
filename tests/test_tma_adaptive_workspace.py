@@ -370,6 +370,13 @@ def test_adaptive_inspector_uses_real_measurement_state(window: object) -> None:
     assert window._adaptive_summary_labels["target"].text() == "100 MPa"
     assert window._adaptive_summary_labels["processed"].text() == "101.5 MPa"
     assert window._adaptive_summary_labels["current"].text() == "3.10 mA"
+    assert (
+        window._adaptive_plot_bundles["strain"]
+        .widget.backgroundBrush()
+        .color()
+        .name()
+        == "#191c20"
+    )
 
 
 def test_run_log_button_reuses_existing_log_panel(window: object) -> None:
@@ -385,3 +392,15 @@ def test_run_log_button_reuses_existing_log_panel(window: object) -> None:
     app.processEvents()
     assert not window._dashboard_log_container.isVisible()
     assert window._run_log_button.text() == "Run log"
+
+
+def test_active_sweep_keeps_update_action_discoverable(window: object) -> None:
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._update_recipe_buttons()
+
+    assert window.button_apply_current_sweep_edits.isVisible()
+    assert not window.button_apply_current_sweep_edits.isEnabled()
+
+    window._automation_active = False
+    window._automation_name = ""
