@@ -15,6 +15,7 @@ TARGET_MATCH_ABS_TOLERANCE_MPA = 1e-6
 
 class TargetedMeasurementPoint(Protocol):
     elapsed_s: float
+    automation_phase: str | None
     automation_basis: str | None
     automation_target_value: float | None
 
@@ -41,6 +42,10 @@ class StressTargetSelection:
 
 def stress_target_for_point(point: TargetedMeasurementPoint) -> float | None:
     if str(point.automation_basis or "") != STRESS_BASIS:
+        return None
+    # A target ramp publishes its continuously moving setpoint. Those values are
+    # acquisition progress, not independently measured stress plateaus.
+    if str(point.automation_phase or "") == "target_ramp":
         return None
     value = point.automation_target_value
     if value is None or not math.isfinite(float(value)):

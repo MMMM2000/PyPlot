@@ -59,6 +59,7 @@ from data_logging.source_provenance import (
 from data_logging.mini_dma_logger.adaptive_workspace import (
     StressTargetNavigator,
     StressTargetSelection,
+    TARGET_MATCH_ABS_TOLERANCE_MPA,
     format_target_mpa,
     measured_stress_targets,
     points_for_target,
@@ -35492,27 +35493,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 splitter.setSizes([600, max(720, splitter.width() - 600)])
 
     def _handle_dashboard_view_changed(self, index: int) -> None:
-        if not self._is_current_sweep_mode():
+        if not self._adaptive_workspace_supported():
             self._adaptive_workspace_user_prefers_custom = True
         else:
             self._adaptive_workspace_user_prefers_custom = int(index) == 1
         self._sync_dashboard_workspace_mode()
         self._refresh_plots()
 
+    def _dashboard_recipe_mode(self) -> str:
+        if self._automation_active and self._automation_name:
+            return str(self._automation_name)
+        return str(self.combo_recipe_mode.currentData() or "")
+
+    def _adaptive_workspace_supported(self) -> bool:
+        return self._dashboard_recipe_mode() == CURRENT_SWEEP_STRESS
+
     def _sync_dashboard_workspace_mode(self) -> None:
         stack = self._adaptive_plot_stack
         tabs = self._dashboard_view_tabs
         if stack is None or tabs is None:
             return
-        current_sweep_mode = self._is_current_sweep_mode()
+        adaptive_supported = self._adaptive_workspace_supported()
         adaptive_visible = (
-            current_sweep_mode
+            adaptive_supported
             and not self._adaptive_workspace_user_prefers_custom
         )
         target_index = 0 if adaptive_visible else 1
         if stack.currentIndex() != target_index:
             stack.setCurrentIndex(target_index)
-        tabs.setVisible(current_sweep_mode)
+        tabs.setVisible(adaptive_supported)
         desired_tab = 0 if adaptive_visible else 1
         if tabs.currentIndex() != desired_tab:
             blocker = QtCore.QSignalBlocker(tabs)
@@ -35520,14 +35529,21 @@ class MainWindow(QtWidgets.QMainWindow):
             del blocker
         self.button_plot_setup.setVisible(not adaptive_visible)
         if self._control_view_tabs is not None:
-            self._control_view_tabs.setTabEnabled(0, current_sweep_mode)
-        if not current_sweep_mode and self._control_view_stack is not None:
+            self._control_view_tabs.setTabEnabled(0, adaptive_supported)
+        if not adaptive_supported and self._control_view_stack is not None:
             self._set_control_view("prepare")
 
     def _active_adaptive_stress_target_mpa(self) -> float | None:
         if str(self._automation_basis or "") != HSW_BASIS_STRESS_MPA:
             return None
-        value = self._automation_target_value
+        value = (
+            self._active_target_ramp_end_value
+            if (
+                self._automation_phase == "target_ramp"
+                and self._active_target_ramp_end_value is not None
+            )
+            else self._automation_target_value
+        )
         if value is None or not math.isfinite(float(value)):
             return None
         return float(value)
@@ -35544,9 +35560,24 @@ class MainWindow(QtWidgets.QMainWindow):
     ) -> tuple[list[float], float | None, float | None]:
         measured_targets = measured_stress_targets(points)
         active_target = self._active_adaptive_stress_target_mpa()
+        selectable_active_target = active_target
+        if (
+            active_target is not None
+            and measured_targets
+            and not any(
+                math.isclose(
+                    float(active_target),
+                    float(target),
+                    rel_tol=0.0,
+                    abs_tol=TARGET_MATCH_ABS_TOLERANCE_MPA,
+                )
+                for target in measured_targets
+            )
+        ):
+            selectable_active_target = None
         selected_target = resolve_selected_target(
             self._adaptive_target_selection,
-            active_target_mpa=active_target,
+            active_target_mpa=selectable_active_target,
             measured_targets_mpa=measured_targets,
         )
         navigator = self._adaptive_target_navigator

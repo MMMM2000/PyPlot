@@ -40,6 +40,7 @@ def _point(
     target_mpa: float,
     current_mA: float,
     strain_pct: float,
+    phase: str = "current_ramp",
 ) -> object:
     return mini_dma_mod.MeasurementPoint(
         elapsed_s=elapsed_s,
@@ -56,7 +57,7 @@ def _point(
         voltage_V=2.0,
         resistance_ohm=200.0 + current_mA,
         power_W=0.02,
-        automation_phase="current_ramp",
+        automation_phase=phase,
         automation_basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
         automation_target_value=target_mpa,
         plateau_index=int(target_mpa),
@@ -131,6 +132,32 @@ def test_target_model_groups_only_stress_target_points() -> None:
     assert all(point.automation_target_value == 50.0 for point in selected)
 
 
+def test_target_model_excludes_continuous_target_ramp_setpoints() -> None:
+    points = [
+        _point(
+            elapsed_s=float(index),
+            target_mpa=float(index),
+            current_mA=1.0,
+            strain_pct=0.0,
+            phase="target_ramp",
+        )
+        for index in range(101)
+    ]
+    points.extend(
+        _point(
+            elapsed_s=102.0 + index,
+            target_mpa=100.0,
+            current_mA=1.0 + index,
+            strain_pct=0.2 * index,
+            phase="current",
+        )
+        for index in range(3)
+    )
+
+    assert adaptive_mod.measured_stress_targets(points) == [100.0]
+    assert len(adaptive_mod.points_for_target(points, 100.0)) == 3
+
+
 def test_current_sweep_defaults_to_adaptive_but_custom_dashboard_remains(
     window: object,
 ) -> None:
@@ -150,6 +177,47 @@ def test_current_sweep_defaults_to_adaptive_but_custom_dashboard_remains(
     combo.setCurrentIndex(combo.findData(mini_dma_mod.CALIBRATION))
     assert window._adaptive_plot_stack.currentIndex() == 1
     assert not window._dashboard_view_tabs.isVisible()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        mini_dma_mod.CURRENT_SWEEP_LOAD,
+        mini_dma_mod.CURRENT_SWEEP_STRAIN,
+    ],
+)
+def test_non_stress_current_sweeps_keep_custom_dashboard(
+    window: object,
+    mode: str,
+) -> None:
+    combo = window.combo_recipe_mode
+    combo.setCurrentIndex(combo.findData(mode))
+
+    assert window._adaptive_plot_stack.currentIndex() == 1
+    assert not window._dashboard_view_tabs.isVisible()
+    assert not window._control_view_tabs.isTabEnabled(0)
+    assert window._control_view_stack.currentIndex() == 0
+
+
+def test_active_stress_run_ignores_staged_recipe_selector_change(
+    window: object,
+) -> None:
+    combo = window.combo_recipe_mode
+    combo.setCurrentIndex(combo.findData(mini_dma_mod.CURRENT_SWEEP_STRESS))
+    window._adaptive_workspace_user_prefers_custom = False
+    window._automation_active = True
+    window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+    window._sync_dashboard_workspace_mode()
+
+    combo.setCurrentIndex(combo.findData(mini_dma_mod.CALIBRATION))
+    window._sync_dashboard_workspace_mode()
+
+    assert window._adaptive_plot_stack.currentIndex() == 0
+    assert window._dashboard_view_tabs.isVisible()
+    assert window._control_view_tabs.isTabEnabled(0)
+
+    window._automation_active = False
+    window._automation_name = ""
 
 
 def test_target_navigation_scopes_results_and_progress(
@@ -207,6 +275,28 @@ def test_target_navigation_scopes_results_and_progress(
         if len(curve.getData()[0]) > 0
     ]
     assert len(visible_result_curves) == 2
+
+
+def test_follow_active_keeps_last_measured_target_during_next_target_ramp(
+    window: object,
+) -> None:
+    window.combo_recipe_mode.setCurrentIndex(
+        window.combo_recipe_mode.findData(mini_dma_mod.CURRENT_SWEEP_STRESS)
+    )
+    window._session_points = _synthetic_points()
+    window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+    window._automation_target_value = 73.0
+    window._automation_phase = "target_ramp"
+    window._active_target_ramp_end_value = 150.0
+    window._adaptive_target_selection = adaptive_mod.StressTargetSelection.follow_active()
+
+    measured, active, selected = window._adaptive_target_context(
+        window._session_points
+    )
+
+    assert measured == [50.0, 100.0]
+    assert active == 150.0
+    assert selected == 100.0
 
 
 def test_run_and_prepare_views_resize_control_column_for_compact_workspace(
