@@ -260,6 +260,25 @@ class Ui_MainWindow(object):
         channel_row.addWidget(self.comboBox_channel, 1)
         gb_layout.addLayout(channel_row)
 
+        cadence_row = QtWidgets.QHBoxLayout()
+        cadence_row.setSpacing(8)
+        self.label_hmp_readback_rate = QtWidgets.QLabel("PSU rate:")
+        cadence_row.addWidget(self.label_hmp_readback_rate)
+        self.comboBox_hmp_readback_rate = QtWidgets.QComboBox()
+        self.comboBox_hmp_readback_rate.addItem("1 Hz (fixed)", 1.0)
+        self.comboBox_hmp_readback_rate.addItem("Up to 2 Hz (1 Hz when shared)", 2.0)
+        self.comboBox_hmp_readback_rate.setToolTip(
+            "At 2 Hz the ramp step is halved so the configured mA/s rate stays unchanged. "
+            "The shared HMP broker fairly reduces two simultaneous 2 Hz users to 1 Hz each."
+        )
+        cadence_row.addWidget(self.comboBox_hmp_readback_rate, 1)
+        gb_layout.addLayout(cadence_row)
+
+        self.label_hmp_cadence_status = QtWidgets.QLabel("Effective PSU rate: 1 Hz")
+        self.label_hmp_cadence_status.setWordWrap(True)
+        self.label_hmp_cadence_status.setStyleSheet("color: #6b7280;")
+        gb_layout.addWidget(self.label_hmp_cadence_status)
+
         self.label_broker_hint = QtWidgets.QLabel("Uses the shared HMP broker; auto-starts it from an HMP port if needed.")
         self.label_broker_hint.setWordWrap(True)
         self.label_broker_hint.setToolTip(
