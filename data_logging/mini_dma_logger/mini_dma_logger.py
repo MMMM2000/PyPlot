@@ -24906,7 +24906,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if result is None or not result.succeeded:
             return
         # Exact target-position readback is portable across the Prague and
-        # KoÅ¡ice planning-mode enums. Poll it from the 50 ms control path too,
+        # Košice planning-mode enums. Poll it from the 50 ms control path too,
         # so retry cannot depend on status-timer scheduling.
         if self._tic_target_position_steps == pending.target_steps:
             self._confirm_pending_motion_command()

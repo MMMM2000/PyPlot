@@ -26,7 +26,7 @@ from .vsm_isotherms import VSMIsothermsPlugin
 from .dma_iso_stress import DmaIsoStressPlugin
 from .fmr import FmrPlugin
 from .r_vs_t import RVsTPlugin
-from .mini_dma import MiniDmaPlugin
+from .mini_dma import MiniDmaPlugin, TmaPlugin
 
 
 def builtin_plugin_registry() -> dict[str, type[PyPlotPlugin]]:
@@ -57,6 +57,7 @@ __all__ = [
     "DmaIsoStressPlugin",
     "FmrPlugin",
     "RVsTPlugin",
+    "TmaPlugin",
     "MiniDmaPlugin",
     "register_plugin",
     "get_plugin_registry",

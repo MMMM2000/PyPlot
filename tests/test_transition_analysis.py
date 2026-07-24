@@ -43,6 +43,61 @@ def test_tangent_transition_fit_rejects_noisy_linear_false_positive() -> None:
     assert result is None
 
 
+def test_tangent_transition_fit_rejects_unsupported_jump_extrapolation() -> None:
+    x = np.array(
+        [
+            1.2,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            25.8,
+            28.6,
+            31.0,
+            31.9,
+            33.4,
+            34.7,
+            35.9,
+            36.7,
+            38.4,
+            40.0,
+            45.0,
+            55.0,
+            65.0,
+            75.0,
+            79.8,
+        ]
+    )
+    y = np.array(
+        [
+            10.9,
+            10.8,
+            10.7,
+            10.6,
+            10.5,
+            10.4,
+            10.25,
+            10.2,
+            2.4,
+            2.3,
+            2.0,
+            1.5,
+            0.6,
+            0.23,
+            0.2,
+            0.16,
+            0.1,
+            0.07,
+            0.04,
+            0.03,
+        ]
+    )
+
+    result = fit_tangent_transition(x, y, min_segment_points=4)
+
+    assert result is None
+
+
 def test_vsm_temperature_processor_estimates_heating_and_cooling_points() -> None:
     processor = VSMTemperatureScanProcessor()
     processor.set_split_directions(True)
