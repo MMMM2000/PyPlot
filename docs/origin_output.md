@@ -1,4 +1,4 @@
-﻿# Origin Output Expectations
+# Origin Output Expectations
 
 This document defines the expected Origin workbook + graph behavior for PyPlot and Microwire Data Builder exports.
 

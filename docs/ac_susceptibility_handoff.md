@@ -1,4 +1,4 @@
-﻿# AC Susceptibility Handoff
+# AC Susceptibility Handoff
 
 Created 2026-05-04 for continuing the LCR-6200 / AC susceptibility work on a
 different PC.

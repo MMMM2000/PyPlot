@@ -7215,6 +7215,8 @@ def test_word_report_microwire_data_uses_requested_column_order_and_empty_values
     assert labels.index("Stress/strain current (mA)") < labels.index("As (°C)")
     assert value_map["Stress/strain current (mA)"] == ""
     assert value_map["As (°C)"] == ""
+    assert core._word_label("d (µm)") == "d (µm)"
+    assert core._word_label("Resistance (Ω)") == "Resistance (Ω)"
     assert "Custom data" not in value_map
     assert "Data source" not in value_map
     assert "R vs T graphs (Origin)" not in value_map
@@ -7375,7 +7377,7 @@ def test_word_report_microwire_data_table_only_expands_multi_value_rows() -> Non
         [
             ("Composition", ["Ni50Fe27Ga23"]),
             ("Strain (%)", ["22.6904", "21.8579", "4.85437"]),
-            ("As (Â°C)", [""]),
+            ("As (°C)", [""]),
         ]
     )
 
@@ -14208,7 +14210,7 @@ def test_assemble_column_header_move_marks_project_dirty(qtbot) -> None:
                     {
                         "Composition": "Ni50Fe27Ga23",
                         "Microwire": "12/2",
-                        "d (Âµm)": 12.5,
+                        "d (µm)": 12.5,
                     }
                 ]
             )

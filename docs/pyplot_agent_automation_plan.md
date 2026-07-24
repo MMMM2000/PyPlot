@@ -1,4 +1,4 @@
-﻿# PyPlot Agent Automation Plan
+# PyPlot Agent Automation Plan
 
 This note captures a full implementation plan for making PyPlot reliably controllable by Codex in a later dedicated worktree.
 
@@ -149,7 +149,7 @@ Example intent:
 
 Example intent:
 
-- "Set all open VSM loops to `0Â° and 90Â° only`, then save the project."
+- "Set all open VSM loops to `0° and 90° only`, then save the project."
 
 ### 6. Close Or Reset Cleanly
 

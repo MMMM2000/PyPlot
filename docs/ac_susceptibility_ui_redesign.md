@@ -1,4 +1,4 @@
-﻿# AC Susceptibility UI Redesign Notes
+# AC Susceptibility UI Redesign Notes
 
 This note captures the stabilization-campaign audit for the AC susceptibility logger. It is not a release checklist and should not block bench testing of the current branch.
 

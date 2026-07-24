@@ -1,4 +1,4 @@
-﻿{
+{
   "schema_version": 1,
   "kind": "mini_dma_bench_sequence",
   "summary_path": "artifacts/mini-dma-30mpa-speed-ladder-summary.json",

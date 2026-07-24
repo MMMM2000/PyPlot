@@ -1,4 +1,4 @@
-﻿# Praha Microwire Database Update
+# Praha Microwire Database Update
 
 Use this workflow when updating the live Praha Microwire Data Builder database.
 Do not hand-edit the live `.pydpj` and do not export DOCX reports until the

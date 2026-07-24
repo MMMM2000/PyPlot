@@ -1,4 +1,4 @@
-﻿2026-06-03 09:05
+2026-06-03 09:05
 
 - Included TMA `current_hold` displacement rows in Builder auto-extracted strain and transition summaries so recovery data is not dropped between current-ramp points.
 - Rejected tangent-intersection transition fits when an intercept lands far away from the measured segment boundary, avoiding TMA transition-current summaries for unsupported strain jumps.

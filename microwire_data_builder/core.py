@@ -638,13 +638,13 @@ HEADER_HINTS: Dict[str, str] = {
     "dtum": "piece_date",
     "Poet otok": "piece_turns",
     "P.": "piece_y",
-    "zloÅ¾enie": "composition_label",
+    "zloženie": "composition_label",
     "zlozenie": "composition_label",
     "composition": "composition_label",
-    "dÃ¡tum a Äas vÃ½roby": "production_datetime",
+    "dátum a čas výroby": "production_datetime",
     "datum a cas vyroby": "production_datetime",
     "datumacasvyroby": "production_datetime",
-    "hmotnosÅ¥": "mass_g",
+    "hmotnosť": "mass_g",
     "hmotnost": "mass_g",
     "mass": "mass_g",
     "odpor": "fabrication_resistance_ohm",
@@ -659,46 +659,46 @@ HEADER_HINTS: Dict[str, str] = {
     "glass pull-away": "glass_pull_off",
     "glass pull away": "glass_pull_off",
     "bistabilny/nebistabilny": "bistable_status",
-    "poznÃ¡mka": "notes",
-    "PoznÃ¡mka": "notes",
+    "poznámka": "notes",
+    "Poznámka": "notes",
     "poznamka": "notes",
     "Poznamka": "notes",
     "pozn.": "notes",
     "pozn": "notes",
-    "poznÃ¡mky": "notes",
+    "poznámky": "notes",
     "p.Ä": "piece_y",
     "p.c": "piece_y",
     "p.Ä.": "piece_y",
-    "poÄet otÃ¡Äok": "piece_turns",
+    "počet otáčok": "piece_turns",
     "pocet otacok": "piece_turns",
-    "dÄºÅ¾ka (m)": "length_m",
+    "dĺžka (m)": "length_m",
     "dlzka (m)": "length_m",
-    "d (Âµm)": "d_um",
+    "d (µm)": "d_um",
     "d (um)": "d_um",
-    "d (Î¼m)": "d_um",
+    "d (μm)": "d_um",
     "d (μm)": "d_um",
     "d (�m)": "d_um",
     "d (µm)": "d_um",
-    "d(Âµm)": "d_um",
+    "d(µm)": "d_um",
     "d(um)": "d_um",
-    "d(Î¼m)": "d_um",
+    "d(μm)": "d_um",
     "d": "d_um",
-    "D (Âµm)": "D_um",
+    "D (µm)": "D_um",
     "D (um)": "D_um",
-    "D (Î¼m)": "D_um",
+    "D (μm)": "D_um",
     "D (μm)": "D_um",
     "D (�m)": "D_um",
     "D (µm)": "D_um",
-    "D(Âµm)": "D_um",
+    "D(µm)": "D_um",
     "D(um)": "D_um",
-    "D(Î¼m)": "D_um",
+    "D(μm)": "D_um",
     "D": "D_um",
     "d/D": "d_over_D",
     "d/d": "d_over_D",
     "Datum": "piece_date",
-    "DÃ¡tum": "piece_date",
+    "Dátum": "piece_date",
     "datum": "piece_date",
-    "dÃ¡tum": "piece_date",
+    "dátum": "piece_date",
 }
 
 ANNEALING_COLUMNS = ["I_A", "V_V", "R_ohm"]
@@ -733,7 +733,7 @@ MICROSCOPE_VALUE_PATTERN = re.compile(
 )
 MICROSCOPE_SECONDARY_PREFIX = re.compile(r"\[2]\s*$", re.IGNORECASE)
 MICROSCOPE_NUMBER_TOKEN = re.compile(r"^\d+(?:[.,]\d+)?$")
-MICROSCOPE_UNIT_HINTS = ("Âµm", "um", "Î¼m")
+MICROSCOPE_UNIT_HINTS = ("µm", "um", "μm")
 
 KNOWN_TIMEZONE_TOKENS = {
     "UTC",
@@ -1984,7 +1984,7 @@ def _header_key(value: object) -> Optional[str]:
         return "piece_turns"
     if "poet" in lowered and "otok" in lowered:
         return "piece_turns"
-    if "dlzk" in lowered or "dlÅ¾k" in lowered:
+    if "dlzk" in lowered or "dlžk" in lowered:
         return "length_m"
     micron_hint = any(token in lowered for token in ("Âµm", "µm", "um", "Î¼m", "mikro", "micro"))
     ascii_simple = ascii_text.replace("\u00a0", " ")
@@ -2017,7 +2017,7 @@ def _header_key(value: object) -> Optional[str]:
         return "d_um"
     if any(token in lowered for token in ("sklo", "skla", "glass", "clad", "cladding", "sheath")) and re.search(r"\bD\d*\b", ascii_text):
         return "D_um"
-    if ("datum" in lowered or "dÃ¡tum" in lowered) and "cas" not in lowered:
+    if ("datum" in lowered or "dátum" in lowered) and "cas" not in lowered:
         return "piece_date"
     return None
 
@@ -2391,7 +2391,7 @@ def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
     if cleaned in {"D", "D.", "D:"}:
         return "D_um"
 
-    has_micron_hint = any(token in lowered for token in ("_um", " um", "Âµm", "Î¼m", "mic"))
+    has_micron_hint = any(token in lowered for token in ("_um", " um", "µm", "μm", "mic"))
     context_hint = any(
         token in lowered
         for token in (
@@ -2719,7 +2719,7 @@ def _auto_discover_microscope_paths(
 
 def _normalise_microscope_text(text: str) -> str:
     cleaned = unicodedata.normalize("NFKC", text or "")
-    cleaned = cleaned.replace("Î¼", MICRO_SIGN)
+    cleaned = cleaned.replace("μ", MICRO_SIGN)
     cleaned = cleaned.replace("|", "1")
     cleaned = re.sub(r"(^|\s)(?:1|I|l){1,2}\]", lambda m: f"{m.group(1)}[1]", cleaned)
     cleaned = re.sub(r"(^|\s)(?:2|Z)\]", lambda m: f"{m.group(1)}[2]", cleaned)
@@ -2746,7 +2746,7 @@ def _has_primary_marker(prefix: str) -> bool:
     snippet = unicodedata.normalize("NFKC", prefix[-8:] if prefix else "")
     if not snippet:
         return False
-    snippet = snippet.replace("Î¼", MICRO_SIGN)
+    snippet = snippet.replace("μ", MICRO_SIGN)
     snippet = snippet.replace("|", "1").replace("I", "1").replace("l", "1")
     snippet = snippet.replace("{", "[").replace("(", "[")
     snippet = snippet.replace("}", "]").replace(")", "]")
@@ -3002,7 +3002,7 @@ def _extract_microscope_diameters(
         scale_ref_y = ref_h / float(vh)
         offset_x, offset_y = offset
         normalised_words = [_normalise_microscope_text(word.text) for word in words]
-        lowered_words = [text.lower().replace("Î¼", "Âµ") for text in normalised_words]
+        lowered_words = [text.lower().replace("μ", "µ") for text in normalised_words]
         for idx, word in enumerate(words):
             normalised = normalised_words[idx]
             marker_match = re.match(r"^\[\s*([12Il])\s*\]\s*", normalised)
@@ -3045,7 +3045,7 @@ def _extract_microscope_diameters(
             if unit_idx is None and marker is not None:
                 unit_idx = idx
             if marker is None:
-                context_normalised = context_prefix.replace("Î¼", MICRO_SIGN)
+                context_normalised = context_prefix.replace("μ", MICRO_SIGN)
                 if any(hint in context_normalised for hint in ("[1", "1]", "[1]")):
                     marker = 1
                 elif any(hint in context_normalised for hint in ("[2", "2]", "[2]")):
@@ -5389,8 +5389,6 @@ def _asset_references(value: Any) -> List[str]:
 
 
 _WORD_REPORT_LABELS: Dict[str, str] = {
-    DIAMETER_COLUMN: "d (um)",
-    GLASS_DIAMETER_COLUMN: "D (um)",
     DIAMETER_RATIO_COLUMN: "d/D",
     RVT_FILE_COLUMN: "R vs T source files",
     RVT_GRAPH_COLUMN: "R vs T graphs",
@@ -5407,15 +5405,6 @@ _WORD_REPORT_LABELS: Dict[str, str] = {
     RVT_RESISTANCE_RANGE_COLUMN: "R vs T resistance range (Ohm)",
     CORE_TEMPERATURE_COLUMN: "Core temperature (deg C)",
     GLASS_TEMPERATURE_COLUMN: "Glass temperature (deg C)",
-    "Resistance (Î©)": "Resistance (Ohm)",
-    "As (Â°C)": "As (deg C)",
-    "Af (Â°C)": "Af (deg C)",
-    "Ms (Â°C)": "Ms (deg C)",
-    "Mf (Â°C)": "Mf (deg C)",
-    "Figure â€” 1000 mA": "Figure - 1000 mA",
-    "Figure â€” other annealing": "Figure - other annealing",
-    "Figure â€” 1000 mA (Origin)": "Figure - 1000 mA (Origin)",
-    "Figure â€” other annealing (Origin)": "Figure - other annealing (Origin)",
 }
 
 _WORD_IDENTITY_COLUMNS: Tuple[str, ...] = (
@@ -5435,7 +5424,7 @@ _WORD_FABRICATION_COLUMNS: Tuple[str, ...] = (
     "Length (m)",
     "Production datetime",
     "Mass (g)",
-    "Resistance (Î©)",
+    "Resistance (Ω)",
     CORE_TEMPERATURE_COLUMN,
     GLASS_TEMPERATURE_COLUMN,
     "Winding speed (m/min)",
@@ -8331,10 +8320,10 @@ def build_database(
             if not ok:
                 stats.resistance_checks_failed += 1
                 if mean_error is None:
-                    log.warning("Râ‰ˆV/I sanity check failed for %s", path)
+                    log.warning("R≈V/I sanity check failed for %s", path)
                 else:
                     log.warning(
-                        "Râ‰ˆV/I sanity check failed for %s (mean error %.2f%%)",
+                        "R≈V/I sanity check failed for %s (mean error %.2f%%)",
                         path,
                         mean_error * 100,
                     )
@@ -9259,7 +9248,7 @@ def build_database(
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
     log.info(
-        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | Râ‰ˆV/I failures: %s",
+        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | R≈V/I failures: %s",
         stats.parsed,
         stats.skipped,
         stats.rows_built,

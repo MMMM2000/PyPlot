@@ -1,4 +1,4 @@
-﻿# AC Susceptibility Logger
+# AC Susceptibility Logger
 
 The AC Susceptibility Logger is a focused two-step tool for coil-based AC
 susceptibility runs with a GW Instek LCR-6200/LCR-6000 series meter and a DC

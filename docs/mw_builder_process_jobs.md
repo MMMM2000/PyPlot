@@ -1,4 +1,4 @@
-﻿# MW Builder Process Jobs
+# MW Builder Process Jobs
 
 This note defines the first process-separation boundary for Microwire Data Builder
 and PyPlot automation. The goal is to keep the manual UI responsive while giving

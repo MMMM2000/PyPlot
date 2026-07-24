@@ -1,4 +1,4 @@
-﻿2026-06-19 07:23
+2026-06-19 07:23
 
 - Added shared manual transition-current editing controls for Current annealing review and Current density previews.
 - Saved manual As1/Af1/Ms1/Mf1/As2/Af2/Ms2/Mf2 overrides through the existing annealing phase-points payload so Assemble/export values stay consistent.

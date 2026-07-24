@@ -1,4 +1,4 @@
-﻿2026-06-15 12:00
+2026-06-15 12:00
 
 - Fixed TMA Builder previews so current-sweep runs with newer relative-strain columns are not misclassified as iso-current stress-strain runs.
 - Made unsupported TMA transition-review run modes finish with an empty state instead of staying on a loading view.

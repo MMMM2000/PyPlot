@@ -1,4 +1,4 @@
-﻿### MPa in stress dependence/sensitivity:
+### MPa in stress dependence/sensitivity:
 -since different dimensions mean different different stress with the same load, it would be better to start using stress instead of load. When stress dependence is selected in data logger, there could be an option to input d and D of the microwire, and it could automatically calculate loads necessary for 20, 40, 60, 80 and 100 MPa. We could then use MPa values in stress dependendce and stress sensitivity pyplot plugins. Here is a sample way to calculate the stress in microwires:
 geometry
 d_m = 26e-6     # metal core diameter [m]
@@ -14,7 +14,7 @@ E_m = 120e9     # Pa
 E_gl = 70e9     # Pa
 K = E_m / E_gl
 
-g = 9.81        # m/sÂ²
+g = 9.81        # m/s²
 
 def stress_metal_core(m_grams):
     m = m_grams / 1000      # kg

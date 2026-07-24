@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import ctypes
@@ -900,7 +900,7 @@ RECIPE_FILENAME_TOKENS = {
     ELASTOCALORIC_EFFECT: "elastocaloric",
 }
 CALIBRATION_MODES = frozenset({CALIBRATION, CALIBRATION_COPPER})
-PROJECT_ROW_DIAMETER_KEYS = ("d (Âµm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
+PROJECT_ROW_DIAMETER_KEYS = ("d (µm)", "d (um)", "d_um", "d", "Diameter", "diameter_um")
 PROJECT_ROW_CURRENT_KEYS = (
     "Stress/strain current (mA)",
     "Current (mA)",
@@ -1199,7 +1199,7 @@ def _normalized_microwire_token(text: Any) -> str:
 
 def _normalized_column_key(text: Any) -> str:
     token = str(text or "").strip().lower()
-    token = token.replace("Âµ", "u").replace("Î¼", "u").replace("?", "u")
+    token = token.replace("µ", "u").replace("μ", "u").replace("?", "u")
     return re.sub(r"[^a-z0-9]+", "", token)
 
 
@@ -9074,11 +9074,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_motion_speed_mm_s.setToolTip("Linear stage speed for held manual movement.")
 
         jog_buttons = QtWidgets.QHBoxLayout()
-        jog_negative = QtWidgets.QPushButton("â–² Move up / increase tension", motion_box)
+        jog_negative = QtWidgets.QPushButton("▲ Move up / increase tension", motion_box)
         jog_negative.setObjectName("hardware_jog_tension_button")
         self._configure_manual_jog_button(jog_negative, lambda: self._tension_motion_sign())
         jog_buttons.addWidget(jog_negative)
-        jog_positive = QtWidgets.QPushButton("â–¼ Move down / relax", motion_box)
+        jog_positive = QtWidgets.QPushButton("▼ Move down / relax", motion_box)
         jog_positive.setObjectName("hardware_jog_relax_button")
         self._configure_manual_jog_button(jog_positive, lambda: -self._tension_motion_sign())
         jog_buttons.addWidget(jog_positive)
@@ -11205,13 +11205,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.button_manual_auto_connect.setToolTip("Auto-detect/connect the motor and scale for manual setup.")
         self.button_manual_auto_connect.clicked.connect(self._auto_connect_manual_hardware)
         manual_motion_row.addWidget(self.button_manual_auto_connect)
-        manual_up = QtWidgets.QPushButton("â–² Move up", manual_box)
+        manual_up = QtWidgets.QPushButton("▲ Move up", manual_box)
         manual_up.setObjectName("manual_jog_tension_button")
         manual_up.setToolTip("Move the stage in the tension-increasing direction by the jog step.")
         manual_up.setMinimumHeight(42)
         self._configure_manual_jog_button(manual_up, lambda: self._tension_motion_sign())
         manual_motion_row.addWidget(manual_up)
-        manual_down = QtWidgets.QPushButton("â–¼ Move down", manual_box)
+        manual_down = QtWidgets.QPushButton("▼ Move down", manual_box)
         manual_down.setObjectName("manual_jog_relax_button")
         manual_down.setToolTip("Move the stage in the relaxing direction by the jog step.")
         manual_down.setMinimumHeight(42)
@@ -23283,7 +23283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if mode == "cycle":
             summary = (
                 f"Plan: cyclic displacement, {self.spin_cycle_count.value()} cycle(s), "
-                f"with Â±{abs(self.spin_cycle_amplitude.value()):.4f} mm amplitude."
+                f"with ±{abs(self.spin_cycle_amplitude.value()):.4f} mm amplitude."
             )
             banner = "Cyclic displacement"
             summary = (
@@ -24768,7 +24768,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if result is None or not result.succeeded:
             return
         # Exact target-position readback is portable across the Prague and
-        # KoÅ¡ice planning-mode enums. Poll it from the 50 ms control path too,
+        # Košice planning-mode enums. Poll it from the 50 ms control path too,
         # so retry cannot depend on status-timer scheduling.
         if self._tic_target_position_steps == pending.target_steps:
             self._confirm_pending_motion_command()

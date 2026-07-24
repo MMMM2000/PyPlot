@@ -1,4 +1,4 @@
-﻿# Microwire Builder Agent Automation Plan
+# Microwire Builder Agent Automation Plan
 
 This note tracks the implementation direction for making Microwire Data Builder safe to operate from Codex without opening the UI by hand.
 

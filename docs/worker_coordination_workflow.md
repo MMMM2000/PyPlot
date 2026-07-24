@@ -1,4 +1,4 @@
-﻿# Worker Coordination Workflow
+# Worker Coordination Workflow
 
 This workflow is for the PyPlot master coordination thread when multiple Codex workers, worktrees, subagents, or monitor automations are active at the same time.
 

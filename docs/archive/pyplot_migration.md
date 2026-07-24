@@ -1,11 +1,11 @@
-﻿# PyPlot Migration Tracker
+# PyPlot Migration Tracker
 
 ## 1. Inventory & Dependencies
 
 ### 1.1 Core PyPlot Runtime
-- `plotting/pyplot/window.py` â€“ main QMainWindow subclass, shared widgets, graph state helpers.
-- `plotting/pyplot/app.py` â€“ workbench orchestration, plugin registration, project persistence.
-- `plotting/pyplot/console.py`, `plotting/python_console.py` â€“ embedded Python console.
+- `plotting/pyplot/window.py` – main QMainWindow subclass, shared widgets, graph state helpers.
+- `plotting/pyplot/app.py` – workbench orchestration, plugin registration, project persistence.
+- `plotting/pyplot/console.py`, `plotting/python_console.py` – embedded Python console.
 - Shared helpers: `plotting/shared/toolkit.py`, `plotting/shared/common.py`, `plotting/shared/backends.py`, `plotting/shared/config.py`, `plotting/shared/__init__.py`.
 
 ### 1.2 Active Plugins (wired through `PyPlotWorkbench`)
@@ -29,12 +29,12 @@
   and the launcher mirrors that list, so no manual wiring inside `plotting/pyplot/app.py` remains.
 
 ### 1.3 Legacy/Unplugged Components
-- `plotting/legacy/` â€“ **removed 2025-11-07**; all compatibility shims and historical GUIs have been deleted after migration verification.
-- `plotting/pyplot.py` â€“ historical entry point preserved for reference; `plotting/pyplot_app.py` retired with the legacy package.
+- `plotting/legacy/` – **removed 2025-11-07**; all compatibility shims and historical GUIs have been deleted after migration verification.
+- `plotting/pyplot.py` – historical entry point preserved for reference; `plotting/pyplot_app.py` retired with the legacy package.
 - Tests/CLI: no CLI commitments required; launcher drives PyPlot directly.
 
 ### 1.4 Shared Assets & Resources
-- `plotting/default_config.json` â€“ shared defaults.
+- `plotting/default_config.json` – shared defaults.
 - Icons/QSS currently embedded inside legacy GUIs; no centralised resources folder yet.
 
 ## 2. Unified Layout (Post-Migration)

@@ -1,4 +1,4 @@
-﻿# Microwire Data Plotting & Logging
+# Microwire Data Plotting & Logging
 
 A compact toolkit for logging, visualising, and post-processing microwire
 experiments. The launcher keeps the utilities together so you can jump between

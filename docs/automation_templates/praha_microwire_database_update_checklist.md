@@ -1,4 +1,4 @@
-﻿# Praha Microwire Database Update Checklist
+# Praha Microwire Database Update Checklist
 
 Use this checklist whenever refreshing the shared `.pydpj` database before DOCX export. The goal is to make each refresh reproducible and to record when fabrication data is not available yet.
 

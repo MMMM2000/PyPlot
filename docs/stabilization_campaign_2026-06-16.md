@@ -1,4 +1,4 @@
-﻿# PyPlot Stabilization Campaign - 2026-06-16
+# PyPlot Stabilization Campaign - 2026-06-16
 
 This is a coordination note for the overnight stabilization pass requested by the user. Do not treat this as a release PR. The user wants to test the resulting branch manually before any final PR or merge to `main`.
 

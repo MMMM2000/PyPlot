@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -369,7 +369,7 @@ def test_supervisor_main_prints_ascii_json_for_windows_console(monkeypatch, caps
         return {
             "state": "completed",
             "child_returncode": 0,
-            "path": "C:/Users/Martin EliÃ¡Å¡/PyPlot",
+            "path": "C:/Users/Martin Eliáš/PyPlot",
             "tail": "bad char \ufffd",
         }
 
