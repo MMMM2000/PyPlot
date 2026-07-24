@@ -22020,6 +22020,145 @@ def test_current_sweep_runtime_update_replans_future_stress_targets(
         _close_test_window(window)
 
 
+@pytest.mark.parametrize("active_action", ["set_current", "ramp_target"])
+def test_current_sweep_runtime_update_before_plateau_sweeps_preserves_current_plateau(
+    tmp_path: Path,
+    qtbot,
+    active_action: str,
+) -> None:
+    window = _build_window(tmp_path, qtbot)
+    window.edit_log_name.setText(f"runtime_preserve_50_{active_action}")
+    steps = [
+        mini_dma_mod.AutomationStep(
+            "set_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_mA=1.0,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=50.0,
+            target_start_value=0.0,
+            target_end_value=50.0,
+            target_ramp_rate_value_s=5.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=40.0,
+            current_ramp_rate_mA_s=0.4,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=50.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=40.0,
+            current_end_mA=1.0,
+            current_ramp_rate_mA_s=0.4,
+            note="1",
+        ),
+        mini_dma_mod.AutomationStep(
+            "set_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_mA=1.0,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "ramp_target",
+            target_value=100.0,
+            target_start_value=50.0,
+            target_end_value=100.0,
+            target_ramp_rate_value_s=5.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=1.0,
+            current_end_mA=40.0,
+            current_ramp_rate_mA_s=0.4,
+            note="2",
+        ),
+        mini_dma_mod.AutomationStep(
+            "sweep_current",
+            target_value=100.0,
+            basis=mini_dma_mod.HSW_BASIS_STRESS_MPA,
+            current_start_mA=40.0,
+            current_end_mA=1.0,
+            current_ramp_rate_mA_s=0.4,
+            note="2",
+        ),
+    ]
+    active_index = 0 if active_action == "set_current" else 1
+
+    try:
+        window._start_session(enable_logging=False, record_initial_point=False)
+        window._automation_active = True
+        window._automation_name = mini_dma_mod.CURRENT_SWEEP_STRESS
+        window._automation_steps = steps
+        window._automation_index = active_index
+        window._active_target_ramp_step_index = (
+            active_index if active_action == "ramp_target" else None
+        )
+        window._automation_basis = mini_dma_mod.HSW_BASIS_STRESS_MPA
+        window._automation_target_value = 50.0
+        window._automation_interval_ms = 250
+        window._recipe_estimated_points, window._automation_total_steps = (
+            window._estimate_recipe_points_and_ticks(
+                window._automation_steps,
+                window._automation_interval_ms,
+            )
+        )
+
+        window.spin_current_sweep_target_start.setValue(50.0)
+        window.spin_current_sweep_target_end.setValue(100.0)
+        window.spin_current_sweep_target_step.setValue(50.0)
+        window.spin_current_sweep_target_ramp_rate.setValue(5.0)
+        window.check_current_sweep_return_target.setChecked(False)
+        window.spin_current_sweep_start_mA.setValue(1.0)
+        window.spin_current_sweep_end_mA.setValue(40.0)
+        window.spin_current_sweep_step_mA.setValue(1.0)
+
+        assert window._apply_current_sweep_pending_overrides(show_message=False) is True
+
+        current_plateau_sweeps = [
+            step
+            for step in window._automation_steps[active_index + 1 :]
+            if step.action == "sweep_current" and step.target_value == pytest.approx(50.0)
+        ]
+        assert len(current_plateau_sweeps) == 2
+        assert [step.current_start_mA for step in current_plateau_sweeps] == [
+            pytest.approx(1.0),
+            pytest.approx(40.0),
+        ]
+        assert [step.current_end_mA for step in current_plateau_sweeps] == [
+            pytest.approx(40.0),
+            pytest.approx(1.0),
+        ]
+        assert all(
+            step.current_ramp_rate_mA_s == pytest.approx(1.0)
+            for step in current_plateau_sweeps
+        )
+        assert any(
+            step.action == "ramp_target"
+            and step.target_end_value == pytest.approx(100.0)
+            for step in window._automation_steps[active_index + 1 :]
+        )
+        window._stop_session()
+    finally:
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_current_sweep_runtime_update_button_waits_for_pending_changes(
     tmp_path: Path,
     qtbot,
