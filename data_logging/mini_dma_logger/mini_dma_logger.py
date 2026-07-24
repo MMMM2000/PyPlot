@@ -29484,6 +29484,74 @@ class MainWindow(QtWidgets.QMainWindow):
             return CURRENT_SWEEP_BASIS_BY_MODE[str(self._automation_name)]
         return self._current_sweep_basis()
 
+    def _runtime_updated_future_step(
+        self,
+        step: AutomationStep,
+        values: Mapping[str, float | bool],
+    ) -> AutomationStep:
+        if step.action == "set_current" and step.current_mA is not None:
+            return replace(
+                step,
+                current_mA=float(values["current_start_mA"]),
+            )
+        if step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
+            return replace(
+                step,
+                target_ramp_rate_value_s=float(values["target_ramp_rate_value_s"]),
+            )
+        if step.action != "sweep_current":
+            return step
+        old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
+        old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
+        current_end_key = (
+            "first_overheating_current_end_mA"
+            if self._is_first_overheating_step(step)
+            else "current_end_mA"
+        )
+        if old_end >= old_start:
+            new_start = float(values["current_start_mA"])
+            new_end = float(values[current_end_key])
+        else:
+            new_start = float(values[current_end_key])
+            new_end = float(values["current_start_mA"])
+        return replace(
+            step,
+            current_start_mA=new_start,
+            current_end_mA=new_end,
+            current_ramp_rate_mA_s=float(values["current_ramp_rate_mA_s"]),
+            current_hold_enabled=bool(values["current_hold_enabled"]),
+            current_hold_pause_tolerance_factor=float(values["current_hold_pause_tolerance_factor"]),
+            current_hold_resume_tolerance_factor=float(values["current_hold_resume_tolerance_factor"]),
+            current_hold_resume_stable_s=float(values["current_hold_resume_stable_s"]),
+        )
+
+    def _runtime_pending_active_plateau_steps(
+        self,
+        values: Mapping[str, float | bool],
+        *,
+        basis: str,
+        active_index: int,
+        active_target: float,
+    ) -> list[AutomationStep]:
+        if not 0 <= active_index < len(self._automation_steps):
+            return []
+        active_step = self._automation_steps[active_index]
+        if active_step.action == "sweep_current":
+            return []
+        active_note = str(active_step.note)
+        pending: list[AutomationStep] = []
+        for step in self._automation_steps[active_index + 1 :]:
+            same_note = bool(active_note) and str(step.note) == active_note
+            same_target = (
+                step.basis == basis
+                and step.target_value is not None
+                and self._target_values_close(float(step.target_value), active_target)
+            )
+            if not same_note and not same_target:
+                break
+            pending.append(self._runtime_updated_future_step(step, values))
+        return pending
+
     @staticmethod
     def _is_first_overheating_step(step: AutomationStep) -> bool:
         return step.note == "first_overheating"
@@ -29581,6 +29649,15 @@ class MainWindow(QtWidgets.QMainWindow):
         current_end = float(values["current_end_mA"])
         current_ramp_rate = float(values["current_ramp_rate_mA_s"])
         target_ramp_rate = float(values["target_ramp_rate_value_s"])
+
+        tail.extend(
+            self._runtime_pending_active_plateau_steps(
+                values,
+                basis=basis,
+                active_index=active_index,
+                active_target=active_target,
+            )
+        )
 
         def _append_plateau(target: float, note: str) -> None:
             nonlocal previous_target
@@ -29782,41 +29859,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if index <= active_index:
                     continue
                 old_summary = self._current_sweep_step_override_summary(step)
-                new_step = step
-                if step.action == "set_current" and step.current_mA is not None:
-                    new_step = replace(
-                        step,
-                        current_mA=float(update_values["current_start_mA"]),
-                    )
-                elif step.action == "ramp_target" and step.target_ramp_rate_value_s is not None:
-                    new_step = replace(
-                        step,
-                        target_ramp_rate_value_s=float(update_values["target_ramp_rate_value_s"]),
-                    )
-                elif step.action == "sweep_current":
-                    old_start = float(step.current_start_mA) if step.current_start_mA is not None else 0.0
-                    old_end = float(step.current_end_mA) if step.current_end_mA is not None else old_start
-                    current_end_key = (
-                        "first_overheating_current_end_mA"
-                        if self._is_first_overheating_step(step)
-                        else "current_end_mA"
-                    )
-                    if old_end >= old_start:
-                        new_start = float(update_values["current_start_mA"])
-                        new_end = float(update_values[current_end_key])
-                    else:
-                        new_start = float(update_values[current_end_key])
-                        new_end = float(update_values["current_start_mA"])
-                    new_step = replace(
-                        step,
-                        current_start_mA=new_start,
-                        current_end_mA=new_end,
-                        current_ramp_rate_mA_s=float(update_values["current_ramp_rate_mA_s"]),
-                        current_hold_enabled=bool(update_values["current_hold_enabled"]),
-                        current_hold_pause_tolerance_factor=float(update_values["current_hold_pause_tolerance_factor"]),
-                        current_hold_resume_tolerance_factor=float(update_values["current_hold_resume_tolerance_factor"]),
-                        current_hold_resume_stable_s=float(update_values["current_hold_resume_stable_s"]),
-                    )
+                new_step = self._runtime_updated_future_step(step, update_values)
                 if new_step is not step:
                     new_summary = self._current_sweep_step_override_summary(new_step)
                     if new_summary != old_summary:
