@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from data_logging.mini_dma_logger.kosice_import import (
     build_annealing_folder_index,
@@ -43,6 +44,28 @@ def test_loads_legacy_four_column_dat_using_real_current_and_resistance(tmp_path
     assert frame["I_mA"].tolist() == pytest.approx([0.8, 1.9])
     assert frame["V_V"].tolist() == pytest.approx([0.096, 0.247])
     assert frame["R_Ohm"].tolist() == pytest.approx([120.0, 130.0])
+
+
+def test_converts_legacy_four_column_amp_values_despite_misleading_ma_header(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Ni46Fe27Ga23Cu2Co2-2_1-No1.dat"
+    path.write_text(
+        "ID\n"
+        "Iset(mA) Ireal (mA) Ureal (mA) R(ohm)\n"
+        "0.001 0.0013 0.413 317.692307692308\n"
+        "0.002 0.0022 0.772 350.909090909091\n",
+        encoding="utf-8",
+    )
+
+    frame = load_annealing_curve(path)
+
+    assert frame["I_mA"].tolist() == pytest.approx([1.3, 2.2])
+    assert frame["I_A"].tolist() == pytest.approx([0.0013, 0.0022])
+    assert frame["V_V"].tolist() == pytest.approx([0.413, 0.772])
+    assert frame["R_Ohm"].tolist() == pytest.approx(
+        [317.692307692308, 350.909090909091]
+    )
 
 
 def test_loads_current_six_column_dat_schema(tmp_path: Path) -> None:
@@ -119,3 +142,37 @@ def test_index_honours_cancellation(tmp_path: Path) -> None:
             source_label="Košice folder",
             cancelled=lambda: True,
         )
+
+
+def test_index_reads_exact_diameters_from_kosice_workbook_and_rejects_conflicts(
+    tmp_path: Path,
+) -> None:
+    unrelated = Workbook()
+    unrelated.active.append(["Task", "Owner", "Start"])
+    unrelated.save(tmp_path / "Gantt_chart.xlsx")
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sheet1"
+    sheet.append(["Composition", "Microwire", "d (µm)", "D (µm)"])
+    sheet.append([None, None, None, None])
+    sheet.append(["Ni50Fe27Ga23", "19/8", 10.2, 44.9])
+    sheet.append(["Ni50Fe27Ga23", "19/8", 10.2, 44.9])
+    sheet.append(["Ni50Fe27Ga23", "19/9", 11.0, 45.0])
+    sheet.append(["Ni50Fe27Ga23", "19/9", 12.0, 45.0])
+    workbook_path = tmp_path / "microwire_database.xlsx"
+    workbook.save(workbook_path)
+
+    index = build_annealing_folder_index(
+        tmp_path,
+        source_label="Košice folder",
+        include_sample_workbook=True,
+    )
+
+    record = index.matching_sample("ni50fe27ga23", "19_8")
+    assert record is not None
+    assert record.diameter_mm == pytest.approx(0.0102)
+    assert record.workbook_path == workbook_path
+    assert index.matching_sample("Ni50Fe27Ga23", "19/9") is None
+    assert index.conflicting_sample_count == 1
+    assert index.suggestions() == {"Ni50Fe27Ga23": ("19/8",)}

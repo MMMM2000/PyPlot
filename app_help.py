@@ -174,7 +174,10 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
 
             **Show annealing** uses that same priority order, reports the chosen source, and opens
             all matching curves in the existing stacked preview. Košice `.dat` and `.txt` tables
-            are supported; discovered Origin `.opju` projects are reported but not imported.
+            are supported. Legacy four-column `.dat` tables are normalized to mA from their
+            electrically consistent current, voltage, and resistance values even when their old
+            header incorrectly labels ampere values as mA. Discovered Origin `.opju` projects are
+            reported but not imported.
 
             ### IR thermometer wiring
             Use the NUCLEO-H753ZI ST-LINK USB connector for board power and the PC

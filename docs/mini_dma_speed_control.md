@@ -332,6 +332,20 @@ mm/s, g/s, MPa/s, %/s
 
 The g/s and MPa/s values use the frozen setup/calibration stiffness prior during current-sweep control. TMA does not update this stiffness from current-driven load/stress fluctuations, so phase/current transients cannot inflate backlash cost or rewrite the mechanical sensitivity while the sweep is in progress. The %/s value uses the current `l0`.
 
+### Physical invariant: transformation is an active disturbance
+
+An iso-load or iso-stress current sweep is not a passive position-control experiment. Heating drives a phase transformation that changes the wire's free length. During the contracting transformation, the tensile stress can rise even while the motor is moving in the correct relaxing direction. Holding the current setpoint pauses the electrical ramp, but it does not stop thermal lag or transformation kinetics already in progress.
+
+The measured stress change between two feedback samples therefore contains at least two simultaneous contributions:
+
+```text
+net stress change = motor-induced stress change + transformation/thermal stress change + noise
+```
+
+Consequently, a net stress increase after a correctly directed relaxation command is **not** evidence that the motor command increased tension or had the wrong sign. It may mean only that transformation-driven contraction raised stress faster than that command relaxed it. Controller response learning and instability classification must not attribute the whole net change to the motor. Direction must come from the target error and known motor geometry; command effectiveness must be estimated with disturbance-aware evidence such as motor position, sustained same-current history, or a model/replay that separates transformation drift from mechanical response.
+
+For the important above-target case, persistent same-sign stress growth during a correctly directed relaxation sequence calls for bounded stronger relaxation under the configured displacement, strain, speed, and load safety rails. It must not, by itself, collapse recovery to one motor unit. Target crossing, an unexpected motor-position response, a real direction mismatch, or other independent safety evidence can still justify damping or reversal protection.
+
 ![Iso-stress/current-sweep dynamic balance speed](assets/mini_dma_current_sweep_servo_speed.svg)
 
 ## Recipe Ramp Rates In g/s, MPa/s, And %/s
@@ -387,7 +401,7 @@ When the current ramp is paused and several fresh post-move samples show that th
 
 The Tic command speed is kept practical for these small corrections. During current-sweep balancing, TMA will not deliberately creep below about `0.05 mm/s` unless the stage speed cap itself is lower. The balance feedback is normally the bottleneck, so a tiny correction should finish quickly and then wait for the next fresh scale reply instead of spending seconds moving slowly.
 
-Current-sweep load/stress correction is conservative-gated in target-ramp, hold, and settle phases. TMA does not use cruise feedback for these modes, because delayed balance samples can otherwise stack several stale corrections while the sample is already passing through the target. During the main current phase, a far-from-target force error can still cruise on a fresh in-flight scale sample when the safety margin says the remaining error is much larger than feedback latency, backlash, tolerance, and motor-step floors. Each gated force correction consumes one fresh scale sample; in the very-near/fine band the next correction waits for two fresh scale samples so one delayed or noisy value cannot immediately trigger a reversal.
+Current-sweep load/stress correction is conservative-gated in target-ramp and settle phases. During the main current phase, a far-from-target force error can cruise on a fresh in-flight scale sample when the safety margin says the remaining error is much larger than feedback latency, backlash, tolerance, and motor-step floors. Current-hold recovery can do the same for a clean same-sign far error; if the error is worsening, the processed signal must additionally show a low-residual, same-direction transformation trend away from the target. A reversal, noisy response, or unexplained worsening remains one-move-at-a-time. Each gated force correction consumes one fresh scale sample; in the very-near/fine band the next correction waits for two fresh scale samples so one delayed or noisy value cannot immediately trigger a reversal.
 
 Scale feedback also has a readability floor. Prague G&G runs use a 0.005 g floor, while the Kosice KERN KCP profile uses a 0.01 g floor. Post-move filtered-signal change and "response worsened" decisions include this floor so a single quantized display count cannot be mistaken for a confirmed unstable current-hold response. The KERN profile also uses smaller current-hold command strain caps (`0.08%` base, response-earned `1.25x` adaptive ceiling, or `0.10%` strain) because the faster balance cadence can otherwise compound corrections more quickly than the quantized force feedback can justify. The Prague/G&G caps remain `0.24%` and `0.35%`.
 
@@ -433,11 +447,19 @@ backlash_mm * sensitivity
 
 If a correction crosses the target but the remaining error is inside this band, TMA accepts the target as reached instead of reversing immediately. This prevents backlash-driven hunting.
 
+## Transformation-disturbance recovery
+
+During an iso-stress current sweep, observed stress change is the sum of the motor response and transformation/thermal drift. A correctly directed relaxation move can therefore coincide with rising stress when the transforming wire contracts faster than the stage relieves it. Current-hold control must continue bounded recovery in that direction; the net stress change alone is not evidence of a failed motor response.
+
+Prague current sweeps reject isolated readability-scale outliers, use a median pairwise trend and projected endpoint, and calculate fluctuation from detrended residuals. During the active current ramp and current-hold recovery, clean far same-sign error may chain fresh-feedback corrections. A worsening hold error only chains while a low-noise trend shows coherent transformation drift away from the target; reversal, unexplained worsening, or accumulated instability restores response gating. Košice uses its separate quantization-aware force policy, projects same-direction measured drift over a short response horizon, and confirms a persistent error before reversing motor direction. A sub-resolution motor response lowers identification confidence but never stops the recipe.
+
+Heating resumes only inside the configured processed-stress tolerance after stable confirmation. Measured fluctuation may lengthen confirmation but does not enlarge that scientific resume tolerance. Raw stress, processed stress, trend, residual fluctuation, and motor decisions remain logged separately.
+
+There is no cumulative millimetre limit on current-sweep recovery. Cumulative stage displacement is part of the measured transformation strain. Individual commands remain bounded by motor resolution, target-relative response, configured strain per correction, strain rate, stage speed, and physical hardware protections.
+
 ## Current Limitations
 
-The current controller is now hybrid feedback-based: far from target it can keep the motor moving between scale replies, and near target it returns to conservative post-move feedback gating. It compensates for large error and moving-away trends, but it still does not have full current feed-forward.
-
-A possible future layer is current-ramp feed-forward:
+The controller still does not have current feed-forward learned from an earlier thermal cycle. A possible future layer is:
 
 ```text
 predicted_error =
