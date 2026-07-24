@@ -9821,6 +9821,85 @@ def _dma_iso_stress_preview_items(
     return items
 
 
+def _downsample_mini_dma_preview_run(run: Any, *, points_per_trace: int = 180) -> Any:
+    frame = getattr(run, "frame", None)
+    if not isinstance(frame, pd.DataFrame) or len(frame.index) <= points_per_trace:
+        return run
+    try:
+        iso_current = bool(mini_dma_core.is_iso_current_run(run))
+    except Exception:
+        iso_current = False
+    if iso_current:
+        group_columns = [
+            column
+            for column in ("current_set_mA", "current_measured_mA", "current_mA")
+            if column in frame.columns
+        ][:1]
+    else:
+        group_columns = [
+            column
+            for column in ("automation_target_value", "plateau_index")
+            if column in frame.columns
+        ]
+    if not group_columns:
+        group_columns = (
+            ["automation_target_value"]
+            if "automation_target_value" in frame.columns
+            else []
+        )
+    groups: Iterable[Tuple[object, pd.DataFrame]]
+    if group_columns:
+        groups = frame.groupby(group_columns, sort=False, dropna=False)
+    else:
+        groups = ((None, frame),)
+    sampled: List[pd.DataFrame] = []
+    for _key, group in groups:
+        if len(group.index) <= points_per_trace:
+            sampled.append(group)
+            continue
+        positions = sorted(
+            {
+                int(round(position * (len(group.index) - 1) / (points_per_trace - 1)))
+                for position in range(points_per_trace)
+            }
+        )
+        sampled.append(group.iloc[positions])
+    if not sampled:
+        return run
+    preview_frame = pd.concat(sampled).sort_index().reset_index(drop=True)
+    return mini_dma_core.MiniDmaRun(
+        path=run.path,
+        measurement_path=run.measurement_path,
+        frame=preview_frame,
+        sample_name=run.sample_name,
+        initial_length_mm=run.initial_length_mm,
+        wire_diameter_mm=run.wire_diameter_mm,
+    )
+
+
+def _mini_dma_preview_run(record: MiniDmaRecord) -> Any:
+    path = getattr(record, "path", None)
+    if not isinstance(path, Path):
+        raise ValueError("TMA preview record has no path")
+    frame = getattr(record, "data", None)
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        run = mini_dma_core.load_run(path)
+    else:
+        initial_length_mm = None
+        if "current_l0_mm" in frame.columns:
+            values = pd.to_numeric(frame["current_l0_mm"], errors="coerce").dropna()
+            if not values.empty:
+                initial_length_mm = _coerce_finite_float(values.median())
+        run = mini_dma_core.MiniDmaRun(
+            path=path,
+            measurement_path=path / mini_dma_core.MEASUREMENT_FILE,
+            frame=frame,
+            sample_name=str(getattr(record, "sample", "") or path.name),
+            initial_length_mm=initial_length_mm,
+        )
+    return _downsample_mini_dma_preview_run(run)
+
+
 def _mini_dma_preview_items(
     records: Sequence[MiniDmaRecord],
     logger: logging.Logger,
@@ -9836,7 +9915,7 @@ def _mini_dma_preview_items(
         if not isinstance(path, Path):
             continue
         try:
-            run = mini_dma_core.load_run(path)
+            run = _mini_dma_preview_run(record)
             if mini_dma_core.is_iso_current_run(run):
                 figure = mini_dma_core.make_iso_current_figure(run)
             else:
@@ -11585,6 +11664,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._project_overview_loader: Callable[[Sequence[str]], Sequence[Any]] | None = None
         self._project_overview_generation = 0
         self._project_overview_pending: Set[str] = set()
+        self._project_overview_completed: Set[str] = set()
+        self._project_overview_queued: Dict[str, Tuple[str, ...]] = {}
+        self._project_overview_start_scheduled = False
+        self._project_overview_batch_id = 0
         self._project_overview_threads: Dict[
             str, Tuple[QtCore.QThread, _ProjectRecordSubsetLoadWorker]
         ] = {}
@@ -12219,6 +12302,9 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._project_overview_generation += 1
         self._project_overview_loader = loader
         self._project_overview_pending = set()
+        self._project_overview_completed = set()
+        self._project_overview_queued = {}
+        self._project_overview_start_scheduled = False
         cache = getattr(self, "_pixmap_cache", None)
         if isinstance(cache, dict):
             cache.clear()
@@ -12241,14 +12327,53 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if not paths:
             return False
         key = str(request_key)
+        if key in self._project_overview_completed:
+            return False
         if key in self._project_overview_pending:
             return True
         self._project_overview_pending.add(key)
+        self._project_overview_queued[key] = paths
+        self._schedule_project_overview_batch()
+        return True
+
+    def _schedule_project_overview_batch(self) -> None:
+        if (
+            self._project_overview_start_scheduled
+            or self._project_overview_threads
+            or not self._project_overview_queued
+        ):
+            return
+        self._project_overview_start_scheduled = True
+        QtCore.QTimer.singleShot(0, self._start_project_overview_batch)
+
+    def _start_project_overview_batch(self) -> None:
+        self._project_overview_start_scheduled = False
+        loader = self._project_overview_loader
+        if (
+            not callable(loader)
+            or self._project_overview_threads
+            or not self._project_overview_queued
+        ):
+            return
+        requests = self._project_overview_queued
+        self._project_overview_queued = {}
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for request_paths in requests.values()
+                for path in request_paths
+            )
+        )
+        if not paths:
+            self._project_overview_pending.difference_update(requests)
+            return
         generation = self._project_overview_generation
+        self._project_overview_batch_id += 1
+        batch_key = f"batch-{self._project_overview_batch_id}"
         thread = QtCore.QThread(self)
         worker = _ProjectRecordSubsetLoadWorker(loader, paths)
         worker.moveToThread(thread)
-        self._project_overview_threads[key] = (thread, worker)
+        self._project_overview_threads[batch_key] = (thread, worker)
         result: Dict[str, object] = {}
 
         worker.finished.connect(lambda records: result.__setitem__("records", records))
@@ -12259,10 +12384,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         worker.failed.connect(worker.deleteLater)
 
         def _complete() -> None:
-            self._project_overview_threads.pop(key, None)
-            self._project_overview_pending.discard(key)
+            self._project_overview_threads.pop(batch_key, None)
             if generation != self._project_overview_generation:
+                self._schedule_project_overview_batch()
                 return
+            self._project_overview_pending.difference_update(requests)
             error = result.get("error")
             if error is not None:
                 self.logger.warning(
@@ -12270,16 +12396,18 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                     self.section_key,
                     error,
                 )
+                self._schedule_project_overview_batch()
                 return
+            self._project_overview_completed.update(requests)
             records = result.get("records")
             if isinstance(records, list):
                 self._accept_project_overview_records(records)
+            self._schedule_project_overview_batch()
 
         thread.finished.connect(_complete)
         thread.finished.connect(thread.deleteLater)
         thread.started.connect(worker.run)
         thread.start()
-        return True
 
     def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
         _ = records
@@ -12734,6 +12862,27 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if not isinstance(stack, QtWidgets.QStackedWidget):
             return True
         return right_panel is not None and stack.currentWidget() is right_panel
+
+    def _refresh_table_decorations(self) -> None:
+        """Repaint cached thumbnails without resetting the table layout."""
+
+        if isinstance(self.model, DataFrameModel):
+            rows = self.model.rowCount()
+            columns = self.model.columnCount()
+            if rows > 0 and columns > 0:
+                try:
+                    self.model.dataChanged.emit(
+                        self.model.index(0, 0),
+                        self.model.index(rows - 1, columns - 1),
+                        [QtCore.Qt.ItemDataRole.DecorationRole],
+                    )
+                except Exception:
+                    pass
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            try:
+                self.table_view.viewport().update()
+            except Exception:
+                pass
 
     def _update_content_stack(self) -> None:
         if not self.supported_suffixes:
@@ -24086,11 +24235,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._preview_render_queue.clear()
         self._preview_render_pending.clear()
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _load_preview_range_setting(self) -> None:
         stored = _load_vsm_hysteresis_preview_range_oe()
@@ -24117,16 +24262,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
 
     def _refresh_preview_pixmaps(self) -> None:
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
-        if isinstance(self.table_view, QtWidgets.QTableView):
-            try:
-                self.table_view.viewport().update()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _handle_preview_range_changed(self, _: int) -> None:
         data = self.preview_range_combo.currentData()
@@ -24249,11 +24385,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
             self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
         finally:
             self._preview_render_pending.discard(cache_key)
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
         if self._preview_render_queue:
             self._preview_render_timer.start(1)
 
@@ -24627,11 +24759,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         self._preview_render_queue.clear()
         self._preview_render_pending.clear()
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _load_preview_mode_setting(self) -> None:
         mode = _load_vsm_temperature_preview_mode()
@@ -24655,16 +24783,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         except Exception:
             self.logger.exception("Failed to store VSM temperature preview mode setting")
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
-        if isinstance(self.table_view, QtWidgets.QTableView):
-            try:
-                self.table_view.viewport().update()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _preview_icon_width(self) -> int:
         count = max(int(getattr(self, "_preview_group_count", 1)), 1)
@@ -24755,11 +24874,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
         finally:
             self._preview_render_pending.discard(cache_key)
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
         if self._preview_render_queue:
             self._preview_render_timer.start(1)
 
@@ -25670,11 +25785,7 @@ class MiniDmaSection(MiniDatabaseSection):
         self._preview_render_queue.clear()
         self._preview_render_pending.clear()
         self._pixmap_cache.clear()
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
 
     def _accept_project_overview_records(self, records: Sequence[Any]) -> None:
         merged = {
@@ -25793,11 +25904,7 @@ class MiniDmaSection(MiniDatabaseSection):
             self._pixmap_cache[cache_key] = self._render_preview_pixmap(records)
         finally:
             self._preview_render_pending.discard(cache_key)
-        if isinstance(self.model, DataFrameModel):
-            try:
-                self.model.layoutChanged.emit()
-            except Exception:
-                pass
+        self._refresh_table_decorations()
         if self._preview_render_queue:
             self._preview_render_timer.start(1)
 
@@ -40250,6 +40357,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
             raise RuntimeError("Synchronous Builder project restore did not finish")
         self._project_package_index = prepared.package_index
         self._project_payload_resolver = prepared.payload_resolver
+        if isinstance(prepared.payload_resolver, ProjectPayloadResolver):
+            restored_sections = prepared.payload.get("sections", {})
+            if isinstance(restored_sections, Mapping):
+                for section_key, section in self.sections.items():
+                    self._configure_project_overview_loader(
+                        section_key,
+                        section,
+                        restored_sections.get(section_key),
+                        prepared.payload_resolver,
+                    )
 
     def _begin_project_load_prepare_worker(
         self,

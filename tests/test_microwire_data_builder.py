@@ -3630,6 +3630,64 @@ def test_mini_dma_preview_items_render_iso_current_without_current_sweep_error(
     assert not caplog.records
 
 
+def test_mini_dma_packaged_preview_uses_record_data_and_downsamples(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    run_path = tmp_path / "Ni50Fe27Ga23 12_2 packaged"
+    frame = pd.DataFrame(
+        {
+            "elapsed_s": range(1000),
+            "automation_phase": ["current"] * 1000,
+            "automation_target_value": [50.0] * 1000,
+            "plateau_index": [1] * 1000,
+            "strain_pct": [value / 100.0 for value in range(1000)],
+            "resistance_ohm": [100.0] * 1000,
+            "current_mA": [value / 10.0 for value in range(1000)],
+        }
+    )
+    record = MiniDmaRecord(
+        path=run_path,
+        sample="Ni50Fe27Ga23 12_2",
+        data=frame,
+        key=("Ni50Fe27Ga23", 12, 2, None),
+        label=run_path.name,
+    )
+    rendered_lengths: list[int] = []
+
+    monkeypatch.setattr(
+        builder_ui.mini_dma_core,
+        "load_run",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("packaged preview must use decoded record data")
+        ),
+    )
+
+    def _figure(run, **_kwargs):
+        rendered_lengths.append(len(run.frame.index))
+        figure = builder_ui.Figure(figsize=(2, 1))
+        axis = figure.add_subplot(111)
+        axis.plot([0, 1], [0, 1])
+        return figure
+
+    monkeypatch.setattr(
+        builder_ui.mini_dma_core,
+        "make_strain_current_figure",
+        _figure,
+    )
+
+    items = builder_ui._mini_dma_preview_items(  # noqa: SLF001
+        [record],
+        logging.getLogger("test"),
+        width_px=builder_ui.ANNEALING_GRAPH_WIDTH,
+        height_px=builder_ui.ANNEALING_GRAPH_HEIGHT,
+    )
+
+    assert len(items) == 1
+    assert rendered_lengths == [180]
+
+
 def test_mini_dma_section_process_accepts_iso_current_without_sweep_summary_error(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -3710,11 +3768,18 @@ def test_mini_dma_section_defers_visible_preview_render(
                 builder_ui.MINI_DMA_COLUMN: [record.label],
             }
         )
+        section.model.set_frame(pd.DataFrame([row]))
         pixmap = QtGui.QPixmap(10, 10)
         pixmap.fill(QtGui.QColor("#123456"))
         monkeypatch.setattr(section, "_should_defer_preview_render", lambda: True)
         render = Mock(return_value=pixmap)
         monkeypatch.setattr(section, "_render_preview_pixmap", render)
+        layout_refreshes: list[None] = []
+        decoration_refreshes: list[list[QtCore.Qt.ItemDataRole]] = []
+        section.model.layoutChanged.connect(lambda: layout_refreshes.append(None))
+        section.model.dataChanged.connect(
+            lambda _top_left, _bottom_right, roles: decoration_refreshes.append(roles)
+        )
 
         assert section._preview_decoration(row, builder_ui.MINI_DMA_COLUMN) is None  # noqa: SLF001
         assert len(section._preview_render_queue) == 1  # noqa: SLF001
@@ -3724,6 +3789,8 @@ def test_mini_dma_section_defers_visible_preview_render(
 
         assert render.call_count == 1
         assert next(iter(section._pixmap_cache.values())) is pixmap  # noqa: SLF001
+        assert layout_refreshes == []
+        assert decoration_refreshes == [[QtCore.Qt.ItemDataRole.DecorationRole]]
     finally:
         section.close()
         section.deleteLater()
@@ -3762,6 +3829,52 @@ def test_mini_dma_lazy_project_preview_uses_placeholder_without_loading_source(
         assert preview.width() == builder_ui.ANNEALING_GRAPH_WIDTH
         assert preview.height() == builder_ui.ANNEALING_GRAPH_HEIGHT
     finally:
+        section.close()
+        section.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_packaged_preview_requests_are_coalesced_into_one_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_qapp()
+    section = builder_ui.MiniDmaSection(logging.getLogger("test"), lambda *_args: None)
+    calls: list[tuple[str, ...]] = []
+    accepted: list[list[str]] = []
+
+    def loader(paths: tuple[str, ...]) -> list[str]:
+        calls.append(tuple(paths))
+        return list(paths)
+
+    monkeypatch.setattr(
+        section,
+        "_accept_project_overview_records",
+        lambda records: accepted.append(list(records)),
+    )
+    try:
+        section._set_project_overview_loader(loader)  # noqa: SLF001
+        assert section._request_project_overview_records("row-a", ["a.csv"])  # noqa: SLF001
+        assert section._request_project_overview_records("row-b", ["b.csv"])  # noqa: SLF001
+        assert section._request_project_overview_records(  # noqa: SLF001
+            "row-c", ["a.csv", "c.csv"]
+        )
+
+        _wait_for_qt(
+            lambda: not section._project_overview_threads  # noqa: SLF001
+            and not section._project_overview_start_scheduled,  # noqa: SLF001
+        )
+
+        assert calls == [("a.csv", "b.csv", "c.csv")]
+        assert accepted == [["a.csv", "b.csv", "c.csv"]]
+        assert section._project_overview_pending == set()  # noqa: SLF001
+        assert section._project_overview_queued == {}  # noqa: SLF001
+        assert not section._request_project_overview_records(  # noqa: SLF001
+            "row-a", ["a.csv"]
+        )
+        QtWidgets.QApplication.processEvents()
+        assert calls == [("a.csv", "b.csv", "c.csv")]
+    finally:
+        section._set_project_overview_loader(None)  # noqa: SLF001
         section.close()
         section.deleteLater()
         QtWidgets.QApplication.processEvents()
