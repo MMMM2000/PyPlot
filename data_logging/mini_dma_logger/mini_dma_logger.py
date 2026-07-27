@@ -31490,6 +31490,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._first_overheating_preflight_decision = None
                 return
             self._release_tic_device_lock()
+        # The visible window no longer owns Tic status while the child owns
+        # recipe hardware.  A preflight refresh may have armed this timer.
+        self._status_timer.stop()
         self._production_control_generation += 1
         identity = ControlSessionIdentity(
             session_id=f"mini-dma-{uuid4()}",
@@ -35812,6 +35815,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._automation_controller.execute_next_tick()
 
     def _handle_status_timer(self) -> None:
+        if self._isolated_recipe_active and not self._controller_process_mode:
+            self._status_timer.stop()
+            return
         if (
             self._automation_active
             or self._session_active

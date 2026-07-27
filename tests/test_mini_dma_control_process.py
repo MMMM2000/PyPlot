@@ -475,6 +475,90 @@ def test_production_backend_owns_recipe_lifecycle_and_readback() -> None:
     backend.close()
 
 
+def test_production_backend_real_window_starts_next_run_without_child_dialog(
+    tmp_path,
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from data_logging.mini_dma_logger import mini_dma_logger as mini_dma_mod
+
+    source = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=False,
+    )
+    qtbot.addWidget(source)
+    source.edit_log_name.setText("existing_sample")
+    source._controller_process_output_collision_action = mini_dma_mod.OUTPUT_COLLISION_NEXT
+    source.check_zero_position_on_start.setChecked(False)
+    source.check_tare_on_start.setChecked(False)
+    (tmp_path / "existing_sample").mkdir()
+    (tmp_path / "existing_sample" / mini_dma_mod.SESSION_METADATA_JSON).write_text(
+        '{"session_state":"finished"}',
+        encoding="utf-8",
+    )
+    created: list[mini_dma_mod.MainWindow] = []
+
+    def _factory(**_kwargs: object) -> mini_dma_mod.MainWindow:
+        window = mini_dma_mod.MainWindow(
+            log_dir=str(tmp_path),
+            persist_settings=False,
+            control_process_enabled=False,
+            controller_process_mode=True,
+        )
+        qtbot.addWidget(window)
+        created.append(window)
+        window._build_automation_recipe = lambda: (  # type: ignore[method-assign]
+            [mini_dma_mod.AutomationStep("wait", duration_s=1.0)],
+            "Synthetic production recipe",
+            50,
+        )
+        window._preflight_recipe_hardware = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+        window._prepare_continuity_current_for_recipe = lambda _steps: True  # type: ignore[method-assign]
+        window._start_automation_control_loop = lambda _interval_ms: None  # type: ignore[method-assign]
+        window._refresh_tic_status = lambda: True  # type: ignore[method-assign]
+        return window
+
+    monkeypatch.setattr(
+        mini_dma_mod.QtWidgets.QMessageBox,
+        "exec",
+        lambda *_args, **_kwargs: pytest.fail(
+            "controller child must use the transferred output choice"
+        ),
+    )
+    payload = capture_window_configuration(
+        source,
+        starting_length_mm=57.522,
+        cadence_downgrade_accepted=True,
+    )
+    backend = ProductionMiniDmaBackend(window_factory=_factory)
+
+    try:
+        backend.start(
+            ControlStartRequest(
+                identity=_identity(),
+                policy=ControlPolicy.PRAGUE,
+                config_json=payload,
+            )
+        )
+
+        assert created
+        child = created[0]
+        assert child._automation_active is True
+        assert child._session_active is True
+        assert child.edit_log_name.text() == "existing_sample_run02"
+        assert (tmp_path / "existing_sample_run02" / "measurement.csv").exists()
+        assert (
+            child._controller_process_output_collision_action
+            == mini_dma_mod.OUTPUT_COLLISION_NEXT
+        )
+    finally:
+        if created:
+            created[0]._automation_active = False
+        backend.close()
+        source.close()
+
+
 def test_production_backend_rejects_missing_ui_collected_starting_length() -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     del app

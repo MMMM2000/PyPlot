@@ -389,7 +389,11 @@ class _ControlProcessRuntime:
             finally:
                 self._emit_event(ControlEventKind.FAULT, detail=str(exc) or exc.__class__.__name__)
                 self._publish_snapshot()
-            raise SystemExit(1) from None
+            # Preserve the original traceback on the inherited diagnostic
+            # stream.  The supervisor still observes exit code 1, while a
+            # driver/startup failure remains actionable if IPC teardown races
+            # the final FAULT event.
+            raise
         finally:
             self._backend.close()
 

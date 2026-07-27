@@ -52,7 +52,8 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
 6. Parent-side scale, PSU, and Tic construction is fenced while the child owns
    the recipe. Manual Actions and Hardware controls are disabled until the
    child reports completion, stop, emergency, or fault. The child retains the
-   existing cross-process Tic device lease.
+   existing cross-process Tic device lease. The parent's periodic Tic status
+   timer is stopped at handoff and rejects work throughout child ownership.
 7. The production child runs the existing recipe implementation unchanged, so
    Prague legacy-seek and Košice adaptive policies stay separate while sharing
    the isolated process and hardware infrastructure.

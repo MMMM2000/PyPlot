@@ -1945,6 +1945,33 @@ def test_isolated_hardware_ownership_interlocks_manual_controls_until_finish(
         _close_test_window(window)
 
 
+def test_parent_status_timer_never_touches_tic_during_isolated_ownership(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window = mini_dma_mod.MainWindow(
+        log_dir=str(tmp_path),
+        persist_settings=False,
+        control_process_enabled=True,
+    )
+    qtbot.addWidget(window)
+    refreshes: list[str] = []
+    window._isolated_recipe_active = True
+    window._automation_active = True
+    window._refresh_tic_status = lambda: refreshes.append("tic") or True  # type: ignore[method-assign]
+    window._status_timer.start()
+
+    try:
+        window._handle_status_timer()
+
+        assert refreshes == []
+        assert window._status_timer.isActive() is False
+    finally:
+        window._isolated_recipe_active = False
+        window._automation_active = False
+        _close_test_window(window)
+
+
 def test_isolated_start_finishes_visible_preflight_and_length_before_process(
     tmp_path: Path,
     qtbot,
@@ -2002,6 +2029,7 @@ def test_isolated_start_finishes_visible_preflight_and_length_before_process(
         assert '"starting_length_mm":57.602' in process.requests[0].config_json
         assert process.update_payloads == []
         assert window.spin_initial_length.value() == pytest.approx(57.602)
+        assert window._status_timer.isActive() is False
     finally:
         window._isolated_recipe_active = False
         window._automation_active = False
