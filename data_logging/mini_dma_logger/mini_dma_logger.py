@@ -8373,7 +8373,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
-        self._manual_jog_velocity_sequence: int | None = None
         self._manual_auto_connect_progress: QtWidgets.QProgressDialog | None = None
         self._last_motion_command_time_s: float | None = None
         self._last_motion_expected_complete_time_s: float | None = None
@@ -24605,52 +24604,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
         self._manual_jog_click_suppressed = False
-        self._manual_jog_velocity_sequence = None
         self._start_tic_keepalive()
         self._manual_jog_timer.start()
 
     def _stop_manual_jog(self) -> None:
         self._manual_jog_timer.stop()
-        velocity_was_queued = self._manual_jog_velocity_sequence is not None
-        if velocity_was_queued:
-            try:
-                self._build_tic_dispatcher().halt_and_hold()
-            except Exception as exc:
-                self._log(f"Tic manual-jog halt failed: {exc}")
-        if self._manual_jog_timer_moves > 0 or velocity_was_queued:
+        if self._manual_jog_timer_moves > 0:
             self._manual_jog_click_suppressed = True
         self._manual_jog_last_tick_s = None
         self._manual_jog_direction = 0.0
         self._manual_jog_pending_mm = 0.0
         self._manual_jog_timer_moves = 0
-        self._manual_jog_velocity_sequence = None
         if not self._automation_active:
             self._stop_tic_keepalive()
 
     def _handle_manual_jog_timer(self) -> None:
         if self._manual_jog_direction == 0.0:
             return
-        if self._pending_motion_command is not None or self._tic_motor_power_ok is False:
-            return
-        dispatcher = self._build_tic_dispatcher()
-        if self._manual_jog_velocity_sequence is not None:
-            result = dispatcher.command_result(self._manual_jog_velocity_sequence)
-            if result is None or result.succeeded:
-                return
-            self._log(f"Tic manual-jog velocity command failed: {result.error}; retrying.")
-            self._manual_jog_velocity_sequence = None
-        velocity_units = int(
-            round(
-                self._manual_jog_direction
-                * abs(float(self.spin_motion_speed_mm_s.value()))
-                * max(1.0, float(self.spin_steps_per_mm.value()))
-                * 10_000.0
-            )
-        )
-        if velocity_units == 0:
-            return
-        self._manual_jog_velocity_sequence = dispatcher.set_target_velocity(velocity_units)
-        self._manual_jog_timer_moves += 1
+        if self._jog_relative(self._manual_jog_direction):
+            self._manual_jog_timer_moves += 1
 
     def _handle_manual_jog_button_clicked(self, direction: float) -> None:
         if self._manual_jog_click_suppressed:

@@ -7255,43 +7255,31 @@ def test_manual_jog_press_refreshes_stale_tic_status(tmp_path: Path, qtbot) -> N
         _close_test_window(window)
 
 
-def test_held_manual_jog_uses_one_continuous_velocity_command(
+def test_held_manual_jog_repeats_bounded_position_steps(
     tmp_path: Path,
     qtbot,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-
-    class _FakeController:
-        def __init__(self) -> None:
-            self.velocities: list[int] = []
-            self.halts = 0
-
-        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
-            self.velocities.append(velocity_steps_per_10k_s)
-
-        def halt_and_hold(self) -> None:
-            self.halts += 1
-
-    controller = _FakeController()
-    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
-    window.spin_steps_per_mm.setValue(100.0)
-    window.spin_motion_speed_mm_s.setValue(1.0)
+    jog_directions: list[float] = []
+    window._prepare_manual_jog_press = lambda: None  # type: ignore[method-assign]
+    window._jog_relative = (  # type: ignore[method-assign]
+        lambda direction, **_kwargs: jog_directions.append(direction) or True
+    )
 
     try:
         window._start_manual_jog(-1.0)
         for _ in range(3):
             window._handle_manual_jog_timer()
-            _wait_for_tic_commands(window)
         window._stop_manual_jog()
-        _wait_for_tic_commands(window)
 
-        assert controller.velocities == [-1_000_000]
-        assert controller.halts == 1
+        assert jog_directions == [-1.0, -1.0, -1.0]
+        assert window._manual_jog_timer.isActive() is False
+        assert window._manual_jog_click_suppressed is True
     finally:
         _close_test_window(window)
 
 
-def test_held_manual_jog_delayed_timer_starts_only_one_velocity_command(
+def test_held_manual_jog_delayed_timer_caps_each_position_step(
     tmp_path: Path,
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -7299,17 +7287,13 @@ def test_held_manual_jog_delayed_timer_starts_only_one_velocity_command(
     window = _build_window(tmp_path, qtbot)
     clock = {"now": 10.0}
     monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
-
-    class _FakeController:
-        def __init__(self) -> None:
-            self.velocities: list[int] = []
-
-        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
-            self.velocities.append(velocity_steps_per_10k_s)
-
-    controller = _FakeController()
-    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
-    window.spin_steps_per_mm.setValue(100.0)
+    targets: list[tuple[float, bool]] = []
+    window._prepare_manual_jog_press = lambda: None  # type: ignore[method-assign]
+    window._relative_motion_base_mm = lambda: 0.0  # type: ignore[method-assign]
+    window._move_to_position_mm = (  # type: ignore[method-assign]
+        lambda target_mm, *, manual_jog=False: targets.append((target_mm, manual_jog)) or True
+    )
+    window.spin_steps_per_mm.setValue(800.0)
     window.spin_jog_mm.setValue(0.01)
     window.spin_motion_speed_mm_s.setValue(1.0)
 
@@ -7317,56 +7301,33 @@ def test_held_manual_jog_delayed_timer_starts_only_one_velocity_command(
         window._start_manual_jog(-1.0)
         clock["now"] = 10.8
         window._handle_manual_jog_timer()
-        window._handle_manual_jog_timer()
-        _wait_for_tic_commands(window)
 
-        assert controller.velocities == [-1_000_000]
+        assert targets == [(-mini_dma_mod.MANUAL_JOG_MAX_TIMER_ELAPSED_S, True)]
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)
 
 
-def test_manual_jog_release_halts_velocity_without_batching_position_move(
+def test_manual_jog_release_stops_without_queuing_an_extra_motor_command(
     tmp_path: Path,
     qtbot,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     window = _build_window(tmp_path, qtbot)
-    clock = {"now": 10.0}
-    monkeypatch.setattr(mini_dma_mod.time, "monotonic", lambda: clock["now"])
-
-    class _FakeController:
-        def __init__(self) -> None:
-            self.targets: list[int] = []
-            self.velocities: list[int] = []
-            self.halts = 0
-
-        def set_target_position(self, position_steps: int, max_speed: int | None = None) -> None:
-            self.targets.append(position_steps)
-
-        def set_target_velocity(self, velocity_steps_per_10k_s: int) -> None:
-            self.velocities.append(velocity_steps_per_10k_s)
-
-        def halt_and_hold(self) -> None:
-            self.halts += 1
-
-    controller = _FakeController()
-    window._build_tic_controller = lambda _settings=None: controller  # type: ignore[method-assign]
-    window.spin_steps_per_mm.setValue(800.0)
-    window.spin_jog_mm.setValue(0.00625)
-    window.spin_motion_speed_mm_s.setValue(0.1)
+    jog_directions: list[float] = []
+    window._prepare_manual_jog_press = lambda: None  # type: ignore[method-assign]
+    window._jog_relative = (  # type: ignore[method-assign]
+        lambda direction, **_kwargs: jog_directions.append(direction) or True
+    )
 
     try:
         window._start_manual_jog(1.0)
-        clock["now"] = 20.0
         window._handle_manual_jog_timer()
-        _wait_for_tic_commands(window)
         window._stop_manual_jog()
-        _wait_for_tic_commands(window)
+        window._handle_manual_jog_timer()
 
-        assert controller.targets == []
-        assert controller.velocities == [800_000]
-        assert controller.halts == 1
+        assert jog_directions == [1.0]
+        assert window._manual_jog_direction == 0.0
+        assert window._manual_jog_timer.isActive() is False
     finally:
         window._manual_jog_timer.stop()
         _close_test_window(window)

@@ -26,7 +26,10 @@ PRs 298, 300, and 302 are merged. Current `main` was merged into this branch on
    an out-of-band emergency path. It imports no Qt, serial, Tic, or PSU code.
 2. The visible UI retains operator-facing preparation: stopped-run handling,
    previous-run and first-overheating decisions, hardware preflight, continuity
-   preparation, and the mounted-length prompt.
+   preparation, the mounted-length prompt, and responsive manual setup controls.
+   Manual Tic jogging uses bounded target-position steps directly from the UI
+   while no isolated recipe owns the hardware; it is not routed through the
+   recipe child.
 3. Immediately before the run, the visible UI freezes immutable JSON
    configuration, stops its acquisition workers, closes its PSU and Tic
    objects, explicitly releases the Tic ownership lease, and starts the child.
@@ -65,8 +68,8 @@ and for the child-host adapter.
   access.
 - Existing Prague and Košice controller suites must remain green; this migration
   does not change their physical assumptions or control laws.
-- Packaging analysis must include the dynamically imported process kernel and
-  production backend.
+- Source-based launches are the supported deployment path for this application;
+  building a PyInstaller executable is not a release gate.
 
 ## Remaining live gate
 
